@@ -194,7 +194,7 @@ class TestMacroContextInjection:
 
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=pd.DataFrame(
                 {
@@ -227,7 +227,7 @@ class TestMacroContextInjection:
 
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=pd.DataFrame(
                 {

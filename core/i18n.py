@@ -106,6 +106,9 @@ class I18n:
             I18n.get("app_title", locale="en_US")  # Returns "A-Share Intelligent Screener"
         """
         if not cls._initialized:
+            logger.warning(
+                "[I18n] Auto-initializing with default locale. Call I18n.initialize(locale) explicitly at startup."
+            )
             cls.initialize()
 
         target_locale = locale if locale else cls._locale

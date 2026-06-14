@@ -618,7 +618,7 @@ class TestDatabaseConfigServiceMigrations:
 
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE"))
         await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     @pytest.mark.asyncio
@@ -749,7 +749,7 @@ class TestDatabaseConfigPanelSaveConfig:
 
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE"))
         await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     @pytest.mark.asyncio
@@ -887,7 +887,7 @@ class TestOnboardingWizardDatabaseValidation:
 
         async with test_engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE"))
         await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     @pytest.mark.asyncio

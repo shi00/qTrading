@@ -75,7 +75,7 @@ class TestMacroDaoEdgeCases:
         """
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             side_effect=Exception("DB Error"),
         ):
@@ -91,7 +91,7 @@ class TestMacroDaoEdgeCases:
         """
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=None,
         ):
@@ -107,7 +107,7 @@ class TestMacroDaoEdgeCases:
         """
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=pd.DataFrame(),
         ):
@@ -145,7 +145,7 @@ class TestShiborDataQuality:
 
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=mock_df,
         ):
@@ -171,7 +171,7 @@ class TestShiborDataQuality:
 
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=mock_df,
         ):
@@ -207,7 +207,7 @@ class TestMacroEconomyDataQuality:
 
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=mock_df,
         ):
@@ -233,7 +233,7 @@ class TestMacroEconomyDataQuality:
 
         with patch.object(
             macro_dao,
-            "_read_db",
+            "_read_db_select",
             new_callable=AsyncMock,
             return_value=mock_df,
         ):
