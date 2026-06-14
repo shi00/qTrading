@@ -45,7 +45,7 @@ def upgrade() -> None:
     if not _column_exists("macro_economy", "updated_at"):
         op.add_column(
             "macro_economy",
-            sa.Column("updated_at", sa.DateTime(), nullable=True),
+            sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=True),
         )
 
     # Backfill publish_date: period month + 1, day 16

@@ -241,7 +241,7 @@ class ScreeningHistory(Base):
         Index(
             "idx_sh_pending",
             "review_status",
-            postgresql_where=text("review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL"),
+            postgresql_where=text("review_status IN ('PENDING', 'T1_DONE') OR (review_status IS NULL)"),
         ),
         Index(
             "idx_sh_params_gin",

@@ -740,7 +740,7 @@ def _create_all_tables() -> None:
         "screening_history",
         "idx_sh_pending",
         "review_status",
-        "review_status IN ('PENDING', 'T1_DONE') OR review_status IS NULL",
+        "review_status IN ('PENDING', 'T1_DONE') OR (review_status IS NULL)",
     )
     if _is_postgresql():
         op.execute(
