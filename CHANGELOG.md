@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.9](https://github.com/shi00/qTrading/compare/v0.6.8...v0.6.9) (2026-06-14)
+
+
+### Bug Fixes
+
+* **db:** correct migration sequence and fix down_revision reference ([a1a1d7e](https://github.com/shi00/qTrading/commit/a1a1d7e6e3509b5027a9a276ee1a574530efd7c1))
+* **db:** resolve integration test failures with orm/migration consistency ([3ed37de](https://github.com/shi00/qTrading/commit/3ed37de910719fe976f5a51d09dfa66270e41264))
+
 ## [0.6.8](https://github.com/shi00/qTrading/compare/v0.6.7...v0.6.8) (2026-06-14)
 
 
