@@ -62,11 +62,13 @@ class HolderDao(BaseDao):
                 ) sub
                 WHERE h.ts_code = sub.ts_code AND h.end_date = sub.end_date
             """
-            await self.chunked_in_write(
-                self._write_db,
-                sql_template,
-                ts_codes,
-            )
+            async with self._guarded_begin() as tx_conn:
+                await self.chunked_in_write(
+                    self._write_db,
+                    sql_template,
+                    ts_codes,
+                    conn=tx_conn,
+                )
             logger.debug("[HolderDao] Calculated holder changes for %d stocks", len(ts_codes))
         except asyncio.CancelledError:
             raise

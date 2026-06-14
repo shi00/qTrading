@@ -124,11 +124,32 @@ class BaseDao:
         prefix_len = len(extra_prefix)
         actual_start_idx = start_idx if extra_params is None else prefix_len + 1
 
+        import inspect
+
+        template_takes_start_idx = False
+        if callable(sql_template):
+            try:
+                sig = inspect.signature(sql_template)
+                params_list = list(sig.parameters.values())
+                pos_count = 0
+                has_var_positional = False
+                for p in params_list:
+                    if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                        pos_count += 1
+                    elif p.kind == inspect.Parameter.VAR_POSITIONAL:
+                        has_var_positional = True
+                template_takes_start_idx = (pos_count >= 3) or has_var_positional
+            except (ValueError, TypeError):
+                template_takes_start_idx = False
+
         if len(values) <= chunk_size:
             placeholders = ",".join([f"${actual_start_idx + i}" for i in range(len(values))])
             extra_suffix = params_fn(values) if params_fn else []
             if callable(sql_template):
-                sql = sql_template(placeholders, len(values))
+                if template_takes_start_idx:
+                    sql = sql_template(placeholders, len(values), actual_start_idx)
+                else:
+                    sql = sql_template(placeholders, len(values))
             else:
                 sql = sql_template.format(placeholders=placeholders)
             df = await read_db_fn(sql, extra_prefix + values + extra_suffix, **read_db_kwargs)
@@ -140,7 +161,10 @@ class BaseDao:
             placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
             extra_suffix = params_fn(chunk) if params_fn else []
             if callable(sql_template):
-                sql = sql_template(placeholders, len(chunk))
+                if template_takes_start_idx:
+                    sql = sql_template(placeholders, len(chunk), actual_start_idx)
+                else:
+                    sql = sql_template(placeholders, len(chunk))
             else:
                 sql = sql_template.format(placeholders=placeholders)
             df = await read_db_fn(sql, extra_prefix + chunk + extra_suffix, **read_db_kwargs)
@@ -186,13 +210,34 @@ class BaseDao:
         prefix_len = len(extra_prefix)
         actual_start_idx = start_idx if extra_params is None else prefix_len + 1
 
+        import inspect
+
+        template_takes_start_idx = False
+        if callable(sql_template):
+            try:
+                sig = inspect.signature(sql_template)
+                params_list = list(sig.parameters.values())
+                pos_count = 0
+                has_var_positional = False
+                for p in params_list:
+                    if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                        pos_count += 1
+                    elif p.kind == inspect.Parameter.VAR_POSITIONAL:
+                        has_var_positional = True
+                template_takes_start_idx = (pos_count >= 3) or has_var_positional
+            except (ValueError, TypeError):
+                template_takes_start_idx = False
+
         total = 0
         for i in range(0, len(values), chunk_size):
             chunk = values[i : i + chunk_size]
             placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
             extra_suffix = params_fn(chunk) if params_fn else []
             if callable(sql_template):
-                sql = sql_template(placeholders, len(chunk))
+                if template_takes_start_idx:
+                    sql = sql_template(placeholders, len(chunk), actual_start_idx)
+                else:
+                    sql = sql_template(placeholders, len(chunk))
             else:
                 sql = sql_template.format(placeholders=placeholders)
             result = await write_db_fn(sql, extra_prefix + chunk + extra_suffix, **write_db_kwargs)

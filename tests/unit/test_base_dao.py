@@ -895,6 +895,37 @@ class TestChunkedInQuery:
         call_params = read_fn.call_args[0][1]
         assert "extra_val" in call_params
 
+    @pytest.mark.asyncio
+    async def test_callable_sql_template_with_start_idx(self):
+        read_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A"]}))
+
+        passed_start_idx = None
+
+        def sql_template_3(placeholders, chunk_len, start_idx):
+            nonlocal passed_start_idx
+            passed_start_idx = start_idx
+            return f"SELECT * FROM t WHERE id IN ({placeholders}) LIMIT ${start_idx + chunk_len}"
+
+        await BaseDao.chunked_in_query(
+            read_fn,
+            sql_template_3,
+            ["A"],
+            extra_params=["prefix1"],
+        )
+        assert passed_start_idx == 2
+        called_sql = read_fn.call_args[0][0]
+        assert called_sql == "SELECT * FROM t WHERE id IN ($2) LIMIT $3"
+
+        def sql_template_2(placeholders, chunk_len):
+            return f"SELECT * FROM t WHERE id IN ({placeholders})"
+
+        await BaseDao.chunked_in_query(
+            read_fn,
+            sql_template_2,
+            ["A"],
+            extra_params=["prefix1"],
+        )
+
 
 class TestChunkedInWrite:
     """Verify chunked_in_write properly splits large IN clauses for write operations."""
@@ -988,6 +1019,37 @@ class TestChunkedInWrite:
             suppress_errors=True,
         )
         assert write_fn.call_args[1].get("suppress_errors") is True
+
+    @pytest.mark.asyncio
+    async def test_callable_sql_template_with_start_idx(self):
+        write_fn = AsyncMock(return_value=1)
+
+        passed_start_idx = None
+
+        def sql_template_3(placeholders, chunk_len, start_idx):
+            nonlocal passed_start_idx
+            passed_start_idx = start_idx
+            return f"UPDATE t SET x=1 WHERE id IN ({placeholders}) AND status = ${start_idx + chunk_len}"
+
+        await BaseDao.chunked_in_write(
+            write_fn,
+            sql_template_3,
+            ["A"],
+            extra_params=["status_val"],
+        )
+        assert passed_start_idx == 2
+        called_sql = write_fn.call_args[0][0]
+        assert called_sql == "UPDATE t SET x=1 WHERE id IN ($2) AND status = $3"
+
+        def sql_template_2(placeholders, chunk_len):
+            return f"UPDATE t SET x=1 WHERE id IN ({placeholders})"
+
+        await BaseDao.chunked_in_write(
+            write_fn,
+            sql_template_2,
+            ["A"],
+            extra_params=["status_val"],
+        )
 
 
 class TestBaseDaoSaveUpsertExtended:

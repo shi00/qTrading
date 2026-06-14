@@ -267,14 +267,14 @@ class FinancialDao(BaseDao):
             if as_of_date is not None:
                 return await self.chunked_in_query(
                     self._read_db,
-                    lambda placeholders, chunk_len: (
+                    lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
                             ts_code, end_date, ann_date, audit_result, audit_sign, audit_fees, audit_agency
                         FROM fina_audit
                         WHERE ts_code IN ({placeholders})
                           AND audit_result IS NOT NULL
-                          AND ann_date <= ${chunk_len + 1}
+                          AND ann_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC, ann_date DESC
                     """
                     ),
@@ -308,12 +308,12 @@ class FinancialDao(BaseDao):
             if as_of_date is not None:
                 return await self.chunked_in_query(
                     self._read_db,
-                    lambda placeholders, chunk_len: (
+                    lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT ts_code, end_date, ann_date, cash_div, stk_div, div_proc
                         FROM dividend
                         WHERE ts_code IN ({placeholders})
-                          AND ann_date <= ${chunk_len + 1}
+                          AND ann_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
                     """
                     ),
@@ -345,13 +345,13 @@ class FinancialDao(BaseDao):
             if as_of_date is not None:
                 return await self.chunked_in_query(
                     self._read_db,
-                    lambda placeholders, chunk_len: (
+                    lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT DISTINCT ON (ts_code)
                             ts_code, end_date, pledge_count, pledge_ratio
                         FROM pledge_stat
                         WHERE ts_code IN ({placeholders})
-                          AND end_date <= ${chunk_len + 1}
+                          AND end_date <= ${start_idx + chunk_len}
                         ORDER BY ts_code, end_date DESC
                     """
                     ),
@@ -417,13 +417,13 @@ class FinancialDao(BaseDao):
             if as_of_date is not None:
                 df = await self.chunked_in_query(
                     self._read_db,
-                    lambda placeholders, chunk_len: (
+                    lambda placeholders, chunk_len, start_idx: (
                         f"""
                         SELECT ts_code, end_date, ann_date, bz_item, bz_sales, bz_profit, bz_cost, curr_type
                         FROM (
                             SELECT *, DENSE_RANK() OVER (PARTITION BY ts_code ORDER BY end_date DESC) as dr
                             FROM fina_mainbz
-                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${chunk_len + 1}
+                            WHERE ts_code IN ({placeholders}) AND ann_date <= ${start_idx + chunk_len}
                         ) sub
                         WHERE sub.dr = 1
                         ORDER BY ts_code, bz_sales DESC
