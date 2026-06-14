@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.8](https://github.com/shi00/qTrading/compare/v0.6.7...v0.6.8) (2026-06-14)
+
+
+### Bug Fixes
+
+* **db:** resolve schema consistency issues from review report ([58e8c43](https://github.com/shi00/qTrading/commit/58e8c43410d3d141225ff87c9a8f679818c76888))
+* **db:** unify server_default to now() and fix integration test issues ([0ed97d6](https://github.com/shi00/qTrading/commit/0ed97d686b4f483113580e1ef12476134ad344a6))
+* **orm:** Resolve FK cascade and partial index consistency test failures ([121a689](https://github.com/shi00/qTrading/commit/121a68934c05a2fb9f5c42a794425541a24c5a41))
+* **orm:** 解决外键级联与局部索引一致性测试失败问题 ([d9a0101](https://github.com/shi00/qTrading/commit/d9a0101f9be4ef8a1eb26f02bba8a2bdc105feea))
+* **persistence:** resolve DAO API parameter binding traps and ensure holder calculations atomicity ([f4064ff](https://github.com/shi00/qTrading/commit/f4064ff7958bc2d51d2de4ec1ec9ed5b0fbf801b))
+* **persistence:** resolve DAO API parameter binding traps and ensure holder calculations atomicity ([1e87f37](https://github.com/shi00/qTrading/commit/1e87f37d6e08001b2b0dea1e45f211d011cac03d))
+* sync installer.iss version to 0.6.7 and fix I18n initialization ([5fee19b](https://github.com/shi00/qTrading/commit/5fee19b5cbd00004c1500d0124248f7a40114789))
+
 ## [0.6.7](https://github.com/shi00/qTrading/compare/v0.6.6...v0.6.7) (2026-06-13)
 
 
