@@ -178,6 +178,14 @@ jobs:
           python -m alembic downgrade base
           python -m alembic upgrade head
 
+      - name: Verify ORM-Migration Schema Consistency
+        env:
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: "5432"
+          TEST_DB_USER: postgres
+          TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+        run: python -m pytest tests/integration/test_orm_migration_consistency.py -v --tb=long
+
       - name: Run Unit Tests
         env:
           STRICT_SCHEMA_GATE: "1"
