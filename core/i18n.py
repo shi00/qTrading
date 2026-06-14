@@ -106,6 +106,9 @@ class I18n:
             I18n.get("app_title", locale="en_US")  # Returns "A-Share Intelligent Screener"
         """
         if not cls._initialized:
+            logger.warning(
+                "[I18n] Auto-initializing with default locale. Call I18n.initialize(locale) explicitly at startup."
+            )
             cls.initialize()
 
         target_locale = locale if locale else cls._locale
@@ -142,6 +145,7 @@ class I18n:
 
         if normalized_locale in SUPPORTED_LOCALES:
             cls._locale = normalized_locale
+            cls._initialized = True
             logger.info(f"[I18n] Locale changed to: {cls._locale}")
 
             if cls._listeners:
@@ -195,6 +199,9 @@ class I18n:
         If only one locale is supported, returns its native name.
         """
         if not cls._initialized:
+            logger.warning(
+                "[I18n] Auto-initializing with default locale. Call I18n.initialize(locale) explicitly at startup."
+            )
             cls.initialize()
         current_name = LOCALE_NAMES.get(cls._locale, cls._locale)
         other_names = [LOCALE_NAMES[loc] for loc in SUPPORTED_LOCALES if loc != cls._locale and loc in LOCALE_NAMES]

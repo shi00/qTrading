@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import typing
+from contextlib import asynccontextmanager
 
 import pandas as pd
 import sqlalchemy as sa
@@ -492,6 +493,18 @@ class CacheManager:
     # --- Financial Reports ---
     async def save_financial_reports(self, df: pd.DataFrame, conn=None):
         return await self.financial_dao.save_financial_reports(df, conn=conn)
+
+    @asynccontextmanager
+    async def financial_transaction(self):
+        """Public guarded transaction context for financial sync operations.
+
+        Yields a transaction connection that ensures:
+        - Engine disposal guard (raises EngineDisposedError if disposed)
+        - Maintenance event wait
+        - Automatic connection-closed-to-EngineDisposedError conversion
+        """
+        async with self.financial_dao._guarded_begin() as conn:
+            yield conn
 
     async def get_cached_financial_records(self, period: str | None = None):
         return await self.financial_dao.get_cached_financial_records(period)

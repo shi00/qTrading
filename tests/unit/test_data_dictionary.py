@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch, MagicMock
 from data.data_dictionary import (
     TABLE_DEFINITIONS,
@@ -6,6 +7,7 @@ from data.data_dictionary import (
 )
 
 
+@patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
 class TestValidateSchemaDefinitionsExtended:
     @patch("data.persistence.models.Base")
     def test_validate_with_orm_columns_missing_from_dict(self, mock_base):
@@ -133,6 +135,7 @@ class TestCommonColumns:
         assert "trade_date" in COMMON_COLUMNS
 
 
+@patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
 class TestValidateSchemaDefinitions:
     @patch("data.persistence.models.Base")
     def test_validate_runs_without_error(self, mock_base):
@@ -184,6 +187,7 @@ class TestValidateSchemaDefinitions:
                 del TABLE_DEFINITIONS["stock_basic"]["columns"]["phantom_col"]
 
 
+@patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
 class TestValidateSchemaDefinitionsStrict:
     @patch("data.persistence.models.Base")
     def test_strict_raises_value_error_on_missing_def(self, mock_base):

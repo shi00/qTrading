@@ -50,13 +50,25 @@ class TestCalculateHolderChanges:
         dao._write_db.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_success(self):
+    async def test_success_single_chunk(self):
         dao = _make_dao()
+        dao._write_db = AsyncMock(return_value=1)
         await dao._calculate_holder_changes(["000001.SZ"])
         dao._write_db.assert_called_once()
+        sql = dao._write_db.call_args[0][0]
+        assert "{placeholders}" not in sql
+        assert "$1" in sql
 
     @pytest.mark.asyncio
-    async def test_exception(self):
+    async def test_large_list_splits_into_chunks(self):
+        dao = _make_dao()
+        dao._write_db = AsyncMock(return_value=1)
+        codes = [f"{i:06d}.SH" for i in range(1200)]
+        await dao._calculate_holder_changes(codes)
+        assert dao._write_db.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_exception_handled(self):
         dao = _make_dao()
         dao._write_db = AsyncMock(side_effect=Exception("db error"))
         await dao._calculate_holder_changes(["000001.SZ"])

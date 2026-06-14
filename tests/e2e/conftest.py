@@ -28,7 +28,7 @@ TIMEOUT_MULTIPLIER = float(os.environ.get("E2E_TIMEOUT_MULTIPLIER", "1.0"))
 
 from core.i18n import I18n
 
-I18n.set_locale("zh")
+I18n.initialize("zh")
 
 
 @pytest.fixture(scope="session")

@@ -1811,10 +1811,42 @@ class TestConcurrentInitDb:
             # The migrator's init_db should have been called exactly once
             mock_migrator.init_db.assert_called_once()
 
+
+class TestFinancialTransaction:
+    """Verify financial_transaction delegates to financial_dao._guarded_begin."""
+
+    @pytest.mark.asyncio
+    async def test_yields_connection_from_guarded_begin(self):
+        mgr = _make_mgr()
+        mock_conn = AsyncMock()
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_conn)
+        mock_ctx.__aexit__ = AsyncMock(return_value=None)
+        mgr.financial_dao._guarded_begin = MagicMock(return_value=mock_ctx)
+
+        async with mgr.financial_transaction() as conn:
+            assert conn is mock_conn
+
+        mgr.financial_dao._guarded_begin.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed_error(self):
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        mgr = _make_mgr()
+        mgr.financial_dao._guarded_begin = MagicMock(side_effect=EngineDisposedError("disposed"))
+
+        with pytest.raises(EngineDisposedError):
+            async with mgr.financial_transaction():
+                pass
+
+
+class TestConcurrentInitDbForce:
+    """When force=True, each call re-runs the migrator, but the lock
+    ensures they execute serially (no concurrent migration overlap)."""
+
     @pytest.mark.asyncio
     async def test_concurrent_init_db_with_force_is_serialized(self):
-        """When force=True, each call re-runs the migrator, but the lock
-        ensures they execute serially (no concurrent migration overlap)."""
         mgr = _make_mgr()
         mgr._schema_initialized = True
 

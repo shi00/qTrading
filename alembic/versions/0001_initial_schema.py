@@ -10,30 +10,6 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 
-# Intercept sa.text and sa.func.now to normalize server default expressions
-_original_text = sa.text
-
-
-def _custom_text(text_str):
-    if isinstance(text_str, str) and text_str.upper() in ("CURRENT_TIMESTAMP", "NOW()"):
-        return _original_text("now()")
-    return _original_text(text_str)
-
-
-sa.text = _custom_text
-
-_original_func_now = sa.func.now
-
-
-def _custom_now(*args, **kwargs):
-    return _original_text("now()")
-
-
-try:
-    sa.func.now = _custom_now
-except Exception:
-    sa.func.now = _custom_now
-
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -135,13 +111,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", "buyer", "seller", name=op.f("pk_block_trade")),
@@ -168,13 +144,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_daily_indicators")),
@@ -202,13 +178,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_daily_quotes")),
@@ -235,13 +211,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date", name=op.f("pk_dividend")),
@@ -259,13 +235,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_fina_audit")),
@@ -283,13 +259,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date", name=op.f("pk_fina_forecast")),
@@ -309,13 +285,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "bz_item", name=op.f("pk_fina_mainbz")),
@@ -347,13 +323,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_financial_reports")),
@@ -392,13 +368,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_daily")),
@@ -421,13 +397,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_index_dailybasic")),
@@ -441,13 +417,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("index_code", "con_code", "trade_date", name=op.f("pk_index_weight")),
@@ -472,13 +448,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("trade_date", "ts_code", name=op.f("pk_limit_list")),
@@ -498,7 +474,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("period", name=op.f("pk_macro_economy")),
@@ -515,13 +491,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_margin_daily")),
@@ -538,7 +514,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_market_news")),
@@ -571,13 +547,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_moneyflow_daily")),
@@ -600,13 +576,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("trade_date", name=op.f("pk_moneyflow_hsgt")),
@@ -622,13 +598,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_northbound_holding")),
@@ -652,13 +628,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_pledge_stat")),
@@ -677,13 +653,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "ann_date", name=op.f("pk_repurchase")),
@@ -728,7 +704,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_screening_history")),
@@ -799,13 +775,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("date", name=op.f("pk_shibor_daily")),
@@ -821,13 +797,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", name=op.f("pk_stk_holdernumber")),
@@ -852,13 +828,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_basic")),
@@ -875,13 +851,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "concept_id", name=op.f("pk_stock_concepts")),
@@ -895,13 +871,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", name=op.f("pk_stock_sync_status")),
@@ -915,13 +891,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_suspend_d")),
@@ -940,13 +916,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("table_name", name=op.f("pk_sync_status")),
@@ -964,7 +940,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=False,
         ),
         sa.Column("started_at", sa.DateTime(), nullable=True),
@@ -990,13 +966,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "holder_name", name=op.f("pk_top10_holders")),
@@ -1027,13 +1003,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("trade_date", "ts_code", name=op.f("pk_top_list")),
@@ -1048,13 +1024,13 @@ def _create_all_tables() -> None:
         sa.Column(
             "updated_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.Column(
             "created_at",
             sa.DateTime(),
-            server_default=sa.text("CURRENT_TIMESTAMP"),
+            server_default=sa.text("now()"),
             nullable=True,
         ),
         sa.PrimaryKeyConstraint("cal_date", name=op.f("pk_trade_cal")),

@@ -363,7 +363,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     if not has_error:
                         has_actual_data = df_merged is not None and not df_merged.empty
                         if has_actual_data:
-                            async with self.context.cache.financial_dao._guarded_begin() as tx_conn:
+                            async with self.context.cache.financial_transaction() as tx_conn:
                                 await self.context.cache.save_financial_reports(
                                     df_merged[FINANCIAL_REPORT_SCHEMA_COLS],  # type: ignore[optional-subscript]
                                     conn=tx_conn,
