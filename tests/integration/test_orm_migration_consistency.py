@@ -123,6 +123,26 @@ def _normalize_default(default_text: str | None) -> str | None:
     return s
 
 
+def _normalize_sql_expression(expr: str | None) -> str | None:
+    """Normalize a SQL expression (like postgresql_where) for comparison."""
+    if expr is None:
+        return None
+    s = expr.strip()
+    # Strip type-cast suffix: 'PENDING'::text → 'PENDING'
+    s = re.sub(r"::[\w\s]+", "", s)
+    # Strip outer parentheses: (review_status = 'PENDING') → review_status = 'PENDING'
+    while s.startswith("(") and s.endswith(")"):
+        inner = s[1:-1]
+        # Only strip if parens are balanced
+        if inner.count("(") == inner.count(")"):
+            s = inner.strip()
+        else:
+            break
+    # Normalize whitespace
+    s = re.sub(r"\s+", " ", s)
+    return s.upper()
+
+
 def _orm_server_default(col: sa.Column) -> str | None:
     """Extract the server_default text from an ORM column definition."""
     sd = col.server_default
@@ -195,7 +215,10 @@ def _reflect_schema(connection) -> dict:
         # Indexes
         indexes = {}
         for idx in inspector.get_indexes(table_name):
-            indexes[idx["name"]] = set(idx["column_names"])
+            indexes[idx["name"]] = {
+                "columns": set(idx["column_names"]),
+                "where": idx.get("dialect_options", {}).get("postgresql_where"),
+            }
 
         # Unique constraints
         uniques = {}
@@ -212,7 +235,8 @@ def _reflect_schema(connection) -> dict:
                     "constrained_columns": tuple(fk.get("constrained_columns", [])),
                     "referred_table": fk.get("referred_table", ""),
                     "referred_columns": tuple(fk.get("referred_columns", [])),
-                    "ondelete": fk.get("ondelete"),
+                    "ondelete": (fk.get("ondelete") or "NO ACTION").upper(),
+                    "onupdate": (fk.get("onupdate") or "NO ACTION").upper(),
                 }
             )
 
@@ -370,11 +394,26 @@ class TestOrmMigrationConsistency:
                     continue
 
                 orm_default = _orm_server_default(orm_col)
-                db_default = _reflected_server_default(db_columns[orm_col.name])
+                db_col = db_columns[orm_col.name]
+                db_default = _reflected_server_default(db_col)
 
-                # Skip auto-increment columns: PG creates nextval() sequences
-                # for SERIAL/IDENTITY columns, but ORM doesn't declare server_default.
-                if orm_default is None and db_default is not None and db_default.startswith("nextval("):
+                # Autoincrement handling
+                db_is_auto = db_col.get("autoincrement", False) or db_col.get("identity") is not None
+                if (
+                    orm_col.autoincrement is True
+                    and orm_col.primary_key
+                    and str(orm_col.type).upper() in ("INTEGER", "BIGINTEGER", "SMALLINTEGER")
+                ):
+                    if not db_is_auto and (db_default is None or not db_default.startswith("nextval(")):
+                        errors.append(
+                            f"{table_name}.{orm_col.name}: ORM expects autoincrement but DB lacks sequence/identity."
+                        )
+                    continue
+                elif db_is_auto or (db_default and db_default.startswith("nextval(")):
+                    if orm_col.autoincrement is False or not orm_col.primary_key:
+                        errors.append(
+                            f"{table_name}.{orm_col.name}: DB has autoincrement/sequence but ORM does not expect it."
+                        )
                     continue
 
                 if orm_default != db_default:
@@ -423,6 +462,8 @@ class TestOrmMigrationConsistency:
                         tuple(c.name for c in fk_constraint.columns),
                         fk_constraint.referred_table.name,
                         referred_col_names,
+                        (fk_constraint.ondelete or "NO ACTION").upper(),
+                        (fk_constraint.onupdate or "NO ACTION").upper(),
                     )
                 )
 
@@ -434,6 +475,8 @@ class TestOrmMigrationConsistency:
                         fk["constrained_columns"],
                         fk["referred_table"],
                         fk["referred_columns"],
+                        fk["ondelete"],
+                        fk["onupdate"],
                     )
                 )
 
@@ -464,19 +507,26 @@ class TestOrmMigrationConsistency:
                 continue
 
             orm_table = Base.metadata.tables[table_name]
-            # Collect ORM indexes: {frozenset of column names}
+            # Collect ORM indexes: (frozenset of column names, normalized_where)
             orm_index_cols = set()
             for idx in orm_table.indexes:
                 col_set = frozenset(c.name for c in idx.columns)
-                orm_index_cols.add(col_set)
+                where_expr = idx.dialect_options.get("postgresql", {}).get("where")
+                where_str = None
+                if where_expr is not None:
+                    try:
+                        where_str = str(where_expr.compile(dialect=pg_dialect()))
+                    except Exception:
+                        where_str = str(where_expr.text if hasattr(where_expr, "text") else where_expr)
+                orm_index_cols.add((col_set, _normalize_sql_expression(where_str)))
 
             # Collect DB indexes (exclude auto-generated PK indexes)
             db_index_cols = set()
             db_index_names = reflected[table_name]["indexes"]
-            for idx_name, col_set in db_index_names.items():
+            for idx_name, idx_info in db_index_names.items():
                 if idx_name.startswith("pk_"):
                     continue  # Skip PK indexes (covered by test_primary_keys_match)
-                db_index_cols.add(frozenset(col_set))
+                db_index_cols.add((frozenset(idx_info["columns"]), _normalize_sql_expression(idx_info["where"])))
 
             # Check ORM indexes exist in DB
             for col_set in orm_index_cols:
