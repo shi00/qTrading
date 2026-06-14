@@ -1,7 +1,7 @@
 """fix_thinking_fk_cascade
 
-Revision ID: 0005
-Revises: 0004
+Revision ID: 0004
+Revises: 0003
 Create Date: 2026-06-14 13:45:00.000000
 
 """
@@ -9,8 +9,8 @@ Create Date: 2026-06-14 13:45:00.000000
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0005"
-down_revision = "0004"
+revision = "0004"
+down_revision = "0003"
 branch_labels = None
 depends_on = None
 
