@@ -130,6 +130,23 @@ def _normalize_sql_expression(expr: str | None) -> str | None:
     s = expr.strip()
     # Strip type-cast suffix: 'PENDING'::text → 'PENDING'
     s = re.sub(r"::[\w\s]+", "", s)
+
+    # Normalize ANY(ARRAY[...]) to IN (...)
+    # Match: (col)= ANY ((ARRAY['x', 'y'])[]) or similar
+    s = re.sub(
+        r"\(\s*([A-Za-z0-9_]+)\s*\)\s*=\s*ANY\s*\(\s*\(\s*ARRAY\[(.*?)\]\s*\)\s*\[\]\s*\)",
+        r"\1 IN (\2)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(
+        r"\b([A-Za-z0-9_]+)\s*=\s*ANY\s*\(\s*\(\s*ARRAY\[(.*?)\]\s*\)\s*\[\]\s*\)",
+        r"\1 IN (\2)",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(r"\b([A-Za-z0-9_]+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)", r"\1 IN (\2)", s, flags=re.IGNORECASE)
+
     # Strip outer parentheses: (review_status = 'PENDING') → review_status = 'PENDING'
     while s.startswith("(") and s.endswith(")"):
         inner = s[1:-1]
@@ -138,6 +155,10 @@ def _normalize_sql_expression(expr: str | None) -> str | None:
             s = inner.strip()
         else:
             break
+
+    # Clean up parens around the IN clause
+    s = s.replace("((", "(").replace("))", ")")
+
     # Normalize whitespace
     s = re.sub(r"\s+", " ", s)
     return s.upper()
@@ -520,12 +541,14 @@ class TestOrmMigrationConsistency:
                         where_str = str(where_expr.text if hasattr(where_expr, "text") else where_expr)
                 orm_index_cols.add((col_set, _normalize_sql_expression(where_str)))
 
-            # Collect DB indexes (exclude auto-generated PK indexes)
+            # Collect DB indexes (exclude auto-generated PK indexes and Unique Constraints)
             db_index_cols = set()
             db_index_names = reflected[table_name]["indexes"]
             for idx_name, idx_info in db_index_names.items():
                 if idx_name.startswith("pk_"):
                     continue  # Skip PK indexes (covered by test_primary_keys_match)
+                if idx_name in reflected[table_name]["unique_constraints"]:
+                    continue  # Skip unique constraints (covered by test_unique_constraints_match)
                 db_index_cols.add((frozenset(idx_info["columns"]), _normalize_sql_expression(idx_info["where"])))
 
             # Check ORM indexes exist in DB
