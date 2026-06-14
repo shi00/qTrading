@@ -1106,7 +1106,7 @@ def _create_all_tables() -> None:
         sa.Column(
             "executed_at",
             sa.DateTime(timezone=False),
-            server_default=sa.text("now()"),
+            server_default=sa.text("CURRENT_TIMESTAMP"),
             nullable=True,
         ),
         sa.Column("duration_ms", sa.Integer(), nullable=True),

@@ -710,9 +710,9 @@ def validate_schema_definitions(strict: bool = False):
 
         is_strict = strict or os.environ.get("STRICT_SCHEMA_GATE") == "1"
         if is_strict and errors:
-            raise RuntimeError("Schema inconsistencies found:\n" + "\n".join(errors))
+            raise ValueError("Schema inconsistencies found:\n" + "\n".join(errors))
 
-    except RuntimeError as e:
+    except ValueError as e:
         logger.error(f"[DataDict] Schema validation failed in strict mode: {e}")
         raise
     except Exception as e:
