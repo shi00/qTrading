@@ -1,12 +1,41 @@
 # Changelog
 
+## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.10...v0.7.0) (2026-06-15)
+
+
+### Features
+
+* **release:** add --fix option to verify_versions.py and write unit tests ([26b726c](https://github.com/shi00/qTrading/commit/26b726c914e3fbcbe752ea5d2d2f1a1fddd9177f))
+
+
+### Bug Fixes
+
+* **release:** remove non-standard packages key from manifest to fix release-please parsing error ([095465c](https://github.com/shi00/qTrading/commit/095465c0c8464b2e744f33d030f9a01c69158db1))
+* **task_manager:** eliminate cross-thread dict race in submit_task ([06881a4](https://github.com/shi00/qTrading/commit/06881a474804fc278e64b2f576bc4fcc1c2481fc))
+
+
+### Miscellaneous
+
+* **db:** remove redundant 0004 migration ([a71fd86](https://github.com/shi00/qTrading/commit/a71fd86ccea3405b93062a560e5040f0f7abb530))
+* **pre-commit:** add verify-versions auto-fix hook ([4088064](https://github.com/shi00/qTrading/commit/40880643d7de71eba682dd382464fe726db34130))
+* **release:** configure changelog-sections and generic extra-files in release-please-config.json ([d0b44fb](https://github.com/shi00/qTrading/commit/d0b44fbb07b539745cc568c7646bacbc7529ecbf))
+* **release:** switch release-please to manifest-driven mode and fix installer.iss version marker ([b9a12ef](https://github.com/shi00/qTrading/commit/b9a12ef813887d6fc252b60951e7587ee58cbdc3))
+* update installer.iss fallback version to 0.6.9 to match pyproject.toml ([15dbee4](https://github.com/shi00/qTrading/commit/15dbee49d58375c43eb7de045eb0ad4a2377d467))
+
+
+### Tests
+
+* add type ignore with reason for scripts import to resolve CI pyright error ([9070f60](https://github.com/shi00/qTrading/commit/9070f60984c39dc26154962c7a4b57f8011592fc))
+* **base_dao:** add direct unit tests for _guarded_begin covering all paths ([569635d](https://github.com/shi00/qTrading/commit/569635d90c25b4c860191103bcc3518d9d4bc151))
+* expand unit test coverage for version sync script ([0a616d1](https://github.com/shi00/qTrading/commit/0a616d1fd2ef94579849eb1f1d349498ca3382e8))
+
+
 ## [0.6.10](https://github.com/shi00/qTrading/compare/v0.6.9...v0.6.10) (2026-06-15)
 
 
 ### Bug Fixes
 
 * **task_manager:** eliminate cross-thread dict race in submit_task ([06881a4](https://github.com/shi00/qTrading/commit/06881a474804fc278e64b2f576bc4fcc1c2481fc))
-
 ## [0.6.9](https://github.com/shi00/qTrading/compare/v0.6.8...v0.6.9) (2026-06-14)
 
 
