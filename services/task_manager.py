@@ -19,6 +19,7 @@ from utils.async_utils import gather_for_shutdown_cleanup
 from utils.error_classifier import classify_error, classify_severity
 from utils.config_handler import ConfigHandler
 from utils.loop_local import del_loop_local, get_loop_local
+from utils.singleton_registry import register_singleton
 from utils.thread_pool import ThreadPoolManager
 from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
 
@@ -72,9 +73,6 @@ class AppTask:
     correlation_id: str | None = None  # Inherited from caller context for full-chain tracing
 
 
-from utils.singleton_registry import register_singleton
-
-
 @register_singleton
 class TaskManager:
     """
@@ -105,7 +103,6 @@ class TaskManager:
         with cls._lock:
             cls._instance = None
             cls._initialized = False
-        from utils.loop_local import del_loop_local
 
         del_loop_local("task_manager_semaphore")
 

@@ -4,6 +4,8 @@ import logging
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
+import pandas as pd
+
 from services.task_manager import TaskManager, AppTask, TaskStatus, TERMINAL_STATUSES
 from utils.time_utils import get_now
 
@@ -811,9 +813,6 @@ class TestTaskManagerInitDb:
             mock_cm_cls._instance = mock_cache
             await mgr.init_db()
             assert mgr._db_ready is True
-
-
-import pandas as pd
 
 
 class TestAppTaskInit:

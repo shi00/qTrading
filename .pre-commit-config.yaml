@@ -42,3 +42,10 @@ repos:
         language: system
         files: ^(pyproject\.toml|requirements-optional\.in)$
         pass_filenames: false
+
+      - id: verify-versions
+        name: Verify and Fix Versions
+        entry: python scripts/verify_versions.py --fix
+        language: system
+        files: ^(pyproject\.toml|installer\.iss|\.release-please-manifest\.json)$
+        pass_filenames: false

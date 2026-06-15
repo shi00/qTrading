@@ -33,8 +33,7 @@ def get_installer_fallback_version() -> str:
     content = INSTALLER_PATH.read_text(encoding="utf-8")
     m = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', content)
     if not m:
-        print(f"ERROR: Could not find MyAppVersion in {INSTALLER_PATH}")
-        sys.exit(1)
+        raise ValueError(f"Could not find MyAppVersion in {INSTALLER_PATH}")
     return m.group(1)
 
 
@@ -48,8 +47,7 @@ def get_ci_pyright_version() -> str:
     content = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
     m = re.search(r"pip install pyright==(\S+)", content)
     if not m:
-        print(f"ERROR: Could not find pyright version in {CI_WORKFLOW_PATH}")
-        sys.exit(1)
+        raise ValueError(f"Could not find pyright version in {CI_WORKFLOW_PATH}")
     return m.group(1)
 
 
@@ -59,28 +57,77 @@ def get_release_manifest_version() -> str:
     return data["."]
 
 
+def update_installer_version(new_ver: str) -> None:
+    content = INSTALLER_PATH.read_text(encoding="utf-8")
+    new_content, count = re.subn(r'(#define\s+MyAppVersion\s+)"[^"]+"', rf'\g<1>"{new_ver}"', content)
+    if count == 0:
+        raise RuntimeError(f"Failed to update version in {INSTALLER_PATH}: MyAppVersion pattern not found.")
+    INSTALLER_PATH.write_text(new_content, encoding="utf-8")
+
+
+def update_release_manifest_version(new_ver: str) -> None:
+    with open(RELEASE_MANIFEST_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict) or "." not in data:
+        raise ValueError(f"Invalid manifest structure in {RELEASE_MANIFEST_PATH}: key '.' not found")
+    data["."] = new_ver
+    with open(RELEASE_MANIFEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
 def main() -> None:
     errors: list[str] = []
+    fixed_any = False
+    fix_mode = "--fix" in sys.argv
 
-    pyproject_ver = get_pyproject_version()
+    try:
+        pyproject_ver = get_pyproject_version()
+        installer_ver = get_installer_fallback_version()
+        pkg_pyright_ver = get_package_json_pyright_version()
+        ci_pyright_ver = get_ci_pyright_version()
+        manifest_ver = get_release_manifest_version()
+    except Exception as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     # Check 1: installer.iss fallback version
-    installer_ver = get_installer_fallback_version()
     if installer_ver != pyproject_ver:
-        errors.append(f"installer.iss fallback version '{installer_ver}' != pyproject.toml version '{pyproject_ver}'")
+        if fix_mode:
+            print(f"Auto-fixing installer.iss: {installer_ver} -> {pyproject_ver}")
+            try:
+                update_installer_version(pyproject_ver)
+                fixed_any = True
+            except Exception as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
+        else:
+            errors.append(
+                f"installer.iss fallback version '{installer_ver}' != pyproject.toml version '{pyproject_ver}'"
+            )
 
     # Check 2: package.json pyright version vs CI pyright version
-    pkg_pyright_ver = get_package_json_pyright_version()
-    ci_pyright_ver = get_ci_pyright_version()
     if pkg_pyright_ver != ci_pyright_ver:
         errors.append(f"package.json pyright version '{pkg_pyright_ver}' != CI pyright version '{ci_pyright_ver}'")
 
     # Check 3: release-please-manifest.json version
-    manifest_ver = get_release_manifest_version()
     if manifest_ver != pyproject_ver:
-        errors.append(
-            f".release-please-manifest.json version '{manifest_ver}' != pyproject.toml version '{pyproject_ver}'"
-        )
+        if fix_mode:
+            print(f"Auto-fixing .release-please-manifest.json: {manifest_ver} -> {pyproject_ver}")
+            try:
+                update_release_manifest_version(pyproject_ver)
+                fixed_any = True
+            except Exception as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
+        else:
+            errors.append(
+                f".release-please-manifest.json version '{manifest_ver}' != pyproject.toml version '{pyproject_ver}'"
+            )
+
+    if fixed_any:
+        print("Auto-fixed version mismatches. Please stage the changes and try committing again.")
+        sys.exit(1)
 
     if errors:
         print("Version consistency check FAILED:")

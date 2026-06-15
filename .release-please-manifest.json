@@ -1,14 +1,3 @@
 {
-  "packages": {
-    ".": {
-      "release-type": "python",
-      "package-name": "astock-screener",
-      "changelog-path": "CHANGELOG.md",
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": false,
-      "draft": false,
-      "prerelease": false
-    }
-  },
   ".": "0.6.10"
 }
