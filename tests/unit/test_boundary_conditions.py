@@ -32,6 +32,7 @@ class TestTushareClientBoundaryConditions:
         client.timeout = 5
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
+        client._bg_tasks = set()
 
         failing_func = MagicMock(side_effect=Exception("unknown error"))
 
@@ -54,6 +55,7 @@ class TestTushareClientBoundaryConditions:
         client.timeout = 5
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
+        client._bg_tasks = set()
 
         network_error = ConnectionError("connection refused")
         failing_func = MagicMock(side_effect=network_error)
@@ -77,6 +79,7 @@ class TestTushareClientBoundaryConditions:
         client.timeout = 5
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
+        client._bg_tasks = set()
 
         perm_error = Exception("没有权限访问该接口")
         failing_func = MagicMock(side_effect=perm_error)
@@ -98,6 +101,7 @@ class TestTushareClientBoundaryConditions:
         client.timeout = 5
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
+        client._bg_tasks = set()
 
         mock_limiter = MagicMock()
         mock_limiter.consume_async = AsyncMock()
@@ -191,6 +195,7 @@ class TestTushareClientBoundaryConditions:
         client.timeout = 5
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
+        client._bg_tasks = set()
 
         network_error = ConnectionError("connection refused")
         failing_func = MagicMock(side_effect=network_error)
@@ -603,4 +608,4 @@ class TestShutdownBoundaryConditions:
 
         assert len(_CLEANUP_STEPS) >= 2, "Must have ordered cleanup steps"
         for step in _CLEANUP_STEPS:
-            assert len(step) == 3, f"Each step must be (name, method_name, critical): {step}"
+            assert len(step) == 4, f"Each step must be (name, method_name, critical, timeout): {step}"

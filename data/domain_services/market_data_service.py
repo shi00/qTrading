@@ -107,12 +107,13 @@ class MarketDataService:
         logger.info("[MarketDataService] Started market data polling service")
 
     def stop(self):
-        """Stop the service and reset state.
+        """Stop the market data polling service.
 
-        Cancels the task immediately. If called from a running event loop,
-        also schedules stop_async() for graceful await + cleanup.
-        stop() itself no longer clears _task or _cached_data — that is
-        stop_async()'s responsibility so the graceful-await path works.
+        Schedules stop_async() and returns immediately. The scheduled task
+        is tracked in _background_tasks to prevent GC.
+
+        Note: For guaranteed cleanup (e.g. during shutdown), use
+        ``await stop_async()`` instead.
         """
         if not self._running:
             return

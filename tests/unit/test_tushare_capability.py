@@ -1,8 +1,10 @@
+import asyncio
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import hashlib
 
-from data.external.tushare_client import TushareClient
+from data.external.tushare_client import TushareClient, TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
 
@@ -369,6 +371,32 @@ class TestRuntimePermissionPersistence:
 
             await client._persist_capability_safely()
             assert mock_set.called
+
+    @pytest.mark.asyncio
+    async def test_permission_error_holds_strong_reference_to_persist_task(self, tushare_client_mocks):
+        """ASYNC-002: create_task for _persist_capability_safely must be held in _bg_tasks."""
+        client, mock_ts, mock_ch = tushare_client_mocks
+        client._bg_tasks = set()  # Ensure initialized
+
+        # Mock _persist_capability_safely to be a slow coroutine so we can observe the task
+        async def slow_persist():
+            await asyncio.sleep(10)
+
+        mock_func = MagicMock()
+        mock_func.__name__ = "daily"
+        mock_func.side_effect = Exception("权限不足，积分不够")
+
+        with patch.object(client, "_persist_capability_safely", side_effect=slow_persist):
+            with patch.object(client, "mark_api_unavailable"):
+                with pytest.raises(TushareAPIPermissionError):
+                    await client._handle_api_call(mock_func, ts_code="000001.SZ")
+
+        # The task should be in _bg_tasks (strong reference held)
+        assert len(client._bg_tasks) == 1
+        # Clean up
+        for t in list(client._bg_tasks):
+            t.cancel()
+        client._bg_tasks.clear()
 
 
 class TestBlockTradeStrategyRequiredApis:

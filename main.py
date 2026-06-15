@@ -45,7 +45,7 @@ async def main(page: ft.Page):
 
     from utils.shutdown import ShutdownCoordinator
 
-    coordinator = ShutdownCoordinator(page, watchdog_timeout_s=15.0)
+    coordinator = ShutdownCoordinator(page)
     close_confirm_dialog = None
     close_confirm_visible = False
     shutdown_requested = False
@@ -66,7 +66,7 @@ async def main(page: ft.Page):
             logger.info("[Main] Window close confirmed by user.")
             coordinator.start_watchdog()
 
-            cleanup_ok = await coordinator.do_cleanup(timeout_s=12.0, step_timeout_s=2.0)
+            cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
 
             try:
                 if not _is_web_mode():
@@ -230,8 +230,8 @@ async def main(page: ft.Page):
         page.window.on_event = _on_window_event
 
     async def _on_disconnect(e):
-        coordinator.start_watchdog(15)
-        cleanup_ok = await coordinator.do_cleanup(timeout_s=12.0, step_timeout_s=2.0)
+        coordinator.start_watchdog(25)
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
 
         if not coordinator.cleanup_done:
             if cleanup_ok:

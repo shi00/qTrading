@@ -137,7 +137,20 @@ class TushareClient:
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
+            if cls._instance is not None:
+                if hasattr(cls._instance, "_bg_tasks"):
+                    for t in cls._instance._bg_tasks:
+                        t.cancel()
+                    cls._instance._bg_tasks.clear()
             cls._instance = None
+
+    @classmethod
+    def _atexit_cleanup(cls):
+        """Cancel background tasks on process exit."""
+        if cls._instance is not None and hasattr(cls._instance, "_bg_tasks"):
+            for t in cls._instance._bg_tasks:
+                t.cancel()
+            cls._instance._bg_tasks.clear()
 
     def _resolve_rate_limit(self) -> int:
         """
@@ -229,6 +242,7 @@ class TushareClient:
 
             self._capability_cache: dict[str, bool] = {}
             self._capability_cache_lock = threading.Lock()
+            self._bg_tasks: set[asyncio.Task] = set()
 
             self.token = token or ConfigHandler.get_token()
             self.timeout = ConfigHandler.get_tushare_timeout()
@@ -591,7 +605,9 @@ class TushareClient:
                 if is_permission_error:
                     self.mark_api_unavailable(api_name)
                     try:
-                        asyncio.create_task(self._persist_capability_safely())
+                        t = asyncio.create_task(self._persist_capability_safely())
+                        self._bg_tasks.add(t)
+                        t.add_done_callback(self._bg_tasks.discard)
                     except RuntimeError:
                         pass
                     logger.error(

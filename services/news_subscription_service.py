@@ -205,13 +205,13 @@ class NewsSubscriptionService:
         logger.info("[NewsService] Started news polling service [STARTED]")
 
     def stop(self):
-        """Stop the service and reset state.
+        """Stop the news subscription service.
 
-        Cancels the fetch task immediately so no new items enter the queue.
-        If called from a running event loop, schedules stop_async() which
-        will drain the processing queue and then cancel the processing task.
-        The processing task is NOT cancelled here so stop_async() can still
-        drain queued items.
+        Schedules stop_async() and returns immediately. The scheduled task
+        is tracked in _background_tasks to prevent GC.
+
+        Note: For guaranteed cleanup (e.g. during shutdown), use
+        ``await stop_async()`` instead.
         """
         if not self._running:
             return

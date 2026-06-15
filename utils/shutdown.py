@@ -20,13 +20,13 @@ class StepResult:
 
 
 _CLEANUP_STEPS = [
-    ("Step 0", "_step0_cancel_tasks", True),
-    ("Step 1", "_step1_stop_services", True),
-    ("Step 2", "_step2_flush_db_writes", True),
-    ("Step 3", "_step3_close_processor", True),
-    ("Step 4", "_step4_clear_toast", False),
-    ("Step 5", "_step5_unload_ai_model", True),
-    ("Step 6", "_step6_shutdown_thread_pools", True),
+    ("Step 0", "_step0_cancel_tasks", True, 4.0),
+    ("Step 1", "_step1_stop_services", True, 3.0),
+    ("Step 2", "_step2_flush_db_writes", True, 2.0),
+    ("Step 3", "_step3_close_processor", True, 3.0),
+    ("Step 4", "_step4_clear_toast", False, 1.0),
+    ("Step 5", "_step5_unload_ai_model", True, 2.0),
+    ("Step 6", "_step6_shutdown_thread_pools", True, 2.0),
 ]
 
 
@@ -47,7 +47,7 @@ class ShutdownCoordinator:
         *,
         service_stop_delay: float = 0.5,
         force_exit_callback: Callable[[int], None] | None = None,
-        watchdog_timeout_s: float = 15.0,
+        watchdog_timeout_s: float = 25.0,
     ):
         self._page = page
         self._cleanup_started = False
@@ -135,7 +135,7 @@ class ShutdownCoordinator:
         self._watchdog_started = False
         self._watchdog_cancel_event = None
 
-    async def do_cleanup(self, timeout_s: float = 8.0, step_timeout_s: float = 5.0) -> bool:
+    async def do_cleanup(self, timeout_s: float = 20.0, step_timeout_s: float = 5.0) -> bool:
         """
         Core cleanup coroutine. Stops all background services, flushes DB writes, closes pools.
 
@@ -203,17 +203,18 @@ class ShutdownCoordinator:
                 except (OSError, ValueError):
                     pass
 
-    async def _run_cleanup_steps(self, step_timeout_s: float) -> list[StepResult]:
+    async def _run_cleanup_steps(self, step_timeout_s: float = 2.0) -> list[StepResult]:
         results: list[StepResult] = []
         cancelled = False
-        for name, method_name, critical in _CLEANUP_STEPS:
+        for step_def in _CLEANUP_STEPS:
+            name, method_name, critical, step_timeout = step_def[0], step_def[1], step_def[2], step_def[3]
             step_func = getattr(self, method_name)
             start = time.perf_counter()
             try:
                 result = await self._run_async_step(
                     name=name,
                     step=step_func,
-                    step_timeout_s=step_timeout_s,
+                    step_timeout_s=step_timeout,
                     critical=critical,
                 )
             except asyncio.CancelledError:

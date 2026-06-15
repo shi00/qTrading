@@ -24,7 +24,31 @@ class TestCleanupSteps:
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
+        assert _CLEANUP_STEPS[0][3] == 4.0
         assert _CLEANUP_STEPS[4][2] is False
+        assert _CLEANUP_STEPS[4][3] == 1.0
+
+    def test_each_step_has_timeout(self):
+        """ASYNC-004/005: Each cleanup step has its own timeout."""
+        for step_def in _CLEANUP_STEPS:
+            assert len(step_def) == 4, f"Step {step_def[0]} should be a 4-tuple"
+            name, method_name, critical, timeout = step_def
+            assert timeout > 0, f"Step {name} timeout must be positive"
+
+    def test_total_step_timeouts_within_overall_budget(self):
+        """ASYNC-005: Sum of step timeouts must not exceed default overall timeout."""
+        total_step_time = sum(step[3] for step in _CLEANUP_STEPS)
+        # Default overall timeout is 20.0s, need some margin for scheduling overhead
+        assert total_step_time <= 20.0, (
+            f"Sum of step timeouts ({total_step_time}s) exceeds default overall budget (20.0s)"
+        )
+
+    def test_step0_timeout_accommodates_join_timeout(self):
+        """ASYNC-004: Step 0 timeout must accommodate cancel_all_running_async join_timeout."""
+        step0_timeout = _CLEANUP_STEPS[0][3]
+        # cancel_all_running_async default join_timeout is 3.0s
+        # Step 0 needs to cover: cancel + persist + join
+        assert step0_timeout >= 3.0, f"Step 0 timeout ({step0_timeout}s) must be >= join_timeout (3.0s)"
 
 
 class TestShutdownCoordinatorInit:
@@ -542,9 +566,9 @@ class TestWatchdogStepResultsLogging:
 
 
 class TestDefaultWatchdogTimeout:
-    def test_default_watchdog_timeout_is_15s(self):
+    def test_default_watchdog_timeout_is_25s(self):
         coord = ShutdownCoordinator()
-        assert coord._watchdog_timeout_s == 15.0
+        assert coord._watchdog_timeout_s == 25.0
 
     def test_custom_watchdog_timeout(self):
         coord = ShutdownCoordinator(watchdog_timeout_s=20.0)
@@ -605,7 +629,7 @@ class TestShutdownStepOrdering:
     def test_flush_db_before_close_processor(self):
         flush_idx = None
         close_idx = None
-        for i, (_name, method_name, _critical) in enumerate(_CLEANUP_STEPS):
+        for i, (_name, method_name, _critical, _timeout) in enumerate(_CLEANUP_STEPS):
             if method_name == "_step2_flush_db_writes":
                 flush_idx = i
             if method_name == "_step3_close_processor":
