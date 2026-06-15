@@ -10,20 +10,16 @@ def qfq_ratio_expr(col_name: str = "adj_factor", group_col: str | None = "ts_cod
     If the first factor is missing, it is backward filled first to prevent price drift.
     Then forward fill is applied for subsequent missing values.
     """
-    # First forward fill, then backward fill to ensure all elements are filled.
-    # Note: we group by group_col (e.g. ts_code) if specified.
     expr = pl.col(col_name).forward_fill().backward_fill()
     if group_col:
         filled = expr.over(group_col)
-        latest = filled.last().over(group_col)
+        latest = expr.last().over(group_col)
     else:
         filled = expr
-        latest = filled.last()
+        latest = expr.last()
 
-    # Avoid division by zero or None. If latest factor is 0 or null, treat as 1.0.
-    safe_latest = pl.when((latest == 0) | latest.is_null()).then(1.0).otherwise(latest)
-
-    return (filled.fill_null(safe_latest) / safe_latest).alias("qfq_ratio")
+    ratio = pl.when((latest == 0) | latest.is_null()).then(1.0).otherwise(filled / latest)
+    return ratio.alias("qfq_ratio")
 
 
 def qfq_ratio_series(series: pd.Series) -> pd.Series | None:
