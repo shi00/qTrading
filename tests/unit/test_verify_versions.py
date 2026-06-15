@@ -6,7 +6,7 @@ import pytest
 
 # Add scripts directory to path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "scripts"))
-import verify_versions
+import verify_versions  # type: ignore  # Resolved dynamically via sys.path
 
 
 def setup_test_files(
