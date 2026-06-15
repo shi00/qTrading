@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.10](https://github.com/shi00/qTrading/compare/v0.6.9...v0.6.10) (2026-06-15)
+
+
+### Bug Fixes
+
+* **task_manager:** eliminate cross-thread dict race in submit_task ([06881a4](https://github.com/shi00/qTrading/commit/06881a474804fc278e64b2f576bc4fcc1c2481fc))
+
 ## [0.6.9](https://github.com/shi00/qTrading/compare/v0.6.8...v0.6.9) (2026-06-14)
 
 
