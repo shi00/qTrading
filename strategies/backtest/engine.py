@@ -329,16 +329,13 @@ class VectorBacktestEngine:
         复权公式与 TechnicalAnalysis._get_qfq_df() 一致：
         adjusted_price = raw_price * adj_factor / base_adj_factor
 
-        前视偏差防护：
-        使用回测窗口首日的 adj_factor 作为基准（而非期末），
-        确保同一历史日期的复权价不随回测结束日变化。
+        前视偏差防护与基准一致性：
+        统一使用最新一日的 adj_factor 作为基准（base="latest"），
+        确保在回测引擎、选股策略以及技术分析模块中复权基准完全一致。
 
-        关键说明：Tushare 的 adj_factor 是逐日记录的累积复权因子快照，
-        而非"期末回填"值。即同一交易日的 adj_factor 在不同查询窗口下
-        返回相同值。因此：
-        - 首日 qfq_ratio = adj_factor_D1 / adj_factor_D1 = 1.0（基准日自身不调整）
-        - 非首日 qfq_ratio = adj_factor_Dn / adj_factor_D1（仅反映 D1→Dn 间的除权事件）
-        - 不同回测窗口下，同一历史日期的 qfq_ratio 一致（只要起始日相同）
+        复权说明：
+        - 最新一日 qfq_ratio = adj_factor_Latest / adj_factor_Latest = 1.0（最新一日不调整）
+        - 历史日 qfq_ratio = adj_factor_Dn / adj_factor_Latest（反映历史到最新一日的复权关系）
         """
         if "adj_factor" not in quotes_df.columns:
             return quotes_df.with_columns(
@@ -354,8 +351,8 @@ class VectorBacktestEngine:
                 ]
             )
 
-        # Ensure sorted by trade_date to guarantee correctness of the latest value in expression
-        quotes_df = quotes_df.sort("trade_date")
+        # Ensure sorted by ts_code and trade_date to guarantee stock contiguous rows and correctness of the latest value in expression
+        quotes_df = quotes_df.sort(["ts_code", "trade_date"])
         qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
 
         return quotes_df.with_columns(

@@ -7,8 +7,8 @@ def qfq_ratio_expr(col_name: str = "adj_factor", group_col: str | None = "ts_cod
     Calculate Point-in-Time Forward Adjusted Price (QFQ) ratio expression in Polars.
     Normalizes adjustment factors to the LATEST available date (base="latest").
 
-    If the first factor is missing, it is backward filled first to prevent price drift.
-    Then forward fill is applied for subsequent missing values.
+    If factor values are missing, they are forward filled first to carry forward existing factors.
+    Then backward fill is applied to handle any remaining leading nulls.
     """
     expr = pl.col(col_name).forward_fill().backward_fill()
     if group_col:
@@ -27,8 +27,8 @@ def qfq_ratio_series(series: pd.Series) -> pd.Series | None:
     Calculate Point-in-Time Forward Adjusted Price (QFQ) ratio series in Pandas.
     Normalizes adjustment factors to the LATEST available date (base="latest").
 
-    If the first factor is missing, it is backward filled first to prevent price drift.
-    Then forward fill is applied for subsequent missing values.
+    If factor values are missing, they are forward filled first to carry forward existing factors.
+    Then backward fill is applied to handle any remaining leading nulls.
 
     Returns:
         pd.Series: The adjustment ratio series.
