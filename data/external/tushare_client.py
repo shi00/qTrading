@@ -1118,11 +1118,16 @@ class TushareClient:
 
     async def get_moneyflow_hsgt(self, trade_date: str | None = None):
         """Get Northbound (HSGT) money flow"""  # type: ignore[untyped]
-        return await self._handle_api_call(
+        df = await self._handle_api_call(
             self.pro.moneyflow_hsgt,
             trade_date=trade_date,
             fields="trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         )
+        if df is not None and not df.empty:
+            from data.constants import attach_hsgt_column_units
+
+            df = attach_hsgt_column_units(df)
+        return df
 
     async def get_index_dailybasic(self, trade_date: str | None = None, ts_code: str | None = None):
         """Get index daily indicators (PE, PB, etc.)"""  # type: ignore[untyped]

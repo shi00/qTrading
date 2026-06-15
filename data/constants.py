@@ -137,6 +137,27 @@ def attach_top_list_column_units(df):
     return attach_column_unit_sources(df, TOP_LIST_COLUMN_UNIT_SOURCES)
 
 
+HSGT_NORTH_MONEY_UNIT = "million_cny"
+HSGT_NORTH_MONEY_UNIT_SOURCE = {
+    "provider": "tushare.moneyflow_hsgt",
+    "doc_url": "https://tushare.pro/document/2?doc_id=47",
+    "doc_field": "north_money",
+    "doc_description": "北向资金（百万元）",
+}
+HSGT_COLUMN_UNITS = {
+    "north_money": HSGT_NORTH_MONEY_UNIT,
+}
+HSGT_COLUMN_UNIT_SOURCES = {
+    "north_money": HSGT_NORTH_MONEY_UNIT_SOURCE,
+}
+
+
+def attach_hsgt_column_units(df):
+    """Declare known HSGT units and their upstream documentation without changing schema."""
+    df = attach_column_units(df, HSGT_COLUMN_UNITS)
+    return attach_column_unit_sources(df, HSGT_COLUMN_UNIT_SOURCES)
+
+
 def get_column_unit(df, column_name: str, default: str | None = None) -> str | None:
     """Read unit metadata from a DataFrame."""
     if df is None:

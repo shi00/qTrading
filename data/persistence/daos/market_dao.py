@@ -236,4 +236,9 @@ class MarketDao(BaseDao):
             sql += f" LIMIT ${idx}"
             params.append(limit)
 
-        return await self._read_db(sql, params)
+        df = await self._read_db(sql, params)
+        if df is not None and not df.empty:
+            from data.constants import attach_hsgt_column_units
+
+            df = attach_hsgt_column_units(df)
+        return df

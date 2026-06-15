@@ -77,6 +77,20 @@ class TestAttachTopListColumnUnits:
         assert "net_amount" in result.attrs["column_unit_sources"]
 
 
+class TestAttachHsgtColumnUnits:
+    def test_attaches_units_and_sources(self):
+        from data.constants import (
+            attach_hsgt_column_units,
+            DATAFRAME_ATTR_COLUMN_UNITS,
+            DATAFRAME_ATTR_COLUMN_UNIT_SOURCES,
+        )
+
+        df = pd.DataFrame({"north_money": [100.0, 200.0]})
+        df = attach_hsgt_column_units(df)
+        assert df.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["north_money"] == "million_cny"
+        assert df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["north_money"]["provider"] == "tushare.moneyflow_hsgt"
+
+
 class TestGetColumnUnit:
     def test_none_df(self):
         assert get_column_unit(None, "col") is None
