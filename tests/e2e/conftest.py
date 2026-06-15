@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -201,8 +203,260 @@ async def _teardown_page(fp: FletPage) -> None:
         await context.close()
 
 
+def _parse_asyncpg_dsn(sqlalchemy_url: str) -> str:
+    """将 SQLAlchemy asyncpg DSN 转换为 asyncpg 原生 DSN。
+
+    postgresql+asyncpg://user:pass@host:port/db → postgresql://user:pass@host:port/db
+    """
+    return sqlalchemy_url.replace("+asyncpg", "")
+
+
+def _generate_trade_dates(n_days: int = 60) -> list[date]:
+    """生成最近 n_days 个交易日（排除周末），从最新到最旧排列。"""
+    today = date.today()
+    trading: list[date] = []
+    current = today
+    while len(trading) < n_days:
+        if current.weekday() < 5:  # 周一至周五
+            trading.append(current)
+        current -= timedelta(days=1)
+    trading.reverse()
+    return trading
+
+
+async def _seed_e2e_data() -> None:
+    """向测试数据库播种 E2E 所需的基准数据。"""
+    import asyncpg
+
+    dsn = _parse_asyncpg_dsn(TEST_DATABASE_URL)
+    conn = await asyncpg.connect(dsn)
+    try:
+        async with conn.transaction():
+            # 清理
+            await conn.execute(
+                """
+                TRUNCATE TABLE
+                    daily_quotes,
+                    daily_indicators,
+                    financial_reports,
+                    suspend_d,
+                    index_daily,
+                    sync_status,
+                    stock_basic,
+                    trade_cal
+                CASCADE
+                """
+            )
+
+            trade_dates = _generate_trade_dates(60)
+            today_str = date.today().isoformat()
+
+            # stock_basic
+            await conn.execute(
+                """
+                INSERT INTO stock_basic (ts_code, symbol, name, area, industry, market, list_date, list_status)
+                VALUES
+                    ($1, $2, $3, $4, $5, $6, $7, $8),
+                    ($9, $10, $11, $12, $13, $14, $15, $16)
+                """,
+                "000001.SZ",
+                "000001",
+                "平安银行",
+                "深圳",
+                "银行",
+                "主板",
+                date(1991, 4, 3),
+                "L",
+                "600519.SH",
+                "600519",
+                "贵州茅台",
+                "贵州",
+                "白酒",
+                "主板",
+                date(2001, 8, 27),
+                "L",
+            )
+
+            # trade_cal — 最近 90 天内所有日期，工作日 is_open=1
+            cal_rows = []
+            d = date.today() - timedelta(days=90)
+            end = date.today()
+            while d <= end:
+                is_open = 1 if d.weekday() < 5 else 0
+                pretrade = d - timedelta(days=3) if d.weekday() == 0 else d - timedelta(days=1)
+                cal_rows.append((d.isoformat(), "SSE", is_open, pretrade.isoformat()))
+                d += timedelta(days=1)
+            await conn.executemany(
+                "INSERT INTO trade_cal (cal_date, exchange, is_open, pretrade_date) VALUES ($1::date, $2, $3, $4::date)",
+                cal_rows,
+            )
+
+            # daily_quotes — 平安银行 + 贵州茅台 × 60 个交易日
+            rng = random.Random(42)
+            quote_rows = []
+            indicator_rows = []
+            for i, td in enumerate(trade_dates):
+                # 平安银行：pct_chg 3.0~6.0, turnover_rate 3.5~6.0（通过 VolumeBreakoutStrategy 过滤）
+                pa_close = 12.0 + i * 0.05
+                pa_pct_chg = round(rng.uniform(3.0, 6.0), 4)
+                pa_pre_close = round(pa_close / (1 + pa_pct_chg / 100), 4)
+                pa_change = round(pa_close - pa_pre_close, 4)
+                pa_vol = rng.randint(500000, 1000000)
+                pa_amount = round(pa_close * pa_vol / 100, 4)
+                quote_rows.append(
+                    (
+                        "000001.SZ",
+                        td.isoformat(),
+                        round(pa_pre_close - 0.1, 4),
+                        round(pa_close + 0.1, 4),
+                        round(pa_pre_close - 0.2, 4),
+                        pa_close,
+                        pa_pre_close,
+                        pa_change,
+                        pa_pct_chg,
+                        pa_vol,
+                        pa_amount,
+                    )
+                )
+                # 贵州茅台：pct_chg 0.2~1.5（不通过过滤）
+                mt_close = 1800.0 + i * 0.3
+                mt_pct_chg = round(rng.uniform(0.2, 1.5), 4)
+                mt_pre_close = round(mt_close / (1 + mt_pct_chg / 100), 4)
+                mt_change = round(mt_close - mt_pre_close, 4)
+                mt_vol = rng.randint(20000, 40000)
+                mt_amount = round(mt_close * mt_vol / 100, 4)
+                quote_rows.append(
+                    (
+                        "600519.SH",
+                        td.isoformat(),
+                        round(mt_pre_close - 2, 4),
+                        round(mt_close + 2, 4),
+                        round(mt_pre_close - 5, 4),
+                        mt_close,
+                        mt_pre_close,
+                        mt_change,
+                        mt_pct_chg,
+                        mt_vol,
+                        mt_amount,
+                    )
+                )
+
+                # daily_indicators
+                pa_turnover = round(rng.uniform(3.5, 6.0), 4)
+                indicator_rows.append(
+                    (
+                        "000001.SZ",
+                        td.isoformat(),
+                        round(rng.uniform(5.0, 8.0), 4),
+                        round(rng.uniform(0.5, 0.8), 4),
+                        round(rng.uniform(1.5, 2.0), 4),
+                        25000000 + i * 10000,
+                        25000000 + i * 10000,
+                        pa_turnover,
+                        round(pa_turnover * 1.1, 4),
+                        round(rng.uniform(0.8, 1.5), 4),
+                    )
+                )
+                mt_turnover = round(rng.uniform(0.2, 0.8), 4)
+                indicator_rows.append(
+                    (
+                        "600519.SH",
+                        td.isoformat(),
+                        round(rng.uniform(30.0, 40.0), 4),
+                        round(rng.uniform(10.0, 14.0), 4),
+                        round(rng.uniform(13.0, 17.0), 4),
+                        220000000 + i * 50000,
+                        220000000 + i * 50000,
+                        mt_turnover,
+                        round(mt_turnover * 1.1, 4),
+                        round(rng.uniform(0.5, 1.0), 4),
+                    )
+                )
+
+            await conn.executemany(
+                """
+                INSERT INTO daily_quotes
+                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
+                VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                """,
+                quote_rows,
+            )
+            await conn.executemany(
+                """
+                INSERT INTO daily_indicators
+                    (ts_code, trade_date, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate, turnover_rate_f, volume_ratio)
+                VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10)
+                """,
+                indicator_rows,
+            )
+
+            # index_daily — 沪深300 × 60 个交易日
+            index_rows = []
+            idx_close = 3900.0
+            for td in trade_dates:
+                idx_pct = round(rng.uniform(-0.5, 0.5), 4)
+                idx_pre_close = round(idx_close, 4)
+                idx_close = round(idx_close * (1 + idx_pct / 100), 4)
+                idx_change = round(idx_close - idx_pre_close, 4)
+                index_rows.append(
+                    (
+                        "000300.SH",
+                        td.isoformat(),
+                        round(idx_close - 5, 4),
+                        round(idx_close + 10, 4),
+                        round(idx_close - 10, 4),
+                        round(idx_close, 4),
+                        idx_pre_close,
+                        idx_change,
+                        idx_pct,
+                        rng.randint(50000000, 80000000),
+                        round(rng.uniform(3000000, 5000000), 4),
+                    )
+                )
+            await conn.executemany(
+                """
+                INSERT INTO index_daily
+                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
+                VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                """,
+                index_rows,
+            )
+
+            # sync_status — 质量门控评级依据
+            sync_rows = [
+                ("daily_quotes", today_str, today_str, 120, "success", "success", 0),
+                ("daily_indicators", today_str, today_str, 120, "success", "success", 0),
+                ("financial_reports", today_str, today_str, 0, "success", "empty", 0),
+                ("stock_basic", today_str, today_str, 2, "success", "success", 0),
+                ("trade_cal", today_str, today_str, len(cal_rows), "success", "success", 0),
+                ("index_daily", today_str, today_str, 60, "success", "success", 0),
+            ]
+            await conn.executemany(
+                """
+                INSERT INTO sync_status
+                    (table_name, last_sync_date, last_data_date, record_count, status, last_result_status, error_count)
+                VALUES ($1, $2::date, $3::date, $4, $5, $6, $7)
+                """,
+                sync_rows,
+            )
+
+            # suspend_d — 空表（无停牌记录，确保 is_tradable=TRUE）
+            # financial_reports — 空表（volume_breakout 不依赖此数据）
+
+        logger.info("[E2E Seeding] Database seeded successfully.")
+    finally:
+        await conn.close()
+
+
 @pytest.fixture(scope="session")
-def flet_app(tmp_path_factory):
+async def seed_e2e_data():
+    """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。"""
+    await _seed_e2e_data()
+    yield
+
+
+@pytest.fixture(scope="session")
+def flet_app(tmp_path_factory, seed_e2e_data):
     proc, url = _spawn(
         tmp_path_factory,
         config={
