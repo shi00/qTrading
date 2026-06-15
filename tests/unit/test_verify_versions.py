@@ -26,7 +26,7 @@ def setup_test_files(
     ci_workflow.write_text(f"pip install pyright=={ci_pyright}", encoding="utf-8")
 
     manifest = tmp_path / ".release-please-manifest.json"
-    manifest.write_text(f'{{"packages": {{".": {{}}}}, ".": "{manifest_v}"}}', encoding="utf-8")
+    manifest.write_text(f'{{".": "{manifest_v}"}}', encoding="utf-8")
     return pyproject, installer, pkg_json, ci_workflow, manifest
 
 
@@ -46,7 +46,7 @@ def test_verify_versions_fix(tmp_path):
     ci_workflow.write_text("pip install pyright==1.1.300", encoding="utf-8")
 
     manifest = tmp_path / ".release-please-manifest.json"
-    manifest.write_text('{"packages": {".": {}}, ".": "0.6.8"}', encoding="utf-8")
+    manifest.write_text('{".": "0.6.8"}', encoding="utf-8")
 
     # Mock all paths and argv
     with (
@@ -82,7 +82,7 @@ def test_update_installer_version_failure(tmp_path):
 
 def test_update_release_manifest_version_failure(tmp_path):
     manifest = tmp_path / ".release-please-manifest.json"
-    manifest.write_text('{"packages": {}}', encoding="utf-8")  # missing "." key
+    manifest.write_text("{}", encoding="utf-8")  # missing "." key
     with patch("verify_versions.RELEASE_MANIFEST_PATH", manifest), pytest.raises(ValueError) as exc_info:
         verify_versions.update_release_manifest_version("0.6.9")
     assert "Invalid manifest structure" in str(exc_info.value)
