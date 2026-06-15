@@ -704,9 +704,12 @@ class TestTushareClientSimpleApiMethods:
     @pytest.mark.asyncio
     async def test_get_moneyflow_hsgt(self):
         client = _make_client()
-        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240614"]}))
+        client._handle_api_call = AsyncMock(
+            return_value=pd.DataFrame({"trade_date": ["20240614"], "north_money": [100.0]})
+        )
         result = await client.get_moneyflow_hsgt(trade_date="20240614")
         assert result is not None
+        assert result.attrs["column_units"]["north_money"] == "million_cny"
 
     @pytest.mark.asyncio
     async def test_get_index_dailybasic(self):
