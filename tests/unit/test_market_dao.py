@@ -217,13 +217,15 @@ class TestMarketDaoGetMoneyflowHsgt:
     @pytest.mark.asyncio
     async def test_basic(self):
         dao = MarketDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"]}))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"], "north_money": [100.0]}))
         result = await dao.get_moneyflow_hsgt(trade_date="20240615")
         assert result is not None
+        assert result.attrs["column_units"]["north_money"] == "million_cny"
 
     @pytest.mark.asyncio
     async def test_with_limit(self):
         dao = MarketDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"]}))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"trade_date": ["20240615"], "north_money": [100.0]}))
         result = await dao.get_moneyflow_hsgt(limit=10)
         assert result is not None
+        assert result.attrs["column_units"]["north_money"] == "million_cny"

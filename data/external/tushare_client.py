@@ -8,7 +8,7 @@ import pandas as pd
 import requests
 import tushare as ts
 
-from data.constants import attach_top_list_column_units
+from data.constants import attach_hsgt_column_units, attach_top_list_column_units
 from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
 from utils.sanitizers import DataSanitizer
@@ -1124,8 +1124,6 @@ class TushareClient:
             fields="trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         )
         if df is not None and not df.empty:
-            from data.constants import attach_hsgt_column_units
-
             df = attach_hsgt_column_units(df)
         return df
 

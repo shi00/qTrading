@@ -13,6 +13,7 @@ from data.persistence.models import (
     get_model_pk_columns,
 )
 
+from data.constants import attach_hsgt_column_units
 from .base_dao import BaseDao
 
 logger = logging.getLogger(__name__)
@@ -238,7 +239,5 @@ class MarketDao(BaseDao):
 
         df = await self._read_db(sql, params)
         if df is not None and not df.empty:
-            from data.constants import attach_hsgt_column_units
-
             df = attach_hsgt_column_units(df)
         return df
