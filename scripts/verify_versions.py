@@ -61,13 +61,17 @@ def get_release_manifest_version() -> str:
 
 def update_installer_version(new_ver: str) -> None:
     content = INSTALLER_PATH.read_text(encoding="utf-8")
-    new_content = re.sub(r'(#define\s+MyAppVersion\s+)"[^"]+"', rf'\g<1>"{new_ver}"', content)
+    new_content, count = re.subn(r'(#define\s+MyAppVersion\s+)"[^"]+"', rf'\g<1>"{new_ver}"', content)
+    if count == 0:
+        raise RuntimeError(f"Failed to update version in {INSTALLER_PATH}: MyAppVersion pattern not found.")
     INSTALLER_PATH.write_text(new_content, encoding="utf-8")
 
 
 def update_release_manifest_version(new_ver: str) -> None:
     with open(RELEASE_MANIFEST_PATH, encoding="utf-8") as f:
         data = json.load(f)
+    if not isinstance(data, dict) or "." not in data:
+        raise ValueError(f"Invalid manifest structure in {RELEASE_MANIFEST_PATH}: key '.' not found")
     data["."] = new_ver
     with open(RELEASE_MANIFEST_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)

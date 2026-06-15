@@ -49,3 +49,19 @@ def test_verify_versions_fix(tmp_path):
     with open(manifest, encoding="utf-8") as f:
         data = json.load(f)
     assert data["."] == "0.6.9"
+
+
+def test_update_installer_version_failure(tmp_path):
+    installer = tmp_path / "installer.iss"
+    installer.write_text("some random content without MyAppVersion\n", encoding="utf-8")
+    with patch("verify_versions.INSTALLER_PATH", installer), pytest.raises(RuntimeError) as exc_info:
+        verify_versions.update_installer_version("0.6.9")
+    assert "Failed to update version" in str(exc_info.value)
+
+
+def test_update_release_manifest_version_failure(tmp_path):
+    manifest = tmp_path / ".release-please-manifest.json"
+    manifest.write_text('{"packages": {}}', encoding="utf-8")  # missing "." key
+    with patch("verify_versions.RELEASE_MANIFEST_PATH", manifest), pytest.raises(ValueError) as exc_info:
+        verify_versions.update_release_manifest_version("0.6.9")
+    assert "Invalid manifest structure" in str(exc_info.value)
