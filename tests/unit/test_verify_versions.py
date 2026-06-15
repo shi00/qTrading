@@ -65,3 +65,19 @@ def test_update_release_manifest_version_failure(tmp_path):
     with patch("verify_versions.RELEASE_MANIFEST_PATH", manifest), pytest.raises(ValueError) as exc_info:
         verify_versions.update_release_manifest_version("0.6.9")
     assert "Invalid manifest structure" in str(exc_info.value)
+
+
+def test_get_installer_fallback_version_failure(tmp_path):
+    installer = tmp_path / "installer.iss"
+    installer.write_text("wrong file format", encoding="utf-8")
+    with patch("verify_versions.INSTALLER_PATH", installer), pytest.raises(ValueError) as exc_info:
+        verify_versions.get_installer_fallback_version()
+    assert "Could not find MyAppVersion" in str(exc_info.value)
+
+
+def test_get_ci_pyright_version_failure(tmp_path):
+    ci_workflow = tmp_path / "ci_cd.yml"
+    ci_workflow.write_text("wrong content without pyright version", encoding="utf-8")
+    with patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow), pytest.raises(ValueError) as exc_info:
+        verify_versions.get_ci_pyright_version()
+    assert "Could not find pyright version" in str(exc_info.value)

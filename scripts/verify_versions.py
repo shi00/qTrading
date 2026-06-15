@@ -33,8 +33,7 @@ def get_installer_fallback_version() -> str:
     content = INSTALLER_PATH.read_text(encoding="utf-8")
     m = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', content)
     if not m:
-        print(f"ERROR: Could not find MyAppVersion in {INSTALLER_PATH}")
-        sys.exit(1)
+        raise ValueError(f"Could not find MyAppVersion in {INSTALLER_PATH}")
     return m.group(1)
 
 
@@ -48,8 +47,7 @@ def get_ci_pyright_version() -> str:
     content = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
     m = re.search(r"pip install pyright==(\S+)", content)
     if not m:
-        print(f"ERROR: Could not find pyright version in {CI_WORKFLOW_PATH}")
-        sys.exit(1)
+        raise ValueError(f"Could not find pyright version in {CI_WORKFLOW_PATH}")
     return m.group(1)
 
 
@@ -83,10 +81,17 @@ def main() -> None:
     fixed_any = False
     fix_mode = "--fix" in sys.argv
 
-    pyproject_ver = get_pyproject_version()
+    try:
+        pyproject_ver = get_pyproject_version()
+        installer_ver = get_installer_fallback_version()
+        pkg_pyright_ver = get_package_json_pyright_version()
+        ci_pyright_ver = get_ci_pyright_version()
+        manifest_ver = get_release_manifest_version()
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
     # Check 1: installer.iss fallback version
-    installer_ver = get_installer_fallback_version()
     if installer_ver != pyproject_ver:
         if fix_mode:
             print(f"Auto-fixing installer.iss: {installer_ver} -> {pyproject_ver}")
@@ -98,13 +103,10 @@ def main() -> None:
             )
 
     # Check 2: package.json pyright version vs CI pyright version
-    pkg_pyright_ver = get_package_json_pyright_version()
-    ci_pyright_ver = get_ci_pyright_version()
     if pkg_pyright_ver != ci_pyright_ver:
         errors.append(f"package.json pyright version '{pkg_pyright_ver}' != CI pyright version '{ci_pyright_ver}'")
 
     # Check 3: release-please-manifest.json version
-    manifest_ver = get_release_manifest_version()
     if manifest_ver != pyproject_ver:
         if fix_mode:
             print(f"Auto-fixing .release-please-manifest.json: {manifest_ver} -> {pyproject_ver}")
