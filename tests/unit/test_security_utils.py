@@ -304,7 +304,11 @@ class TestMigrateToDerivedKey:
         ):
             result = SecurityManager.migrate_to_derived_key()
             assert result is True
-            assert mock_remove.call_count == 2
+            from utils.security_utils import _LEGACY_MARKER
+
+            called_paths = [call.args[0] for call in mock_remove.call_args_list]
+            assert _LEGACY_MARKER in called_paths
+            assert SecurityManager.KEY_FILE_BAK in called_paths
 
     @patch("utils.security_utils.os.path.exists")
     def test_migration_fails_if_key_unreadable(self, mock_exists):
