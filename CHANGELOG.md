@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.9...v0.7.0) (2026-06-15)
+## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.10...v0.7.0) (2026-06-15)
 
 
 ### Features
@@ -29,6 +29,13 @@
 * **base_dao:** add direct unit tests for _guarded_begin covering all paths ([569635d](https://github.com/shi00/qTrading/commit/569635d90c25b4c860191103bcc3518d9d4bc151))
 * expand unit test coverage for version sync script ([0a616d1](https://github.com/shi00/qTrading/commit/0a616d1fd2ef94579849eb1f1d349498ca3382e8))
 
+
+## [0.6.10](https://github.com/shi00/qTrading/compare/v0.6.9...v0.6.10) (2026-06-15)
+
+
+### Bug Fixes
+
+* **task_manager:** eliminate cross-thread dict race in submit_task ([06881a4](https://github.com/shi00/qTrading/commit/06881a474804fc278e64b2f576bc4fcc1c2481fc))
 ## [0.6.9](https://github.com/shi00/qTrading/compare/v0.6.8...v0.6.9) (2026-06-14)
 
 
