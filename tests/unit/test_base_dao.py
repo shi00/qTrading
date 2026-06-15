@@ -1885,3 +1885,158 @@ class TestPrepareRecordsNaNHandling:
         assert captured_records[1]["val"] is None
         assert captured_records[2]["name"] == "also_valid"
         assert captured_records[2]["val"] == 3.0
+
+
+class TestGuardedBegin:
+    """Direct unit tests for BaseDao._guarded_begin covering all execution paths."""
+
+    @pytest.mark.asyncio
+    async def test_normal_begin_yields_connection(self):
+        """Path 1: Normal engine.begin() yields a transaction connection."""
+        mock_tx_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_tx_conn)
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            async with dao._guarded_begin() as conn:
+                assert conn is mock_tx_conn
+
+    @pytest.mark.asyncio
+    async def test_conn_provided_yields_directly(self):
+        """Path 2: When conn is provided, yield it without starting a new transaction."""
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        existing_conn = AsyncMock()
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            async with dao._guarded_begin(conn=existing_conn) as conn:
+                assert conn is existing_conn
+            # engine.begin should NOT be called when conn is provided
+            mock_engine.begin.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_engine_none_raises_runtime_error(self):
+        """Path 3: _check_engine raises RuntimeError when engine is None."""
+        dao = BaseDao(None)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(RuntimeError, match="Engine not initialized"):
+                async with dao._guarded_begin():
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_cache_manager_disposed_raises_engine_disposed_error(self):
+        """Path 4: _check_engine raises EngineDisposedError when CacheManager is disposed."""
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            with pytest.raises(EngineDisposedError, match="Engine disposed"):
+                async with dao._guarded_begin():
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """Path 5: CancelledError must propagate (R2 red line)."""
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(asyncio.CancelledError):
+                async with dao._guarded_begin():
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_connection_closed_error_converts_to_engine_disposed(self):
+        """Path 6: Connection-closed errors are converted to EngineDisposedError."""
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(side_effect=Exception("no active connection"))
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(EngineDisposedError, match="Engine disposed during guarded begin"):
+                async with dao._guarded_begin():
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_database_closed_error_converts_to_engine_disposed(self):
+        """Path 6 variant: 'database is closed' also converts to EngineDisposedError."""
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(side_effect=Exception("database is closed"))
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(EngineDisposedError, match="Engine disposed during guarded begin"):
+                async with dao._guarded_begin():
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_other_exception_propagates(self):
+        """Path 7: Non-connection errors propagate unchanged."""
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(side_effect=ValueError("some other error"))
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(ValueError, match="some other error"):
+                async with dao._guarded_begin():
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_waits_for_maintenance_event(self):
+        """Verify _guarded_begin waits for the maintenance event before proceeding."""
+        mock_tx_conn = AsyncMock()
+        mock_engine = MagicMock()
+        mock_engine.begin.return_value.__aenter__ = AsyncMock(return_value=mock_tx_conn)
+        mock_engine.begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        dao = BaseDao(mock_engine)
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch.object(dao, "_get_maintenance_event") as mock_get_evt,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_evt = AsyncMock()
+            mock_evt.wait = AsyncMock()
+            mock_get_evt.return_value = mock_evt
+
+            async with dao._guarded_begin() as conn:
+                assert conn is mock_tx_conn
+            mock_evt.wait.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_conn_provided_skips_check_engine_when_engine_is_none(self):
+        """When conn is provided but engine is None, _check_engine still runs first."""
+        dao = BaseDao(None)
+
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            # _check_engine should raise RuntimeError before reaching the conn passthrough
+            with pytest.raises(RuntimeError, match="Engine not initialized"):
+                async with dao._guarded_begin(conn=AsyncMock()):
+                    pass
