@@ -531,6 +531,69 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
         assert svc._cached_data["hot_concepts"] == previous_concepts
 
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_fetch_independent_fallback(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
+        import datetime
+
+        mock_cache = MagicMock()
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
+        svc = MarketDataService()
+        svc.cache = mock_cache
+        svc.api = mock_tc
+
+        today = datetime.date(2026, 6, 15)
+        yesterday = datetime.date(2026, 6, 14)
+
+        # Mock trade_calendar.get_latest_trade_date to return today
+        mock_cal = MagicMock()
+        mock_cal.get_latest_trade_date = AsyncMock(return_value=today)
+        mock_cal.get_prev_trade_date = AsyncMock(return_value=yesterday)
+        svc.trade_calendar = mock_cal
+
+        # Mock _get_indices_batch: succeed for today
+        indices_today = [{"name": "SH", "value": "3000.00", "change": "+1.00%", "color": "red"}]
+
+        async def fake_get_indices_batch(codes, date_str):
+            if date_str == "20260615":
+                return indices_today
+            return []
+
+        svc._get_indices_batch = AsyncMock(side_effect=fake_get_indices_batch)
+
+        # Mock _get_hsgt: return empty for today, valid for yesterday
+        hsgt_yesterday = {"name": "HSGT", "value": "1.50亿", "sub": "inflow", "color": "red"}
+        hsgt_today = {"name": "HSGT", "value": "-", "sub": "-", "color": "grey"}
+
+        async def fake_get_hsgt(date_str):
+            if date_str == "20260615":
+                return hsgt_today
+            elif date_str == "20260614":
+                return hsgt_yesterday
+            return MarketDataService._get_empty_hsgt_data_static()
+
+        svc._get_hsgt = AsyncMock(side_effect=fake_get_hsgt)
+
+        mock_news.get_hot_concepts = AsyncMock(return_value=[])
+
+        # Run _fetch_market_data
+        await svc._fetch_market_data()
+
+        cached_data = svc.get_cached_data()
+        assert cached_data is not None
+        # Verify indices are today's data
+        assert cached_data["indices"] == indices_today
+        # Verify HSGT fell back to yesterday's data
+        assert cached_data["hsgt"] == hsgt_yesterday
+        # Verify "stale" is True
+        assert cached_data["stale"] is True
+
 
 class TestMarketDataServiceGetHsgt:
     def setup_method(self):

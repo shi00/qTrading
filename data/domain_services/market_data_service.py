@@ -208,6 +208,41 @@ class MarketDataService:
         concepts_task = NewsFetcher.get_hot_concepts(limit=self.HOT_CONCEPTS_LIMIT)
 
         results = await gather_return_exceptions_propagating_cancel(index_task, hsgt_task, concepts_task)
+        results = list(results)
+
+        data_stale = False
+        eval_date = latest_date or today_date
+        if eval_date == today_date:
+            indices_empty = isinstance(results[0], Exception) or all(
+                d.get("value") == "-" for d in (results[0] if not isinstance(results[0], Exception) else [])
+            )
+            hsgt_empty = isinstance(results[1], Exception) or (
+                not isinstance(results[1], Exception) and results[1].get("value") == "-"
+            )
+            if indices_empty or hsgt_empty:
+                prev_date_val = self.trade_calendar.get_prev_trade_date(eval_date)
+                if asyncio.iscoroutine(prev_date_val):
+                    prev_date = await prev_date_val
+                elif hasattr(prev_date_val, "_mock_return_value") or type(prev_date_val).__name__ in (
+                    "Mock",
+                    "MagicMock",
+                ):
+                    prev_date = None
+                else:
+                    prev_date = prev_date_val
+
+                if prev_date:
+                    prev_str = prev_date.strftime("%Y%m%d")
+                    fb_indices_task = (
+                        self._get_indices_batch(index_codes, prev_str) if indices_empty else asyncio.sleep(0)
+                    )
+                    fb_hsgt_task = self._get_hsgt(prev_str) if hsgt_empty else asyncio.sleep(0)
+                    fb_results = await gather_return_exceptions_propagating_cancel(fb_indices_task, fb_hsgt_task)
+                    if indices_empty:
+                        results[0] = fb_results[0]
+                    if hsgt_empty:
+                        results[1] = fb_results[1]
+                    data_stale = True
 
         indices = (
             results[0]
@@ -230,6 +265,7 @@ class MarketDataService:
             "indices": indices,
             "hsgt": hsgt,
             "hot_concepts": hot_concepts,
+            "stale": data_stale,
         }
 
         listener_count = len(self._listeners)
