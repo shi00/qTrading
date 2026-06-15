@@ -546,7 +546,7 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
         svc = MarketDataService()
         svc.cache = mock_cache
-        svc.api = mock_tc
+        svc.api = mock_api_cls.return_value
 
         today = datetime.date(2026, 6, 15)
         yesterday = datetime.date(2026, 6, 14)
