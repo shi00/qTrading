@@ -124,6 +124,8 @@ class TaskManager:
                 return
 
             self._tasks: dict[str, AppTask] = {}
+            self._active_keys: set[str] = set()  # Thread-safe dedup for unique_key
+            self._active_keys_lock = threading.Lock()
             self._finished_order: OrderedDict[str, datetime.datetime] = OrderedDict()
             self._subscribers: list[Callable[[list[AppTask]], None]] = []
             self._subscriber_error_counts: dict[Callable[[list[AppTask]], None], int] = {}
@@ -232,21 +234,20 @@ class TaskManager:
         the event-loop thread or a worker thread (Flet dispatches sync on_click
         handlers to a ThreadPoolExecutor).
 
-        Uses loop.call_soon_threadsafe to guarantee all state mutations
-        (dict write, subscriber notification, task launch) happen on the
-        event loop thread — no try/except branching needed.
+        Deduplication via unique_key is checked synchronously using _active_keys
+        (thread-safe, O(1)), so callers still receive None on duplicate hits.
+        All _tasks mutations are deferred to the event loop thread via
+        call_soon_threadsafe, eliminating cross-thread dict access.
         """
-        # Deduplication: reject if a task with same unique_key is already active
+        # Synchronous dedup via _active_keys (thread-safe, O(1))
         if unique_key:
-            for t in self._tasks.values():
-                if t.unique_key == unique_key and t.status in (
-                    TaskStatus.QUEUED,
-                    TaskStatus.RUNNING,
-                ):
+            with self._active_keys_lock:
+                if unique_key in self._active_keys:
                     logger.warning(
                         f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})",
                     )
                     return None
+                self._active_keys.add(unique_key)
 
         task = AppTask(name=name, task_type=task_type, cancellable=cancellable)
         task.unique_key = unique_key
@@ -256,27 +257,34 @@ class TaskManager:
 
         task.correlation_id = _get_cid()
 
-        # Register placeholder immediately to close call_soon_threadsafe delay window
-        self._tasks[task.id] = task
-
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._register_and_run, task)
-        else:
-            # Rollback placeholder
-            self._tasks.pop(task.id, None)
+        if not (self._loop and self._loop.is_running()):
+            # Rollback dedup key
+            if unique_key:
+                with self._active_keys_lock:
+                    self._active_keys.discard(unique_key)
             logger.error(
                 f"[TaskManager] Cannot submit task '{name}': no event loop captured.",
             )
             return None
 
+        # All _tasks mutations (register + launch) on loop thread only
+        def _enqueue():
+            self._tasks[task.id] = task
+            self._register_and_run(task)
+
+        self._loop.call_soon_threadsafe(_enqueue)
         return task.id
 
     def _register_and_run(self, task: AppTask):
         """Finalize task registration and launch runner.
-        Task is already in self._tasks (set by submit_task for dedup safety).
+        Task is already in self._tasks (set by _enqueue on loop thread).
         Always runs on the event loop thread (guaranteed by call_soon_threadsafe)."""
         if task.status == TaskStatus.CANCELLED:
             logger.debug(f"[TaskManager] Task [{task.id}] already cancelled, skipping launch")
+            # Release dedup key since _task_runner won't run for this task
+            if task.unique_key:
+                with self._active_keys_lock:
+                    self._active_keys.discard(task.unique_key)
             return
 
         # Note: _cancel_event will be created lazily in _task_runner
@@ -347,6 +355,11 @@ class TaskManager:
         task.status = TaskStatus.CANCELLED
         task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
 
+        # Release dedup key so same unique_key can be resubmitted
+        if task.unique_key:
+            with self._active_keys_lock:
+                self._active_keys.discard(task.unique_key)
+
         if task._cancel_event:
             task._cancel_event.set()
 
@@ -366,6 +379,11 @@ class TaskManager:
         """Actual clearing logic. Runs on event loop thread."""
         to_delete = [tid for tid, t in self._tasks.items() if t.status in TERMINAL_STATUSES]
         for tid in to_delete:
+            task = self._tasks[tid]
+            # Safety-net: release dedup key if not already discarded
+            if task.unique_key:
+                with self._active_keys_lock:
+                    self._active_keys.discard(task.unique_key)
             del self._tasks[tid]
         # Also clear matching items from history
         delete_set = set(to_delete)
@@ -394,6 +412,10 @@ class TaskManager:
             task.status = TaskStatus.CANCELLED
             task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
             task.completed_at = get_now()
+            # Release dedup key so same unique_key can be resubmitted
+            if task.unique_key:
+                with self._active_keys_lock:
+                    self._active_keys.discard(task.unique_key)
             if task._cancel_event:
                 task._cancel_event.set()
             if task._asyncio_task and not task._asyncio_task.done():
@@ -419,6 +441,12 @@ class TaskManager:
                 f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).",
             )
             self._notify_subscribers()
+
+        # Clear any keys from tasks submitted via call_soon_threadsafe but not
+        # yet enqueued (shutdown race window). Safe since no new submissions
+        # can arrive after this point.
+        with self._active_keys_lock:
+            self._active_keys.clear()
 
     _MAX_FINISHED_HISTORY = 200
 
@@ -507,6 +535,10 @@ class TaskManager:
             task._asyncio_task = None
             if task.completed_at is None:
                 task.completed_at = get_now()
+            # Release dedup key so same unique_key can be resubmitted
+            if task.unique_key:
+                with self._active_keys_lock:
+                    self._active_keys.discard(task.unique_key)
             self._persist_task(task)
             self._notify_subscribers()
             self._evict_on_complete(task.id)

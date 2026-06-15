@@ -345,6 +345,7 @@ class TestTaskManagerSubmitTask:
         existing = AppTask(name="existing", unique_key="sync_1")
         existing.status = TaskStatus.RUNNING
         mgr._tasks[existing.id] = existing
+        mgr._active_keys.add("sync_1")
         result = mgr.submit_task("new", "System", lambda **kw: None, unique_key="sync_1")
         assert result is None
 
