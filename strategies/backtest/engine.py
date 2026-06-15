@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+from utils.qfq import qfq_ratio_expr
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
 from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning
@@ -353,14 +354,9 @@ class VectorBacktestEngine:
                 ]
             )
 
-        # 使用首日 adj_factor 作为基准，避免前视偏差
-        base_factors = (
-            quotes_df.sort("trade_date").group_by("ts_code").agg(pl.col("adj_factor").first().alias("base_adj_factor"))
-        )
-
-        quotes_df = quotes_df.join(base_factors, on="ts_code", how="left")
-
-        qfq_ratio = pl.col("adj_factor") / pl.col("base_adj_factor")
+        # Ensure sorted by trade_date to guarantee correctness of the latest value in expression
+        quotes_df = quotes_df.sort("trade_date")
+        qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
 
         return quotes_df.with_columns(
             [
@@ -368,11 +364,14 @@ class VectorBacktestEngine:
                 pl.col("high").alias("raw_high"),
                 pl.col("low").alias("raw_low"),
                 pl.col("close").alias("raw_close"),
-                (pl.col("open") * qfq_ratio).alias("qfq_open"),
-                (pl.col("high") * qfq_ratio).alias("qfq_high"),
-                (pl.col("low") * qfq_ratio).alias("qfq_low"),
-                (pl.col("close") * qfq_ratio).alias("qfq_close"),
-                qfq_ratio.alias("qfq_ratio"),
+                qfq_ratio,
+            ]
+        ).with_columns(
+            [
+                (pl.col("open") * pl.col("qfq_ratio")).alias("qfq_open"),
+                (pl.col("high") * pl.col("qfq_ratio")).alias("qfq_high"),
+                (pl.col("low") * pl.col("qfq_ratio")).alias("qfq_low"),
+                (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close"),
             ]
         )
 

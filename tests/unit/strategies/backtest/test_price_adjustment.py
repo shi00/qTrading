@@ -46,10 +46,10 @@ class TestPriceAdjustment:
         assert result["raw_close"].to_list() == [10.2, 11.2, 12.2]
 
         qfq_close = result["qfq_close"].to_list()
-        # 基准为首日 adj_factor=1.0，所以前两日 qfq=raw，第三日 adj_factor=2.0 则 qfq 翻倍
-        assert qfq_close[0] == pytest.approx(10.2, rel=0.01)
-        assert qfq_close[1] == pytest.approx(11.2, rel=0.01)
-        assert qfq_close[2] == pytest.approx(24.4, rel=0.01)
+        # 基准为最新一日 adj_factor=2.0，所以前两日 qfq 减半，第三日 qfq=raw
+        assert qfq_close[0] == pytest.approx(5.1, rel=0.01)
+        assert qfq_close[1] == pytest.approx(5.6, rel=0.01)
+        assert qfq_close[2] == pytest.approx(12.2, rel=0.01)
 
     def test_apply_qfq_without_adj_factor(self) -> None:
         quotes_df = pl.DataFrame(
@@ -102,9 +102,9 @@ class TestPriceAdjustment:
         stock1 = result.filter(pl.col("ts_code") == "000001.SZ")
         stock2 = result.filter(pl.col("ts_code") == "000002.SZ")
 
-        # Stock1: 基准为首日 adj_factor=1.0, Day2 adj_factor=2.0 → qfq_close = 11.2*2.0/1.0 = 22.4
-        assert stock1["qfq_close"].to_list()[1] == pytest.approx(22.4, rel=0.01)
-        # Stock2: 基准为首日 adj_factor=1.0, Day2 adj_factor=1.0 → qfq_close = 22.2
+        # Stock1: 基准为最新一日 adj_factor=2.0, Day2 adj_factor=2.0 → qfq_close = 11.2
+        assert stock1["qfq_close"].to_list()[1] == pytest.approx(11.2, rel=0.01)
+        # Stock2: 基准为最新一日 adj_factor=1.0, Day2 adj_factor=1.0 → qfq_close = 22.2
         assert stock2["qfq_close"].to_list()[1] == pytest.approx(22.2, rel=0.01)
 
 
@@ -173,7 +173,7 @@ class TestExRightDate:
         result = engine._apply_qfq(quotes_df)
 
         qfq_close = result["qfq_close"].to_list()
-        base_adj = 0.5  # 首日 adj_factor 作为基准
+        base_adj = 0.25  # 最新一日 adj_factor 作为基准
 
         assert qfq_close[0] == pytest.approx(20.2 * 0.5 / base_adj, rel=0.01)
         assert qfq_close[1] == pytest.approx(10.2 * 0.5 / base_adj, rel=0.01)

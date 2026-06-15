@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 
 from core.i18n import I18n
+from utils.qfq import qfq_ratio_series
 
 
 class TechnicalAnalysis:
@@ -24,20 +25,10 @@ class TechnicalAnalysis:
                 df_adj = df.sort_values("trade_date").copy()
             else:
                 df_adj = df.copy()
-            valid_factors = df_adj["adj_factor"].dropna()
-            if valid_factors.empty:
+
+            ratio = qfq_ratio_series(df_adj["adj_factor"])
+            if ratio is None:
                 return df
-
-            latest_factor = valid_factors.iloc[-1]
-            if latest_factor == 0:
-                return df
-
-            df_adj["adj_factor"] = df_adj["adj_factor"].ffill().fillna(latest_factor)
-
-            if (df_adj["adj_factor"] == latest_factor).all():
-                return df
-
-            ratio = df_adj["adj_factor"] / latest_factor
 
             df_adj["close"] = df_adj["close"] * ratio
             df_adj["high"] = df_adj["high"] * ratio

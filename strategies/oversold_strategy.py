@@ -10,6 +10,7 @@ from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from core.i18n import I18n
+from utils.qfq import qfq_ratio_expr, qfq_ratio_series
 from utils.technical_analysis import TechnicalAnalysis
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -281,10 +282,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
             # Calculate QFQ Close (前复权收盘价)
             if "adj_factor" in df.columns:
-                ffilled = pl.col("adj_factor").forward_fill().over("ts_code")
-                latest_factor = ffilled.last().over("ts_code").fill_null(1.0)
-                safe_latest = pl.when(latest_factor == 0).then(1.0).otherwise(latest_factor)
-                qfq_ratio_expr = (ffilled.fill_null(safe_latest) / safe_latest).alias("qfq_ratio")
+                qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
                 qfq_close_expr = (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close")
                 qfq_vol_expr = (
                     pl.when(pl.col("qfq_ratio") > 0)
@@ -292,7 +290,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     .otherwise(pl.col("vol"))
                     .alias("qfq_vol")
                 )
-                df_lazy = df_lazy.with_columns([qfq_ratio_expr]).with_columns([qfq_close_expr, qfq_vol_expr])
+                df_lazy = df_lazy.with_columns([qfq_ratio]).with_columns([qfq_close_expr, qfq_vol_expr])
             else:
                 df_lazy = df_lazy.with_columns([pl.col("close").alias("qfq_close"), pl.col("vol").alias("qfq_vol")])
 
@@ -605,17 +603,13 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         qfq_vol_col = "vol"
 
         if "adj_factor" in history_df.columns:
-            adj_factors = history_df["adj_factor"].ffill().fillna(1.0)
-            latest_factor = adj_factors.iloc[-1] if len(adj_factors) > 0 else 1.0
-            if latest_factor == 0:
-                latest_factor = 1.0
-            qfq_ratio = adj_factors / latest_factor
-            qfq_ratio = qfq_ratio.fillna(1.0)
-            qfq_close_col = "qfq_close"
-            qfq_vol_col = "qfq_vol"
-            history_df = history_df.copy()
-            history_df["qfq_close"] = history_df["close"] * qfq_ratio
-            history_df["qfq_vol"] = history_df["vol"] / qfq_ratio.replace(0, 1.0)
+            qfq_ratio = qfq_ratio_series(history_df["adj_factor"])
+            if qfq_ratio is not None:
+                qfq_close_col = "qfq_close"
+                qfq_vol_col = "qfq_vol"
+                history_df = history_df.copy()
+                history_df["qfq_close"] = history_df["close"] * qfq_ratio
+                history_df["qfq_vol"] = history_df["vol"] / qfq_ratio.replace(0, 1.0)
 
         recent_60 = history_df.tail(60) if len(history_df) >= 60 else history_df
 
