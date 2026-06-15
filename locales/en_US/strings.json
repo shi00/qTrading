@@ -266,6 +266,7 @@
     "strategy_large_pe_desc": "Criteria: Mkt Cap > 50B | PE < 15x (Core Assets)",
     "home_title": "Market Overview",
     "home_data_date": "Data Date: {date}",
+    "home_data_updating": "Updating",
     "home_refresh": "Refresh Data",
     "home_index_sh": "SSE Index",
     "home_index_sz": "SZSE Index",

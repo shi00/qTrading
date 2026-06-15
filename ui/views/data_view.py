@@ -396,7 +396,7 @@ class TableViewerTab(ft.Container):
             logger.error(f"Error loading schema: {e}", exc_info=True)
             if self.page:
                 self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get("data_err_load_schema", error="内部读取错误"),
+                    I18n.get("data_err_load_schema", error=str(e)),
                     "error",
                 )
         finally:
@@ -764,7 +764,7 @@ class SQLConsoleTab(ft.Container):
                     ft.Container(height=40),  # pragma: no cover
                     ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),  # pragma: no cover
                     ft.Text(  # pragma: no cover
-                        I18n.get("data_sql_empty_hint", default="请输入 SQL 语句并执行查询"),  # pragma: no cover
+                        I18n.get("data_sql_empty_hint"),  # pragma: no cover
                         color=AppColors.TEXT_HINT,  # pragma: no cover
                         size=14,  # pragma: no cover
                     ),  # pragma: no cover
@@ -943,7 +943,7 @@ class SQLConsoleTab(ft.Container):
         except Exception as e:
             self.status_text.value = I18n.get(
                 "data_sys_error",
-                error="内部数据库执行错误",
+                error=str(e),
             )
             self.status_text.color = AppColors.ERROR
             self.result_table.rows = []

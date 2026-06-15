@@ -79,7 +79,7 @@ class TaskCenterView(ft.Container):
         self.stats_text = ft.Text("", size=13, color=AppColors.TEXT_SECONDARY)
 
         self.clear_btn = ft.OutlinedButton(
-            I18n.get("task_clear_finished", "清除已完成"),
+            I18n.get("task_clear_finished"),
             icon=ft.Icons.CLEANING_SERVICES_OUTLINED,
             on_click=self._handle_clear,
             style=ft.ButtonStyle(
@@ -93,7 +93,7 @@ class TaskCenterView(ft.Container):
             [
                 ft.Icon(ft.Icons.TASK_ALT, color=AppColors.PRIMARY, size=28),
                 ft.Text(
-                    I18n.get("nav_tasks", "任务中心"),
+                    I18n.get("nav_tasks"),
                     size=22,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
@@ -116,13 +116,13 @@ class TaskCenterView(ft.Container):
                         color=AppColors.TEXT_HINT,
                     ),
                     ft.Text(
-                        I18n.get("task_empty_title", "暂无任务"),
+                        I18n.get("task_empty_title"),
                         size=18,
                         weight=ft.FontWeight.W_500,
                         color=AppColors.TEXT_SECONDARY,
                     ),
                     ft.Text(
-                        I18n.get("task_empty_subtitle", ""),
+                        I18n.get("task_empty_subtitle"),
                         size=13,
                         color=AppColors.TEXT_HINT,
                         text_align=ft.TextAlign.CENTER,
@@ -146,14 +146,14 @@ class TaskCenterView(ft.Container):
         # --- Pagination footer ---
         self.btn_prev = ft.IconButton(
             icon=ft.Icons.CHEVRON_LEFT,
-            tooltip=I18n.get("common_prev_page", "上一页"),
+            tooltip=I18n.get("common_prev_page"),
             on_click=self._go_prev,
             disabled=True,
             icon_size=20,
         )
         self.btn_next = ft.IconButton(
             icon=ft.Icons.CHEVRON_RIGHT,
-            tooltip=I18n.get("common_next_page", "下一页"),
+            tooltip=I18n.get("common_next_page"),
             on_click=self._go_next,
             disabled=True,
             icon_size=20,
@@ -239,7 +239,6 @@ class TaskCenterView(ft.Container):
         running = sum(1 for t in tasks if t.status == TaskStatus.RUNNING)
         self.stats_text.value = I18n.get(
             "task_stats_fmt",
-            "总计 {total} 项 · 运行中 {running}",
         ).format(total=total, running=running)
 
         # Pagination
@@ -387,7 +386,7 @@ class TaskCenterView(ft.Container):
         action_btn = ft.Container()
         if t.status in (TaskStatus.RUNNING, TaskStatus.QUEUED) and t.cancellable:
             action_btn = ft.TextButton(
-                I18n.get("task_cancel_tooltip", "取消"),
+                I18n.get("task_cancel_tooltip"),
                 icon=ft.Icons.STOP_CIRCLE_OUTLINED,
                 icon_color=AppColors.ERROR,
                 style=ft.ButtonStyle(

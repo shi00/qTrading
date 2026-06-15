@@ -154,16 +154,11 @@ async def main(page: ft.Page):
 
     close_confirm_dialog = ft.AlertDialog(
         modal=True,
-        title=ft.Text(I18n.get("exit_confirm_title", default="确认退出")),
-        content=ft.Text(
-            I18n.get(
-                "exit_confirm_content",
-                default="确认关闭程序吗？后台任务将停止并执行清理。",
-            )
-        ),
+        title=ft.Text(I18n.get("exit_confirm_title")),
+        content=ft.Text(I18n.get("exit_confirm_content")),
         actions=[
-            ft.TextButton(I18n.get("common_cancel", default="取消"), on_click=_on_close_cancel),
-            ft.TextButton(I18n.get("common_confirm", default="确认"), on_click=_on_close_confirm),
+            ft.TextButton(I18n.get("common_cancel"), on_click=_on_close_cancel),
+            ft.TextButton(I18n.get("common_confirm"), on_click=_on_close_confirm),
         ],
         actions_alignment=ft.MainAxisAlignment.END,
     )
@@ -283,14 +278,10 @@ async def main(page: ft.Page):
                 async def on_upgrade_click(e):
                     in_progress_dialog = ft.AlertDialog(
                         modal=True,
-                        title=ft.Text(I18n.get("db_upgrade_in_progress_title", default="正在升级数据库...")),
+                        title=ft.Text(I18n.get("db_upgrade_in_progress_title")),
                         content=ft.Column(
                             [
-                                ft.Text(
-                                    I18n.get(
-                                        "db_upgrade_in_progress_content", default="数据库升级正在进行中，请勿关闭程序。"
-                                    )
-                                ),
+                                ft.Text(I18n.get("db_upgrade_in_progress_content")),
                                 ft.ProgressBar(width=300),
                             ],
                             spacing=10,
@@ -309,13 +300,11 @@ async def main(page: ft.Page):
 
                         success_dialog = ft.AlertDialog(
                             modal=True,
-                            title=ft.Text(I18n.get("db_upgrade_success_title", default="升级成功")),
-                            content=ft.Text(
-                                I18n.get("db_upgrade_success_content", default="数据库已成功升级到最新版本。")
-                            ),
+                            title=ft.Text(I18n.get("db_upgrade_success_title")),
+                            content=ft.Text(I18n.get("db_upgrade_success_content")),
                             actions=[
                                 ft.TextButton(
-                                    I18n.get("common_ok", default="确定"),
+                                    I18n.get("common_ok"),
                                     on_click=lambda e: [
                                         _hide_dialog(success_dialog),
                                         page.run_task(_init_services_and_start_app),
@@ -346,20 +335,19 @@ async def main(page: ft.Page):
 
                         error_dialog = ft.AlertDialog(
                             modal=True,
-                            title=ft.Text(I18n.get("db_upgrade_error_title", default="升级失败")),
+                            title=ft.Text(I18n.get("db_upgrade_error_title")),
                             content=ft.Text(
                                 I18n.get(
                                     "db_upgrade_error_content",
-                                    default="数据库升级失败: {error}\n\n请查看日志文件或联系技术支持。",
                                 ).format(error=error_str)
                             ),
                             actions=[
                                 ft.TextButton(
-                                    I18n.get("exit_program", default="退出程序"),
+                                    I18n.get("exit_program"),
                                     on_click=lambda e: page.run_task(on_exit_click, e),
                                 ),
                                 ft.ElevatedButton(
-                                    I18n.get("retry_upgrade", default="重试升级"),
+                                    I18n.get("retry_upgrade"),
                                     on_click=lambda e: [
                                         logger.info("[Main] User chose to retry upgrade after failure."),
                                         _hide_dialog(error_dialog),
@@ -373,16 +361,11 @@ async def main(page: ft.Page):
 
                 upgrade_dialog = ft.AlertDialog(
                     modal=True,
-                    title=ft.Text(I18n.get("db_upgrade_needed_title", default="数据库需要升级")),
-                    content=ft.Text(
-                        I18n.get(
-                            "db_upgrade_needed_content",
-                            default="应用检测到数据库版本较旧，需要升级后才能继续使用。\n\n升级将优化数据存储结构以支持最新功能。\n\n⚠️ 升级过程中请勿关闭程序。",
-                        )
-                    ),
+                    title=ft.Text(I18n.get("db_upgrade_needed_title")),
+                    content=ft.Text(I18n.get("db_upgrade_needed_content")),
                     actions=[
                         ft.ElevatedButton(
-                            I18n.get("db_upgrade_btn", default="立即升级"),
+                            I18n.get("db_upgrade_btn"),
                             on_click=lambda e: page.run_task(on_upgrade_click, e),
                         ),
                     ],
@@ -398,7 +381,7 @@ async def main(page: ft.Page):
 
                 def on_skip_click(e):
                     page.clean()
-                    show_toast(I18n.get("warning_skip_db", default="跳过数据库初始化，部分功能不可用"), "warning")
+                    show_toast(I18n.get("warning_skip_db"), "warning")
                     from ui.app_layout import AppLayout
 
                     app_layout = AppLayout(page)
@@ -410,7 +393,7 @@ async def main(page: ft.Page):
                             [
                                 ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
                                 ft.Text(
-                                    I18n.get("error_db_init_failed", default="数据库初始化失败"),
+                                    I18n.get("error_db_init_failed"),
                                     size=20,
                                     weight=ft.FontWeight.BOLD,
                                 ),
@@ -418,12 +401,12 @@ async def main(page: ft.Page):
                                 ft.Row(
                                     [
                                         ft.ElevatedButton(
-                                            I18n.get("retry", default="重试"),
+                                            I18n.get("retry"),
                                             icon=ft.Icons.REFRESH,
                                             on_click=lambda e: page.run_task(on_retry_click, e),
                                         ),
                                         ft.TextButton(
-                                            I18n.get("skip", default="跳过"),
+                                            I18n.get("skip"),
                                             on_click=on_skip_click,
                                         ),
                                     ],

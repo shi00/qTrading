@@ -110,6 +110,12 @@ class TestMarketDataServiceSafeFloat:
     def test_zero(self):
         assert MarketDataService._safe_float(0) == 0.0
 
+    def test_inf(self):
+        assert MarketDataService._safe_float(float("inf")) == 0.0
+
+    def test_neg_inf(self):
+        assert MarketDataService._safe_float(float("-inf")) == 0.0
+
 
 class TestMarketDataServiceGetIndicesBatch:
     def setup_method(self):
@@ -594,6 +600,95 @@ class TestMarketDataServiceFetchMarketDataIntegration:
         # Verify "stale" is True
         assert cached_data["stale"] is True
 
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_fetch_full_fallback_updates_date(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
+        """全部回退时 date 应更新为 prev_str"""
+        import datetime
+
+        mock_cache = MagicMock()
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
+        svc = MarketDataService()
+        svc.cache = mock_cache
+        svc.api = mock_api_cls.return_value
+
+        today = datetime.date(2026, 6, 15)
+        yesterday = datetime.date(2026, 6, 13)
+
+        mock_cal = MagicMock()
+        mock_cal.get_latest_trade_date = AsyncMock(return_value=today)
+        mock_cal.get_prev_trade_date = AsyncMock(return_value=yesterday)
+        svc.trade_calendar = mock_cal
+
+        indices_yesterday = [{"name": "SH", "value": "3000.00", "change": "+1.00%", "color": "red"}]
+        hsgt_yesterday = {"name": "HSGT", "value": "1.50亿", "sub": "inflow", "color": "red"}
+
+        async def fake_get_indices_batch(codes, date_str):
+            if date_str == "20260613":
+                return indices_yesterday
+            return [{"name": "SH", "value": "-", "change": "-", "color": "grey"}]
+
+        async def fake_get_hsgt(date_str):
+            if date_str == "20260613":
+                return hsgt_yesterday
+            return MarketDataService._get_empty_hsgt_data_static()
+
+        svc._get_indices_batch = AsyncMock(side_effect=fake_get_indices_batch)
+        svc._get_hsgt = AsyncMock(side_effect=fake_get_hsgt)
+        mock_news.get_hot_concepts = AsyncMock(return_value=[])
+
+        await svc._fetch_market_data()
+
+        cached_data = svc.get_cached_data()
+        assert cached_data is not None
+        assert cached_data["date"] == "20260613"
+        assert cached_data["stale"] is True
+        assert cached_data["indices"] == indices_yesterday
+        assert cached_data["hsgt"] == hsgt_yesterday
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.NewsFetcher")
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_fetch_fallback_prev_date_none(self, mock_tc_cls, mock_cm_cls, mock_api_cls, mock_news):
+        """prev_date 为 None 时不崩溃，date 保持当日"""
+        import datetime
+
+        mock_cache = MagicMock()
+        mock_cm_cls.return_value = mock_cache
+        mock_tc = MagicMock()
+        mock_tc_cls.return_value = mock_tc
+
+        svc = MarketDataService()
+        svc.cache = mock_cache
+        svc.api = mock_api_cls.return_value
+
+        today = datetime.date(2026, 6, 15)
+
+        mock_cal = MagicMock()
+        mock_cal.get_latest_trade_date = AsyncMock(return_value=today)
+        mock_cal.get_prev_trade_date = MagicMock(return_value=None)
+        svc.trade_calendar = mock_cal
+
+        # 今日数据为空
+        svc._get_indices_batch = AsyncMock(return_value=[{"name": "SH", "value": "-", "change": "-", "color": "grey"}])
+        svc._get_hsgt = AsyncMock(return_value=MarketDataService._get_empty_hsgt_data_static())
+        mock_news.get_hot_concepts = AsyncMock(return_value=[])
+
+        await svc._fetch_market_data()
+
+        cached_data = svc.get_cached_data()
+        assert cached_data is not None
+        assert cached_data["date"] == "20260615"
+        assert cached_data["stale"] is False
+
 
 class TestMarketDataServiceGetHsgt:
     def setup_method(self):
@@ -649,6 +744,30 @@ class TestMarketDataServiceGetHsgt:
         svc.api = mock_api_inst
         result = await svc._get_hsgt("20240614")
         assert result["color"] == "grey"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_unit_mismatch_warning(self, mock_tc, mock_cache_cls, mock_api):
+        """单位不匹配时应触发 warning"""
+        mock_cache = MagicMock()
+        mock_cache_cls.return_value = mock_cache
+        df = MagicMock()
+        df.empty = False
+        df.iloc = [MagicMock()]
+        df.iloc[0].get = lambda k: 500.0 if k == "north_money" else 0
+        mock_cache.get_moneyflow_hsgt = AsyncMock(return_value=df)
+
+        with patch("data.domain_services.market_data_service.get_column_unit", return_value="yuan"):
+            svc = MarketDataService()
+            with patch("data.domain_services.market_data_service.logger") as mock_logger:
+                result = await svc._get_hsgt("20240614")
+                mock_logger.warning.assert_any_call(
+                    "[MarketDataService] north_money unit changed: expected='million_cny', got='yuan'. "
+                    "Display conversion may be incorrect."
+                )
+                assert result["color"] == "red"
 
 
 class TestMarketDataServiceStartStop:

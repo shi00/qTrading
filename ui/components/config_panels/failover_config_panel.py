@@ -89,7 +89,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self.custom_model_input = ft.TextField(
             label=I18n.get("llm_custom_model"),
             width=400,
-            hint_text=I18n.get("failover_custom_model_hint", "或输入自定义模型 ID"),
+            hint_text=I18n.get("failover_custom_model_hint"),
         )
 
         self.base_url_input = ft.TextField(
@@ -124,20 +124,20 @@ class ProviderCredentialDialog(ft.AlertDialog):
         )
         self.actions = [
             ft.TextButton(
-                text=I18n.get("btn_cancel", "取消"),
+                text=I18n.get("btn_cancel"),
                 on_click=self._on_cancel,
             ),
         ]
         if self._test_connection_callback:
             self.actions.append(
                 ft.TextButton(
-                    text=I18n.get("failover_test_connection", "测试连接"),
+                    text=I18n.get("failover_test_connection"),
                     on_click=self._on_test_connection,
                 ),
             )
         self.actions.append(
             ft.ElevatedButton(
-                text=I18n.get("btn_confirm", "确定"),
+                text=I18n.get("common_confirm"),
                 on_click=self._on_confirm_click,
                 style=AppStyles.primary_button(),
             ),
@@ -202,21 +202,21 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if console_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_get_api_key", "获取 API Key"),
+                    text=I18n.get("llm_get_api_key"),
                     on_click=lambda _: self._open_url(console_url),
                 )
             )
         if pricing_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_pricing", "查看定价"),
+                    text=I18n.get("llm_view_pricing"),
                     on_click=lambda _: self._open_url(pricing_url),
                 )
             )
         if models_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_models", "查看模型"),
+                    text=I18n.get("llm_view_models"),
                     on_click=lambda _: self._open_url(models_url),
                 )
             )
@@ -388,7 +388,7 @@ class FailoverConfigPanel(ft.Container):
         )
 
         self.btn_save = ft.ElevatedButton(
-            text=I18n.get("settings_save_ai", "保存配置"),
+            text=I18n.get("settings_save_ai"),
             icon=ft.Icons.SAVE,
             on_click=self._on_save_click,
             style=AppStyles.primary_button(),
@@ -445,7 +445,7 @@ class FailoverConfigPanel(ft.Container):
             self._list_column.controls.append(
                 ft.Container(
                     content=ft.Text(
-                        I18n.get("failover_empty_hint", "暂无 Failover 供应商，点击上方按钮添加"),
+                        I18n.get("failover_empty_hint"),
                         size=12,
                         color=AppColors.TEXT_HINT,
                         italic=True,
@@ -477,26 +477,26 @@ class FailoverConfigPanel(ft.Container):
             icon_size=16,
             on_click=lambda e, idx=index: self._on_move_up(idx),
             disabled=index == 0,
-            tooltip=I18n.get("failover_move_up", "上移"),
+            tooltip=I18n.get("failover_move_up"),
         )
         btn_down = ft.IconButton(
             ft.Icons.ARROW_DOWNWARD,
             icon_size=16,
             on_click=lambda e, idx=index: self._on_move_down(idx),
             disabled=index == len(self._failover_items) - 1,
-            tooltip=I18n.get("failover_move_down", "下移"),
+            tooltip=I18n.get("failover_move_down"),
         )
         btn_edit = ft.IconButton(
             ft.Icons.EDIT,
             icon_size=16,
             on_click=lambda e, idx=index: self._on_edit_item(idx),
-            tooltip=I18n.get("failover_edit", "编辑"),
+            tooltip=I18n.get("failover_edit"),
         )
         btn_delete = ft.IconButton(
             ft.Icons.DELETE_OUTLINE,
             icon_size=16,
             on_click=lambda e, idx=index: self._on_delete_item(idx),
-            tooltip=I18n.get("failover_delete", "删除"),
+            tooltip=I18n.get("failover_delete"),
         )
 
         left_section = ft.Row(

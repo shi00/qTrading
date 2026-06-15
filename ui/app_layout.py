@@ -65,6 +65,7 @@ class AppLayout(ft.Container):
         AppColors.subscribe(self.update_theme)
 
     def will_unmount(self):
+        I18n.unsubscribe(self._on_locale_change)
         AppColors.unsubscribe(self.update_theme)
 
     def _init_ui(self):  # pragma: no cover
@@ -150,9 +151,9 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.FORMAT_LIST_BULLETED_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.FORMAT_LIST_BULLETED,  # pragma: no cover
-                    label=I18n.get("nav_tasks", "任务"),  # pragma: no cover
+                    label=I18n.get("nav_tasks"),  # pragma: no cover
                     label_content=ft.Text(  # pragma: no cover
-                        I18n.get("nav_tasks", "任务"),  # pragma: no cover
+                        I18n.get("nav_tasks"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
                     ),  # pragma: no cover

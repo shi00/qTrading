@@ -87,9 +87,9 @@ def _format_cell_value(col: str, val) -> str:
     if isinstance(val, (float, int)) and col not in ("ts_code", "symbol"):
         if col in _VOLUME_COLS:
             if val > 1_000_000_000:
-                return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi', '亿')}"
+                return f"{val / 1_000_000_000:.2f}{I18n.get('unit_yi')}"
             if val > 10_000:
-                return f"{val / 10_000:.2f}{I18n.get('unit_wan', '万')}"
+                return f"{val / 10_000:.2f}{I18n.get('unit_wan')}"
             return f"{val:,.0f}"
         if isinstance(val, (float, Decimal)):
             return f"{val:.2f}"
@@ -208,19 +208,19 @@ class ScreenerView(ft.Container):
             options=[  # pragma: no cover
                 ft.dropdown.Option(  # pragma: no cover
                     "10",  # pragma: no cover
-                    text=f"10 {I18n.get('screener_per_page', '条/页')}",  # pragma: no cover
+                    text=f"10 {I18n.get('screener_per_page')}",  # pragma: no cover
                 ),  # pragma: no cover
                 ft.dropdown.Option(  # pragma: no cover
                     "20",  # pragma: no cover
-                    text=f"20 {I18n.get('screener_per_page', '条/页')}",  # pragma: no cover
+                    text=f"20 {I18n.get('screener_per_page')}",  # pragma: no cover
                 ),  # pragma: no cover
                 ft.dropdown.Option(  # pragma: no cover
                     "50",  # pragma: no cover
-                    text=f"50 {I18n.get('screener_per_page', '条/页')}",  # pragma: no cover
+                    text=f"50 {I18n.get('screener_per_page')}",  # pragma: no cover
                 ),  # pragma: no cover
                 ft.dropdown.Option(  # pragma: no cover
                     "100",  # pragma: no cover
-                    text=f"100 {I18n.get('screener_per_page', '条/页')}",  # pragma: no cover
+                    text=f"100 {I18n.get('screener_per_page')}",  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
             value="50",  # pragma: no cover
@@ -238,12 +238,12 @@ class ScreenerView(ft.Container):
             segments=[  # pragma: no cover
                 ft.Segment(  # pragma: no cover
                     value="REALTIME",  # pragma: no cover
-                    label=ft.Text(I18n.get("screener_mode_run", "执行选股")),  # pragma: no cover
+                    label=ft.Text(I18n.get("screener_mode_run")),  # pragma: no cover
                     icon=ft.Icon(ft.Icons.ELECTRIC_BOLT),  # pragma: no cover
                 ),  # pragma: no cover
                 ft.Segment(  # pragma: no cover
                     value="HISTORY",  # pragma: no cover
-                    label=ft.Text(I18n.get("screener_mode_history", "历史档案")),  # pragma: no cover
+                    label=ft.Text(I18n.get("screener_mode_history")),  # pragma: no cover
                     icon=ft.Icon(ft.Icons.HISTORY),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
@@ -257,7 +257,7 @@ class ScreenerView(ft.Container):
             spacing=0,  # pragma: no cover
         )  # pragma: no cover
         self.history_load_more_btn = ft.TextButton(  # pragma: no cover
-            text=I18n.get("history_load_more", "加载更早记录"),  # pragma: no cover
+            text=I18n.get("history_load_more"),  # pragma: no cover
             icon=ft.Icons.EXPAND_MORE,  # pragma: no cover
             on_click=self._on_load_more_history,  # pragma: no cover
             visible=False,  # pragma: no cover
@@ -267,7 +267,7 @@ class ScreenerView(ft.Container):
                 [  # pragma: no cover
                     ft.Container(  # pragma: no cover
                         content=ft.Text(  # pragma: no cover
-                            I18n.get("screener_mode_history", "历史档案"),  # pragma: no cover
+                            I18n.get("screener_mode_history"),  # pragma: no cover
                             weight=ft.FontWeight.BOLD,  # pragma: no cover
                             color=AppColors.TEXT_PRIMARY,  # pragma: no cover
                             size=14,  # pragma: no cover
@@ -527,7 +527,7 @@ class ScreenerView(ft.Container):
         # 3. Bottom AI Analysis View (Streamed Cards)
         # ==========================================
         self.log_title_text = ft.Text(  # pragma: no cover
-            I18n.get("ai_analysis_report", "深度分析简报"),  # pragma: no cover
+            I18n.get("ai_analysis_report"),  # pragma: no cover
             font_family="Roboto",  # pragma: no cover
             weight=ft.FontWeight.BOLD,  # pragma: no cover
             color=AppColors.TEXT_PRIMARY,  # pragma: no cover
@@ -650,7 +650,7 @@ class ScreenerView(ft.Container):
                     self.history_tree_list.controls.append(
                         ft.Container(
                             content=ft.Text(
-                                I18n.get("screener_no_results", "暂无历史数据"),
+                                I18n.get("screener_no_results"),
                                 color=AppColors.TEXT_SECONDARY,
                                 size=13,
                             ),
@@ -685,7 +685,7 @@ class ScreenerView(ft.Container):
                                 color=AppColors.ACCENT,
                             ),
                             title=ft.Text(
-                                f"{I18n.get('screener_all_strategies', '全部策略')} ({total_cnt})",
+                                f"{I18n.get('screener_all_strategies')} ({total_cnt})",
                                 size=13,
                             ),
                             on_click=lambda e, d=d_key: self._on_tree_item_click(
@@ -721,7 +721,7 @@ class ScreenerView(ft.Container):
                             weight=ft.FontWeight.W_500,
                         ),
                         subtitle=ft.Text(
-                            I18n.get("history_total", "共 {count} 条").format(
+                            I18n.get("history_total").format(
                                 count=total_cnt,
                             ),
                             size=11,
@@ -765,11 +765,7 @@ class ScreenerView(ft.Container):
         if run_id:
             label = f"#{run_id[:8]}"
         else:
-            label = (
-                translate_strategy_name(strategy_name)
-                if strategy_name
-                else I18n.get("screener_all_strategies", "全部策略")
-            )
+            label = translate_strategy_name(strategy_name) if strategy_name else I18n.get("screener_all_strategies")
         self._update_status(f"{display} / {label}", "blue")
         await self.vm.load_history_data(trade_date, strategy_name, run_id)  # type: ignore[arg-type]
         self._toggle_progress(False)
@@ -922,14 +918,13 @@ class ScreenerView(ft.Container):
             if advanced_controls:
                 exp_tile = ft.ExpansionTile(
                     title=ft.Text(
-                        I18n.get("ai_advanced_settings", "⚙️ 高级设置"),
+                        I18n.get("ai_advanced_settings"),
                         size=14,
                         weight=ft.FontWeight.W_500,
                     ),
                     subtitle=ft.Text(
                         I18n.get(
                             "ai_advanced_settings_desc",
-                            "仅供专业用户调整的底层策略参数或大模型系统提示词",
                         ),
                         size=12,
                         color=AppColors.TEXT_SECONDARY,
@@ -1081,7 +1076,6 @@ class ScreenerView(ft.Container):
                                 self.page.show_toast(  # type: ignore[untyped]
                                     I18n.get(
                                         "ai_settings_restored",
-                                        "系统提示词已恢复默认",
                                     ),
                                     "info",
                                 )
@@ -1114,14 +1108,14 @@ class ScreenerView(ft.Container):
                             )
                             if self.page and hasattr(self.page, "show_toast"):
                                 self.page.show_toast(  # type: ignore[untyped]
-                                    I18n.get("ai_settings_saved", "系统提示词已保存"),
+                                    I18n.get("ai_settings_saved"),
                                     "success",
                                 )
 
                         return save_prompt
 
                     reset_btn = ft.TextButton(
-                        text=I18n.get("ai_reset_default", "恢复默认"),
+                        text=I18n.get("ai_reset_default"),
                         icon=ft.Icons.RESTORE,
                         style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
                         height=30,
@@ -1129,7 +1123,7 @@ class ScreenerView(ft.Container):
                     )
 
                     save_btn = ft.TextButton(
-                        text=I18n.get("ai_save_prompt", "保存修改"),
+                        text=I18n.get("ai_save_prompt"),
                         icon=ft.Icons.SAVE,
                         style=ft.ButtonStyle(color=AppColors.PRIMARY),
                         height=30,
@@ -1408,7 +1402,7 @@ class ScreenerView(ft.Container):
             entry = self._ai_cards.pop(name, None)
             if entry and entry["card"].page:
                 # 替换占位卡内容为结果摘要
-                entry["content_md"].value = f"**{I18n.get('ai_score_label', '评分')}: {score}**\n\n{thinking[:200]}"
+                entry["content_md"].value = f"**{I18n.get('screener_score')}: {score}**\n\n{thinking[:200]}"
                 # 移除 ProgressRing
                 row_ctrl = entry["card_content"].controls[0]
                 if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) > 1:
@@ -1460,9 +1454,9 @@ class ScreenerView(ft.Container):
         )  # pragma: no cover
 
         reasoning_tile = ft.ExpansionTile(  # pragma: no cover
-            title=ft.Text(f"💡 {I18n.get('ai_thinking', '推演思考过程')}..."),  # pragma: no cover
+            title=ft.Text(f"💡 {I18n.get('ai_thinking')}..."),  # pragma: no cover
             subtitle=ft.Text(  # pragma: no cover
-                I18n.get("ai_expand_reasoning", "点击展开/折叠思考过程"),  # pragma: no cover
+                I18n.get("ai_expand_reasoning"),  # pragma: no cover
                 size=10,  # pragma: no cover
                 color=AppColors.TEXT_SECONDARY,  # pragma: no cover
             ),  # pragma: no cover

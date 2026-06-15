@@ -217,6 +217,7 @@
     "task_type_ai_screening": "AI 智能选股",
     "home_title": "市场概览",
     "home_data_date": "数据日期: {date}",
+    "home_data_updating": "数据更新中",
     "home_refresh": "刷新数据",
     "home_index_sh": "上证指数",
     "home_index_sz": "深证成指",

@@ -350,7 +350,7 @@ class TaskManager:
 
         logger.info(f"[TaskManager] Cancelling task: [{task.id}] {task.name}")
         task.status = TaskStatus.CANCELLED
-        task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
+        task.description = I18n.get("task_cancelled_desc")
 
         # Release dedup key so same unique_key can be resubmitted
         if task.unique_key:
@@ -407,7 +407,7 @@ class TaskManager:
         for tid in active_ids:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
-            task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
+            task.description = I18n.get("task_cancelled_desc")
             task.completed_at = get_now()
             # Release dedup key so same unique_key can be resubmitted
             if task.unique_key:
@@ -505,13 +505,13 @@ class TaskManager:
                 # If we made it here without CancelledError, it's a success
                 task.status = TaskStatus.COMPLETED
                 task.progress = 1.0
-                task.description = str(task.result) if task.result else I18n.get("task_status_completed", "已完成")
+                task.description = str(task.result) if task.result else I18n.get("task_status_completed")
                 logger.info(f"[TaskManager] Completed: [{task.id}]")
 
         except asyncio.CancelledError:
             if task.status != TaskStatus.CANCELLED:
                 task.status = TaskStatus.CANCELLED
-            task.description = I18n.get("task_cancelled_desc", "用户已中止操作")
+            task.description = I18n.get("task_cancelled_desc")
             logger.info(f"[TaskManager] Cancelled processing for: [{task.id}]")
             raise  # Important to re-raise CancelledError for proper asyncio teardown
         except Exception as e:
@@ -519,7 +519,7 @@ class TaskManager:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             task.error = error_info["message_key"]
-            task.description = I18n.get("task_failed_desc", "任务执行失败")
+            task.description = I18n.get("task_failed_desc")
             if severity == "system":
                 logger.critical(
                     f"[TaskManager] Task {task.id} SYSTEM-LEVEL failure: {e}\n{traceback.format_exc()}",
@@ -576,7 +576,7 @@ class TaskManager:
             "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
             (
                 TaskStatus.INTERRUPTED.value,
-                I18n.get("task_interrupted_desc", "应用上次异常退出，任务被中断"),
+                I18n.get("task_interrupted_desc"),
             ),
         )
 

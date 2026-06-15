@@ -60,7 +60,7 @@ class AutomationTab(ft.Container):
         doubao_time = ConfigHandler.get_doubao_schedule_time()
 
         self.doubao_enabled = ft.Switch(
-            label=I18n.get("settings_doubao_update", "自动重建AI概念"),
+            label=I18n.get("settings_doubao_update"),
             value=doubao_enabled,
             on_change=self.on_doubao_toggle,
         )
@@ -149,10 +149,9 @@ class AutomationTab(ft.Container):
 
         self.row_doubao_schedule = SettingRow(
             icon=ft.Icons.AUTO_AWESOME,
-            title=I18n.get("settings_doubao_update", "自动重建AI概念"),
+            title=I18n.get("settings_doubao_update"),
             subtitle=I18n.get(
                 "settings_doubao_desc",
-                "开启后将定时自动清空并重建全市场的AI概念体系",
             ),
             control=self.doubao_enabled,
             icon_color=AppColors.PRIMARY,
@@ -163,7 +162,7 @@ class AutomationTab(ft.Container):
         self.row_doubao_time = SettingRow(
             icon=ft.Icons.ACCESS_TIME,
             title=I18n.get("settings_update_time"),
-            subtitle=I18n.get("settings_saturdays", "限定每个周六执行"),
+            subtitle=I18n.get("settings_saturdays"),
             control=self.doubao_time,
             icon_color=AppColors.ACCENT,
             title_key="settings_update_time",
@@ -266,7 +265,6 @@ class AutomationTab(ft.Container):
 
             self.doubao_enabled.label = I18n.get(
                 "settings_doubao_update",
-                "自动重建AI概念",
             )
             self.doubao_time.label = I18n.get("settings_update_time")
             self.doubao_time.options = self._build_time_options()

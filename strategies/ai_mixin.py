@@ -286,7 +286,7 @@ class AIStrategyMixin:
                 on_progress(
                     0,
                     0,
-                    I18n.get("ai_not_configured", "AI 服务未配置，仅展示数学筛选结果"),
+                    I18n.get("ai_not_configured"),
                 )
             return candidates_df
 
@@ -485,7 +485,7 @@ class AIStrategyMixin:
         on_card_start = context.get("on_card_start") if not stream_enabled else None
 
         if on_progress:
-            on_progress(0, total_tasks, I18n.get("ai_progress_init", "初始化 AI 分析引擎..."))
+            on_progress(0, total_tasks, I18n.get("ai_progress_init"))
 
         async def analyze_one(row_data: dict) -> dict | None:
             async with screening_sem:

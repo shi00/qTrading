@@ -106,21 +106,24 @@ def make_quotes_df(
     df = pl.DataFrame(rows)
 
     if "adj_factor" in df.columns:
-        base_factors = (
-            df.sort("trade_date").group_by("ts_code").agg(pl.col("adj_factor").first().alias("base_adj_factor"))
-        )
-        df = df.join(base_factors, on="ts_code", how="left")
-        qfq_ratio = pl.col("adj_factor") / pl.col("base_adj_factor")
+        from utils.qfq import qfq_ratio_expr
+
+        df = df.sort(["ts_code", "trade_date"])
+        ratio = qfq_ratio_expr("adj_factor", "ts_code")
         df = df.with_columns(
             [
                 pl.col("open").alias("raw_open"),
                 pl.col("high").alias("raw_high"),
                 pl.col("low").alias("raw_low"),
                 pl.col("close").alias("raw_close"),
-                (pl.col("open") * qfq_ratio).alias("qfq_open"),
-                (pl.col("high") * qfq_ratio).alias("qfq_high"),
-                (pl.col("low") * qfq_ratio).alias("qfq_low"),
-                (pl.col("close") * qfq_ratio).alias("qfq_close"),
+                ratio,
+            ]
+        ).with_columns(
+            [
+                (pl.col("open") * pl.col("qfq_ratio")).alias("qfq_open"),
+                (pl.col("high") * pl.col("qfq_ratio")).alias("qfq_high"),
+                (pl.col("low") * pl.col("qfq_ratio")).alias("qfq_low"),
+                (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close"),
             ]
         )
 

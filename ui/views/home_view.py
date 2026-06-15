@@ -253,7 +253,9 @@ class HomeView(ft.Container):
                 logger.debug(f"[HomeView] Market Data Indices: {len(indices)}")
 
                 date_str = data.get("date", "--")
-                self.date_text.value = I18n.get("home_data_date").format(date=date_str)
+                stale = data.get("stale", False)
+                suffix = f" ({I18n.get('home_data_updating')})" if stale else ""
+                self.date_text.value = I18n.get("home_data_date").format(date=date_str) + suffix
                 self.date_text.update()
                 self.dashboard.update_data(data)
         except Exception as e:

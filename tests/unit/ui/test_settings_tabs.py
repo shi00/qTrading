@@ -399,7 +399,7 @@ class TestAutomationTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab._on_locale_change("zh_CN")
-        self.mock_i18n.get.assert_any_call("settings_doubao_update", "自动重建AI概念")
+        self.mock_i18n.get.assert_any_call("settings_doubao_update")
 
     def test_schedule_time_initially_disabled_when_off(self, mock_page):
         self.mock_ch.is_auto_update_enabled.return_value = False

@@ -335,7 +335,7 @@ class TestTaskCenterView:
             self._make_task(status=TaskStatus.QUEUED),
         ]
         view._refresh_ui(tasks)
-        self.mock_i18n.get.assert_any_call("task_stats_fmt", "总计 {total} 项 · 运行中 {running}")
+        self.mock_i18n.get.assert_any_call("task_stats_fmt")
 
     def test_refresh_ui_pagination_visible_when_multiple_pages(self, mock_page):
         view = self._make_view(mock_page)
@@ -693,6 +693,11 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         layout.will_unmount()
         self.mock_ac.unsubscribe.assert_called_once_with(layout.update_theme)
+
+    def test_will_unmount_unsubscribes_i18n(self, mock_page):
+        layout = self._make_layout(mock_page)
+        layout.will_unmount()
+        self.mock_i18n.unsubscribe.assert_called_once_with(layout._on_locale_change)
 
     def test_get_view_screener(self, mock_page):
         layout = self._make_layout(mock_page)

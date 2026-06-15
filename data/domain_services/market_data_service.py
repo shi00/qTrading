@@ -6,8 +6,8 @@ UI 只从内存缓存读取，类似 NewsSubscriptionService 架构。
 """
 
 import asyncio
-import datetime
 import contextlib
+import datetime
 import logging
 import math
 import threading
@@ -15,20 +15,21 @@ import typing
 
 import pandas as pd
 
-from data.cache.cache_manager import CacheManager
-from data.domain_services.trade_calendar_service import TradeCalendarService
-from data.external.news_fetcher import NewsFetcher
-from data.external.tushare_client import TushareClient
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
+from utils.singleton_registry import register_singleton
 from utils.time_utils import get_now
+from data.cache.cache_manager import CacheManager
+from data.constants import get_column_unit
+from data.domain_services.trade_calendar_service import TradeCalendarService
+from data.external.news_fetcher import NewsFetcher
+from data.external.tushare_client import TushareClient
 
 logger = logging.getLogger(__name__)
-
-
-from utils.singleton_registry import register_singleton
 
 
 @register_singleton
@@ -182,11 +183,29 @@ class MarketDataService:
 
         try:
             await self._fetch_market_data()
+        except asyncio.CancelledError:
+            logger.warning("[MarketDataService] Cancelled during fetch.")
+            raise
         except Exception as e:
-            logger.error(
-                f"[MarketDataService] Error fetching market data: {e}",
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[MarketDataService] SYSTEM-LEVEL failure: %s",
+                    DataSanitizer.sanitize_error(e),
+                )
+            elif severity == "recoverable":
+                logger.warning(
+                    "[MarketDataService] Recoverable error (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                )
+            else:
+                logger.error(
+                    "[MarketDataService] Operational error: %s",
+                    DataSanitizer.sanitize_error(e),
+                )
+            logger.debug("[MarketDataService] Fetch error traceback", exc_info=True)
 
     @log_async_operation(
         operation_name="fetch_market_data",
@@ -238,6 +257,8 @@ class MarketDataService:
                 if hsgt_empty:
                     results[1] = fb_results[1]
                 data_stale = True
+                if indices_empty and hsgt_empty:
+                    date = prev_str
 
         indices = (
             results[0]
@@ -245,13 +266,17 @@ class MarketDataService:
             else [MarketDataService._get_empty_index_data_static(key) for _, key in self.INDICES_CONFIG]
         )
         if isinstance(results[0], Exception):
-            logger.warning(f"[MarketDataService] Indices batch fetch failed: {results[0]}")
+            logger.warning(
+                "[MarketDataService] Indices batch fetch failed: %s", DataSanitizer.sanitize_error(results[0])
+            )
         hsgt = results[1] if not isinstance(results[1], Exception) else MarketDataService._get_empty_hsgt_data_static()
         if isinstance(results[1], Exception):
-            logger.warning(f"[MarketDataService] HSGT fetch failed: {results[1]}")
+            logger.warning("[MarketDataService] HSGT fetch failed: %s", DataSanitizer.sanitize_error(results[1]))
         hot_concepts = results[2] if not isinstance(results[2], Exception) else None
         if isinstance(results[2], Exception):
-            logger.warning(f"[MarketDataService] Hot concepts fetch failed: {results[2]}")
+            logger.warning(
+                "[MarketDataService] Hot concepts fetch failed: %s", DataSanitizer.sanitize_error(results[2])
+            )
             # Preserve previous hot_concepts on failure; only update on success
             hot_concepts = self._cached_data.get("hot_concepts", []) if self._cached_data else []
 
@@ -269,7 +294,7 @@ class MarketDataService:
                 try:
                     listener()
                 except Exception as e:
-                    logger.error(f"[MarketDataService] Listener error: {e}")
+                    logger.error("[MarketDataService] Listener error: %s", DataSanitizer.sanitize_error(e))
 
     async def _get_indices_batch(self, codes: list[str], date: str) -> list[dict]:
         """批量获取指数数据 - 1次DB/API调用替代N次"""
@@ -330,6 +355,13 @@ class MarketDataService:
 
         if df is not None and not df.empty:
             val = self._safe_float(df.iloc[0].get("north_money"))
+            # 校验单位元数据，检测上游变更
+            unit = get_column_unit(df, "north_money", default="million_cny")
+            if unit != "million_cny":
+                logger.warning(
+                    f"[MarketDataService] north_money unit changed: expected='million_cny', got='{unit}'. "
+                    "Display conversion may be incorrect."
+                )
             # north_money unit: 百万元 (1 Million CNY). >100 (=1亿) -> 亿 display.
             return {
                 "name": I18n.get("home_northbound"),
@@ -357,7 +389,7 @@ class MarketDataService:
             if val is None:
                 return 0.0
             f = float(val)
-            if math.isnan(f):
+            if math.isnan(f) or math.isinf(f):
                 return 0.0
             return f
         except (ValueError, TypeError):

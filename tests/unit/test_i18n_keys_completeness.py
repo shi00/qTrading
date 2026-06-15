@@ -1,6 +1,10 @@
+import ast
 import json
+import re
 import unittest
 from pathlib import Path
+
+_CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
 class TestI18nKeysCompleteness(unittest.TestCase):
@@ -121,6 +125,79 @@ class TestI18nKeysCompleteness(unittest.TestCase):
 
         self.assertNotIn(deprecated_key, zh_keys, f"Deprecated key '{deprecated_key}' still in zh_CN")
         self.assertNotIn(deprecated_key, en_keys, f"Deprecated key '{deprecated_key}' still in en_US")
+
+    def test_no_chinese_fallback_in_i18n_get(self):
+        """UI-003: I18n.get() default parameter must not contain CJK characters.
+
+        Chinese fallback values silently mask missing keys in non-Chinese locales.
+        All i18n text should live in locale files; if a key is missing, the warning
+        log (triggered when default=None) makes the gap visible.
+
+        Note: Dynamic defaults (e.g. I18n.get(warning, warning)) cannot be detected
+        by AST analysis. These are manually verified to use English enum values only:
+        - screener_view.py / ai_brain_tab.py: validate_prompt() returns English keys
+        - news_feed.py: news tags are English enums (stock, policy, etc.)
+        - ai_service.py: AI classification codes are English enums
+        """
+        project_root = Path(__file__).parent.parent.parent
+        violations: list[str] = []
+
+        for py_file in project_root.rglob("*.py"):
+            # Skip test directories and virtual environments
+            parts = py_file.relative_to(project_root).parts
+            if parts[0] in (
+                "tests",
+                "scripts",
+                ".venv",
+                "venv",
+                "node_modules",
+                ".worktrees",
+                ".git",
+                "tiktoken_cache",
+            ):
+                continue
+
+            source = py_file.read_text(encoding="utf-8")
+            tree = ast.parse(source, filename=str(py_file))
+
+            for node in ast.walk(tree):
+                # Match I18n.get(...) calls
+                if not isinstance(node, ast.Call):
+                    continue
+                if not (isinstance(node.func, ast.Attribute) and node.func.attr == "get"):
+                    continue
+                if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "I18n"):
+                    continue
+
+                # Check positional default (2nd arg)
+                if len(node.args) >= 2:
+                    val = node.args[1]
+                    if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                        if _CJK_PATTERN.search(val.value):
+                            key_name = (
+                                node.args[0].value
+                                if isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+                                else "?"
+                            )
+                            rel = py_file.relative_to(project_root)
+                            violations.append(f'{rel}:{node.lineno} key="{key_name}" (positional default)')
+
+                # Check keyword default=
+                for kw in node.keywords:
+                    if kw.arg == "default" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                        if _CJK_PATTERN.search(kw.value.value):
+                            key_name = (
+                                node.args[0].value
+                                if isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+                                else "?"
+                            )
+                            rel = py_file.relative_to(project_root)
+                            violations.append(f'{rel}:{node.lineno} key="{key_name}" (keyword default)')
+
+        self.assertFalse(
+            violations,
+            f"Found {len(violations)} I18n.get() calls with CJK fallback defaults:\n" + "\n".join(violations),
+        )
 
 
 if __name__ == "__main__":
