@@ -87,7 +87,7 @@ def main() -> None:
         pkg_pyright_ver = get_package_json_pyright_version()
         ci_pyright_ver = get_ci_pyright_version()
         manifest_ver = get_release_manifest_version()
-    except ValueError as e:
+    except Exception as e:
         print(f"ERROR: {e}")
         sys.exit(1)
 
@@ -95,8 +95,12 @@ def main() -> None:
     if installer_ver != pyproject_ver:
         if fix_mode:
             print(f"Auto-fixing installer.iss: {installer_ver} -> {pyproject_ver}")
-            update_installer_version(pyproject_ver)
-            fixed_any = True
+            try:
+                update_installer_version(pyproject_ver)
+                fixed_any = True
+            except Exception as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
         else:
             errors.append(
                 f"installer.iss fallback version '{installer_ver}' != pyproject.toml version '{pyproject_ver}'"
@@ -110,8 +114,12 @@ def main() -> None:
     if manifest_ver != pyproject_ver:
         if fix_mode:
             print(f"Auto-fixing .release-please-manifest.json: {manifest_ver} -> {pyproject_ver}")
-            update_release_manifest_version(pyproject_ver)
-            fixed_any = True
+            try:
+                update_release_manifest_version(pyproject_ver)
+                fixed_any = True
+            except Exception as e:
+                print(f"ERROR: {e}")
+                sys.exit(1)
         else:
             errors.append(
                 f".release-please-manifest.json version '{manifest_ver}' != pyproject.toml version '{pyproject_ver}'"

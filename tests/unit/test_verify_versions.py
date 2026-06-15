@@ -206,3 +206,58 @@ def test_verify_versions_pyright_mismatch(tmp_path):
     ):
         verify_versions.main()
     assert exc_info.value.code == 1
+
+
+def test_main_initial_read_failure(tmp_path):
+    pyproject, installer, pkg_json, ci_workflow, manifest = setup_test_files(
+        tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.9"
+    )
+    # Make one file missing to trigger OSError in main()
+    missing_pyproject = tmp_path / "non_existent_pyproject.toml"
+    with (
+        patch("verify_versions.PYPROJECT_PATH", missing_pyproject),
+        patch("verify_versions.INSTALLER_PATH", installer),
+        patch("verify_versions.PACKAGE_JSON_PATH", pkg_json),
+        patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+        patch("sys.argv", ["verify_versions.py"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.main()
+    assert exc_info.value.code == 1
+
+
+def test_main_installer_fix_failure(tmp_path):
+    pyproject, installer, pkg_json, ci_workflow, manifest = setup_test_files(
+        tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9"
+    )
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.INSTALLER_PATH", installer),
+        patch("verify_versions.PACKAGE_JSON_PATH", pkg_json),
+        patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+        patch("verify_versions.update_installer_version", side_effect=RuntimeError("Mocked update failure")),
+        patch("sys.argv", ["verify_versions.py", "--fix"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.main()
+    assert exc_info.value.code == 1
+
+
+def test_main_manifest_fix_failure(tmp_path):
+    pyproject, installer, pkg_json, ci_workflow, manifest = setup_test_files(
+        tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8"
+    )
+    with (
+        patch("verify_versions.PYPROJECT_PATH", pyproject),
+        patch("verify_versions.INSTALLER_PATH", installer),
+        patch("verify_versions.PACKAGE_JSON_PATH", pkg_json),
+        patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow),
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+        patch("verify_versions.update_release_manifest_version", side_effect=ValueError("Mocked update failure")),
+        patch("sys.argv", ["verify_versions.py", "--fix"]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        verify_versions.main()
+    assert exc_info.value.code == 1
