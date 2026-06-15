@@ -207,14 +207,16 @@ class ShutdownCoordinator:
         results: list[StepResult] = []
         cancelled = False
         for step_def in _CLEANUP_STEPS:
-            name, method_name, critical, step_timeout = step_def[0], step_def[1], step_def[2], step_def[3]
+            name, method_name, critical, default_timeout = step_def[0], step_def[1], step_def[2], step_def[3]
+            # Use the smaller of per-step default and caller-provided step_timeout_s
+            effective_timeout = min(default_timeout, step_timeout_s)
             step_func = getattr(self, method_name)
             start = time.perf_counter()
             try:
                 result = await self._run_async_step(
                     name=name,
                     step=step_func,
-                    step_timeout_s=step_timeout,
+                    step_timeout_s=effective_timeout,
                     critical=critical,
                 )
             except asyncio.CancelledError:
