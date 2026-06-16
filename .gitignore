@@ -61,6 +61,7 @@ coverage.json
 .hypothesis/
 .pytest_cache/
 .ruff_cache/
+junit-*.xml
 
 # Gemini / Local AI Assistant
 .gemini/
