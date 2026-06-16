@@ -81,6 +81,7 @@ logs/
 *.log
 *.bak
 *.html
+mylog*.txt
 
 # 3. Environment Variables & Secrets
 .env
