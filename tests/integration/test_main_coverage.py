@@ -695,7 +695,7 @@ class TestMainWindowCloseShowDialogSkipped:
 
             await on_event(SimpleNamespace(type="close"))
 
-            assert any("Skip showing close confirm dialog" in msg for msg in logger_spy.messages)
+            assert any("Skip showing close confirm dialog" in msg for msg in logger_spy.debugs)
 
 
 class TestMainHideCloseConfirmDialog:
