@@ -616,7 +616,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
     async def test_no_expected_bases(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={})
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]):
             result = await dao.get_bulk_sync_quality_scores("20240614", "20240615")
             assert result == {}
 
@@ -625,7 +625,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 0})
         dao.get_bulk_table_counts = AsyncMock(return_value={})
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]):
             result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
             assert datetime.date(2024, 6, 15) in result
             assert result[datetime.date(2024, 6, 15)]["score"] == 0

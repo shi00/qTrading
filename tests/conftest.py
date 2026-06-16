@@ -245,14 +245,10 @@ def mock_external_services(request):
         return
 
     # Only apply to unit tests. Do not intercept integration or E2E tests.
-    is_unit_test = False
     if hasattr(request, "path"):
         is_unit_test = "tests/unit" in str(request.path).replace("\\", "/")
-    elif hasattr(request, "fspath"):
-        is_unit_test = "tests/unit" in str(request.fspath).replace("\\", "/")
     else:
-        module_name = getattr(request.module, "__name__", "")
-        is_unit_test = "tests.unit" in module_name or module_name.startswith("unit")
+        is_unit_test = "tests/unit" in str(request.fspath).replace("\\", "/")
 
     if not is_unit_test:
         yield
@@ -261,29 +257,20 @@ def mock_external_services(request):
     patches = []
 
     # Mock NewsFetcher network calls (async)
-    try:
-        from data.external.news_fetcher import NewsFetcher
+    from data.external.news_fetcher import NewsFetcher
 
-        patches.append(patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock, return_value=[]))
-        patches.append(patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock, return_value=""))
-    except ImportError:
-        pass
+    patches.append(patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock, return_value=[]))
+    patches.append(patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock, return_value=""))
 
     # Mock ReviewManager database calls (async)
-    try:
-        from data.persistence.review_manager import ReviewManager
+    from data.persistence.review_manager import ReviewManager
 
-        patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
-    except ImportError:
-        pass
+    patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
 
     # Mock ConfigHandler.get_sync_request_delay to 0 to prevent asyncio.sleep timeouts
-    try:
-        from utils.config_handler import ConfigHandler
+    from utils.config_handler import ConfigHandler
 
-        patches.append(patch.object(ConfigHandler, "get_sync_request_delay", return_value=0))
-    except ImportError:
-        pass
+    patches.append(patch.object(ConfigHandler, "get_sync_request_delay", return_value=0))
 
     for p in patches:
         p.start()
