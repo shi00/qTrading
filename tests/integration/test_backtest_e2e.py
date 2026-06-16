@@ -110,6 +110,15 @@ def mock_cache() -> MagicMock:
     cache.get_limit_list = AsyncMock(return_value=pd.DataFrame())
     cache.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
 
+    # Range preloading mocks to support the optimized preload path in E2E tests
+    cache.get_screening_data_range = AsyncMock(return_value=pd.DataFrame(screening_data))
+    cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+    cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+    cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+    cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+    cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+    cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
     return cache
 
 

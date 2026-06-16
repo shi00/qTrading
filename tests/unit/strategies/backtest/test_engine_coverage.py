@@ -699,6 +699,7 @@ class TestGenerateSignals:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.data_provider = MagicMock()
+        engine.data_provider.preload_range = AsyncMock()
         engine.strategy_adapter = MagicMock()
         return engine
 
@@ -730,6 +731,7 @@ class TestGenerateSignals:
             cancel_check=cancel_check,
         )
 
+        engine.data_provider.preload_range.assert_called_once_with(trade_dates[0], trade_dates[-1])
         assert signals.is_empty() or signals.height == 1
 
     @pytest.mark.asyncio
@@ -742,6 +744,7 @@ class TestGenerateSignals:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.data_provider = MagicMock()
+        engine.data_provider.preload_range = AsyncMock()
         engine.strategy_adapter = MagicMock()
         engine.data_provider.build_context = AsyncMock(return_value={})
         engine.strategy_adapter.generate_signal = AsyncMock(side_effect=Exception("strategy error"))
@@ -755,6 +758,8 @@ class TestGenerateSignals:
                 trade_dates=trade_dates,
             )
 
+        engine.data_provider.preload_range.assert_called_once_with(trade_dates[0], trade_dates[-1])
+
     @pytest.mark.asyncio
     async def test_strategy_exception_without_fail_fast(self):
         config = BacktestConfig(
@@ -765,6 +770,7 @@ class TestGenerateSignals:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
         engine.data_provider = MagicMock()
+        engine.data_provider.preload_range = AsyncMock()
         engine.strategy_adapter = MagicMock()
         engine.data_provider.build_context = AsyncMock(return_value={})
         engine.strategy_adapter.generate_signal = AsyncMock(side_effect=Exception("strategy error"))
@@ -779,6 +785,7 @@ class TestGenerateSignals:
             failed_signal_dates=failed_signal_dates,
         )
 
+        engine.data_provider.preload_range.assert_called_once_with(trade_dates[0], trade_dates[-1])
         assert signals.is_empty()
         assert len(failed_signal_dates) == 1
 

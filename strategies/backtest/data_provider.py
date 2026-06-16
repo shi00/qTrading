@@ -66,8 +66,39 @@ class BacktestDataProvider:
 
     async def preload_range(self, start_date: date, end_date: date):
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
-        start_str = self._normalize_trade_date(start_date)
-        end_str = self._normalize_trade_date(end_date)
+        # 兼容处理输入参数类型并转为 date 对象
+        from datetime import datetime
+
+        def to_date_obj(d):
+            if isinstance(d, datetime):
+                return d.date()
+            if isinstance(d, date):
+                return d
+            if isinstance(d, str):
+                clean_d = d.replace("-", "").strip()
+                return datetime.strptime(clean_d, "%Y%m%d").date()
+            return d
+
+        try:
+            start_date_obj = to_date_obj(start_date)
+            end_date_obj = to_date_obj(end_date)
+        except Exception as e:
+            logger.error(f"[BacktestDataProvider] Invalid date format for preloading: {e}")
+            self._preloaded = None
+            return
+
+        # 增加区间保护，限制最长 1 年，防止大范围数据加载导致 OOM/DB 过载
+        days_limit = 366
+        if (end_date_obj - start_date_obj).days > days_limit:
+            logger.warning(
+                f"[BacktestDataProvider] Preload range too wide ({(end_date_obj - start_date_obj).days} days > {days_limit}). "
+                f"Skipping range preloading to prevent OOM/DB overload. Fallback to daily query."
+            )
+            self._preloaded = None
+            return
+
+        start_str = self._normalize_trade_date(start_date_obj)
+        end_str = self._normalize_trade_date(end_date_obj)
 
         logger.info(f"[BacktestDataProvider] Preloading range {start_str} to {end_str}...")
 
@@ -107,14 +138,11 @@ class BacktestDataProvider:
                 elif res is not None and not res.empty:
                     df_copy = res.copy()
                     if "trade_date" in df_copy.columns:
-                        # 转换并格式化为 YYYYMMDD
-                        def to_str(d):
-                            if isinstance(d, date):
-                                return d.strftime("%Y%m%d")
-                            d_str = str(d).replace("-", "").strip()[:8]
-                            return d_str
-
-                        df_copy["trade_date_str"] = df_copy["trade_date"].apply(to_str)
+                        # 向量化转换并格式化为 YYYYMMDD
+                        trade_dates_dt = pd.to_datetime(df_copy["trade_date"], errors="coerce")
+                        df_copy["trade_date_str"] = trade_dates_dt.dt.strftime("%Y%m%d").fillna("")
+                        # 过滤掉无效或空的交易日期
+                        df_copy = df_copy[df_copy["trade_date_str"] != ""].copy()
                         # 按 trade_date_str 进行 groupby 并存储为字典
                         self._preloaded[key] = {date_str: grp for date_str, grp in df_copy.groupby("trade_date_str")}
                     else:

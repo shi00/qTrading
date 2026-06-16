@@ -419,3 +419,71 @@ class TestBacktestQualityProxy:
         ctx = await provider.build_context(date(2024, 1, 2))
         cache.get_screening_data.assert_called_once_with("20240102")
         assert len(ctx.get("screening_data")) == 1
+
+    @pytest.mark.asyncio
+    async def test_preload_range_cancelled_error_propagation(self) -> None:
+        """验证在预加载时，如果是 CancelledError 异常，应该向上抛出（不吞没异常）。"""
+        import asyncio
+
+        cache = MagicMock()
+        # 模拟其中一个方法抛出 CancelledError
+        cache.get_screening_data_range = AsyncMock(side_effect=asyncio.CancelledError())
+        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        with pytest.raises(asyncio.CancelledError):
+            await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+    @pytest.mark.asyncio
+    async def test_preload_range_wide_fallback(self) -> None:
+        """验证当时间跨度超过限制（如366天）时，跳过预加载，并优雅降级为每日查询。"""
+        cache = MagicMock()
+        provider = BacktestDataProvider(cache)
+
+        # 超过 366 天的范围 (2024-01-01 到 2025-02-01)
+        await provider.preload_range(date(2024, 1, 1), date(2025, 2, 1))
+
+        # 预加载应该没有初始化 (为 None)
+        assert provider._preloaded is None
+        # 应无范围方法调用
+        cache.get_screening_data_range.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_preload_range_robust_date_handling(self) -> None:
+        """验证对于 null, NaT, None 等无效日期，能够进行过滤且不报错。"""
+        cache = MagicMock()
+        import numpy as np
+
+        # 返回含有 None/NaT 的非法数据
+        cache.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "trade_date": ["20240102", None, np.nan],
+                    "close": [10.0, 20.0, 30.0],
+                    "is_tradable": [True, True, True],
+                }
+            )
+        )
+        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._preloaded is not None
+        # 应该只保留 20240102 的有效数据，过滤掉其余两条空日期数据
+        preloaded_df_dict = provider._preloaded["screening_data"]
+        assert isinstance(preloaded_df_dict, dict)
+        assert len(preloaded_df_dict) == 1
+        assert "20240102" in preloaded_df_dict
+        assert len(preloaded_df_dict["20240102"]) == 1
