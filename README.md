@@ -111,8 +111,7 @@ astock_screener/
 │   │   └── transaction_cost.py        # 交易成本计算服务
 │   ├── external/           # 外部数据源
 │   │   ├── tushare_client.py   # Tushare API 客户端（限流、重试）
-│   │   ├── news_fetcher.py     # 新闻抓取服务
-│   │   └── news_subscription.py # 新闻订阅服务
+│   │   └── news_fetcher.py     # 新闻抓取服务
 │   ├── persistence/        # 持久化层
 │   │   ├── daos/           # 数据访问对象
 │   │   │   ├── base_dao.py     # 基础 DAO（类型转换、批量写入）
@@ -173,6 +172,7 @@ astock_screener/
 │   ├── ai_service.py           # AI 服务（LiteLLM 多模型网关）
 │   ├── local_model_manager.py  # 本地模型管理
 │   ├── task_manager.py         # 异步任务管理器
+│   ├── news_subscription_service.py # 新闻订阅服务
 │   └── backtest_service.py     # 回测服务（策略回测执行、结果管理）
 │
 ├── ui/                     # 表现层 (MVVM)
@@ -184,7 +184,8 @@ astock_screener/
 │   │   │   ├── database_config_panel.py
 │   │   │   ├── llm_config_panel.py
 │   │   │   ├── local_model_config_panel.py
-│   │   │   └── tushare_config_panel.py
+│   │   │   ├── tushare_config_panel.py
+│   │   │   └── failover_config_panel.py  # 故障转移配置
 │   │   ├── backtest/           # 回测相关组件
 │   │   │   ├── backtest_config_panel.py
 │   │   │   └── backtest_result_panel.py
@@ -199,7 +200,10 @@ astock_screener/
 │   ├── viewmodels/             # 视图模型
 │   │   ├── home_view_model.py
 │   │   ├── screener_view_model.py
-│   │   └── backtest_view_model.py
+│   │   ├── backtest_view_model.py
+│   │   ├── data_explorer_view_model.py
+│   │   ├── data_source_view_model.py
+│   │   └── onboarding_view_model.py
 │   └── views/                  # 视图
 │       ├── home_view.py
 │       ├── screener_view.py
@@ -235,7 +239,7 @@ astock_screener/
 │   ├── sanitizers.py           # 数据脱敏工具
 │   └── time_utils.py           # 时间工具函数
 │
-├── tests/                  # 测试层（140+ 单元测试文件，50+ 集成测试文件）
+├── tests/                  # 测试层（170+ 单元测试文件，50+ 集成测试文件）
 │   ├── conftest.py             # 全局测试配置
 │   ├── unit/                   # 单元测试
 │   │   ├── conftest.py
@@ -248,7 +252,7 @@ astock_screener/
 │   │   ├── strategies/         # 策略测试（含回测模块测试）
 │   │   ├── data/               # 数据层测试
 │   │   ├── ui/                 # UI 层测试
-│   │   └── ... (140+ 文件)
+│   │   └── ... (170+ 文件)
 │   └── integration/            # 集成测试
 │       ├── conftest.py
 │       ├── test_historical_sync_integrity.py
@@ -274,7 +278,12 @@ astock_screener/
 │
 ├── .github/                # GitHub 配置
 │   └── workflows/
-│       └── ci_cd.yml           # CI/CD 工作流
+│       ├── ci_cd.yml           # CI/CD 主工作流
+│       ├── codeql.yml          # CodeQL 安全分析
+│       ├── gitleaks.yml        # 密钥泄露扫描
+│       ├── release-please.yml  # 自动化 Release PR
+│       ├── renovate.yml        # 依赖更新机器人
+│       └── scorecard.yml       # OpenSSF 安全评分
 │
 ├── pyproject.toml          # 项目元数据 & 工具配置
 └── requirements.txt        # 依赖清单
@@ -314,7 +323,7 @@ graph TB
     subgraph INFRA["<b>基础设施层 Infrastructure</b>"]
         direction LR
         CACHE["🗄️ CacheManager<br/>单例缓存 | DAO 统一入口"]
-        DAOS["📝 DAOs (9 个)<br/>Stock | Quote | Financial<br/>Holder | Macro | Market<br/>Screener | Sync | Base"]
+        DAOS["📝 DAOs (9 个业务 DAO + Base)<br/>Stock | Quote | Financial<br/>Holder | Macro | Market<br/>Screener | Sync | Backtest | Base"]
         SYNC["🔄 Sync Strategies<br/>历史行情 | 财务 | 股东 | 宏观<br/>断点续传 | 质量评分"]
         QUALITY["🛡️ Quality Gate<br/>Bronze → Silver → Gold<br/>三级数据质量校验"]
         REVIEW["🔁 ReviewManager<br/>AI 回顾闭环<br/>Alpha 收益 | 经验注入"]
@@ -373,7 +382,7 @@ graph TB
 ### 1. 环境要求
 
 * Python 3.13+
-* PostgreSQL 14+
+* PostgreSQL 16+
 
 ### 2. 安装
 
@@ -398,13 +407,13 @@ DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/astock
 python main.py
 ```
 
-*首次启动请根据 Onboarding 向导配置您的 Tushare Token。若需启用 AI 分析，请在设置中配置任意支持的 LLM 供应商（DeepSeek / OpenAI / Anthropic / 智谱 / 通义千问 等 11 家），或下载 GGUF 模型到 `ai_models/` 目录进行本地推理。*
+*首次启动请根据 Onboarding 向导配置您的 Tushare Token。若需启用 AI 分析，请在设置中配置任意支持的 LLM 供应商（DeepSeek / OpenAI / Anthropic / 智谱 / 通义千问 等 10 家云端供应商 + 自定义供应商），或下载 GGUF 模型到 `ai_models/` 目录进行本地推理。*
 
 ---
 
 ## 🧪 测试
 
-项目采用双层测试金字塔结构，包含 **140+ 单元测试文件，50+ 集成测试文件**：
+项目采用双层测试金字塔结构，包含 **170+ 单元测试文件，50+ 集成测试文件**：
 
 ```bash
 # 运行所有测试
@@ -429,7 +438,7 @@ python -m pytest tests/integration/test_historical_sync_integrity.py -v
 
 | 层级 | 目录 | 文件数 | 覆盖内容 |
 |------|------|--------|----------|
-| **Unit** | `tests/unit/` | 140+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
+| **Unit** | `tests/unit/` | 170+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
 | **Integration** | `tests/integration/` | 50+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度、回测全流程 |
 
 ### 关键测试覆盖
@@ -451,12 +460,12 @@ python -m pytest tests/integration/test_historical_sync_integrity.py -v
 
 ```bash
 # 本地运行覆盖率检查
-python -m pytest tests/ --cov=data --cov=services --cov=strategies --cov=utils --cov-report=term-missing --cov-fail-under=85
+python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 ```
 
 | 覆盖维度 | 说明 |
 |----------|------|
-| **覆盖目标** | `data/` `services/` `strategies/` `utils/` 四个核心模块 |
+| **覆盖目标** | `core/` `data/` `services/` `strategies/` `utils/` `ui/` `config/` `main/` 八个核心模块 |
 | **门禁阈值** | **85%** — 低于此值 CI 流水线失败 |
 | **排除项** | tiktoken 缓存、离线日历数据、辅助脚本 |
 | **报告格式** | terminal-missing（终端逐行展示）+ XML（CI 解析） |
@@ -535,7 +544,7 @@ cleanup_ok = await coordinator.do_cleanup(
 ```python
 from utils.llm_providers import LLM_PROVIDERS
 
-# 11 家供应商统一配置
+# 10 家云端供应商 + 自定义供应商统一配置
 for pid, cfg in LLM_PROVIDERS.items():
     print(f"{cfg['name']}: {len(cfg['models'])} models, base={cfg['base_url']}")
 
@@ -558,7 +567,7 @@ await review.run_review(screener_result_id)
 ### 向量化回测框架
 
 ```python
-from strategies.backtest.engine import BacktestEngine
+from strategies.backtest.engine import VectorBacktestEngine
 from strategies.backtest.config import BacktestConfig
 
 # 配置回测参数
@@ -571,7 +580,7 @@ config = BacktestConfig(
 )
 
 # 运行回测
-engine = BacktestEngine(config)
+engine = VectorBacktestEngine(config)
 result = await engine.run(strategy, data_provider)
 
 # 获取绩效指标

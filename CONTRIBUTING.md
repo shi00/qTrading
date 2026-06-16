@@ -75,7 +75,7 @@ uv pip install --system -r requirements-dev.txt
 # 安装 pre-commit hooks
 pre-commit install
 
-# 项目使用 6 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、requirements 同步)，详见 CLAUDE.md §8.1 或 `.pre-commit-config.yaml`。
+# 项目使用 7 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、requirements 同步、版本一致性校验)，详见 CLAUDE.md §8.1 或 `.pre-commit-config.yaml`。
 
 # 运行测试验证环境
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
@@ -185,7 +185,7 @@ Closes #123
 | **lint-fast** | Ruff lint + format 检查 (Python 3.13 + 3.14) |
 | **ci-checks** | Linux 完整流水线 (pre-commit、安全审计、Pyright、Alembic 迁移、单元/集成测试、覆盖率) |
 | **ci-checks-windows** | Windows 单元测试 + Pyright + 覆盖率 |
-| **e2e-tests-windows** | Windows E2E 测试 (MS Edge + PostgreSQL) |
+| **e2e-tests-windows** | Windows E2E 测试 (Chromium + PostgreSQL) |
 
 ### 覆盖率要求
 

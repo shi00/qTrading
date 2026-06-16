@@ -94,7 +94,7 @@
 | **数据库** | PostgreSQL 16 + SQLAlchemy 2.0 (asyncpg) |
 | **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → downgrade → upgrade) |
 | **AI 推理** | LiteLLM (多家云端供应商统一网关) / llama-cpp-python (本地 GGUF) |
-| **数据源** | Tushare Pro (核心) + Akshare (补充) + 财联社新闻 |
+| **数据源** | Tushare Pro (核心) + Akshare (补充) |
 | **任务调度** | APScheduler + 自研 `TaskManager` (优先级、持久化、UI 通知) |
 | **HTTP 客户端** | requests + httpx (异步) + urllib3 |
 | **代码质量** | Ruff (Linter + Formatter) + Pyright (类型检查) |
@@ -152,7 +152,7 @@ core/             ← 架构核心层 (i18n，不依赖任何其他层)
 app/              ← 引导层 (bootstrap: 启动初始化、服务编排，仅 main.py 调用)
 data/             ← 数据层 (DAO、同步策略、外部数据源、领域服务、缓存管理)
   ├── cache/             缓存管理器 (CacheManager 单例，DAO 统一入口、引擎管理)
-  ├── persistence/       持久化 (DAOs、ORM 模型、数据库迁移、质量门控、配置/状态/元数据/复盘服务)
+  ├── persistence/       持久化 (DAOs、ORM 模型、数据库管理/迁移/配置、质量门控、配置/状态/元数据/复盘服务)
   ├── domain_services/   领域服务 (交易日历、市场数据、离线日历快照、交易成本)
   ├── external/          外部数据源 (Tushare 客户端、新闻抓取)
   ├── sync/              数据同步策略 (历史数据、财务数据、股东数据、宏观数据)
@@ -239,7 +239,9 @@ class MyService:
 
 **@register_singleton 单例**: `CacheManager`、`ThreadPoolManager`、`TaskManager`、`AIService`、`SchedulerService`、`DataProcessor`、`MarketDataService`、`NewsSubscriptionService`、`TushareClient`、`LocalModelManager`、`StrategyManager`。
 
-**非注册单例**: `ConfigHandler` (纯静态方法 + RWLockFair 保护)、`ProxyManager` (非装饰器单例)。
+**非注册单例**: `ConfigHandler` (静态方法/类方法 + RWLockFair 保护)、`ProxyManager` (非装饰器单例)。
+
+**非单例服务**: `BacktestService` (每次实例化创建新对象，由调用方管理生命周期)。
 
 ---
 
@@ -310,7 +312,7 @@ from data.cache.cache_manager import CacheManager
   - `ERROR` — 操作失败但不影响进程
   - `CRITICAL` — 系统级失败 (`MemoryError`、磁盘满)、数据完整性问题
 - **关机期间** 的连接错误 (`no active connection` / `database is closed` / `ConnectionDoesNotExistError`) 必须降级为 `warning`，避免污染日志。
-- **UI 交互埋点** 使用专用 `UILogger.log_action()` 静态方法或 `@log_ui_action` 装饰器，自动写入 `ui.action` logger 通道。
+- **UI 交互埋点** 使用专用 `UILogger.log_action()` 类方法或 `@log_ui_action` 装饰器，自动写入 `ui.action` logger 通道。
 - **敏感参数** 必须经 `DataSanitizer.sanitize_args()` 或 `DataSanitizer.sanitize_error()` 脱敏后再记录。
 - **Correlation ID** 涉及跨模块的请求链路追踪，使用 `utils/correlation.py` 提供的工具串联日志。
 
@@ -394,7 +396,7 @@ class MyStrategy(BaseStrategy):
 ```
 
 - **策略入口**: `strategies/all_strategies.py` 通过导入所有策略模块触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 字典统一暴露。
-- **策略依赖检查**: 每个策略声明 `required_context_keys` 和 `required_tables`，运行前通过 `check_dependencies()` 验证数据就绪状态，返回 `ready` / `degraded` / `unready`。`CONTEXT_KEY_TABLE_MAP` 定义了 context key 到表名的映射。
+- **策略依赖检查**: 每个策略声明 `required_context_keys` 和 `required_tables`，运行前通过 `check_dependencies()` 验证数据就绪状态，返回 `ready` / `degraded` / `unready`。`CONTEXT_KEY_TABLE_MAP` (`BaseStrategy` 类属性) 定义了 context key 到表名的映射。
 - **动态参数**: 重写 `get_parameters()` 暴露可调参数 (`slider` / `number` / `dropdown` 三种 UI 控件)。
 - **动态描述**: 重写 `get_dynamic_description(current_params)` 让描述随参数变化。
 - **依赖声明**: 声明 `required_context_keys` / `required_tables` / `required_history_days`。可选声明 `required_apis: list[str] = []`（所需外部 API 端点列表，用于依赖检查）。
@@ -415,6 +417,8 @@ class MyPolarsStrategy(PolarsBaseStrategy):
     def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         return lf.filter(pl.col("pct_chg") > 5.0)
 ```
+
+> 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 直接继承 `BaseStrategy`）可使用 `@require_quality` 装饰器。
 
 ### 6.3 AI 策略混入 (AIStrategyMixin)
 
@@ -463,8 +467,8 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 ### 6.7 配置管理、质量门控、性能监控
 
-- **配置管理**: `ConfigHandler` 使用读写锁 (`ReaderWriterLock`) 保护并发访问。敏感信息优先使用 `keyring`，降级到 AES-GCM 加密文件 (`utils/security_utils.py`)。
-- **数据质量门控**: 使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE=true` 环境变量启用严格模式。
+- **配置管理**: `ConfigHandler` 使用读写锁 (`rwlock.RWLockFair`) 保护并发访问。敏感信息优先使用 `keyring`，降级到 AES-GCM 加密文件 (`utils/security_utils.py`)。
+- **数据质量门控**: 使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量控制严格模式（默认开启，设为 `false` 关闭）。
 - **性能监控装饰器** (`utils/log_decorators.py`):
   - `@log_async_operation(operation_name="fetch_data", threshold_ms=500)` — 异步操作日志 + 性能监控 + 自动脱敏
   - `@track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)` — 纯性能追踪 (轻量)
@@ -548,7 +552,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 1. **Fast Ruff Check & Format** (Python 3.13 + 3.14 experimental)
 2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步)
-3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt` 与 `requirements-optional.txt`，使用 `.security/audit-allowlist.yml`)
+3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
 4. **Pyright Type Check** (`pyright==1.1.410`，`continue-on-error: false`)
 5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
 6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration)
