@@ -5,6 +5,8 @@ import datetime
 
 from data.persistence.review_manager import ReviewManager
 
+pytestmark = pytest.mark.no_auto_mock
+
 
 class TestReviewManagerInit:
     @patch("data.persistence.review_manager.CacheManager")

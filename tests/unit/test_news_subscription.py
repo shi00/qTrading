@@ -6,6 +6,8 @@ from collections import OrderedDict
 
 from services.news_subscription_service import NewsSubscriptionService, NewsUpdateType
 
+pytestmark = pytest.mark.no_auto_mock
+
 
 @pytest.fixture(autouse=True)
 def reset_singleton():

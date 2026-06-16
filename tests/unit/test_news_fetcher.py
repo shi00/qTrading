@@ -13,6 +13,8 @@ from data.external.news_fetcher import (
     _SINA_EMPTY_THRESHOLD,
 )
 
+pytestmark = pytest.mark.no_auto_mock
+
 
 @pytest.fixture(autouse=True)
 def clean_global_caches():

@@ -91,6 +91,7 @@ markers = [
     "network: Tests requiring real network access",
     "database: Tests requiring database connection",
     "ai: Tests requiring AI service",
+    "no_auto_mock: Skip auto-mocking of external services in conftest",
 ]
 
 [tool.coverage.run]
