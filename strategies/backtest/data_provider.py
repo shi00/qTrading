@@ -61,6 +61,71 @@ class BacktestDataProvider:
         self.data_processor = data_processor
         # 缓存 proxy，避免每次 build_context 都新建实例
         self._quality_proxy = _BacktestQualityProxy() if data_processor is None else None
+        self._preloaded: dict | None = None
+
+    async def preload_range(self, start_date: date, end_date: date):
+        """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
+        import asyncio
+
+        start_str = self._normalize_trade_date(start_date)
+        end_str = self._normalize_trade_date(end_date)
+
+        logger.info(f"[BacktestDataProvider] Preloading range {start_str} to {end_str}...")
+
+        self._preloaded = {}
+
+        try:
+            # 并行查询所有数据
+            results = await asyncio.gather(
+                self.cache.get_screening_data_range(start_str, end_str),
+                self.cache.get_fundamental_screening_data_range(start_str, end_str),
+                self.cache.get_northbound_range(start_str, end_str),
+                self.cache.get_moneyflow_hsgt_range(start_str, end_str),
+                self.cache.get_moneyflow_range(start_str, end_str),
+                self.cache.get_top_list_range(start_str, end_str),
+                self.cache.get_block_trade_range(start_str, end_str),
+                return_exceptions=True,
+            )
+
+            keys = [
+                "screening_data",
+                "fundamental_screening_data",
+                "northbound_data",
+                "northbound_flow_data",
+                "moneyflow_data",
+                "top_list",
+                "block_trade",
+            ]
+
+            for key, res in zip(keys, results, strict=True):
+                if isinstance(res, Exception):
+                    logger.warning(
+                        f"[BacktestDataProvider] Range preload failed for {key}: {res}. Fallback to daily query."
+                    )
+                    self._preloaded[key] = None
+                elif res is not None and not res.empty:
+                    df_copy = res.copy()
+                    if "trade_date" in df_copy.columns:
+                        # 转换并格式化为 YYYYMMDD
+                        def to_str(d):
+                            if isinstance(d, date):
+                                return d.strftime("%Y%m%d")
+                            d_str = str(d).replace("-", "").strip()[:8]
+                            return d_str
+
+                        df_copy["trade_date_str"] = df_copy["trade_date"].apply(to_str)
+                        # 按 trade_date_str 进行 groupby 并存储为字典
+                        self._preloaded[key] = {date_str: grp for date_str, grp in df_copy.groupby("trade_date_str")}
+                    else:
+                        self._preloaded[key] = df_copy
+
+                    rows = len(res)
+                    logger.info(f"[BacktestDataProvider] Preloaded {key}: {rows} rows")
+                else:
+                    self._preloaded[key] = {}
+        except Exception as e:
+            logger.error(f"[BacktestDataProvider] Failed to preload range: {e}", exc_info=True)
+            self._preloaded = None
 
     async def build_context(
         self,
@@ -120,8 +185,13 @@ class BacktestDataProvider:
         }
 
         trade_date_str = self._normalize_trade_date(trade_date)
+        preloaded = getattr(self, "_preloaded", None)
 
-        screening_data = await self._get_screening_data(trade_date_str)
+        # 1. 获取当日 screening_data
+        if preloaded and "screening_data" in preloaded and preloaded["screening_data"] is not None:
+            screening_data = preloaded["screening_data"].get(trade_date_str, pd.DataFrame())
+        else:
+            screening_data = await self._get_screening_data(trade_date_str)
 
         if screening_data is not None and not screening_data.empty and "is_tradable" in screening_data.columns:
             suspended_count = int((~screening_data["is_tradable"]).sum())
@@ -140,7 +210,16 @@ class BacktestDataProvider:
         base_complete = screening_data is not None and not screening_data.empty
         diagnostics["base_complete"] = base_complete
 
-        fundamental_data = await self._get_fundamental_screening_data(trade_date_str)
+        # 2. 获取当日 fundamental_screening_data
+        if (
+            preloaded
+            and "fundamental_screening_data" in preloaded
+            and preloaded["fundamental_screening_data"] is not None
+        ):
+            fundamental_data = preloaded["fundamental_screening_data"].get(trade_date_str, pd.DataFrame())
+        else:
+            fundamental_data = await self._get_fundamental_screening_data(trade_date_str)
+
         if fundamental_data is not None and not fundamental_data.empty:
             if "is_tradable" in fundamental_data.columns:
                 fundamental_data = fundamental_data[fundamental_data["is_tradable"]].copy()
@@ -157,6 +236,7 @@ class BacktestDataProvider:
             "rows": len(screening_data) if screening_data is not None else 0,
         }
 
+        # 3. 加载辅助表
         auxiliary_tables = {
             "northbound_data": self.cache.get_northbound,
             "northbound_flow_data": self.cache.get_moneyflow_hsgt,
@@ -168,7 +248,11 @@ class BacktestDataProvider:
         all_aux_ready = True
         for key, fetch_func in auxiliary_tables.items():
             try:
-                data = await fetch_func(trade_date=trade_date_str)
+                if preloaded and key in preloaded and preloaded[key] is not None:
+                    data = preloaded[key].get(trade_date_str, pd.DataFrame())
+                else:
+                    data = await fetch_func(trade_date=trade_date_str)
+
                 if data is not None:
                     context[key] = data
                     is_empty = hasattr(data, "empty") and data.empty

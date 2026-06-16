@@ -427,6 +427,10 @@ class VectorBacktestEngine:
         signals_list = []
         total_dates = len(trade_dates)
 
+        if trade_dates:
+            # Preload all required tables for the backtest date range
+            await self.data_provider.preload_range(trade_dates[0], trade_dates[-1])
+
         for i, signal_date in enumerate(trade_dates[:-1]):
             if cancel_check and cancel_check():
                 logger.warning("[VectorBacktestEngine] Cancelled during signal generation at %s", signal_date)

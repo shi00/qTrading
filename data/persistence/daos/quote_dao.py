@@ -507,6 +507,10 @@ class QuoteDao(BaseDao):
             p.append(trade_date)
         return await self._read_db(sql, p)
 
+    async def get_block_trade_range(self, start_date: str, end_date: str):
+        sql = "SELECT * FROM block_trade WHERE trade_date >= $1 AND trade_date <= $2"
+        return await self._read_db(sql, [start_date, end_date])
+
     # --- Limit List ---
     async def save_limit_list(self, df: pd.DataFrame):
         cols = get_model_columns(LimitList)
@@ -571,6 +575,11 @@ class QuoteDao(BaseDao):
             sql += " AND trade_date=$1"
             p.append(trade_date)
         df = await self._read_db(sql, p)
+        return attach_top_list_column_units(df)
+
+    async def get_top_list_range(self, start_date: str, end_date: str):
+        sql = "SELECT * FROM top_list WHERE trade_date >= $1 AND trade_date <= $2"
+        df = await self._read_db(sql, [start_date, end_date])
         return attach_top_list_column_units(df)
 
     # --- Margin ---
@@ -652,7 +661,12 @@ class QuoteDao(BaseDao):
         if ts_code:
             sql += f" AND ts_code=${idx}"
             p.append(ts_code)
+            idx += 1
         return await self._read_db(sql, p)
+
+    async def get_moneyflow_range(self, start_date: str, end_date: str):
+        sql = "SELECT * FROM moneyflow_daily WHERE trade_date >= $1 AND trade_date <= $2"
+        return await self._read_db(sql, [start_date, end_date])
 
     # --- Northbound ---
     async def save_northbound(self, df: pd.DataFrame):
@@ -676,7 +690,12 @@ class QuoteDao(BaseDao):
         if ts_code:
             sql += f" AND ts_code=${idx}"
             p.append(ts_code)
+            idx += 1
         return await self._read_db(sql, p)
+
+    async def get_northbound_range(self, start_date: str, end_date: str):
+        sql = "SELECT * FROM northbound_holding WHERE trade_date >= $1 AND trade_date <= $2"
+        return await self._read_db(sql, [start_date, end_date])
 
     async def get_latest_northbound(self):
         df = await self._read_db(

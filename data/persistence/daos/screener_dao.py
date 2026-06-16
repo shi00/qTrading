@@ -195,6 +195,68 @@ class ScreenerDao(BaseDao):
         sql = self._build_screening_sql(require_close=False)
         return await self._read_db(sql, (trade_date,) * 6)
 
+    def _build_screening_sql_range(self, *, require_close: bool = True) -> str:
+        close_condition = "q.close IS NOT NULL AND " if require_close else ""
+        return f"""
+              SELECT b.ts_code,
+                     b.name,
+                     b.industry,
+                     b.list_date,
+                     b.list_status,
+                     cal.cal_date AS trade_date,
+                     q.close,
+                     q.pct_chg,
+                     q.vol,
+                     q.amount,
+                     i.pe_ttm,
+                     i.pb,
+                     i.ps_ttm,
+                     i.dv_ttm,
+                     i.total_mv,
+                     i.circ_mv,
+                     i.turnover_rate,
+                     f.roe,
+                     f.grossprofit_margin,
+                     f.debt_to_assets,
+                     f.or_yoy,
+                     f.netprofit_yoy,
+                     CASE WHEN s.ts_code IS NOT NULL THEN FALSE ELSE TRUE END AS is_tradable
+               FROM (
+                   SELECT cal_date
+                   FROM trade_cal
+                   WHERE is_open = 1
+                     AND cal_date >= $1
+                     AND cal_date <= $2
+               ) cal
+                        CROSS JOIN stock_basic b
+                        LEFT JOIN daily_quotes q ON b.ts_code = q.ts_code AND q.trade_date = cal.cal_date
+                        LEFT JOIN daily_indicators i ON b.ts_code = i.ts_code AND i.trade_date = cal.cal_date
+                        LEFT JOIN LATERAL (
+                            SELECT f_inner.roe,
+                                   f_inner.grossprofit_margin,
+                                   f_inner.debt_to_assets,
+                                   f_inner.or_yoy,
+                                   f_inner.netprofit_yoy
+                            FROM financial_reports f_inner
+                            WHERE f_inner.ts_code = b.ts_code
+                              AND f_inner.ann_date <= cal.cal_date
+                            ORDER BY f_inner.ann_date DESC, f_inner.end_date DESC
+                            LIMIT 1
+                        ) f ON TRUE
+                        LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
+               WHERE {close_condition}b.list_status = 'L'
+                 AND b.list_date <= cal.cal_date
+                 AND (b.delist_date IS NULL OR b.delist_date > cal.cal_date)
+              """
+
+    async def get_screening_data_range(self, start_date: str, end_date: str):
+        sql = self._build_screening_sql_range(require_close=True)
+        return await self._read_db(sql, (start_date, end_date))
+
+    async def get_fundamental_screening_data_range(self, start_date: str, end_date: str):
+        sql = self._build_screening_sql_range(require_close=False)
+        return await self._read_db(sql, (start_date, end_date))
+
     # --- Review Manager Methods ---
 
     async def get_pending_predictions(self, date_threshold: str):

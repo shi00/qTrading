@@ -241,3 +241,10 @@ class MarketDao(BaseDao):
         if df is not None and not df.empty:
             df = attach_hsgt_column_units(df)
         return df
+
+    async def get_moneyflow_hsgt_range(self, start_date: str, end_date: str):
+        sql = "SELECT * FROM moneyflow_hsgt WHERE trade_date >= $1 AND trade_date <= $2 ORDER BY trade_date DESC"
+        df = await self._read_db(sql, [start_date, end_date])
+        if df is not None and not df.empty:
+            df = attach_hsgt_column_units(df)
+        return df

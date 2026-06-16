@@ -82,16 +82,17 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             return pd.DataFrame()
 
         try:
-            lf = pl.from_pandas(df).lazy()
-            result_lf = self._filter_logic(lf, context)
-            # Offload CPU-intensive collect + conversion to thread pool
+            # Offload CPU-intensive from_pandas, _filter_logic graph building, collect, and conversion to thread pool
             # to avoid blocking the Flet event loop during full-market screening.
-            # Thread-safety: lambda captures result_lf (immutable LazyFrame graph)
-            # and implicitly references context via closure. This is safe because
-            # context is not mutated concurrently during filter() execution.
+            # Thread-safety: df and context are not mutated concurrently during filter() execution.
+            def _convert_and_filter(df_in, ctx):
+                lf = pl.from_pandas(df_in).lazy()
+                result_lf = self._filter_logic(lf, ctx)
+                return result_lf.collect().to_pandas()
+
             candidates_df = await ThreadPoolManager().run_async(
                 TaskType.CPU,
-                lambda: result_lf.collect().to_pandas(),
+                lambda: _convert_and_filter(df, context),
             )
         except QualityGateError:
             raise

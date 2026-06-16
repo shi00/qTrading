@@ -341,3 +341,81 @@ class TestBacktestQualityProxy:
         processor = MagicMock()
         provider = BacktestDataProvider(cache, data_processor=processor)
         assert provider._quality_proxy is None
+
+    @pytest.mark.asyncio
+    async def test_preload_range_success(self) -> None:
+        """验证 preload_range 成功读取数据并在 build_context 中进行内存切片。"""
+        cache = MagicMock()
+        cache.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240102", "20240103"],
+                    "close": [10.0, 20.0],
+                    "is_tradable": [True, True],
+                }
+            )
+        )
+        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        assert provider._preloaded is not None
+        assert "screening_data" in provider._preloaded
+
+        # 验证 build_context 时是否直接从预加载数据中切片，而不触发 daily 查询
+        cache.get_screening_data.assert_not_called()
+
+        ctx = await provider.build_context(date(2024, 1, 2))
+        screening_data = ctx.get("screening_data")
+        assert len(screening_data) == 1
+        assert screening_data.iloc[0]["ts_code"] == "000001.SZ"
+
+    @pytest.mark.asyncio
+    async def test_preload_range_fallback(self) -> None:
+        """验证在预加载抛出异常时，能够优雅降级回单日查询逻辑。"""
+        cache = MagicMock()
+        # 范围查询抛出异常
+        cache.get_screening_data_range = AsyncMock(side_effect=Exception("DB Error"))
+        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        # 单日查询正常
+        cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache)
+        await provider.preload_range(date(2024, 1, 2), date(2024, 1, 3))
+
+        # 发生异常后，_preloaded 内对应项应标记为 None 或异常
+        assert provider._preloaded is not None
+        assert provider._preloaded["screening_data"] is None
+
+        # 触发 build_context 时应执行 daily get_screening_data
+        ctx = await provider.build_context(date(2024, 1, 2))
+        cache.get_screening_data.assert_called_once_with("20240102")
+        assert len(ctx.get("screening_data")) == 1

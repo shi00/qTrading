@@ -534,6 +534,12 @@ class CacheManager:
     async def get_fundamental_screening_data(self, trade_date: str | None = None):
         return await self.screener_dao.get_fundamental_screening_data(trade_date)
 
+    async def get_screening_data_range(self, start_date: str, end_date: str):
+        return await self.screener_dao.get_screening_data_range(start_date, end_date)
+
+    async def get_fundamental_screening_data_range(self, start_date: str, end_date: str):
+        return await self.screener_dao.get_fundamental_screening_data_range(start_date, end_date)
+
     # --- Sync Stats & Misc ---
     async def update_sync_status(
         self,
@@ -878,17 +884,29 @@ class CacheManager:
     async def get_top_list(self, trade_date: str | None = None):
         return await self.quote_dao.get_top_list(trade_date)
 
+    async def get_top_list_range(self, start_date: str, end_date: str):
+        return await self.quote_dao.get_top_list_range(start_date, end_date)
+
     async def save_block_trade(self, df: pd.DataFrame):
         return await self.quote_dao.save_block_trade(df)
 
     async def get_block_trade(self, trade_date: str | None = None):
         return await self.quote_dao.get_block_trade(trade_date)
 
+    async def get_block_trade_range(self, start_date: str, end_date: str):
+        return await self.quote_dao.get_block_trade_range(start_date, end_date)
+
     async def get_moneyflow(self, trade_date: str | None = None, ts_code: str | None = None):
         return await self.quote_dao.get_moneyflow(trade_date, ts_code)
 
+    async def get_moneyflow_range(self, start_date: str, end_date: str):
+        return await self.quote_dao.get_moneyflow_range(start_date, end_date)
+
     async def get_northbound(self, trade_date: str | None = None, ts_code: str | None = None):
         return await self.quote_dao.get_northbound(trade_date, ts_code)
+
+    async def get_northbound_range(self, start_date: str, end_date: str):
+        return await self.quote_dao.get_northbound_range(start_date, end_date)
 
     # --- Screening History ---
     async def get_screening_history(self, strategy_name: str | None = None, limit: int | None = 100):
@@ -970,6 +988,9 @@ class CacheManager:
 
     async def get_moneyflow_hsgt(self, trade_date: datetime.date | str | None = None, limit: int | None = None):
         return await self.market_dao.get_moneyflow_hsgt(trade_date, limit)
+
+    async def get_moneyflow_hsgt_range(self, start_date: str, end_date: str):
+        return await self.market_dao.get_moneyflow_hsgt_range(start_date, end_date)
 
     # === Phase 1.5: Cache 层新增方法（AI Prompt 数据注入）===
 

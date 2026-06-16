@@ -1094,7 +1094,7 @@ class AIStrategyMixin:
 
             import datetime
 
-            for _, r in df.tail(3).iterrows():
+            for r in df.tail(3).to_dict("records"):
                 td = r.get("trade_date")
                 if isinstance(td, (datetime.date, datetime.datetime)):
                     d = td.strftime("%m%d")
@@ -1395,7 +1395,7 @@ class AIStrategyMixin:
                 total_sales = top_business["bz_sales"].sum()
                 if total_sales > 0:
                     biz_items = []
-                    for _, row in top_business.head(3).iterrows():
+                    for row in top_business.head(3).to_dict("records"):
                         bz_name = row.get("bz_item", I18n.get("ai_unknown"))
                         bz_sales = row.get("bz_sales", 0)
                         ratio = (bz_sales / total_sales * 100) if total_sales > 0 else 0
@@ -1413,7 +1413,7 @@ class AIStrategyMixin:
             if dividend_df is not None and not dividend_df.empty:
                 recent_div = dividend_df.head(3)
                 div_items = []
-                for _, row in recent_div.iterrows():
+                for row in recent_div.to_dict("records"):
                     end_date = str(row.get("end_date", ""))[:4]
                     div_proc = row.get("div_proc", "")
                     div_items.append(f"{end_date}{I18n.get('ai_year_suffix')}{div_proc}")
