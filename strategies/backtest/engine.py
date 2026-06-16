@@ -165,7 +165,16 @@ class VectorBacktestEngine:
         if cal_df is None or cal_df.empty:
             raise ValueError("No trade dates found in the specified range")
 
-        return sorted([datetime.datetime.strptime(str(d), "%Y%m%d").date() for d in cal_df["cal_date"].tolist()])
+        trade_dates = []
+        for d in cal_df["cal_date"].tolist():
+            if isinstance(d, date):
+                trade_dates.append(d)
+            elif isinstance(d, datetime.datetime):
+                trade_dates.append(d.date())
+            else:
+                d_str = str(d).replace("-", "").strip()[:8]
+                trade_dates.append(datetime.datetime.strptime(d_str, "%Y%m%d").date())
+        return sorted(trade_dates)
 
     async def _load_quotes(self, trade_dates: list[date]) -> tuple[pl.DataFrame, list[DataWarning]]:
         start_str = trade_dates[0].strftime("%Y%m%d")
@@ -643,7 +652,8 @@ class VectorBacktestEngine:
         for row in benchmark_df.iter_rows(named=True):
             trade_date_val = row["trade_date"]
             if isinstance(trade_date_val, str):
-                trade_date_val = datetime.datetime.strptime(trade_date_val, "%Y%m%d").date()
+                d_str = trade_date_val.replace("-", "").strip()[:8]
+                trade_date_val = datetime.datetime.strptime(d_str, "%Y%m%d").date()
             bm_dict[trade_date_val] = float(row["pct_chg"]) / 100
 
         returns = [bm_dict.get(d, 0.0) for d in trade_dates]

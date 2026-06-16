@@ -125,12 +125,6 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # 这将原本需要数十秒的网络请求压缩至几毫秒，从而稳定保障 Flet UI 的秒级加载。
     async def intercept_canvaskit(route, request):
         url = request.url
-        if "fonts.googleapis.com" in url:
-            await route.abort()
-            return
-        if "fonts.gstatic.com" in url:
-            await route.abort()
-            return
         if "canvaskit" in url:
             filename = url.split("/")[-1]
             from pathlib import Path
@@ -227,6 +221,19 @@ def _generate_trade_dates(n_days: int = 60) -> list[date]:
 async def _seed_e2e_data() -> None:
     """向测试数据库播种 E2E 所需的基准数据。"""
     import asyncpg
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from data.persistence.db_migrator import DatabaseMigrator
+    from data.persistence.db_url_override import override_db_url
+
+    # Ensure tables are migrated before seeding
+    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+    try:
+        with override_db_url(TEST_DATABASE_URL):
+            await DatabaseMigrator.init_db(engine, auto_migrate=True)
+    except Exception as e:
+        logger.exception("Failed to run database migrations in E2E seed: %s", e)
+    finally:
+        await engine.dispose()
 
     dsn = _parse_asyncpg_dsn(TEST_DATABASE_URL)
     conn = await asyncpg.connect(dsn)
@@ -249,7 +256,7 @@ async def _seed_e2e_data() -> None:
             )
 
             trade_dates = _generate_trade_dates(60)
-            today_str = date.today().isoformat()
+            today = date.today()
 
             # stock_basic
             await conn.execute(
@@ -284,10 +291,10 @@ async def _seed_e2e_data() -> None:
             while d <= end:
                 is_open = 1 if d.weekday() < 5 else 0
                 pretrade = d - timedelta(days=3) if d.weekday() == 0 else d - timedelta(days=1)
-                cal_rows.append((d.isoformat(), "SSE", is_open, pretrade.isoformat()))
+                cal_rows.append((d, "SSE", is_open, pretrade))
                 d += timedelta(days=1)
             await conn.executemany(
-                "INSERT INTO trade_cal (cal_date, exchange, is_open, pretrade_date) VALUES ($1::date, $2, $3, $4::date)",
+                "INSERT INTO trade_cal (cal_date, exchange, is_open, pretrade_date) VALUES ($1, $2, $3, $4)",
                 cal_rows,
             )
 
@@ -306,7 +313,7 @@ async def _seed_e2e_data() -> None:
                 quote_rows.append(
                     (
                         "000001.SZ",
-                        td.isoformat(),
+                        td,
                         round(pa_pre_close - 0.1, 4),
                         round(pa_close + 0.1, 4),
                         round(pa_pre_close - 0.2, 4),
@@ -316,6 +323,7 @@ async def _seed_e2e_data() -> None:
                         pa_pct_chg,
                         pa_vol,
                         pa_amount,
+                        1.0,
                     )
                 )
                 # 贵州茅台：pct_chg 0.2~1.5（不通过过滤）
@@ -328,7 +336,7 @@ async def _seed_e2e_data() -> None:
                 quote_rows.append(
                     (
                         "600519.SH",
-                        td.isoformat(),
+                        td,
                         round(mt_pre_close - 2, 4),
                         round(mt_close + 2, 4),
                         round(mt_pre_close - 5, 4),
@@ -338,6 +346,7 @@ async def _seed_e2e_data() -> None:
                         mt_pct_chg,
                         mt_vol,
                         mt_amount,
+                        1.0,
                     )
                 )
 
@@ -346,7 +355,7 @@ async def _seed_e2e_data() -> None:
                 indicator_rows.append(
                     (
                         "000001.SZ",
-                        td.isoformat(),
+                        td,
                         round(rng.uniform(5.0, 8.0), 4),
                         round(rng.uniform(0.5, 0.8), 4),
                         round(rng.uniform(1.5, 2.0), 4),
@@ -361,7 +370,7 @@ async def _seed_e2e_data() -> None:
                 indicator_rows.append(
                     (
                         "600519.SH",
-                        td.isoformat(),
+                        td,
                         round(rng.uniform(30.0, 40.0), 4),
                         round(rng.uniform(10.0, 14.0), 4),
                         round(rng.uniform(13.0, 17.0), 4),
@@ -376,8 +385,8 @@ async def _seed_e2e_data() -> None:
             await conn.executemany(
                 """
                 INSERT INTO daily_quotes
-                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
-                VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
                 quote_rows,
             )
@@ -385,7 +394,7 @@ async def _seed_e2e_data() -> None:
                 """
                 INSERT INTO daily_indicators
                     (ts_code, trade_date, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate, turnover_rate_f, volume_ratio)
-                VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
                 indicator_rows,
             )
@@ -401,7 +410,7 @@ async def _seed_e2e_data() -> None:
                 index_rows.append(
                     (
                         "000300.SH",
-                        td.isoformat(),
+                        td,
                         round(idx_close - 5, 4),
                         round(idx_close + 10, 4),
                         round(idx_close - 10, 4),
@@ -417,25 +426,25 @@ async def _seed_e2e_data() -> None:
                 """
                 INSERT INTO index_daily
                     (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
-                VALUES ($1, $2::date, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 index_rows,
             )
 
             # sync_status — 质量门控评级依据
             sync_rows = [
-                ("daily_quotes", today_str, today_str, 120, "success", "success", 0),
-                ("daily_indicators", today_str, today_str, 120, "success", "success", 0),
-                ("financial_reports", today_str, today_str, 0, "success", "empty", 0),
-                ("stock_basic", today_str, today_str, 2, "success", "success", 0),
-                ("trade_cal", today_str, today_str, len(cal_rows), "success", "success", 0),
-                ("index_daily", today_str, today_str, 60, "success", "success", 0),
+                ("daily_quotes", today, today, 120, "success", "success", 0),
+                ("daily_indicators", today, today, 120, "success", "success", 0),
+                ("financial_reports", today, today, 0, "success", "empty", 0),
+                ("stock_basic", today, today, 2, "success", "success", 0),
+                ("trade_cal", today, today, len(cal_rows), "success", "success", 0),
+                ("index_daily", today, today, 60, "success", "success", 0),
             ]
             await conn.executemany(
                 """
                 INSERT INTO sync_status
                     (table_name, last_sync_date, last_data_date, record_count, status, last_result_status, error_count)
-                VALUES ($1, $2::date, $3::date, $4, $5, $6, $7)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
                 sync_rows,
             )

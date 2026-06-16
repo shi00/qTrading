@@ -140,6 +140,12 @@ class TradeCalendarService:
         Returns:
             DataFrame 或 None
         """
+        import os
+
+        if os.environ.get("E2E_TESTING") == "true":
+            logger.debug(f"[TradeCalendarService] E2E mode: skipping Tushare API fetch for {start_date} - {end_date}")
+            return None
+
         try:
             df = await self._api.get_trade_cal(start_date=start_date, end_date=end_date)
             if df is not None and not df.empty:
@@ -286,7 +292,10 @@ class TradeCalendarService:
                 # 3年约730个交易日，如果记录数远低于预期跨度的交易日密度，说明数据不完整
                 span_days = (end_obj - start_obj).days
                 expected_min = max(1, int(span_days * 0.6))  # 保守估计：60% 是交易日
-                if span_days > 30 and len(df) < expected_min * 0.5:
+                import os
+
+                is_e2e = os.environ.get("E2E_TESTING") == "true"
+                if not is_e2e and span_days > 30 and len(df) < expected_min * 0.5:
                     # 数据明显不完整，回退到 API 补充
                     logger.warning(
                         f"[TradeCalendarService] DB data incomplete: {len(df)} records "

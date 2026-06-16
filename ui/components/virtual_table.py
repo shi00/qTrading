@@ -96,6 +96,13 @@ class PaginatedTable(ft.Column):
         else:
             self._canvas.controls = []
 
+        if self.page:
+            try:
+                self.header_container.update()
+                self._canvas.update()
+            except Exception:
+                pass
+
     def set_rows(self, data_rows, sort_col=None, sort_asc=True):
         """Store full page rows and render the first visible window.
 
@@ -116,6 +123,7 @@ class PaginatedTable(ft.Column):
         if self.page:
             # Best-effort only. `set_rows` must still be valid before mount.
             try:
+                self._canvas.update()
                 self.list_view.scroll_to(offset=0, duration=0)
             except Exception:
                 pass

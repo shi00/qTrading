@@ -39,6 +39,18 @@ class FletPage:
     async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = 8000) -> None:
         scaled = self._tm(timeout_ms)
         btn = self.page.get_by_role(role, name=name)
+        by_label = self.page.locator(
+            f'[aria-label="{name}"], [aria-label*="{name}"]:not([role="tabpanel"]):not([role="group"]):not([role="region"])'
+        )
+        text_loc = self.page.get_by_text(name, exact=False)
+
+        # Combine all candidates using .or_() so that we wait for whichever appears first!
+        loc_combined = btn.or_(by_label).or_(text_loc).first
+        try:
+            await loc_combined.wait_for(state="attached", timeout=scaled)
+        except Exception as e:
+            logger.debug("Combined click target not found for '%s' (role: %s): %s", name, role, e)
+
         if await btn.count() > 0:
             try:
                 await btn.first.click(timeout=self._tm(3000))
@@ -46,7 +58,6 @@ class FletPage:
             except Exception:
                 pass
 
-        by_label = self.page.locator(f'flt-semantics[aria-label="{name}"]')
         if await by_label.count() > 0:
             try:
                 await by_label.first.click(timeout=self._tm(3000))
@@ -54,17 +65,26 @@ class FletPage:
             except Exception:
                 pass
 
-        text_loc = self.page.get_by_text(name, exact=False).first
-        await text_loc.wait_for(state="attached", timeout=scaled)
-        box = await text_loc.bounding_box()
-        if box:
-            await self.page.mouse.click(
-                box["x"] + box["width"] / 2,
-                box["y"] + box["height"] / 2,
-            )
-            return
+        if await text_loc.count() > 0:
+            target = text_loc.first
+            try:
+                box = await target.bounding_box()
+                if box:
+                    await self.page.mouse.click(
+                        box["x"] + box["width"] / 2,
+                        box["y"] + box["height"] / 2,
+                    )
+                    return
+            except Exception:
+                pass
+            try:
+                await target.click(force=True, timeout=self._tm(3000))
+                return
+            except Exception:
+                pass
 
-        await text_loc.click(force=True, timeout=scaled)
+        # If everything fails, try clicking the combined locator to trigger standard playwright error
+        await loc_combined.click(timeout=self._tm(3000))
 
     async def click_button(self, name: str, timeout_ms: int = 8000) -> None:
         await self._click_with_fallback(name, "button", timeout_ms)
@@ -75,14 +95,37 @@ class FletPage:
 
     async def click_text(self, text: str, timeout_ms: int = 8000) -> None:
         scaled = self._tm(timeout_ms)
-        loc = self.page.get_by_text(text, exact=False).first
-        await loc.wait_for(state="attached", timeout=scaled)
-        await loc.click(timeout=scaled)
+        loc_text = self.page.get_by_text(text, exact=False)
+        loc_aria = self.page.locator(
+            f'[aria-label*="{text}"]:not([role="tabpanel"]):not([role="group"]):not([role="region"])'
+        )
+        loc_combined = loc_text.or_(loc_aria).first
+        await loc_combined.wait_for(state="attached", timeout=scaled)
+        await loc_combined.click(timeout=scaled, force=True)
 
     async def fill_textbox(self, label: str, value: str, timeout_ms: int = 8000) -> None:
         scaled = self._tm(timeout_ms)
-        el = self.page.get_by_role("textbox", name=label).first
-        await el.wait_for(state="visible", timeout=scaled)
+        loc1 = self.page.get_by_role("textbox", name=label)
+        loc2 = self.page.locator(
+            f'input[aria-label*="{label}" i], textarea[aria-label*="{label}" i], [role="textbox"][aria-label*="{label}" i]'
+        )
+        loc_combined = loc1.or_(loc2).first
+
+        try:
+            await loc_combined.wait_for(state="visible", timeout=scaled)
+            el = loc_combined
+        except Exception:
+            # Fallback: check if there's exactly 1 textbox on the page
+            try:
+                loc3 = self.page.get_by_role("textbox")
+                await loc3.first.wait_for(state="visible", timeout=self._tm(2000))
+                if await loc3.count() == 1:
+                    el = loc3.first
+                else:
+                    el = loc1.first
+            except Exception:
+                el = loc1.first
+
         await el.click(timeout=scaled)
         try:
             await el.fill(value, timeout=scaled)
@@ -110,6 +153,10 @@ class FletPage:
             opt_match_key = "简体中文"
         elif "english" in opt_lower or "en" in opt_lower:
             opt_match_key = "english"
+        elif "volume_breakout" in opt_lower:
+            opt_match_key = "放量突破"
+        elif "oversold" in opt_lower:
+            opt_match_key = "超跌反弹"
 
         def get_option_locators():
             return [
@@ -231,36 +278,39 @@ class FletPage:
 
     async def expect_text(self, text: str, timeout_ms: int = 8000) -> None:
         scaled = self._tm(timeout_ms)
-        loc = self.page.get_by_text(text, exact=False).first
+        loc_text = self.page.get_by_text(text, exact=False)
+        loc_aria = self.page.locator(
+            f'[aria-label*="{text}"]:not([role="tabpanel"]):not([role="group"]):not([role="region"])'
+        )
+        loc_combined = loc_text.or_(loc_aria).first
         try:
-            await loc.wait_for(state="attached", timeout=self._tm(2000))
+            await loc_combined.wait_for(state="attached", timeout=scaled)
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Combined locator wait_for failed for text '%s': %s", text, e)
 
-        loc_aria = self.page.locator(f'[aria-label*="{text}"]').first
-        try:
-            await loc_aria.wait_for(state="attached", timeout=self._tm(2000))
-            return
-        except Exception:
-            pass
+        # Fallback: poll input field values
+        import time
 
-        try:
-            inputs_match = self.page.locator("input")
-            count = await inputs_match.count()
-            for i in range(count):
-                el = inputs_match.nth(i)
-                val = await el.evaluate("e => e.value")
-                if text.lower() in val.lower():
-                    return
-        except Exception:
-            pass
+        start_time = time.time()
+        while (time.time() - start_time) * 1000 < scaled:
+            try:
+                inputs_match = self.page.locator("input")
+                count = await inputs_match.count()
+                for i in range(count):
+                    el = inputs_match.nth(i)
+                    val = await el.evaluate("e => e.value")
+                    if text.lower() in val.lower():
+                        return
+            except Exception:
+                pass
+            await self.page.wait_for_timeout(200)
 
         if logger.isEnabledFor(logging.DEBUG):
             self._dump_dom_debug(text)
 
-        loc_final = self.page.locator(f'[aria-label*="{text}"]').first
-        await loc_final.wait_for(state="attached", timeout=scaled)
+        # Trigger standard playwright timeout error for trace and stacktrace
+        await loc_combined.wait_for(state="attached", timeout=1)
 
     async def has_text(self, text: str) -> bool:
         """检查页面上是否存在指定文本。"""

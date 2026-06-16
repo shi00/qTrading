@@ -902,7 +902,7 @@ class ScreenerView(ft.Container):
                             color=AppColors.TEXT_PRIMARY,
                         ),
                         ft.Divider(height=1, color=AppColors.DIVIDER),
-                        ft.Column(controls, spacing=8),
+                        ft.Row(controls, wrap=True, spacing=15),
                     ],
                     spacing=8,
                 ),
@@ -1005,8 +1005,13 @@ class ScreenerView(ft.Container):
                 )
                 slider.data = p["name"]
 
-                controls.append(value_text)
-                controls.append(slider)
+                # Group label and slider vertically in a compact Column with width 200
+                param_group = ft.Column(
+                    [value_text, slider],
+                    spacing=2,
+                    width=200,
+                )
+                controls.append(param_group)
 
             elif p_type == "number":
                 ctrl = ft.TextField(
@@ -1018,6 +1023,7 @@ class ScreenerView(ft.Container):
                     focused_border_color=AppColors.PRIMARY,
                     text_size=13,
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    width=200,
                 )
                 ctrl.data = p["name"]
                 controls.append(ctrl)
@@ -1033,6 +1039,7 @@ class ScreenerView(ft.Container):
                     focused_border_color=AppColors.PRIMARY,
                     text_size=13,
                     content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    width=200,
                 )
                 ctrl.data = p["name"]
                 controls.append(ctrl)
@@ -1316,7 +1323,7 @@ class ScreenerView(ft.Container):
 
         async def _do_update():
             # 1. Update Table
-            await self._render_table_async()
+            self._render_table_sync()
 
             # 2. Update Pagination
             self.page_info_text.value = I18n.get("screener_page_info").format(
@@ -1372,6 +1379,10 @@ class ScreenerView(ft.Container):
     def _render_table_sync(self):
         """Synchronous fallback for non-async callers (e.g. update_theme)"""
         df = self.vm.get_current_page_data()
+        logger.info("=== E2E DEBUG _render_table_sync: df empty=%s ===", df.empty if df is not None else True)
+        if df is not None and not df.empty:
+            logger.info("DF columns: %s", list(df.columns))
+            logger.info("DF row 0: %s", df.iloc[0].to_dict())
 
         if df is None or df.empty:
             self.result_table.set_columns([])

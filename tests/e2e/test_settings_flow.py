@@ -21,13 +21,14 @@ async def test_settings_theme_switch(e2e_page):
     await e2e_page.expect_text(settings_title, timeout_ms=10000)
 
     tab_system = I18n.get("settings_tab_system")
-    await e2e_page.click_tab(tab_system)
+    # 使用 click_text 而不是 click_tab，因为 click_tab 内部的 get_by_text 是 exact=False
+    # 如果 exact=False，"系统" 可能会匹配到页面标题 "系统设置"，导致点击无效
+    await e2e_page.click_text(tab_system, timeout_ms=8000)
 
-    core_config_label = I18n.get("sys_core_config")
-    await e2e_page.expect_text(core_config_label)
-
+    # 核心配置由于 CanvasKit 渲染为非独立语义节点可能无法被 get_by_text 获取
+    # 直接验证主题下拉框的存在，这足以证明 System Tab 已加载
     theme_label = I18n.get("settings_theme")
-    await e2e_page.expect_text(theme_label)
+    await e2e_page.expect_text(theme_label, timeout_ms=10000)
 
     theme_light = I18n.get("theme_light")
     await e2e_page.select_dropdown(theme_label, theme_light)

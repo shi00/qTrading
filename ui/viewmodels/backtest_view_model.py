@@ -84,8 +84,9 @@ class BacktestViewModel:
 
     def get_available_strategies(self) -> dict[str, str]:
         """获取可用策略列表。"""
-        registry = get_strategy_registry()
-        return {key: I18n.get(cls().name) for key, cls in registry.items()}
+        from strategies.all_strategies import StrategyManager
+
+        return StrategyManager().get_all_names()
 
     def create_config(
         self,

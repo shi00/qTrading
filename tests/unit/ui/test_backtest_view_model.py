@@ -160,12 +160,10 @@ class TestBacktestViewModel:
         assert config.benchmark_code == "000905.SH"
         assert config.risk_free_rate == 0.03
 
-    @patch("ui.viewmodels.backtest_view_model.get_strategy_registry")
-    def test_get_available_strategies(self, mock_registry):
+    @patch("strategies.all_strategies.StrategyManager")
+    def test_get_available_strategies(self, mock_manager):
         """测试获取可用策略列表。"""
-        mock_strategy_cls = MagicMock()
-        mock_strategy_cls.return_value.name = "测试策略"
-        mock_registry.return_value = {"test_strategy": mock_strategy_cls}
+        mock_manager.return_value.get_all_names.return_value = {"test_strategy": "测试策略"}
 
         vm = BacktestViewModel()
         strategies = vm.get_available_strategies()
@@ -173,26 +171,22 @@ class TestBacktestViewModel:
         assert "test_strategy" in strategies
         assert strategies["test_strategy"] == "测试策略"
 
-    @patch("ui.viewmodels.backtest_view_model.get_strategy_registry")
-    def test_get_available_strategies_empty(self, mock_registry):
+    @patch("strategies.all_strategies.StrategyManager")
+    def test_get_available_strategies_empty(self, mock_manager):
         """测试获取空策略列表。"""
-        mock_registry.return_value = {}
+        mock_manager.return_value.get_all_names.return_value = {}
 
         vm = BacktestViewModel()
         strategies = vm.get_available_strategies()
 
         assert strategies == {}
 
-    @patch("ui.viewmodels.backtest_view_model.get_strategy_registry")
-    def test_get_available_strategies_multiple(self, mock_registry):
+    @patch("strategies.all_strategies.StrategyManager")
+    def test_get_available_strategies_multiple(self, mock_manager):
         """测试获取多个策略列表。"""
-        mock_strategy_cls1 = MagicMock()
-        mock_strategy_cls1.return_value.name = "策略1"
-        mock_strategy_cls2 = MagicMock()
-        mock_strategy_cls2.return_value.name = "策略2"
-        mock_registry.return_value = {
-            "strategy1": mock_strategy_cls1,
-            "strategy2": mock_strategy_cls2,
+        mock_manager.return_value.get_all_names.return_value = {
+            "strategy1": "策略1",
+            "strategy2": "策略2",
         }
 
         vm = BacktestViewModel()

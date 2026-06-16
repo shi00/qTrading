@@ -8,7 +8,7 @@ import pandas as pd
 import sqlalchemy as sa
 
 from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
-from data.persistence.models import BacktestResultModel, get_model_columns, get_model_pk_columns
+from data.persistence.models import BacktestResultModel, get_model_columns
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ class BacktestDAO(BaseDao):
             df,
             "backtest_results",
             get_model_columns(BacktestResultModel),
-            pk_columns=get_model_pk_columns(BacktestResultModel),
+            pk_columns=["run_id"],
         )
 
     async def get_result(self, run_id: str) -> dict | None:
