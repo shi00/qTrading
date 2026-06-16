@@ -118,7 +118,7 @@
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) |
 | R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) |
-| R7 | **测试状态污染** | 测试中不隔离单例 (必须使用 `reset_singleton` 上下文管理器) |
+| R7 | **测试状态污染** | 单例未隔离 (单元测试由 `_reset_all_singletons` autouse fixture 自动重置，无需手动隔离) |
 | R8 | **废弃 API** | 使用 `_write_db(is_many=True)` 进行批量写入 (会发 `DeprecationWarning`，必须用 `_save_upsert()`) |
 | R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 `DataSanitizer` 脱敏) |
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) |
@@ -508,10 +508,11 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 - `@pytest.mark.e2e` — 端到端测试
 - `@pytest.mark.slow` — 慢速测试 (真实 sleep、大量 IO)
 - `@pytest.mark.network` — 需要真实网络访问
+- `@pytest.mark.no_auto_mock` — 跳过 `mock_external_services` autouse fixture (用于测试外部服务自身)
 
 ### 7.2 测试编写规则
 
-- **单例隔离**: 使用 `reset_singleton` 上下文管理器 (支持 `extra_attrs` 参数重置额外类属性)
+- **单例隔离**: 单元测试由 `_reset_all_singletons` autouse fixture 自动重置所有注册单例，无需手动隔离。特殊场景需手动控制单例状态时，可使用 `reset_singleton` 上下文管理器：
 
   ```python
   from tests.conftest import reset_singleton
@@ -522,7 +523,9 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
   # 自动恢复原始单例状态
   ```
 
-- **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 级别，`pytest_configure` 早期拦截)，每个测试后清理状态。
+- **外部服务 Mock**: 单元测试由 `mock_external_services` autouse fixture 自动 mock 外部网络调用 (`NewsFetcher`/`ReviewManager`)。测试自身模块需跳过 mock 时，在文件顶部声明 `pytestmark = pytest.mark.no_auto_mock`。
+
+- **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
 - **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。
 - **事件循环策略**: Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 为 `session` 级。
 - **配置隔离**: 测试使用临时配置文件 (`tempfile.mkdtemp`)，通过 `pytest_configure` 在 import 之前重写 `utils.config_handler.CONFIG_FILE`。
