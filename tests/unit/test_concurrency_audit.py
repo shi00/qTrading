@@ -11,19 +11,6 @@ from utils.rate_limiter import TokenBucket
 from utils.thread_pool import ThreadPoolManager
 
 
-@pytest.fixture(autouse=True)
-def reset_singletons():
-    NewsSubscriptionService._instance = None
-    NewsSubscriptionService._initialized = False
-    MarketDataService._reset_singleton()
-    ThreadPoolManager._reset_singleton()
-    yield
-    NewsSubscriptionService._instance = None
-    NewsSubscriptionService._initialized = False
-    MarketDataService._reset_singleton()
-    ThreadPoolManager._reset_singleton()
-
-
 class TestNewsSubscriptionStopBehavior:
     """C-P1-2: Verify stop() behavioral contracts — not implementation details.
 

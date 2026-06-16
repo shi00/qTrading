@@ -6,13 +6,6 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 from utils.scheduler_service import SchedulerService
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    SchedulerService._reset_singleton()
-    yield
-    SchedulerService._reset_singleton()
-
-
 def _make_svc():
     with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
         mock_ch.get_setting.return_value = None
@@ -556,12 +549,6 @@ class TestScheduleJobsInvalidTime:
 
 
 class TestSchedulerServiceStatus:
-    def setup_method(self):
-        SchedulerService._reset_singleton()
-
-    def teardown_method(self):
-        SchedulerService._reset_singleton()
-
     def test_get_status_returns_dict(self):
         with (
             patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),

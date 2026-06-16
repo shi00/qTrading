@@ -6,13 +6,11 @@ Covers:
 - SchedulerService._atexit_cleanup() — calls scheduler.shutdown(wait=False)
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from utils.scheduler_service import SchedulerService
-from tests.conftest import reset_singleton as _reset_singleton_ctx
 
 
 # ---------------------------------------------------------------------------
@@ -21,11 +19,6 @@ from tests.conftest import reset_singleton as _reset_singleton_ctx
 
 
 class TestCacheManagerAtexitCleanup:
-    @pytest.fixture(autouse=True)
-    def _reset(self):
-        with _reset_singleton_ctx(CacheManager, extra_attrs=["_initialized"]):
-            yield
-
     def test_disposes_sync_engine_and_sets_disposed(self):
         """_atexit_cleanup calls engine.sync_engine.dispose() and sets _disposed=True."""
         mgr = CacheManager.__new__(CacheManager)
@@ -89,12 +82,6 @@ class TestCacheManagerAtexitCleanup:
 
 
 class TestDataProcessorAtexitCleanup:
-    @pytest.fixture(autouse=True)
-    def _reset(self):
-        DataProcessor._reset_singleton()
-        yield
-        DataProcessor._reset_singleton()
-
     def test_sets_cancel_event(self):
         """_atexit_cleanup sets the cancel event via get_loop_local(strict=False)."""
         dp = DataProcessor.__new__(DataProcessor)
@@ -134,12 +121,6 @@ class TestDataProcessorAtexitCleanup:
 
 
 class TestSchedulerServiceAtexitCleanup:
-    @pytest.fixture(autouse=True)
-    def _reset(self):
-        SchedulerService._reset_singleton()
-        yield
-        SchedulerService._reset_singleton()
-
     def test_shutdown_running_scheduler(self):
         """_atexit_cleanup calls scheduler.shutdown(wait=False) when running."""
         svc = SchedulerService.__new__(SchedulerService)

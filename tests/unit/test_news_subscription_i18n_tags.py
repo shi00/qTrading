@@ -3,14 +3,6 @@ import pytest
 from services.news_subscription_service import NewsSubscriptionService
 
 
-@pytest.fixture(autouse=True)
-def _reset_singleton():
-    """Ensure singleton state is clean before and after each test."""
-    NewsSubscriptionService._reset_singleton()
-    yield
-    NewsSubscriptionService._reset_singleton()
-
-
 def _make_i18n_mock(overrides=None):
     overrides = overrides or {}
 

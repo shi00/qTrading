@@ -6,13 +6,6 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from services.local_model_manager import LocalModelManager, _HAS_LLAMA_CPP
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    LocalModelManager._reset_singleton()
-    yield
-    LocalModelManager._reset_singleton()
-
-
 class TestLocalModelManagerGetLoadedModelPath:
     def test_no_model_loaded(self):
         mgr = LocalModelManager()
@@ -363,14 +356,6 @@ class TestLocalModelManagerConstants:
 
 
 class TestLocalModelManagerGetModelInfo:
-    def setup_method(self):
-        LocalModelManager._instance = None
-        LocalModelManager._initialized = False
-
-    def teardown_method(self):
-        LocalModelManager._instance = None
-        LocalModelManager._initialized = False
-
     def test_get_loaded_model_path_empty(self):
         mgr = LocalModelManager.__new__(LocalModelManager)
         mgr._model_path = ""
@@ -388,14 +373,6 @@ class TestLocalModelManagerGetModelInfo:
 
 
 class TestLocalModelManagerGetters:
-    def setup_method(self):
-        LocalModelManager._instance = None
-        LocalModelManager._initialized = False
-
-    def teardown_method(self):
-        LocalModelManager._instance = None
-        LocalModelManager._initialized = False
-
     def test_get_loaded_model_path_empty(self):
         LocalModelManager._model_path = ""
         assert LocalModelManager._model_path == ""

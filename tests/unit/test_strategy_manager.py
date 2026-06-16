@@ -1,17 +1,8 @@
-import pytest
 from unittest.mock import MagicMock, patch
 
 
 class TestStrategyManagerCache:
     """Tests for StrategyManager dependency cache functionality."""
-
-    @pytest.fixture(autouse=True)
-    def reset_singleton(self):
-        from strategies.all_strategies import StrategyManager
-
-        StrategyManager._reset_singleton()
-        yield
-        StrategyManager._reset_singleton()
 
     def test_get_all_with_dependencies_returns_cached_result(self):
         """Test that second call returns cached result without recomputation."""

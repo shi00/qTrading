@@ -799,32 +799,28 @@ class TestLocalModelManagerIntegration:
     def test_local_model_manager_singleton_reset_clears_instance(self):
         """Test that _reset_singleton clears the singleton instance"""
         from services.local_model_manager import LocalModelManager
-        from tests.conftest import reset_singleton
 
-        with reset_singleton(LocalModelManager):
-            assert LocalModelManager._instance is None
-            assert LocalModelManager._initialized is False
+        assert LocalModelManager._instance is None
+        assert LocalModelManager._initialized is False
 
     def test_local_model_manager_singleton_reset_unloads_model(self):
         """Test that _reset_singleton unloads LLM model to free memory"""
         from services.local_model_manager import LocalModelManager
-        from tests.conftest import reset_singleton
 
-        with reset_singleton(LocalModelManager):
-            # 在隔离环境中创建实例并设置属性
-            LocalModelManager._instance = object.__new__(LocalModelManager)
-            LocalModelManager._instance._worker_lock = threading.Lock()
-            LocalModelManager._instance._worker_proc = None
-            LocalModelManager._instance._request_queue = None
-            LocalModelManager._instance._result_queue = None
-            LocalModelManager._instance._worker_ready = False
-            LocalModelManager._initialized = True
+        # 在隔离环境中创建实例并设置属性
+        LocalModelManager._instance = object.__new__(LocalModelManager)
+        LocalModelManager._instance._worker_lock = threading.Lock()
+        LocalModelManager._instance._worker_proc = None
+        LocalModelManager._instance._request_queue = None
+        LocalModelManager._instance._result_queue = None
+        LocalModelManager._instance._worker_ready = False
+        LocalModelManager._initialized = True
 
-            # 调用 reset 清理
-            LocalModelManager._reset_singleton()
+        # 调用 reset 清理
+        LocalModelManager._reset_singleton()
 
-            assert LocalModelManager._instance is None
-            assert LocalModelManager._initialized is False
+        assert LocalModelManager._instance is None
+        assert LocalModelManager._initialized is False
 
 
 class TestSliderLabelAttribute:

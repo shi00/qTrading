@@ -15,13 +15,6 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.backtest_dao import BacktestDAO
-from tests.conftest import reset_singleton as _reset_singleton_ctx
-
-
-@pytest.fixture(autouse=True)
-def _reset_cache_singleton():
-    with _reset_singleton_ctx(CacheManager, extra_attrs=["_initialized"]):
-        yield
 
 
 def _make_async_engine_ctx(mock_conn=None):

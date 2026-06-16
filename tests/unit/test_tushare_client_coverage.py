@@ -8,13 +8,6 @@ import requests
 from data.external.tushare_client import TushareClient
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    TushareClient._reset_singleton()
-    yield
-    TushareClient._reset_singleton()
-
-
 def _make_client(token="test_token", limit=120):
     with (
         patch("data.external.tushare_client.ts") as mock_ts,

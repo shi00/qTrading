@@ -6,13 +6,6 @@ from unittest.mock import patch, MagicMock
 from utils.thread_pool import ThreadPoolManager, TaskType, get_thread_pool_manager
 
 
-@pytest.fixture(autouse=True)
-def auto_reset_singleton():
-    ThreadPoolManager._reset_singleton()
-    yield
-    ThreadPoolManager._reset_singleton()
-
-
 class TestThreadPoolManagerInit:
     @patch("utils.thread_pool.ConfigHandler")
     def test_init(self, mock_ch):

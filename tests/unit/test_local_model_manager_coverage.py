@@ -12,13 +12,6 @@ from services.local_model_manager import (
 )
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    LocalModelManager._reset_singleton()
-    yield
-    LocalModelManager._reset_singleton()
-
-
 class TestPersistentWorkerImportFailure:
     def test_llama_cpp_import_failure(self):
         mock_req_queue = MagicMock()

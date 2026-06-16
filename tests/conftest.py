@@ -235,14 +235,11 @@ def _reset_mock_keyring_store():
 def mock_external_services(request):
     """
     Globally mock external network and DB calls for unit tests to prevent CI timeouts.
-    Tests that manage their own mocks should use @pytest.mark.no_auto_mock.
+    Avoids patching when testing the respective modules themselves.
     """
     from unittest.mock import patch, AsyncMock
 
-    # Skip all auto-mocking when the test explicitly opts out
-    if request.node.get_closest_marker("no_auto_mock"):
-        yield
-        return
+    module_name = getattr(request.module, "__name__", "")
 
     # Only apply to unit tests. Do not intercept integration or E2E tests.
     is_unit_test = False
@@ -251,7 +248,6 @@ def mock_external_services(request):
     elif hasattr(request, "fspath"):
         is_unit_test = "tests/unit" in str(request.fspath).replace("\\", "/")
     else:
-        module_name = getattr(request.module, "__name__", "")
         is_unit_test = "tests.unit" in module_name or module_name.startswith("unit")
 
     if not is_unit_test:
@@ -261,21 +257,32 @@ def mock_external_services(request):
     patches = []
 
     # Mock NewsFetcher network calls (async)
-    try:
-        from data.external.news_fetcher import NewsFetcher
+    if "test_news_fetcher" not in module_name and "test_news_subscription" not in module_name:
+        try:
+            from data.external.news_fetcher import NewsFetcher
 
-        patches.append(patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock, return_value=[]))
-        patches.append(patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock, return_value=""))
-    except ImportError:
-        pass
+            patches.append(patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock, return_value=[]))
+            patches.append(patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock, return_value=""))
+        except ImportError:
+            pass
 
     # Mock ReviewManager database calls (async)
-    try:
-        from data.persistence.review_manager import ReviewManager
+    if "test_review_manager" not in module_name:
+        try:
+            from data.persistence.review_manager import ReviewManager
 
-        patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
-    except ImportError:
-        pass
+            patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
+        except ImportError:
+            pass
+
+    # Mock FinancialSync ConfigHandler delay to 0 to prevent asyncio.sleep timeouts
+    if "test_financial_sync" in module_name:
+        try:
+            from utils.config_handler import ConfigHandler
+
+            patches.append(patch.object(ConfigHandler, "get_sync_request_delay", return_value=0))
+        except ImportError:
+            pass
 
     for p in patches:
         p.start()

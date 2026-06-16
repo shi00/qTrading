@@ -9,13 +9,6 @@ from services.news_subscription_service import NewsSubscriptionService, NewsUpda
 pytestmark = pytest.mark.no_auto_mock
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    NewsSubscriptionService._reset_singleton()
-    yield
-    NewsSubscriptionService._reset_singleton()
-
-
 class TestNewsUpdateType:
     def test_constants(self):
         assert NewsUpdateType.NEW_ITEM == "new_item"

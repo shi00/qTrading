@@ -7,13 +7,6 @@ import datetime
 from data.external.tushare_client import TushareClient
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    TushareClient._reset_singleton()
-    yield
-    TushareClient._reset_singleton()
-
-
 @pytest.fixture
 def tushare_client_mocks():
     with (

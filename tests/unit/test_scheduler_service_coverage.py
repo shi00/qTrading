@@ -7,13 +7,6 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from utils.scheduler_service import SchedulerService
 
 
-@pytest.fixture(autouse=True)
-def reset_singletons():
-    SchedulerService._reset_singleton()
-    yield
-    SchedulerService._reset_singleton()
-
-
 def _make_svc():
     with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
         mock_ch.get_setting.return_value = None

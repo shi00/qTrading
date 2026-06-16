@@ -8,8 +8,7 @@ from data.data_processor import DataProcessor
 
 
 def _make_dp():
-    DataProcessor._instance = None
-    DataProcessor._initialized = False
+    DataProcessor._reset_singleton()
     with (
         patch("data.data_processor.CacheManager"),
         patch("data.data_processor.TushareClient"),
@@ -21,403 +20,305 @@ def _make_dp():
     return dp
 
 
-def _cleanup(dp):
-    DataProcessor._instance = None
-    DataProcessor._initialized = False
-
-
 class TestDataProcessorRefreshToken:
     def test_refresh_with_new_token(self):
         dp = _make_dp()
-        try:
-            with patch("data.data_processor.TushareClient"):
-                dp.refresh_token("new_token")
-                assert dp._current_token == "new_token"
-        finally:
-            _cleanup(dp)
+        with patch("data.data_processor.TushareClient"):
+            dp.refresh_token("new_token")
+            assert dp._current_token == "new_token"
 
     def test_refresh_auto_detect(self):
         dp = _make_dp()
-        try:
-            with (
-                patch("data.data_processor.ConfigHandler") as mock_ch,
-                patch("data.data_processor.TushareClient"),
-            ):
-                mock_ch.get_token.return_value = "auto_token"
-                dp.refresh_token()
-                assert dp._current_token == "auto_token"
-        finally:
-            _cleanup(dp)
+        with (
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.TushareClient"),
+        ):
+            mock_ch.get_token.return_value = "auto_token"
+            dp.refresh_token()
+            assert dp._current_token == "auto_token"
 
 
 class TestDataProcessorCancel:
     @pytest.mark.asyncio
     async def test_get_cancel_event(self):
         dp = _make_dp()
-        try:
-            evt = dp._get_cancel_event()
-            assert evt is not None
-        finally:
-            _cleanup(dp)
+        evt = dp._get_cancel_event()
+        assert evt is not None
 
     @pytest.mark.asyncio
     async def test_is_cancelled(self):
         dp = _make_dp()
-        try:
-            dp.clear_cancel()
-            assert not dp.is_cancelled()
-            dp._get_cancel_event().set()
-            assert dp.is_cancelled()
-        finally:
-            _cleanup(dp)
+        dp.clear_cancel()
+        assert not dp.is_cancelled()
+        dp._get_cancel_event().set()
+        assert dp.is_cancelled()
 
     @pytest.mark.asyncio
     async def test_clear_cancel(self):
         dp = _make_dp()
-        try:
-            dp._get_cancel_event().set()
-            dp.clear_cancel()
-            assert not dp.is_cancelled()
-        finally:
-            _cleanup(dp)
+        dp._get_cancel_event().set()
+        dp.clear_cancel()
+        assert not dp.is_cancelled()
 
     @pytest.mark.asyncio
     async def test_request_cancel(self):
         dp = _make_dp()
-        try:
-            for s in dp.strategies.values():
-                s.cancel = MagicMock()
-            await dp.request_cancel()
-            assert dp.is_cancelled()
-        finally:
-            _cleanup(dp)
+        for s in dp.strategies.values():
+            s.cancel = MagicMock()
+        await dp.request_cancel()
+        assert dp.is_cancelled()
 
     @pytest.mark.asyncio
     async def test_stop(self):
         dp = _make_dp()
-        try:
-            for s in dp.strategies.values():
-                s.cancel = MagicMock()
-            await dp.stop()
-            assert dp.is_cancelled()
-        finally:
-            _cleanup(dp)
+        for s in dp.strategies.values():
+            s.cancel = MagicMock()
+        await dp.stop()
+        assert dp.is_cancelled()
 
     @pytest.mark.asyncio
     async def test_stop_calls_strategy_cancel(self):
         dp = _make_dp()
-        try:
-            # Track cancel calls
-            cancel_calls = {}
-            for name, s in dp.strategies.items():
-                s.cancel = MagicMock()
-                cancel_calls[name] = s.cancel
+        # Track cancel calls
+        cancel_calls = {}
+        for name, s in dp.strategies.items():
+            s.cancel = MagicMock()
+            cancel_calls[name] = s.cancel
 
-            await dp.stop()
+        await dp.stop()
 
-            # Verify all strategies were cancelled
-            for _name, mock_cancel in cancel_calls.items():
-                mock_cancel.assert_called_once()
-        finally:
-            _cleanup(dp)
+        # Verify all strategies were cancelled
+        for _name, mock_cancel in cancel_calls.items():
+            mock_cancel.assert_called_once()
 
 
 class TestDataProcessorClose:
     @pytest.mark.asyncio
     async def test_close_with_cache(self):
         dp = _make_dp()
-        try:
-            dp.cache = MagicMock()
-            dp.cache.close = AsyncMock()
-            for s in dp.strategies.values():
-                s.cancel = MagicMock()
-            await dp.close()
-            dp.cache.close.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.cache = MagicMock()
+        dp.cache.close = AsyncMock()
+        for s in dp.strategies.values():
+            s.cancel = MagicMock()
+        await dp.close()
+        dp.cache.close.assert_called_once()
 
 
 class TestDataProcessorSyncHistorical:
     @pytest.mark.asyncio
     async def test_sync_historical_data(self):
         dp = _make_dp()
-        try:
-            mock_result = MagicMock()
-            mock_result.status = "completed"
-            dp.strategies["historical"].run = AsyncMock(return_value=mock_result)
-            result = await dp.sync_historical_data(days=100)
-            assert result.status == "completed"
-        finally:
-            _cleanup(dp)
+        mock_result = MagicMock()
+        mock_result.status = "completed"
+        dp.strategies["historical"].run = AsyncMock(return_value=mock_result)
+        result = await dp.sync_historical_data(days=100)
+        assert result.status == "completed"
 
 
 class TestDataProcessorSyncFinancial:
     @pytest.mark.asyncio
     async def test_sync_financial_reports(self):
         dp = _make_dp()
-        try:
-            mock_result = MagicMock()
-            mock_result.added = 50
-            dp.strategies["financial"].run = AsyncMock(return_value=mock_result)
-            result = await dp.sync_financial_reports()
-            assert result == 50
-        finally:
-            _cleanup(dp)
+        mock_result = MagicMock()
+        mock_result.added = 50
+        dp.strategies["financial"].run = AsyncMock(return_value=mock_result)
+        result = await dp.sync_financial_reports()
+        assert result == 50
 
     @pytest.mark.asyncio
     async def test_sync_comprehensive_fundamentals(self):
         dp = _make_dp()
-        try:
-            mock_result = MagicMock()
-            mock_result.status = "completed"
-            dp.strategies["financial"].run = AsyncMock(return_value=mock_result)
-            result = await dp.sync_comprehensive_fundamentals()
-            assert result.status == "completed"
-        finally:
-            _cleanup(dp)
+        mock_result = MagicMock()
+        mock_result.status = "completed"
+        dp.strategies["financial"].run = AsyncMock(return_value=mock_result)
+        result = await dp.sync_comprehensive_fundamentals()
+        assert result.status == "completed"
 
 
 class TestDataProcessorSyncDailyMarket:
     @pytest.mark.asyncio
     async def test_sync_daily_market_snapshot_with_date(self):
         dp = _make_dp()
-        try:
-            dp.strategies["historical"].sync_daily_market_snapshot = AsyncMock()
-            dp.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-            await dp.sync_daily_market_snapshot(trade_date="20240614")
-            dp.strategies["historical"].sync_daily_market_snapshot.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.strategies["historical"].sync_daily_market_snapshot = AsyncMock()
+        dp.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        await dp.sync_daily_market_snapshot(trade_date="20240614")
+        dp.strategies["historical"].sync_daily_market_snapshot.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_sync_daily_market_snapshot_no_date(self):
         dp = _make_dp()
-        try:
-            dp.get_latest_trade_date = AsyncMock(return_value="20240614")
-            dp.strategies["historical"].sync_daily_market_snapshot = AsyncMock()
-            dp.get_screening_data = AsyncMock(return_value=pd.DataFrame())
-            await dp.sync_daily_market_snapshot()
-            dp.strategies["historical"].sync_daily_market_snapshot.assert_called_once_with("20240614", force=False)
-        finally:
-            _cleanup(dp)
+        dp.get_latest_trade_date = AsyncMock(return_value="20240614")
+        dp.strategies["historical"].sync_daily_market_snapshot = AsyncMock()
+        dp.get_screening_data = AsyncMock(return_value=pd.DataFrame())
+        await dp.sync_daily_market_snapshot()
+        dp.strategies["historical"].sync_daily_market_snapshot.assert_called_once_with("20240614", force=False)
 
 
 class TestDataProcessorShouldSyncFinancials:
     @pytest.mark.asyncio
     async def test_force(self):
         dp = _make_dp()
-        try:
-            result, reason = await dp.should_sync_financials(force=True)
-            assert result is True
-        finally:
-            _cleanup(dp)
+        result, reason = await dp.should_sync_financials(force=True)
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_never_synced(self):
         dp = _make_dp()
-        try:
-            dp.cache.get_sync_status = AsyncMock(return_value=None)
-            result, reason = await dp.should_sync_financials()
-            assert result is True
-        finally:
-            _cleanup(dp)
+        dp.cache.get_sync_status = AsyncMock(return_value=None)
+        result, reason = await dp.should_sync_financials()
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_no_last_sync_date(self):
         dp = _make_dp()
-        try:
-            dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": None})
-            result, reason = await dp.should_sync_financials()
-            assert result is True
-        finally:
-            _cleanup(dp)
+        dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": None})
+        result, reason = await dp.should_sync_financials()
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_recent_sync(self):
         dp = _make_dp()
-        try:
-            recent = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=5)
-            dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
-                result, reason = await dp.should_sync_financials()
-                assert result is False
-        finally:
-            _cleanup(dp)
+        recent = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=5)
+        dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+            result, reason = await dp.should_sync_financials()
+            assert result is False
 
     @pytest.mark.asyncio
     async def test_old_sync(self):
         dp = _make_dp()
-        try:
-            old = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=35)
-            dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": old.strftime("%Y-%m-%d")})
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
-                result, reason = await dp.should_sync_financials()
-                assert result is True
-        finally:
-            _cleanup(dp)
+        old = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=35)
+        dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": old.strftime("%Y-%m-%d")})
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+            result, reason = await dp.should_sync_financials()
+            assert result is True
 
     @pytest.mark.asyncio
     async def test_exception_returns_true(self):
         dp = _make_dp()
-        try:
-            dp.cache.get_sync_status = AsyncMock(side_effect=Exception("db error"))
-            result, reason = await dp.should_sync_financials()
-            assert result is True
-        finally:
-            _cleanup(dp)
+        dp.cache.get_sync_status = AsyncMock(side_effect=Exception("db error"))
+        result, reason = await dp.should_sync_financials()
+        assert result is True
 
 
 class TestDataProcessorSyncStockBasic:
     @pytest.mark.asyncio
     async def test_cancelled(self):
         dp = _make_dp()
-        try:
-            dp._get_cancel_event().set()
-            result = await dp.sync_stock_basic()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp._get_cancel_event().set()
+        result = await dp.sync_stock_basic()
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_already_syncing(self):
         dp = _make_dp()
-        try:
-            dp._is_syncing_basic = True
-            result = await dp.sync_stock_basic()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp._is_syncing_basic = True
+        result = await dp.sync_stock_basic()
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_empty_api_result(self):
         dp = _make_dp()
-        try:
-            dp.api.get_stock_basic_all = AsyncMock(return_value=None)
-            dp.clear_cancel()
-            result = await dp.sync_stock_basic()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp.api.get_stock_basic_all = AsyncMock(return_value=None)
+        dp.clear_cancel()
+        result = await dp.sync_stock_basic()
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_successful_sync(self):
         dp = _make_dp()
-        try:
-            df = pd.DataFrame(
-                {
-                    "ts_code": ["000001.SZ", "000002.SZ"],
-                    "list_status": ["L", "D"],
-                }
-            )
-            dp.api.get_stock_basic_all = AsyncMock(return_value=df)
-            dp.cache.save_stock_basic = AsyncMock(return_value=2)
-            dp.cache.update_sync_status = AsyncMock()
-            dp.clear_cancel()
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
-                result = await dp.sync_stock_basic()
-                assert result == 2
-        finally:
-            _cleanup(dp)
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "list_status": ["L", "D"],
+            }
+        )
+        dp.api.get_stock_basic_all = AsyncMock(return_value=df)
+        dp.cache.save_stock_basic = AsyncMock(return_value=2)
+        dp.cache.update_sync_status = AsyncMock()
+        dp.clear_cancel()
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+            result = await dp.sync_stock_basic()
+            assert result == 2
 
     @pytest.mark.asyncio
     async def test_no_stocks_saved(self):
         dp = _make_dp()
-        try:
-            df = pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]})
-            dp.api.get_stock_basic_all = AsyncMock(return_value=df)
-            dp.cache.save_stock_basic = AsyncMock(return_value=0)
-            dp.clear_cancel()
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
-                result = await dp.sync_stock_basic()
-                assert result == 0
-        finally:
-            _cleanup(dp)
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "list_status": ["L"]})
+        dp.api.get_stock_basic_all = AsyncMock(return_value=df)
+        dp.cache.save_stock_basic = AsyncMock(return_value=0)
+        dp.clear_cancel()
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+            result = await dp.sync_stock_basic()
+            assert result == 0
 
     @pytest.mark.asyncio
     async def test_exception(self):
         dp = _make_dp()
-        try:
-            dp.api.get_stock_basic_all = AsyncMock(side_effect=Exception("api error"))
-            dp.clear_cancel()
-            result = await dp.sync_stock_basic()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp.api.get_stock_basic_all = AsyncMock(side_effect=Exception("api error"))
+        dp.clear_cancel()
+        result = await dp.sync_stock_basic()
+        assert result == 0
 
 
 class TestDataProcessorSyncConcepts:
     @pytest.mark.asyncio
     async def test_cancelled(self):
         dp = _make_dp()
-        try:
-            dp._get_cancel_event().set()
-            result = await dp.sync_concepts()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp._get_cancel_event().set()
+        result = await dp.sync_concepts()
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_empty_concept_list(self):
         dp = _make_dp()
-        try:
-            dp.api.get_concept_list = AsyncMock(return_value=None)
-            dp.clear_cancel()
-            result = await dp.sync_concepts()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp.api.get_concept_list = AsyncMock(return_value=None)
+        dp.clear_cancel()
+        result = await dp.sync_concepts()
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_successful_sync(self):
         dp = _make_dp()
-        try:
-            df_c = pd.DataFrame({"code": ["TS1"]})
-            dp.api.get_concept_list = AsyncMock(return_value=df_c)
-            detail_df = pd.DataFrame(
-                {
-                    "id": ["TS1"],
-                    "concept_name": ["Concept1"],
-                    "ts_code": ["000001.SZ"],
-                    "name": ["Stock1"],
-                }
-            )
-            dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
-            dp.cache.overwrite_concepts = AsyncMock(return_value=1)
-            dp.clear_cancel()
-            with patch("data.data_processor.asyncio") as mock_aio:
-                mock_aio.Semaphore = asyncio.Semaphore
-                mock_aio.create_task = asyncio.create_task
-                mock_aio.gather = AsyncMock(return_value=[detail_df])
-                mock_aio.sleep = AsyncMock()
-                mock_aio.CancelledError = asyncio.CancelledError
-                result = await dp.sync_concepts()
-                assert result == 1
-        finally:
-            _cleanup(dp)
+        df_c = pd.DataFrame({"code": ["TS1"]})
+        dp.api.get_concept_list = AsyncMock(return_value=df_c)
+        detail_df = pd.DataFrame(
+            {
+                "id": ["TS1"],
+                "concept_name": ["Concept1"],
+                "ts_code": ["000001.SZ"],
+                "name": ["Stock1"],
+            }
+        )
+        dp.api.get_concept_detail_by_id = AsyncMock(return_value=detail_df)
+        dp.cache.overwrite_concepts = AsyncMock(return_value=1)
+        dp.clear_cancel()
+        with patch("data.data_processor.asyncio") as mock_aio:
+            mock_aio.Semaphore = asyncio.Semaphore
+            mock_aio.create_task = asyncio.create_task
+            mock_aio.gather = AsyncMock(return_value=[detail_df])
+            mock_aio.sleep = AsyncMock()
+            mock_aio.CancelledError = asyncio.CancelledError
+            result = await dp.sync_concepts()
+            assert result == 1
 
     @pytest.mark.asyncio
     async def test_exception(self):
         dp = _make_dp()
-        try:
-            dp.api.get_concept_list = AsyncMock(side_effect=Exception("api error"))
-            dp.clear_cancel()
-            result = await dp.sync_concepts()
-            assert result == 0
-        finally:
-            _cleanup(dp)
+        dp.api.get_concept_list = AsyncMock(side_effect=Exception("api error"))
+        dp.clear_cancel()
+        result = await dp.sync_concepts()
+        assert result == 0
 
 
 class TestDataProcessorInitData:
     @pytest.mark.asyncio
     async def test_init_data(self):
         dp = _make_dp()
-        try:
-            dp.cache.init_db = AsyncMock()
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            await dp.init_data()
-            dp.cache.init_db.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.cache.init_db = AsyncMock()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        await dp.init_data()
+        dp.cache.init_db.assert_called_once()
 
 
 class TestDataProcessorNormalizeContextTradeDate:
@@ -473,406 +374,343 @@ class TestDataProcessorPrepareMarketData:
     @pytest.mark.asyncio
     async def test_latest_not_today(self):
         dp = _make_dp()
-        try:
-            dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 13))
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                result = await dp.prepare_market_data()
-                assert result == datetime.date(2024, 6, 13)
-        finally:
-            _cleanup(dp)
+        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 13))
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await dp.prepare_market_data()
+            assert result == datetime.date(2024, 6, 13)
 
     @pytest.mark.asyncio
     async def test_latest_is_today_cached(self):
         dp = _make_dp()
-        try:
-            today = datetime.date(2024, 6, 14)
-            dp.get_latest_trade_date = AsyncMock(return_value=today)
-            dp.cache.get_latest_trade_date = AsyncMock(return_value=today)
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                result = await dp.prepare_market_data()
-                assert result == today
-        finally:
-            _cleanup(dp)
+        today = datetime.date(2024, 6, 14)
+        dp.get_latest_trade_date = AsyncMock(return_value=today)
+        dp.cache.get_latest_trade_date = AsyncMock(return_value=today)
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await dp.prepare_market_data()
+            assert result == today
 
 
 class TestDataProcessorGetMarketOverview:
     @pytest.mark.asyncio
     async def test_exception(self):
         dp = _make_dp()
-        try:
-            dp.trade_calendar = MagicMock()
-            dp.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                result = await dp.get_market_overview()
-                assert result is None
-        finally:
-            _cleanup(dp)
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await dp.get_market_overview()
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_batch_query_success(self):
         dp = _make_dp()
-        try:
-            dp.trade_calendar = MagicMock()
-            dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-            index_df = pd.DataFrame(
-                {
-                    "ts_code": ["000001.SH", "399001.SZ", "399006.SZ"],
-                    "pct_chg": [1.5, -2.0, 0.0],
-                    "close": [3000.0, 10000.0, 2000.0],
-                }
-            )
-            dp.cache.get_index_daily_range = AsyncMock(return_value=index_df)
-            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
-            dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
-            with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
-                with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                    result = await dp.get_market_overview()
-            assert result is not None
-            assert len(result["indices"]) == 3
-            assert result["indices"][0]["color"] == "red"
-            assert result["indices"][1]["color"] == "green"
-            assert result["indices"][2]["color"] == "grey"
-            dp.cache.get_index_daily_range.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        index_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH", "399001.SZ", "399006.SZ"],
+                "pct_chg": [1.5, -2.0, 0.0],
+                "close": [3000.0, 10000.0, 2000.0],
+            }
+        )
+        dp.cache.get_index_daily_range = AsyncMock(return_value=index_df)
+        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
+            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+                result = await dp.get_market_overview()
+        assert result is not None
+        assert len(result["indices"]) == 3
+        assert result["indices"][0]["color"] == "red"
+        assert result["indices"][1]["color"] == "green"
+        assert result["indices"][2]["color"] == "grey"
+        dp.cache.get_index_daily_range.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_cache_miss_falls_back_to_api(self):
         dp = _make_dp()
-        try:
-            dp.trade_calendar = MagicMock()
-            dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-            dp.cache.get_index_daily_range = AsyncMock(return_value=None)
-            api_df = pd.DataFrame(
-                {
-                    "ts_code": ["000001.SH"],
-                    "pct_chg": [0.5],
-                    "close": [3100.0],
-                }
-            )
-            dp.api.get_index_daily = AsyncMock(return_value=api_df)
-            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
-            dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
-            with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
-                with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                    result = await dp.get_market_overview()
-            assert result is not None
-            assert len(result["indices"]) == 3
-            assert result["indices"][0]["color"] == "red"
-            assert result["indices"][1]["color"] == "grey"
-            assert result["indices"][2]["color"] == "grey"
-            dp.api.get_index_daily.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.cache.get_index_daily_range = AsyncMock(return_value=None)
+        api_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SH"],
+                "pct_chg": [0.5],
+                "close": [3100.0],
+            }
+        )
+        dp.api.get_index_daily = AsyncMock(return_value=api_df)
+        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
+            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+                result = await dp.get_market_overview()
+        assert result is not None
+        assert len(result["indices"]) == 3
+        assert result["indices"][0]["color"] == "red"
+        assert result["indices"][1]["color"] == "grey"
+        assert result["indices"][2]["color"] == "grey"
+        dp.api.get_index_daily.assert_called_once()
 
 
 class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
     async def test_with_end_date_string(self):
         dp = _make_dp()
-        try:
-            dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-            dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
-            dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            await dp.get_stock_history("000001.SZ", days=365, end_date="20240614")
-            dp.cache.get_daily_quotes.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        await dp.get_stock_history("000001.SZ", days=365, end_date="20240614")
+        dp.cache.get_daily_quotes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_with_end_date_date(self):
         dp = _make_dp()
-        try:
-            dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-            dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
-            dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            await dp.get_stock_history("000001.SZ", end_date=datetime.date(2024, 6, 14))
-            dp.cache.get_daily_quotes.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        await dp.get_stock_history("000001.SZ", end_date=datetime.date(2024, 6, 14))
+        dp.cache.get_daily_quotes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_no_end_date(self):
         dp = _make_dp()
-        try:
-            dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-            dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
-            dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                await dp.get_stock_history("000001.SZ")
-                dp.cache.get_daily_quotes.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            await dp.get_stock_history("000001.SZ")
+            dp.cache.get_daily_quotes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_end_date_exception_fallback(self):
         dp = _make_dp()
-        try:
-            dp.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-            dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
-            dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
-                await dp.get_stock_history("000001.SZ")
-                dp.cache.get_daily_quotes.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            await dp.get_stock_history("000001.SZ")
+            dp.cache.get_daily_quotes.assert_called_once()
 
 
 class TestDataProcessorRunDailyUpdate:
     @pytest.mark.asyncio
     async def test_run_daily_update(self):
         dp = _make_dp()
-        try:
-            dp.init_data = AsyncMock()
-            dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
-            dp.sync_financial_reports = AsyncMock()
-            with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                mock_instance = MagicMock()
-                mock_instance.run_review = AsyncMock()
-                mock_rm.return_value = mock_instance
-                await dp.run_daily_update()
-                dp.init_data.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_financial_reports = AsyncMock()
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_rm.return_value = mock_instance
+            await dp.run_daily_update()
+            dp.init_data.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_with_callback(self):
         dp = _make_dp()
-        try:
-            dp.init_data = AsyncMock()
-            dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
-            dp.sync_financial_reports = AsyncMock()
-            callback = MagicMock()
-            with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                mock_instance = MagicMock()
-                mock_instance.run_review = AsyncMock()
-                mock_rm.return_value = mock_instance
-                await dp.run_daily_update(progress_callback=callback)
-                assert callback.call_count >= 4
-        finally:
-            _cleanup(dp)
+        dp.init_data = AsyncMock()
+        dp.sync_daily_market_snapshot = AsyncMock(return_value=pd.DataFrame())
+        dp.sync_financial_reports = AsyncMock()
+        callback = MagicMock()
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_instance = MagicMock()
+            mock_instance.run_review = AsyncMock()
+            mock_rm.return_value = mock_instance
+            await dp.run_daily_update(progress_callback=callback)
+            assert callback.call_count >= 4
 
 
 class TestDataProcessorPrepareScreeningContext:
     @pytest.mark.asyncio
     async def test_basic_context(self):
         dp = _make_dp()
-        try:
-            dp._quality_tier = 3
-            dp.cache.get_screening_data = AsyncMock(
-                return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
-            )
-            dp.cache.get_fundamental_screening_data = AsyncMock(
-                return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True]})
-            )
-            dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
-            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
-            dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
-            dp.cache.get_top_list = AsyncMock(return_value=None)
-            dp.cache.get_block_trade = AsyncMock(return_value=None)
-            result = await dp.prepare_screening_context(trade_date="20240614")
-            assert "screening_data" in result
-            assert "_diagnostics" in result
-        finally:
-            _cleanup(dp)
+        dp._quality_tier = 3
+        dp.cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
+        )
+        dp.cache.get_fundamental_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True]})
+        )
+        dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        dp.cache.get_top_list = AsyncMock(return_value=None)
+        dp.cache.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614")
+        assert "screening_data" in result
+        assert "_diagnostics" in result
 
     @pytest.mark.asyncio
     async def test_with_suspended_stocks(self):
         dp = _make_dp()
-        try:
-            dp._quality_tier = 3
-            dp.cache.get_screening_data = AsyncMock(
-                return_value=pd.DataFrame(
-                    {
-                        "ts_code": ["000001.SZ", "000002.SZ"],
-                        "trade_date": ["20240614", "20240614"],
-                        "is_tradable": [True, False],
-                    }
-                )
+        dp._quality_tier = 3
+        dp.cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "trade_date": ["20240614", "20240614"],
+                    "is_tradable": [True, False],
+                }
             )
-            dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
-            dp.cache.get_northbound = AsyncMock(return_value=None)
-            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
-            dp.cache.get_moneyflow = AsyncMock(return_value=None)
-            dp.cache.get_top_list = AsyncMock(return_value=None)
-            dp.cache.get_block_trade = AsyncMock(return_value=None)
-            result = await dp.prepare_screening_context(trade_date="20240614")
-            assert len(result["screening_data"]) == 1
-        finally:
-            _cleanup(dp)
+        )
+        dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.get_northbound = AsyncMock(return_value=None)
+        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.get_top_list = AsyncMock(return_value=None)
+        dp.cache.get_block_trade = AsyncMock(return_value=None)
+        result = await dp.prepare_screening_context(trade_date="20240614")
+        assert len(result["screening_data"]) == 1
 
     @pytest.mark.asyncio
     async def test_no_quality_tier(self):
         dp = _make_dp()
-        try:
-            dp._quality_tier = None
-            dp._assign_basic_tier = AsyncMock()
-            dp.cache.get_screening_data = AsyncMock(
-                return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
-            )
-            dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
-            dp.cache.get_northbound = AsyncMock(return_value=None)
-            dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
-            dp.cache.get_moneyflow = AsyncMock(return_value=None)
-            dp.cache.get_top_list = AsyncMock(return_value=None)
-            dp.cache.get_block_trade = AsyncMock(return_value=None)
-            await dp.prepare_screening_context(trade_date="20240614")
-            dp._assign_basic_tier.assert_called_once()
-        finally:
-            _cleanup(dp)
+        dp._quality_tier = None
+        dp._assign_basic_tier = AsyncMock()
+        dp.cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
+        )
+        dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
+        dp.cache.get_northbound = AsyncMock(return_value=None)
+        dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
+        dp.cache.get_moneyflow = AsyncMock(return_value=None)
+        dp.cache.get_top_list = AsyncMock(return_value=None)
+        dp.cache.get_block_trade = AsyncMock(return_value=None)
+        await dp.prepare_screening_context(trade_date="20240614")
+        dp._assign_basic_tier.assert_called_once()
 
 
 class TestDataProcessorInitializeSystem:
     @pytest.mark.asyncio
     async def test_quick_mode(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            dp.sync_concepts = AsyncMock(return_value=3)
-            dp.ensure_trade_cal = AsyncMock(return_value=True)
-            dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-            dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
-            dp.check_data_health = AsyncMock(return_value={"tier": 3})
-            dp.clear_cancel()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-                patch("data.data_processor.ConfigHandler") as mock_ch,
-                patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                mock_ch.get_init_history_years.return_value = 1
-                result = await dp.initialize_system(quick=True)
-                assert result is not None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system(quick=True)
+            assert result is not None
 
     @pytest.mark.asyncio
     async def test_stock_basic_returns_zero(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=0)
-            dp.clear_cancel()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                result = await dp.initialize_system()
-                assert result is None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=0)
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            result = await dp.initialize_system()
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_calendar_fails(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            dp.sync_concepts = AsyncMock(return_value=3)
-            dp.ensure_trade_cal = AsyncMock(return_value=False)
-            dp.clear_cancel()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-                patch("data.data_processor.ConfigHandler") as mock_ch,
-                patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                mock_ch.get_init_history_years.return_value = 1
-                result = await dp.initialize_system()
-                assert result is None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.ensure_trade_cal = AsyncMock(return_value=False)
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system()
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_full_mode(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            dp.sync_concepts = AsyncMock(return_value=3)
-            dp.ensure_trade_cal = AsyncMock(return_value=True)
-            dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
-            dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
-            dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
-            dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
-            dp.check_data_health = AsyncMock(return_value={"tier": 3})
-            dp.clear_cancel()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-                patch("data.data_processor.ConfigHandler") as mock_ch,
-                patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                mock_ch.get_init_history_years.return_value = 1
-                result = await dp.initialize_system()
-                assert result is not None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system()
+            assert result is not None
 
     @pytest.mark.asyncio
     async def test_historical_failed(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            dp.sync_concepts = AsyncMock(return_value=3)
-            dp.ensure_trade_cal = AsyncMock(return_value=True)
-            dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="failed", errors=["err"]))
-            dp.clear_cancel()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-                patch("data.data_processor.ConfigHandler") as mock_ch,
-                patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                mock_ch.get_init_history_years.return_value = 1
-                result = await dp.initialize_system()
-                assert result is None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="failed", errors=["err"]))
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system()
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_financial_failed(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            dp.sync_concepts = AsyncMock(return_value=3)
-            dp.ensure_trade_cal = AsyncMock(return_value=True)
-            dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
-            dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="failed", errors=["err"]))
-            dp.clear_cancel()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-                patch("data.data_processor.ConfigHandler") as mock_ch,
-                patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                mock_ch.get_init_history_years.return_value = 1
-                result = await dp.initialize_system()
-                assert result is None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
+        dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="failed", errors=["err"]))
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            result = await dp.initialize_system()
+            assert result is None
 
     @pytest.mark.asyncio
     async def test_cancelled_after_step1(self):
         dp = _make_dp()
-        try:
-            dp.sync_stock_basic = AsyncMock(return_value=5)
-            dp.sync_concepts = AsyncMock(return_value=3)
-            dp.ensure_trade_cal = AsyncMock(return_value=True)
-            dp.clear_cancel()
-            dp._get_cancel_event().set()
-            with (
-                patch("data.data_dictionary.validate_schema_definitions"),
-                patch("data.data_processor.I18n") as mock_i18n,
-            ):
-                mock_i18n.get.side_effect = lambda k, **kw: k
-                result = await dp.initialize_system()
-                assert result is None
-        finally:
-            _cleanup(dp)
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.clear_cancel()
+        dp._get_cancel_event().set()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            result = await dp.initialize_system()
+            assert result is None
 
 
 class TestDataProcessorCancelControl:
@@ -896,12 +734,6 @@ class TestDataProcessorCancelControl:
 
 
 class TestDataProcessorCancelEvent:
-    def setup_method(self):
-        DataProcessor._reset_singleton()
-
-    def teardown_method(self):
-        DataProcessor._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")
@@ -925,12 +757,6 @@ class TestDataProcessorCancelEvent:
 
 
 class TestDataProcessorClearCancel:
-    def setup_method(self):
-        DataProcessor._reset_singleton()
-
-    def teardown_method(self):
-        DataProcessor._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")
@@ -965,12 +791,6 @@ class TestDataProcessorGetScreeningData:
 
 
 class TestDataProcessorInit:
-    def setup_method(self):
-        DataProcessor._reset_singleton()
-
-    def teardown_method(self):
-        DataProcessor._reset_singleton()
-
     @patch("data.data_processor.CacheManager")
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.ConfigHandler")
@@ -989,12 +809,6 @@ class TestDataProcessorInit:
 
 
 class TestDataProcessorRequestCancel:
-    def setup_method(self):
-        DataProcessor._reset_singleton()
-
-    def teardown_method(self):
-        DataProcessor._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")
@@ -1016,12 +830,6 @@ class TestDataProcessorResetSingleton:
 
 
 class TestDataProcessorSingleton:
-    def setup_method(self):
-        DataProcessor._reset_singleton()
-
-    def teardown_method(self):
-        DataProcessor._reset_singleton()
-
     @patch("data.data_processor.CacheManager")
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.ConfigHandler")
@@ -1033,12 +841,6 @@ class TestDataProcessorSingleton:
 
 
 class TestDataProcessorStop:
-    def setup_method(self):
-        DataProcessor._reset_singleton()
-
-    def teardown_method(self):
-        DataProcessor._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.data_processor.TushareClient")
     @patch("data.data_processor.CacheManager")

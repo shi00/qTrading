@@ -11,14 +11,6 @@ import pytest
 class TestTushareClientBoundaryConditions:
     """Tushare API error handling boundary conditions - behavior tests"""
 
-    @pytest.fixture(autouse=True)
-    def _reset_tushare(self):
-        from data.external.tushare_client import TushareClient
-
-        TushareClient._instance = None
-        yield
-        TushareClient._instance = None
-
     @pytest.mark.asyncio
     async def test_handle_api_call_unknown_error_raises_on_last_retry(self):
         from data.external.tushare_client import TushareClient

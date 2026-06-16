@@ -6,11 +6,6 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 @pytest.mark.unit
 class TestCacheManagerLifecycle:
-    @pytest.fixture(autouse=True)
-    def reset_cm(self, singleton_reset):
-        with singleton_reset(self._get_cm_cls()):
-            yield
-
     @staticmethod
     def _get_cm_cls():
         from data.cache.cache_manager import CacheManager

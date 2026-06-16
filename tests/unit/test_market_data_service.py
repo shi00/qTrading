@@ -39,12 +39,6 @@ class TestMarketDataServiceConfig:
 
 
 class TestMarketDataServiceListeners:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
@@ -75,12 +69,6 @@ class TestMarketDataServiceListeners:
 
 
 class TestMarketDataServiceStop:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
@@ -118,12 +106,6 @@ class TestMarketDataServiceSafeFloat:
 
 
 class TestMarketDataServiceGetIndicesBatch:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     def _make_svc(self):
         with (
             patch("data.domain_services.market_data_service.TushareClient"),
@@ -359,12 +341,6 @@ class TestMarketDataServiceGetIndicesBatch:
 
 
 class TestMarketDataServiceFetchMarketDataIntegration:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.domain_services.market_data_service.NewsFetcher")
     @patch("data.domain_services.market_data_service.TushareClient")
@@ -691,12 +667,6 @@ class TestMarketDataServiceFetchMarketDataIntegration:
 
 
 class TestMarketDataServiceGetHsgt:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
@@ -771,12 +741,6 @@ class TestMarketDataServiceGetHsgt:
 
 
 class TestMarketDataServiceStartStop:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
@@ -822,12 +786,6 @@ class TestMarketDataServiceStartStop:
 
 
 class TestMarketDataServiceSafeFetch:
-    def setup_method(self):
-        MarketDataService._reset_singleton()
-
-    def teardown_method(self):
-        MarketDataService._reset_singleton()
-
     @pytest.mark.asyncio
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")

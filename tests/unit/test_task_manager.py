@@ -11,15 +11,13 @@ from utils.time_utils import get_now
 
 
 @pytest.fixture(autouse=True)
-def reset_singleton():
-    TaskManager._reset_singleton()
+def _cleanup_coroutines():
     yield
     mgr = TaskManager._instance
     if mgr and hasattr(mgr, "_loop") and isinstance(mgr._loop, MagicMock):
         for call in mgr._loop.call_soon_threadsafe.call_args_list:
             if call.args and len(call.args) > 1 and asyncio.iscoroutine(call.args[1]):
                 call.args[1].close()
-    TaskManager._reset_singleton()
 
 
 class TestAppTask:
@@ -826,12 +824,6 @@ class TestAppTaskInit:
 
 
 class TestTaskManagerAutoEvict:
-    def setup_method(self):
-        TaskManager._reset_singleton()
-
-    def teardown_method(self):
-        TaskManager._reset_singleton()
-
     @patch("services.task_manager.ThreadPoolManager")
     def test_evict_old_finished(self, mock_tp):
         mgr = TaskManager()
@@ -848,12 +840,6 @@ class TestTaskManagerAutoEvict:
 
 class TestTaskManagerEvictOrderedDict:
     """C-P1-4: Verify _evict_on_complete uses OrderedDict for O(1) eviction."""
-
-    def setup_method(self):
-        TaskManager._reset_singleton()
-
-    def teardown_method(self):
-        TaskManager._reset_singleton()
 
     @patch("services.task_manager.ThreadPoolManager")
     def test_finished_order_tracks_completed_tasks(self, mock_tp):
@@ -898,12 +884,6 @@ class TestTaskManagerEvictOrderedDict:
 
 
 class TestTaskManagerGetTasks:
-    def setup_method(self):
-        TaskManager._reset_singleton()
-
-    def teardown_method(self):
-        TaskManager._reset_singleton()
-
     @patch("services.task_manager.ThreadPoolManager")
     def test_get_all_tasks_empty(self, mock_tp):
         mgr = TaskManager()

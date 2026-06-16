@@ -8,13 +8,6 @@ from data.external.tushare_client import TushareClient, TushareAPIPermissionErro
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
 
-@pytest.fixture(autouse=True)
-def reset_singleton():
-    TushareClient._reset_singleton()
-    yield
-    TushareClient._reset_singleton()
-
-
 @pytest.fixture
 def tushare_client_mocks():
     with (
