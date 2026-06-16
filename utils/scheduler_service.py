@@ -65,6 +65,7 @@ class SchedulerService:
                 except Exception as e:
                     logger.warning(f"[Scheduler] Error during shutdown: {e}")
             cls._instance = None
+            cls._initialized = False
 
     @classmethod
     def _atexit_cleanup(cls):

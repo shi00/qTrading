@@ -64,6 +64,7 @@ class StrategyManager:
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
             cls._instance = None
+            cls._initialized = False
 
     def __init__(self):
         if self._initialized:

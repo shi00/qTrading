@@ -143,6 +143,7 @@ class TushareClient:
                         t.cancel()
                     cls._instance._bg_tasks.clear()
             cls._instance = None
+            cls._initialized = False
 
     @classmethod
     def _atexit_cleanup(cls):

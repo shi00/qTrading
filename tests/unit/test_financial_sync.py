@@ -8,7 +8,6 @@ import pandas as pd
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.base import SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
-from utils.config_handler import ConfigHandler
 
 
 def make_ctx():
@@ -60,15 +59,6 @@ def make_ctx():
     ctx.api.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_disclosure_date = AsyncMock(return_value=None)
     return ctx
-
-
-@pytest.fixture(autouse=True)
-def zero_sync_delay():
-    """Patch ConfigHandler.get_sync_request_delay to 0 to prevent asyncio.sleep timeouts."""
-    from unittest.mock import patch
-
-    with patch.object(ConfigHandler, "get_sync_request_delay", return_value=0):
-        yield
 
 
 class TestFinancialSyncRun:
