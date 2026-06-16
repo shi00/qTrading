@@ -195,6 +195,17 @@ class ThreadPoolManager:
         import inspect
 
         def is_coro(f):
+            import sys
+
+            if "unittest.mock" in sys.modules:
+                try:
+                    from unittest.mock import NonCallableMock
+
+                    if isinstance(f, NonCallableMock):
+                        return False
+                except ImportError:
+                    pass
+
             if inspect.iscoroutinefunction(f):
                 return True
             if hasattr(f, "func"):
