@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date
 from typing import TYPE_CHECKING
@@ -65,8 +66,6 @@ class BacktestDataProvider:
 
     async def preload_range(self, start_date: date, end_date: date):
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
-        import asyncio
-
         start_str = self._normalize_trade_date(start_date)
         end_str = self._normalize_trade_date(end_date)
 
@@ -98,7 +97,9 @@ class BacktestDataProvider:
             ]
 
             for key, res in zip(keys, results, strict=True):
-                if isinstance(res, Exception):
+                if isinstance(res, BaseException):
+                    if isinstance(res, asyncio.CancelledError):
+                        raise res
                     logger.warning(
                         f"[BacktestDataProvider] Range preload failed for {key}: {res}. Fallback to daily query."
                     )
@@ -123,6 +124,8 @@ class BacktestDataProvider:
                     logger.info(f"[BacktestDataProvider] Preloaded {key}: {rows} rows")
                 else:
                     self._preloaded[key] = {}
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[BacktestDataProvider] Failed to preload range: {e}", exc_info=True)
             self._preloaded = None
