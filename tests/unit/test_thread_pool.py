@@ -258,3 +258,47 @@ class TestThreadPoolManagerShutdownLoggingErrors:
             tpm.shutdown(wait=False)
         assert tpm._io_pool is None
         assert tpm._cpu_pool is None
+
+
+class TestThreadPoolManagerContextVarsPropagation:
+    """OBS-010: Verify contextvars (e.g. correlation_id) propagate to worker threads."""
+
+    @pytest.mark.asyncio
+    async def test_correlation_id_propagates_to_worker(self):
+        from utils.correlation import set_correlation_id, get_correlation_id, clear_correlation_id
+
+        clear_correlation_id()
+        set_correlation_id("test-ctx-01")
+        try:
+            mgr = ThreadPoolManager()
+            result = await mgr.run_async(TaskType.IO, get_correlation_id)
+            assert result == "test-ctx-01"
+        finally:
+            clear_correlation_id()
+
+    @pytest.mark.asyncio
+    async def test_correlation_id_propagates_with_kwargs(self):
+        from utils.correlation import set_correlation_id, get_correlation_id, clear_correlation_id
+
+        clear_correlation_id()
+        set_correlation_id("test-ctx-02")
+        try:
+            mgr = ThreadPoolManager()
+
+            def func(x, y=0):
+                return get_correlation_id(), x + y
+
+            cid, val = await mgr.run_async(TaskType.IO, func, 1, y=2)
+            assert cid == "test-ctx-02"
+            assert val == 3
+        finally:
+            clear_correlation_id()
+
+    @pytest.mark.asyncio
+    async def test_no_correlation_id_in_worker_when_none_set(self):
+        from utils.correlation import get_correlation_id, clear_correlation_id
+
+        clear_correlation_id()
+        mgr = ThreadPoolManager()
+        result = await mgr.run_async(TaskType.IO, get_correlation_id)
+        assert result is None

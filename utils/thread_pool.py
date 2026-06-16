@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextvars
 import functools
 import logging
 import threading
@@ -187,6 +188,7 @@ class ThreadPoolManager:
         """
         Run a sync function in the executor and await it (asyncio bridge).
         Supports kwargs by automatically wrapping in functools.partial.
+        Propagates contextvars (e.g. correlation_id) to worker threads.
 
         Usage: await ThreadPoolManager().run_async(TaskType.IO, my_func, arg1, key=val)
         """
@@ -194,11 +196,14 @@ class ThreadPoolManager:
         executor = self.get_executor(task_type)
 
         # run_in_executor does not support kwargs, so wrap with functools.partial when needed.
-        # Positional args (*args) are passed through run_in_executor to the target function.
         if kwargs:
             func = functools.partial(func, **kwargs)
 
-        return await loop.run_in_executor(executor, func, *args)
+        # Copy contextvars (correlation_id etc.) to worker thread so logs
+        # emitted inside the executor carry the same correlation context.
+        ctx = contextvars.copy_context()
+
+        return await loop.run_in_executor(executor, lambda: ctx.run(func, *args))
 
     def shutdown(self, wait=True, *, _quiet=False):
         """

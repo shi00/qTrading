@@ -15,6 +15,7 @@ from utils.config_handler import ConfigHandler
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
 from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,7 @@ async def main(page: ft.Page):
 
     def _hide_close_confirm_dialog():
         nonlocal close_confirm_visible
-        logger.info(
+        logger.debug(
             "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, dialog_open=%s, "
             "page_dialog_is_close_confirm=%s",
             close_confirm_visible,
@@ -133,15 +134,9 @@ async def main(page: ft.Page):
             return
         _hide_dialog(close_confirm_dialog)
         close_confirm_visible = False
-        logger.info(
-            "[Main] Close confirm dialog hidden. visible=%s, dialog_open=%s, page_dialog_is_close_confirm=%s",
-            close_confirm_visible,
-            getattr(close_confirm_dialog, "open", None),
-            _page_dialog_matches_close_confirm(),
-        )
 
     def _on_close_cancel(_):
-        logger.info("[Main] Window close canceled by user.")
+        UILogger.log_action("MainWindow", action="close_cancel")
         _hide_close_confirm_dialog()
 
     def _on_close_confirm(_):
@@ -150,6 +145,7 @@ async def main(page: ft.Page):
         if shutdown_requested:
             return
         shutdown_requested = True
+        UILogger.log_action("MainWindow", action="close_confirm")
         _schedule_async(_perform_window_shutdown)
 
     close_confirm_dialog = ft.AlertDialog(
@@ -165,7 +161,7 @@ async def main(page: ft.Page):
 
     def _show_close_confirm_dialog():
         nonlocal close_confirm_visible
-        logger.info(
+        logger.debug(
             "[Main] Request to show close confirm dialog. visible=%s, shutdown_requested=%s, "
             "dialog_exists=%s, dialog_open=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
@@ -175,31 +171,14 @@ async def main(page: ft.Page):
             _page_dialog_matches_close_confirm(),
         )
         if close_confirm_visible or shutdown_requested:
-            logger.info(
-                "[Main] Skip showing close confirm dialog. visible=%s, shutdown_requested=%s, "
-                "dialog_open=%s, page_dialog_is_close_confirm=%s",
+            logger.debug(
+                "[Main] Skip showing close confirm dialog. visible=%s, shutdown_requested=%s",
                 close_confirm_visible,
                 shutdown_requested,
-                getattr(close_confirm_dialog, "open", None),
-                _page_dialog_matches_close_confirm(),
             )
             return
         _show_dialog(close_confirm_dialog)
         close_confirm_visible = True
-        logger.info(
-            "[Main] Close confirm dialog assigned before page.update(). visible=%s, dialog_open=%s, "
-            "page_dialog_is_close_confirm=%s",
-            close_confirm_visible,
-            getattr(close_confirm_dialog, "open", None),
-            _page_dialog_matches_close_confirm(),
-        )
-        logger.info(
-            "[Main] Close confirm dialog show request completed. visible=%s, dialog_open=%s, "
-            "page_dialog_is_close_confirm=%s",
-            close_confirm_visible,
-            getattr(close_confirm_dialog, "open", None),
-            _page_dialog_matches_close_confirm(),
-        )
 
     def _is_web_mode() -> bool:
         return os.environ.get("FLET_FORCE_WEB_SERVER", "").lower() in ("true", "1", "yes")
@@ -208,17 +187,14 @@ async def main(page: ft.Page):
         page.window.prevent_close = True
 
     async def _on_window_event(e):
-        logger.info(
-            "[Main] Window event received. type=%s, close_confirm_visible=%s, shutdown_requested=%s, "
-            "page_dialog_is_close_confirm=%s, dialog_open=%s",
+        logger.debug(
+            "[Main] Window event received. type=%s, close_confirm_visible=%s, shutdown_requested=%s",
             getattr(e, "type", None),
             close_confirm_visible,
             shutdown_requested,
-            _page_dialog_matches_close_confirm(),
-            getattr(close_confirm_dialog, "open", None),
         )
         if e.type == ft.WindowEventType.CLOSE:
-            logger.info("[Main] Window CLOSE event received.")
+            UILogger.log_action("MainWindow", action="close_request")
             _show_close_confirm_dialog()
 
     if not _is_web_mode():

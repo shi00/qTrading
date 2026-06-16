@@ -321,11 +321,16 @@ async def test_window_close_logs_dialog_state_transitions(monkeypatch):
     logger_spy = _LoggerSpy()
     monkeypatch.setattr(app_main, "logger", logger_spy)
 
+    ui_logger_spy = MagicMock()
+    monkeypatch.setattr(app_main.UILogger, "log_action", ui_logger_spy)
+
     await app_main.main(page)
     assert page.window.on_event is not None
     on_event = cast(AsyncEventHandler, page.window.on_event)
     await on_event(SimpleNamespace(type="close"))
 
+    # Internal state logs are DEBUG, not INFO
     assert any("Window event received." in msg for msg in logger_spy.messages)
     assert any("Request to show close confirm dialog." in msg for msg in logger_spy.messages)
-    assert any("Close confirm dialog show request completed." in msg for msg in logger_spy.messages)
+    # User action goes through UILogger.log_action, not main logger
+    ui_logger_spy.assert_called_with("MainWindow", action="close_request")

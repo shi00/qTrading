@@ -178,6 +178,10 @@ def setup_logging(name="astock_screener"):
 def update_log_level(level_str):
     """
     Update log level at runtime.
+
+    Note: The error.log handler is always kept at ERROR level regardless of the
+    new setting, ensuring monitoring tools can reliably capture errors even when
+    the runtime level is lowered to DEBUG/INFO.
     """
     level_map = {
         "DEBUG": logging.DEBUG,
