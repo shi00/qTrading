@@ -3,35 +3,22 @@ title = "Gitleaks configuration for AStockScreener"
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Allow test fixtures and mock data"
+[allowlist]
+description = "Global allowlist for AStockScreener"
 paths = [
   '''tests/fixtures/.*''',
   '''tests/.*/fixtures/.*''',
   '''tests/unit/.*test.*\.py''',
   '''tests/integration/.*test.*\.py''',
   '''tests/e2e/.*test.*\.py''',
-]
-
-[[allowlists]]
-description = "Allow example config files"
-paths = [
   '''config/example.*\.yaml$''',
   '''config/example.*\.yml$''',
   '''config/example.*\.json$''',
   '''.*\.example$''',
-]
-
-[[allowlists]]
-description = "Allow documentation"
-paths = [
   '''docs/.*\.md$''',
   '''README\.md$''',
-  '''CLAUDE\.md$''',
+  '''CLAUDE\.md$'''
 ]
-
-[[allowlists]]
-description = "Allow mock/fake tokens in test code"
 regexes = [
   '''test_token_[a-zA-Z0-9_]+''',
   '''fake_api_key_[a-zA-Z0-9]+''',
@@ -44,14 +31,9 @@ regexes = [
   '''sk-proj-LEAKED-KEY-12345''',
   '''sk-LEAKED123''',
   '''eyJhbGciOiJIUzI1NiJ9''',
-]
-
-[[allowlists]]
-description = "Allow placeholder patterns in code"
-regexes = [
   '''YOUR_API_KEY_HERE''',
   '''YOUR_TOKEN_HERE''',
   '''<YOUR_API_KEY>''',
   '''\$\{.*\}''',
-  '''\{\{.*\}\}''',
+  '''\{\{.*\}\}'''
 ]
