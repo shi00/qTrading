@@ -41,6 +41,7 @@ class PortfolioSimulator:
         self.skipped_list: list[dict] = []
         self.positions_list: list[dict] = []
         self.warnings: list[str] = []
+        self._last_known_prices: dict[str, float] = {}
 
     def reset(self) -> None:
         self.cash = self.config.initial_capital
@@ -49,6 +50,7 @@ class PortfolioSimulator:
         self.skipped_list = []
         self.positions_list = []
         self.warnings = []
+        self._last_known_prices = {}
 
     def process_day(
         self,
@@ -149,6 +151,7 @@ class PortfolioSimulator:
 
             self.cash += cost.net_amount
             del self.positions[ts_code]
+            self._last_known_prices.pop(ts_code, None)
 
     def _buy_signals(
         self,
@@ -175,6 +178,8 @@ class PortfolioSimulator:
         if total_weight <= 0:
             return
 
+        # 第一遍：基于快照计算所有买单的目标金额和股数
+        buy_plans: list[dict] = []
         for row in weights_df.iter_rows(named=True):
             ts_code = row["ts_code"]
             weight = float(row["weight"])
@@ -229,9 +234,50 @@ class PortfolioSimulator:
                 qfq_entry_price = float(quote.select("qfq_open").item())
 
             target_value = available_cash * weight
-
-            # 先用原始价格估算股数，再通过 cost_model 获取滑点调整价后精确计算
             volume = int(target_value / entry_price / 100) * 100
+
+            if volume <= 0:
+                self.skipped_list.append(
+                    {
+                        "trade_date": exec_date,
+                        "ts_code": ts_code,
+                        "direction": "buy",
+                        "reason": "insufficient_cash",
+                        "intended_volume": 0,
+                    }
+                )
+                self.warnings.append(f"{exec_date}: {ts_code} buy skipped (insufficient_cash)")
+                continue
+
+            buy_plans.append(
+                {
+                    "ts_code": ts_code,
+                    "entry_price": entry_price,
+                    "qfq_entry_price": qfq_entry_price,
+                    "volume": volume,
+                    "target_value": target_value,
+                    "quote": quote,
+                }
+            )
+
+        if not buy_plans:
+            return
+
+        # 检查总目标金额是否超过可用现金，按比例缩减
+        total_target = sum(p["target_value"] for p in buy_plans)
+        if total_target > available_cash:
+            scale = available_cash / total_target
+            for plan in buy_plans:
+                plan["target_value"] *= scale
+                plan["volume"] = int(plan["target_value"] / plan["entry_price"] / 100) * 100
+
+        # 第二遍：按缩减后的目标金额顺序下单
+        for plan in buy_plans:
+            ts_code = plan["ts_code"]
+            entry_price = plan["entry_price"]
+            qfq_entry_price = plan["qfq_entry_price"]
+            volume = plan["volume"]
+            quote = plan["quote"]
 
             if volume <= 0:
                 self.skipped_list.append(
@@ -255,9 +301,8 @@ class PortfolioSimulator:
             )
 
             # 使用滑点调整后的成交价重新计算股数（仅一次）
-            # 滑点导致买入价上浮，实际可买股数可能减少
             if cost.slippage_adjusted_price > 0 and cost.slippage_adjusted_price != entry_price:
-                adjusted_volume = int(target_value / cost.slippage_adjusted_price / 100) * 100
+                adjusted_volume = int(plan["target_value"] / cost.slippage_adjusted_price / 100) * 100
                 if 0 < adjusted_volume < volume:
                     volume = adjusted_volume
                     cost = self.cost_model.calculate(
@@ -268,7 +313,6 @@ class PortfolioSimulator:
                         trade_date=exec_date,
                     )
 
-            # 记录实际成交价（含滑点调整）
             actual_price = cost.slippage_adjusted_price if cost.slippage_adjusted_price > 0 else entry_price
 
             if cost.net_amount > self.cash:
@@ -317,21 +361,23 @@ class PortfolioSimulator:
         """
         记录每日持仓状态。
 
-        NAV 口径统一使用 raw 价格：
+        NAV 口径使用 qfq（复权总收益）：
         - cash 为名义金额（raw 口径）
-        - 持仓市值使用 raw_close 计算
-        - 除权日 NAV 不会跳变
+        - 持仓市值使用 qfq_close 计算
+        - 除权日 NAV 不跳变（qfq 价格连续）
 
-        QFQ 价格仅用于收益计算和 PnL 展示，不参与 NAV 计算。
+        交易成本和 realized_pnl 保持 raw 口径，NAV 代表复权总收益。
         """
         total_value = self.cash
         positions_detail: dict[str, dict] = {}
         for ts_code, pos in self.positions.items():
             quote = day_quotes.filter(pl.col("ts_code") == ts_code)
             if not quote.is_empty():
-                qfq_market_value = pos["volume"] * float(quote.select("qfq_close").item())
+                qfq_close = float(quote.select("qfq_close").item())
+                self._last_known_prices[ts_code] = qfq_close
+                qfq_market_value = pos["volume"] * qfq_close
                 raw_market_value = pos["volume"] * float(quote.select("raw_close").item())
-                total_value += raw_market_value
+                total_value += qfq_market_value
                 qfq_entry_price = pos.get("qfq_entry_price", pos["entry_price"])
                 qfq_cost_basis = pos["volume"] * qfq_entry_price
                 positions_detail[ts_code] = {
@@ -340,6 +386,20 @@ class PortfolioSimulator:
                     "raw_market_value": raw_market_value,
                     "pnl": qfq_market_value - qfq_cost_basis,
                 }
+            else:
+                last_price = self._last_known_prices.get(ts_code)
+                if last_price is not None:
+                    estimated_value = pos["volume"] * last_price
+                    total_value += estimated_value
+                    qfq_entry_price = pos.get("qfq_entry_price", pos["entry_price"])
+                    qfq_cost_basis = pos["volume"] * qfq_entry_price
+                    positions_detail[ts_code] = {
+                        "volume": pos["volume"],
+                        "market_value": estimated_value,
+                        "raw_market_value": None,
+                        "pnl": estimated_value - qfq_cost_basis,
+                        "estimated": True,
+                    }
 
         self.positions_list.append(
             {

@@ -29,7 +29,12 @@ class BacktestMetrics:
         if len(nav_curve) <= 1:
             return pl.Series([0.0] * len(nav_curve))
         returns = nav_curve.pct_change()
-        return returns.fill_nan(0.0).fill_null(0.0)
+        # 首项保持 null（pct_change 产生）；nan 和 inf 替换为 0.0
+        return (
+            returns.to_frame("_r")
+            .select(pl.when(pl.col("_r").is_infinite() | pl.col("_r").is_nan()).then(0.0).otherwise(pl.col("_r")))
+            .to_series()
+        )
 
     @staticmethod
     def calc_total_return(nav_curve: pl.Series) -> float:
@@ -53,9 +58,11 @@ class BacktestMetrics:
         daily_returns: pl.Series,
         trading_days_per_year: int = 252,
     ) -> float:
-        if len(daily_returns) < 2:
+        # 排除首项 null（pct_change 产生的伪样本）
+        valid_returns = daily_returns.drop_nulls()
+        if len(valid_returns) < 2:
             return 0.0
-        std_val = daily_returns.std()
+        std_val = valid_returns.std()
         if std_val is None or not isinstance(std_val, (int, float)):
             return 0.0
         return float(std_val) * math.sqrt(trading_days_per_year)
@@ -66,11 +73,13 @@ class BacktestMetrics:
         risk_free_rate: float = 0.02,
         trading_days_per_year: int = 252,
     ) -> float:
-        if len(daily_returns) < 2:
+        # 排除首项 null（pct_change 产生的伪样本）
+        valid_returns = daily_returns.drop_nulls()
+        if len(valid_returns) < 2:
             return 0.0
 
         daily_rf = risk_free_rate / trading_days_per_year
-        excess_returns = daily_returns - daily_rf
+        excess_returns = valid_returns - daily_rf
 
         excess_std = excess_returns.std()
         if excess_std is None or not isinstance(excess_std, (int, float)):

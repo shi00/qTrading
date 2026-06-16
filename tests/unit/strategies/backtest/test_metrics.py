@@ -251,7 +251,7 @@ class TestBacktestMetrics:
         nav = pl.Series([1_000_000.0, 1_010_000.0, 1_005_000.0])
         returns = BacktestMetrics.calc_daily_returns(nav)
         assert len(returns) == 3
-        assert float(returns[0]) == 0.0
+        assert returns[0] is None
         assert float(returns[1]) == pytest.approx(0.01, rel=1e-4)
         assert float(returns[2]) == pytest.approx(-0.00495, abs=1e-4)
 
@@ -260,3 +260,15 @@ class TestBacktestMetrics:
         returns = BacktestMetrics.calc_daily_returns(nav)
         assert len(returns) == 1
         assert float(returns[0]) == 0.0
+
+    def test_calc_daily_returns_handles_inf(self) -> None:
+        """nav_curve 含 0 值时 pct_change 产生 inf，应替换为 0.0"""
+        nav = pl.Series([0.0, 100.0, 105.0, 110.0])
+        returns = BacktestMetrics.calc_daily_returns(nav)
+        # 首项保持 null
+        assert returns[0] is None
+        # 不应包含 inf 或 nan
+        assert not returns.is_infinite().any()
+        assert not returns.is_nan().any()
+        # 0→100 的 inf 应被替换为 0.0
+        assert float(returns[1]) == 0.0

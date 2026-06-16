@@ -5,8 +5,10 @@ from datetime import date
 import polars as pl
 import pytest
 
+from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
+from strategies.backtest.portfolio import PortfolioSimulator
 
 
 class TestTradeSimulation:
@@ -343,3 +345,214 @@ class TestRealizedPnl:
         buy_price = float(buy_trades["price"][0])
         assert buy_volume % 100 == 0
         assert buy_price == 10.0
+
+
+class TestCashScaling:
+    """BT-003: 快照+按比例缩减逻辑测试"""
+
+    @pytest.fixture
+    def config(self) -> BacktestConfig:
+        return BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.0,
+            rebalance_freq="signal",
+        )
+
+    @staticmethod
+    def _make_quotes(ts_codes: list[str], prices: list[float]) -> pl.DataFrame:
+        """构造行情 DataFrame（无 is_tradable/limit_status 列，默认可交易）。"""
+        return pl.DataFrame(
+            {
+                "ts_code": ts_codes,
+                "raw_open": prices,
+                "raw_close": prices,
+                "qfq_open": prices,
+                "qfq_close": prices,
+            }
+        )
+
+    def test_no_scaling_when_cash_sufficient(self, config: BacktestConfig) -> None:
+        """现金充足时，多只股票按等权分配，不触发缩减"""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [1.0, 2.0],
+            }
+        )
+        quotes = self._make_quotes(["000001.SZ", "000002.SZ"], [10.0, 20.0])
+
+        simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        # 两只股票都应成功买入
+        assert len(buy_trades) == 2
+
+    def test_scaling_when_cash_insufficient(self, config: BacktestConfig) -> None:
+        """现金紧张时，按比例缩减各股票的目标金额。
+
+        通过 mock sizer 使权重总和 > 1，从而触发缩减逻辑。
+        """
+        from unittest.mock import patch
+
+        small_config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=20_000.0,  # 确保缩减后每只股票 volume >= 100
+            max_position_count=10,
+            max_single_weight=1.0,  # 关闭单股上限约束，避免被截断到 0.1 后归一化
+            cash_reserve_pct=0.0,
+            rebalance_freq="signal",
+        )
+        simulator = PortfolioSimulator(small_config, TransactionCostModel(TransactionCostConfig()))
+
+        # mock sizer 返回权重总和 > 1 的结果，强制触发缩减
+        # 使用 0.4 避免超过 max_single_weight=1.0
+        oversized_weights = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [1.0, 2.0, 3.0],
+                "weight": [0.4, 0.4, 0.4],  # 总和 1.2 > 1，必然触发缩减
+            }
+        )
+
+        with patch("strategies.backtest.position_sizer.get_sizer") as mock_get_sizer:
+            mock_get_sizer.return_value.compute_weights.return_value = oversized_weights
+            with patch(
+                "strategies.backtest.position_sizer.apply_max_weight_constraint", return_value=oversized_weights
+            ):
+                signals = pl.DataFrame(
+                    {
+                        "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                        "signal_rank": [1.0, 2.0, 3.0],
+                    }
+                )
+                # 使用较低价格，确保缩减后每只股票的 volume >= 100
+                quotes = self._make_quotes(["000001.SZ", "000002.SZ", "000003.SZ"], [10.0, 12.0, 14.0])
+
+                simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        # 所有股票都应买入（缩减后）
+        assert len(buy_trades) == 3
+        # 每只股票的买入金额应大致相等（等权缩减后）
+        amounts = buy_trades["net_amount"].to_list()
+        max_amount = max(amounts)
+        min_amount = min(amounts)
+        # 允许 25% 偏差（取整导致）
+        assert max_amount / min_amount < 1.25
+
+    def test_scaled_volume_is_lot_size_multiple(self, config: BacktestConfig) -> None:
+        """缩减后的股数必须是 100 的整数倍"""
+        from unittest.mock import patch
+
+        small_config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=15_000.0,
+            max_position_count=10,
+            max_single_weight=1.0,
+            cash_reserve_pct=0.0,
+            rebalance_freq="signal",
+        )
+        simulator = PortfolioSimulator(small_config, TransactionCostModel(TransactionCostConfig()))
+
+        oversized_weights = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "signal_rank": [1.0, 2.0],
+                "weight": [0.6, 0.6],  # 总和 1.2 > 1
+            }
+        )
+
+        with patch("strategies.backtest.position_sizer.get_sizer") as mock_get_sizer:
+            mock_get_sizer.return_value.compute_weights.return_value = oversized_weights
+            with patch(
+                "strategies.backtest.position_sizer.apply_max_weight_constraint", return_value=oversized_weights
+            ):
+                signals = pl.DataFrame(
+                    {
+                        "ts_code": ["000001.SZ", "000002.SZ"],
+                        "signal_rank": [1.0, 2.0],
+                    }
+                )
+                quotes = self._make_quotes(["000001.SZ", "000002.SZ"], [33.0, 47.0])
+
+                simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        for volume in buy_trades["volume"].to_list():
+            assert volume % 100 == 0
+            assert volume > 0
+
+    def test_scaled_total_not_exceed_available_cash(self, config: BacktestConfig) -> None:
+        """缩减后所有买单的总金额不超过可用现金"""
+        from unittest.mock import patch
+
+        small_config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=10_000.0,
+            max_position_count=10,
+            max_single_weight=1.0,
+            cash_reserve_pct=0.1,
+            rebalance_freq="signal",
+        )
+        simulator = PortfolioSimulator(small_config, TransactionCostModel(TransactionCostConfig()))
+
+        oversized_weights = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                "signal_rank": [1.0, 2.0, 3.0],
+                "weight": [0.4, 0.4, 0.4],  # 总和 1.2 > 1
+            }
+        )
+
+        with patch("strategies.backtest.position_sizer.get_sizer") as mock_get_sizer:
+            mock_get_sizer.return_value.compute_weights.return_value = oversized_weights
+            with patch(
+                "strategies.backtest.position_sizer.apply_max_weight_constraint", return_value=oversized_weights
+            ):
+                signals = pl.DataFrame(
+                    {
+                        "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                        "signal_rank": [1.0, 2.0, 3.0],
+                    }
+                )
+                # 使用较低价格，确保缩减后每只股票的 volume >= 100
+                quotes = self._make_quotes(["000001.SZ", "000002.SZ", "000003.SZ"], [8.0, 9.0, 10.0])
+
+                simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        assert not buy_trades.is_empty()
+        total_cost = float(buy_trades["net_amount"].sum())
+        # 不超过初始资金（含佣金/滑点可能略超 available_cash 但不超过初始本金）
+        assert total_cost <= 10_000.0
+
+    def test_single_stock_not_scaled(self, config: BacktestConfig) -> None:
+        """单只股票买入时不受缩减影响（权重为 1.0，total_target == available_cash）"""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+
+        signals = pl.DataFrame({"ts_code": ["000001.SZ"], "signal_rank": [1.0]})
+        quotes = self._make_quotes(["000001.SZ"], [10.0])
+
+        simulator.process_day(date(2024, 1, 2), signals, quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        assert len(buy_trades) == 1
+        # 单只股票应买入接近 available_cash 的金额
+        volume = int(buy_trades["volume"][0])
+        price = float(buy_trades["price"][0])
+        expected_max_volume = int(1_000_000.0 / price / 100) * 100
+        assert volume <= expected_max_volume
+        assert volume > 0
