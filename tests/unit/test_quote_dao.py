@@ -637,7 +637,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
         dao.get_field_completeness = AsyncMock(return_value={})
         with (
-            patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]),
+            patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_sync_integrity_config.return_value = {
@@ -658,7 +658,7 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_field_completeness = AsyncMock(return_value={})
         with (
             patch(
-                "data.persistence.daos.quote_dao._get_default_synced_tables",
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
                 return_value=["daily_quotes", "limit_list"],
             ),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
@@ -752,7 +752,7 @@ class TestQuoteDaoCoverageGaps:
         dao.get_field_completeness = AsyncMock(return_value={})
         with (
             patch(
-                "data.persistence.daos.quote_dao._get_default_synced_tables",
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
                 return_value=["daily_quotes", "index_daily"],
             ),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
@@ -775,7 +775,7 @@ class TestQuoteDaoCoverageGaps:
         dao.get_field_completeness = AsyncMock(return_value={})
         with (
             patch(
-                "data.persistence.daos.quote_dao._get_default_synced_tables",
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
                 return_value=["daily_quotes", "daily_indicators"],
             ),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
@@ -819,7 +819,7 @@ class TestQuoteDaoCoverageGaps:
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
         dao.get_field_completeness = AsyncMock(return_value={"roe": 0.8, "pe_ttm": 0.9})
         with (
-            patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]),
+            patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_sync_integrity_config.return_value = {
