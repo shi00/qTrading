@@ -62,7 +62,7 @@ colorama==0.4.6 ; sys_platform == 'win32'
     #   tqdm
 contourpy==1.3.3
     # via matplotlib
-cryptography==48.0.0
+cryptography==49.0.0
     # via
     #   astockscreener (pyproject.toml)
     #   secretstorage
