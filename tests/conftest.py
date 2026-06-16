@@ -27,17 +27,25 @@ def event_loop_policy():
 
 
 @contextmanager
-def reset_singleton(cls, extra_attrs=None):
+def singleton_state(cls, extra_attrs=None):
     """Context manager that saves and restores a singleton class's _instance.
 
     Usage:
-        with reset_singleton(TaskManager):
+        with singleton_state(TaskManager):
             mgr = TaskManager()
             ...
 
-        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+        with singleton_state(AIService, extra_attrs=["_initialized"]):
             svc = AIService()
             ...
+
+    Note:
+        This only saves/restores ``_instance`` and explicitly listed
+        ``extra_attrs``. It does NOT reset the ``singleton_registry``
+        registry nor trigger ``_atexit_cleanup``. In unit tests, this
+        gap is covered by the ``_reset_all_singletons`` autouse fixture
+        in ``tests/unit/conftest.py``. For full singleton isolation in
+        unit tests, prefer ``_reset_all_singletons``.
     """
     saved = {"_instance": cls._instance}
     cls._instance = None
@@ -57,14 +65,17 @@ def reset_singleton(cls, extra_attrs=None):
 
 @pytest.fixture
 def singleton_reset():
-    """Fixture that provides the reset_singleton context manager.
+    """Fixture that provides the singleton_state context manager.
 
     Usage in tests:
         def test_something(self, singleton_reset):
             with singleton_reset(TaskManager):
                 mgr = TaskManager()
+
+    Note: This fixture is currently unused (dead code, kept per §1.4).
+    The singleton_state context manager is imported directly where needed.
     """
-    return reset_singleton
+    return singleton_state
 
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -266,11 +277,6 @@ def mock_external_services(request):
     from data.persistence.review_manager import ReviewManager
 
     patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
-
-    # Mock ConfigHandler.get_sync_request_delay to 0 to prevent asyncio.sleep timeouts
-    from utils.config_handler import ConfigHandler
-
-    patches.append(patch.object(ConfigHandler, "get_sync_request_delay", return_value=0))
 
     for p in patches:
         p.start()

@@ -94,6 +94,13 @@ class FinancialSyncStrategy(ISyncStrategy):
         self._tasks_lock = threading.Lock()
         self._active_tasks = set()
 
+    def _get_request_delay(self, is_heavy: bool) -> float:
+        """Read request delay from injected provider or fall back to ConfigHandler."""
+        provider = self.context.request_delay_provider
+        if provider is not None:
+            return provider(is_heavy)
+        return ConfigHandler.get_sync_request_delay(is_heavy=is_heavy)
+
     @property
     def _shutdown_event(self):
         """Get or create shutdown event dynamically per event loop."""
@@ -508,7 +515,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         concurrency_factor, delay_multiplier = _get_seasonal_adjustments()
         base_concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
         adjusted_concurrency = max(1, base_concurrency // concurrency_factor)
-        base_delay = ConfigHandler.get_sync_request_delay(is_heavy=False)
+        base_delay = self._get_request_delay(is_heavy=False)
         adjusted_delay = base_delay * delay_multiplier
 
         if _is_peak_disclosure_season():
@@ -894,7 +901,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             for i, ts_code in enumerate(ts_codes):
                 try:
                     await asyncio.sleep(
-                        ConfigHandler.get_sync_request_delay(is_heavy=True),
+                        self._get_request_delay(is_heavy=True),
                     )
                     merged_df, aux_counts = await self._fetch_comprehensive_financial_data(
                         ts_code,

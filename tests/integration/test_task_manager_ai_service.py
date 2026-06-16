@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.conftest import reset_singleton
+from tests.conftest import singleton_state
 
 
 @pytest.fixture
@@ -116,7 +116,7 @@ class TestAIServiceReasoningSupport:
     def test_reasoning_detection(self, model, provider, api_url, expected):
         from services.ai_service import AIService
 
-        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+        with singleton_state(AIService, extra_attrs=["_initialized"]):
             with patch("services.ai_service.ConfigHandler") as mock_ch:
                 mock_ch.get_llm_config.return_value = {
                     "api_key": "test-key",
@@ -132,7 +132,7 @@ class TestAIServiceReasoningSupport:
     async def test_reasoning_model_attribute_set(self):
         from services.ai_service import AIService
 
-        with reset_singleton(AIService, extra_attrs=["_initialized"]):
+        with singleton_state(AIService, extra_attrs=["_initialized"]):
             with patch("services.ai_service.ConfigHandler") as mock_ch:
                 mock_ch.get_llm_config.return_value = {
                     "api_key": "test-key",

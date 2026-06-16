@@ -241,3 +241,12 @@ class TestIsRecommendedModel:
         from utils.llm_providers import is_recommended_model
 
         assert is_recommended_model({"id": "x", "tag": ""}) is False
+
+
+class TestLLMProviderName:
+    """Tests for LLM provider name (merged from tests/unit/test_onboarding_wizard.py)."""
+
+    def test_qwen_provider_name_is_correct(self):
+        """Test that qwen provider name is '通义千问' not '阿里云通义千问'"""
+        qwen = LLM_PROVIDERS.get("qwen", {})
+        assert qwen.get("name") == "通义千问"

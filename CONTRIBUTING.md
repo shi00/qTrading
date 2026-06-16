@@ -341,7 +341,7 @@ python main.py
 
 | 现象 | 可能原因 | 排查点 |
 |------|---------|--------|
-| 测试间状态污染 | 单例未注册到 `singleton_registry`（检查 `@register_singleton`）；或需精细控制时用 `reset_singleton` 包裹并检查 `extra_attrs` |
+| 测试间状态污染 | 单例未注册到 `singleton_registry`（检查 `@register_singleton`）；或需精细控制时用 `singleton_state` 包裹并检查 `extra_attrs` |
 | `RuntimeError: no running event loop` | 跨循环使用同步原语 | 改用 `get_loop_local` |
 | `EngineDisposedError` | 关机期间继续访问 DB | 在调用方捕获并降级，或检查 `_disposed` 早退 |
 | 慢查询告警 | SQL 缺索引 / 数据量过大 / N+1 | 看 `[ClassName] Slow Read/Write` 日志，结合 `EXPLAIN` |
@@ -363,7 +363,7 @@ python main.py
 4. 支持 `_initialized` 标志防止重复初始化。
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
 6. 在 CLAUDE.md §4.3 的单例列表中补充新单例名称。
-7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `reset_singleton` 上下文管理器。
+7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器。
 
 ## 获取帮助
 

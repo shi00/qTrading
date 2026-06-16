@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.cache.cache_manager import CacheManager
 from data.persistence.db_url_override import override_db_url
-from tests.conftest import reset_singleton
+from tests.conftest import singleton_state
 
 
 @pytest.mark.integration
@@ -21,7 +21,7 @@ class TestClearAllCacheReset:
     @pytest_asyncio.fixture
     async def cache_mgr(self, test_engine: AsyncEngine):
         """Provide an isolated CacheManager instance wired to the test engine."""
-        with reset_singleton(CacheManager, extra_attrs=["_initialized"]):
+        with singleton_state(CacheManager, extra_attrs=["_initialized"]):
             mgr = CacheManager()
             mgr.engine = test_engine
             mgr._disposed = False

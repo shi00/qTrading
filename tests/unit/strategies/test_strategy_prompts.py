@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from strategies.strategy_prompts import (
     _UNIVERSAL_RULES,
+    FORBIDDEN_STATIC_HEADERS,
     STRATEGY_PROMPTS,
     get_base_prompt,
     resolve_prompt,
@@ -26,6 +27,50 @@ class TestStrategyPromptsConstants:
     def test_all_strategy_prompts_not_empty(self):
         for key, prompt in STRATEGY_PROMPTS.items():
             assert prompt, f"Prompt for {key} should not be empty"
+
+
+class TestKeyConsistency:
+    """northbound key 一致性校验（合并自 tests/unit/test_strategy_prompts.py）。"""
+
+    def test_northbound_holding_key_exists(self):
+        assert "northbound_holding" in STRATEGY_PROMPTS
+
+    def test_northbound_flow_key_exists(self):
+        assert "northbound_flow" in STRATEGY_PROMPTS
+
+    def test_northbound_key_removed(self):
+        assert "northbound" not in STRATEGY_PROMPTS
+
+    def test_northbound_holding_prompt_not_empty(self):
+        prompt = STRATEGY_PROMPTS["northbound_holding"]
+        assert len(prompt.strip()) > 50
+
+    def test_northbound_flow_prompt_not_empty(self):
+        prompt = STRATEGY_PROMPTS["northbound_flow"]
+        assert len(prompt.strip()) > 50
+
+    def test_northbound_holding_mentions_holding(self):
+        prompt = STRATEGY_PROMPTS["northbound_holding"]
+        assert "持仓" in prompt or "增持" in prompt or "holding" in prompt.lower()
+
+    def test_northbound_flow_mentions_flow(self):
+        prompt = STRATEGY_PROMPTS["northbound_flow"]
+        assert "资金流" in prompt or "flow" in prompt.lower()
+
+
+class TestDataBoundary:
+    """数据边界校验（合并自 tests/unit/test_strategy_prompts.py）。"""
+
+    def test_all_prompts_have_data_boundary(self):
+        for key, prompt in STRATEGY_PROMPTS.items():
+            assert "【数据边界】" in prompt or "available_data" in prompt, (
+                f"Strategy '{key}' missing runtime data boundary directive (【数据边界】 or available_data)"
+            )
+
+    def test_no_static_available_data_list(self):
+        for key, prompt in STRATEGY_PROMPTS.items():
+            for header in FORBIDDEN_STATIC_HEADERS:
+                assert header not in prompt, f"Strategy '{key}' still has static data enumeration '{header}'"
 
 
 class TestCleanRules:

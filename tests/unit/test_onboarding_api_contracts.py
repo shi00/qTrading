@@ -1,125 +1,14 @@
 """
-Unit Tests for Onboarding Wizard
+Unit Tests for Onboarding Wizard API Contracts
 
-Targets: OnboardingWizard, StepConfig, navigation logic, validation state
-Coverage Goal: >85%
+Targets: OnboardingWizard public API surface, config panel signatures, i18n keys.
+StepConfig / navigation logic / wizard behavior tests live in tests/unit/ui/.
 """
 
-import os
 import threading
-import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-
-@pytest.fixture
-def isolated_config(tmp_path):
-    """Create an isolated config file for each test with cache cleared"""
-    import utils.config_handler as config_module
-    from utils.config_handler import ConfigHandler
-
-    unique_name = f"test_config_{uuid.uuid4().hex}.json"
-    test_config_file = str(tmp_path / unique_name)
-    original_config_file = config_module.CONFIG_FILE
-    config_module.CONFIG_FILE = test_config_file
-
-    ConfigHandler._config_cache = None
-
-    if os.path.exists(test_config_file):
-        os.remove(test_config_file)
-
-    yield test_config_file
-
-    ConfigHandler._config_cache = None
-    config_module.CONFIG_FILE = original_config_file
-
-
-class TestStepConfig:
-    """Tests for StepConfig dataclass"""
-
-    def test_step_config_defaults(self):
-        """Test StepConfig default values"""
-        from ui.viewmodels.onboarding_view_model import StepConfig
-
-        config = StepConfig(
-            id="test",
-            name="test_name",
-            show_prev=True,
-            show_next=True,
-            next_text_key="next",
-            next_icon="arrow_forward",
-        )
-
-        assert config.show_skip is False
-        assert config.skip_text_key == ""
-        assert config.required is False
-        assert config.validate_before_next is False
-
-    def test_step_config_all_fields(self):
-        """Test StepConfig with all fields set"""
-        from ui.viewmodels.onboarding_view_model import StepConfig
-
-        config = StepConfig(
-            id="test",
-            name="test_name",
-            show_prev=True,
-            show_next=True,
-            next_text_key="next",
-            next_icon="arrow_forward",
-            show_skip=True,
-            skip_text_key="skip",
-            required=True,
-            validate_before_next=True,
-        )
-
-        assert config.id == "test"
-        assert config.required is True
-        assert config.validate_before_next is True
-        assert config.show_skip is True
-
-    def test_step_configs_count(self):
-        """Test STEP_CONFIGS has 8 steps"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        assert len(STEP_CONFIGS) == 8
-
-    def test_step_configs_ids(self):
-        """Test STEP_CONFIGS has correct step IDs"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        expected_ids = [
-            "welcome",
-            "database",
-            "token",
-            "cloud_ai",
-            "local_model",
-            "data_sync",
-            "schedule",
-            "complete",
-        ]
-        actual_ids = [config.id for config in STEP_CONFIGS]
-        assert actual_ids == expected_ids
-
-    def test_required_steps(self):
-        """Test required steps are marked correctly"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        required_steps = [config.id for config in STEP_CONFIGS if config.required]
-        assert required_steps == ["database", "token", "cloud_ai"]
-
-    def test_validate_before_next_steps(self):
-        """Test validate_before_next steps are marked correctly"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        validate_steps = [config.id for config in STEP_CONFIGS if config.validate_before_next]
-        assert validate_steps == [
-            "database",
-            "token",
-            "cloud_ai",
-            "local_model",
-            "schedule",
-        ]
 
 
 class TestConfigPersistence:
@@ -205,132 +94,6 @@ class TestAPISignatures:
         assert hasattr(ConfigHandler, "save_local_ai_config")
 
 
-class TestStepIndicators:
-    """Tests for step indicators"""
-
-    def test_step_count(self):
-        """Test step count is 8"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        assert len(STEP_CONFIGS) == 8
-
-    def test_welcome_step_config(self):
-        """Test welcome step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        welcome = STEP_CONFIGS[0]
-        assert welcome.id == "welcome"
-        assert welcome.show_prev is False
-        assert welcome.required is False
-
-    def test_database_step_config(self):
-        """Test database step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        db_step = STEP_CONFIGS[1]
-        assert db_step.id == "database"
-        assert db_step.required is True
-        assert db_step.validate_before_next is True
-
-    def test_token_step_config(self):
-        """Test token step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        token_step = STEP_CONFIGS[2]
-        assert token_step.id == "token"
-        assert token_step.required is True
-        assert token_step.validate_before_next is True
-
-    def test_cloud_ai_step_config(self):
-        """Test cloud AI step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        ai_step = STEP_CONFIGS[3]
-        assert ai_step.id == "cloud_ai"
-        assert ai_step.required is True
-        assert ai_step.validate_before_next is True
-
-    def test_local_model_step_config(self):
-        """Test local model step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        model_step = STEP_CONFIGS[4]
-        assert model_step.id == "local_model"
-        assert model_step.required is False
-        assert model_step.validate_before_next is True
-        assert model_step.show_skip is True
-
-    def test_data_sync_step_config(self):
-        """Test data sync step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        sync_step = STEP_CONFIGS[5]
-        assert sync_step.id == "data_sync"
-        assert sync_step.required is False
-
-    def test_schedule_step_config(self):
-        """Test schedule step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        schedule_step = STEP_CONFIGS[6]
-        assert schedule_step.id == "schedule"
-        assert schedule_step.required is False
-
-    def test_complete_step_config(self):
-        """Test complete step config"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-
-        complete_step = STEP_CONFIGS[7]
-        assert complete_step.id == "complete"
-        assert complete_step.show_prev is True
-
-
-class TestOnboardingCompleteCallSequence:
-    """Tests for set_onboarding_complete call sequence - Issue 1.1"""
-
-    @pytest.mark.asyncio
-    async def test_complete_step_does_not_call_set_onboarding_complete(self):
-        """Test that _next_step on complete step does NOT call set_onboarding_complete directly"""
-        from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        mock_page = MagicMock()
-        mock_page.run_task = MagicMock()
-        mock_page.overlay = []
-
-        wizard = MagicMock(spec=OnboardingWizard)
-        wizard.current_step = 7
-        wizard.step_validated = {}
-        wizard.sync_in_progress = False
-        wizard.on_complete = AsyncMock()
-
-        config = STEP_CONFIGS[7]
-        assert config.id == "complete"
-
-        if config.id == "complete" and wizard.on_complete:
-            await wizard.on_complete()
-
-        wizard.on_complete.assert_called_once()
-
-    def test_set_onboarding_complete_not_in_onboarding_wizard_module(self):
-        """Test that set_onboarding_complete is not called in onboarding_wizard.py"""
-        import os
-
-        wizard_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "ui",
-            "views",
-            "onboarding_wizard.py",
-        )
-
-        with open(wizard_path, encoding="utf-8") as f:
-            content = f.read()
-
-        assert "set_onboarding_complete" not in content, (
-            "set_onboarding_complete should NOT be called in onboarding_wizard.py - it should only be called in main.py after service initialization"
-        )
-
-
 class TestCloudAIConnectionValidation:
     """Tests for cloud AI connection validation - Issue 1.3"""
 
@@ -353,8 +116,6 @@ class TestCloudAIConnectionValidation:
     @pytest.mark.asyncio
     async def test_validate_cloud_ai_handles_connection_failure(self):
         """Test that _validate_and_save_cloud_ai handles connection failure"""
-        from unittest.mock import AsyncMock
-
         with patch("services.ai_service.AIService") as mock_ai_service:
             mock_ai_service.test_connection = AsyncMock(return_value={"success": False, "message": "Invalid API key"})
 
@@ -489,111 +250,6 @@ class TestScheduleConfigCompleteness:
             assert not is_valid_time(time), f"{time} should be invalid time"
 
 
-class TestClassifyError:
-    """Tests for classify_error function"""
-
-    def test_classify_json_decode_error(self):
-        """Test that JSONDecodeError is classified correctly"""
-        import json
-
-        from utils.error_classifier import classify_error
-
-        try:
-            json.loads("{invalid json}")
-        except json.JSONDecodeError as e:
-            result = classify_error(e)
-            assert result["code"] == "json_parse"
-
-    def test_classify_file_not_found_error(self):
-        """Test that FileNotFoundError is classified correctly"""
-        from utils.error_classifier import classify_error
-
-        e = FileNotFoundError("File not found")
-        result = classify_error(e)
-        assert result["code"] == "file_not_found"
-
-    def test_classify_permission_error(self):
-        """Test that PermissionError is classified correctly"""
-        from utils.error_classifier import classify_error
-
-        e = PermissionError("Permission denied")
-        result = classify_error(e)
-        assert result["code"] == "permission"
-
-    def test_classify_os_error_disk_space(self):
-        """Test that OSError with disk space is classified correctly"""
-        from utils.error_classifier import classify_error
-
-        e = OSError("No disk space left")
-        result = classify_error(e)
-        assert result["code"] == "disk_space"
-
-    def test_classify_timeout_error(self):
-        """Test that timeout errors are classified correctly"""
-        from utils.error_classifier import classify_error
-
-        e = TimeoutError("Connection timed out")
-        result = classify_error(e)
-        assert result["code"] == "timeout"
-
-
-class TestClassifyErrorBackwardCompat:
-    def test_re_export_from_ui_i18n(self):
-        from ui.i18n import classify_error as ce_from_i18n
-        from utils.error_classifier import classify_error as ce_from_utils
-
-        assert ce_from_i18n is ce_from_utils, "ui.i18n.classify_error must re-export from utils.error_classifier"
-
-    def test_re_export_functional(self):
-        from ui.i18n import classify_error
-
-        e = FileNotFoundError("test")
-        result = classify_error(e)
-        assert result["code"] == "file_not_found"
-
-
-class TestCancelSyncButtonState:
-    """Tests for _cancel_sync button state restoration - Issue 4.2"""
-
-    def test_cancel_sync_restores_btn_sync_later(self):
-        """Test that _cancel_sync re-enables btn_sync_later"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        mock_page = MagicMock()
-        mock_page.run_task = MagicMock()
-        mock_page.overlay = []
-
-        wizard = MagicMock(spec=OnboardingWizard)
-        wizard.btn_quick_sync = MagicMock(disabled=True)
-        wizard.btn_full_sync = MagicMock(disabled=True)
-        wizard.btn_sync_later = MagicMock(disabled=True)
-        wizard.btn_cancel_sync = MagicMock(visible=True)
-        wizard.sync_status = MagicMock()
-        wizard._data_processor = MagicMock()
-        wizard._data_processor.stop = AsyncMock()
-        wizard.sync_in_progress = True
-        wizard._update_navigation_buttons = MagicMock()
-        wizard._safe_update = MagicMock()
-
-        wizard.btn_sync_later.disabled = False
-
-        assert wizard.btn_sync_later.disabled is False
-
-    def test_cancel_sync_restores_all_buttons(self):
-        """Test that _cancel_sync restores all button states"""
-        button_states = {
-            "btn_quick_sync": False,
-            "btn_full_sync": False,
-            "btn_sync_later": False,
-            "btn_cancel_sync": False,
-        }
-
-        assert button_states["btn_quick_sync"] is False
-        assert button_states["btn_full_sync"] is False
-        assert button_states["btn_sync_later"] is False
-        assert button_states["btn_cancel_sync"] is False
-
-
 class TestPasswordLoading:
     """Tests for password loading functionality - Issue 2.1"""
 
@@ -684,22 +340,6 @@ class TestLocaleChangeSignature:
 
         assert new_locale_param is not None
         assert new_locale_param.default is None
-
-
-class TestNavigationBarFixedAtBottom:
-    """Tests for navigation bar fixed at bottom - Issue 1.2"""
-
-    def test_content_has_expand_true(self):
-        """Test that main content Column has expand=True"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "__init__")
-
-    def test_step_content_container_exists(self):
-        """Test that step_content_container is created for scrollable content"""
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        assert hasattr(OnboardingWizard, "__init__")
 
 
 class TestLLMProviderSwitch:
@@ -924,14 +564,3 @@ class TestI18nKeys:
 
         assert zh_value != "wizard_err_model_load_failed"
         assert en_value != "wizard_err_model_load_failed"
-
-
-class TestLLMProviderName:
-    """Tests for LLM provider name"""
-
-    def test_qwen_provider_name_is_correct(self):
-        """Test that qwen provider name is '通义千问' not '阿里云通义千问'"""
-        from utils.llm_providers import LLM_PROVIDERS
-
-        qwen = LLM_PROVIDERS.get("qwen", {})
-        assert qwen.get("name") == "通义千问"

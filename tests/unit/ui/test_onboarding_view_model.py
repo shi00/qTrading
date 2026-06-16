@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ui.viewmodels.onboarding_view_model import OnboardingViewModel
+from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS, StepConfig
 
 
 # --- I18n mock (autouse, returns key as value) ---
@@ -552,3 +552,61 @@ class TestOnboardingVMUnboundValidator:
         vm.current_step = 5
         result = await vm.validate_and_persist_current_step()
         assert result is True
+
+
+class TestStepConfigContract:
+    """StepConfig 数据结构与 STEP_CONFIGS 常量契约（合并自 tests/unit/test_onboarding_wizard.py）。"""
+
+    def test_step_config_defaults(self):
+        config = StepConfig(
+            id="test",
+            name="test_name",
+            show_prev=True,
+            show_next=True,
+            next_text_key="next",
+            next_icon="arrow_forward",
+        )
+        assert config.show_skip is False
+        assert config.skip_text_key == ""
+        assert config.required is False
+        assert config.validate_before_next is False
+
+    def test_step_config_all_fields(self):
+        config = StepConfig(
+            id="test",
+            name="test_name",
+            show_prev=True,
+            show_next=True,
+            next_text_key="next",
+            next_icon="arrow_forward",
+            show_skip=True,
+            skip_text_key="skip",
+            required=True,
+            validate_before_next=True,
+        )
+        assert config.id == "test"
+        assert config.required is True
+        assert config.validate_before_next is True
+        assert config.show_skip is True
+
+    def test_step_configs_ids(self):
+        expected_ids = [
+            "welcome",
+            "database",
+            "token",
+            "cloud_ai",
+            "local_model",
+            "data_sync",
+            "schedule",
+            "complete",
+        ]
+        actual_ids = [config.id for config in STEP_CONFIGS]
+        assert actual_ids == expected_ids
+
+    def test_required_steps(self):
+        required_steps = [config.id for config in STEP_CONFIGS if config.required]
+        assert required_steps == ["database", "token", "cloud_ai"]
+
+    def test_validate_before_next_steps(self):
+        validate_steps = [config.id for config in STEP_CONFIGS if config.validate_before_next]
+        assert validate_steps == ["database", "token", "cloud_ai", "local_model", "schedule"]

@@ -11,6 +11,22 @@ class TestStepConfig:
     def test_step_configs_count(self):
         assert len(STEP_CONFIGS) == 8
 
+    @pytest.mark.parametrize(
+        "index,expected_id",
+        [
+            (0, "welcome"),
+            (1, "database"),
+            (2, "token"),
+            (3, "cloud_ai"),
+            (4, "local_model"),
+            (5, "data_sync"),
+            (6, "schedule"),
+            (7, "complete"),
+        ],
+    )
+    def test_step_id(self, index, expected_id):
+        assert STEP_CONFIGS[index].id == expected_id
+
     def test_welcome_step_no_prev(self):
         assert STEP_CONFIGS[0].show_prev is False
 
@@ -38,8 +54,29 @@ class TestStepConfig:
     def test_local_model_step_has_skip(self):
         assert STEP_CONFIGS[4].show_skip is True
 
+    def test_data_sync_step_not_required(self):
+        assert STEP_CONFIGS[5].required is False
+
+    def test_schedule_step_not_required(self):
+        assert STEP_CONFIGS[6].required is False
+
     def test_complete_step_id(self):
         assert STEP_CONFIGS[7].id == "complete"
+
+
+class TestOnboardingWizardModuleContract:
+    """onboarding_wizard.py 模块契约测试（合并自 tests/unit/test_onboarding_wizard.py）。"""
+
+    def test_set_onboarding_complete_not_in_onboarding_wizard_module(self):
+        """set_onboarding_complete 不应在 onboarding_wizard.py 中调用，仅 main.py 调用。"""
+        from pathlib import Path
+
+        wizard_path = Path(__file__).resolve().parents[3] / "ui" / "views" / "onboarding_wizard.py"
+        content = wizard_path.read_text(encoding="utf-8")
+        assert "set_onboarding_complete" not in content, (
+            "set_onboarding_complete should NOT be called in onboarding_wizard.py - "
+            "it should only be called in main.py after service initialization"
+        )
 
 
 class TestOnboardingWizard:

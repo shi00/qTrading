@@ -58,6 +58,8 @@ def make_ctx():
     ctx.api.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+    # Inject zero delay to avoid asyncio.sleep blocking in tests
+    ctx.request_delay_provider = lambda is_heavy: 0.0
     return ctx
 
 
@@ -271,11 +273,9 @@ class TestFinancialSyncRepair:
     async def test_repair_with_codes_saves_merged_df(self):
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            result = await strategy.repair_financial_data(["000001.SZ"])
-            assert isinstance(result, int)
-            ctx.cache.save_financial_reports.assert_awaited()
+        result = await strategy.repair_financial_data(["000001.SZ"])
+        assert isinstance(result, int)
+        ctx.cache.save_financial_reports.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_repair_returns_actual_saved_count(self):
@@ -284,10 +284,8 @@ class TestFinancialSyncRepair:
         ctx.cache.save_fina_mainbz = AsyncMock(return_value=2)
         ctx.cache.save_fina_audit = AsyncMock(return_value=1)
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            result = await strategy.repair_financial_data(["000001.SZ"])
-            assert result > 0
+        result = await strategy.repair_financial_data(["000001.SZ"])
+        assert result > 0
 
     @pytest.mark.asyncio
     async def test_repair_empty_data_does_not_save(self):
@@ -299,11 +297,9 @@ class TestFinancialSyncRepair:
         ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            result = await strategy.repair_financial_data(["000001.SZ"])
-            ctx.cache.save_financial_reports.assert_not_awaited()
-            assert result == 0
+        result = await strategy.repair_financial_data(["000001.SZ"])
+        ctx.cache.save_financial_reports.assert_not_awaited()
+        assert result == 0
 
     @pytest.mark.asyncio
     async def test_repair_fills_missing_schema_cols_with_none(self):
@@ -319,12 +315,10 @@ class TestFinancialSyncRepair:
         ctx.api.get_fina_mainbz = AsyncMock(return_value=None)
         ctx.api.get_fina_audit = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            await strategy.repair_financial_data(["000001.SZ"])
-            saved_df = ctx.cache.save_financial_reports.call_args[0][0]
-            for col in FINANCIAL_REPORT_SCHEMA_COLS:
-                assert col in saved_df.columns, f"Missing column: {col}"
+        await strategy.repair_financial_data(["000001.SZ"])
+        saved_df = ctx.cache.save_financial_reports.call_args[0][0]
+        for col in FINANCIAL_REPORT_SCHEMA_COLS:
+            assert col in saved_df.columns, f"Missing column: {col}"
 
     @pytest.mark.asyncio
     async def test_repair_saves_only_schema_cols(self):
@@ -332,11 +326,9 @@ class TestFinancialSyncRepair:
 
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            await strategy.repair_financial_data(["000001.SZ"])
-            saved_df = ctx.cache.save_financial_reports.call_args[0][0]
-            assert list(saved_df.columns) == FINANCIAL_REPORT_SCHEMA_COLS
+        await strategy.repair_financial_data(["000001.SZ"])
+        saved_df = ctx.cache.save_financial_reports.call_args[0][0]
+        assert list(saved_df.columns) == FINANCIAL_REPORT_SCHEMA_COLS
 
 
 class TestFinancialSyncCorporateActions:
@@ -592,7 +584,6 @@ class TestFinancialSyncIncrementalWithDisclosure:
         ctx.cache.save_fina_audit = AsyncMock(return_value=3)
         strategy = FinancialSyncStrategy(ctx)
         with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
             mock_cfg.get_max_batch_rows.return_value = 100
             mock_cfg.get_sync_max_concurrent_heavy.return_value = 5
             result = await strategy.run()
@@ -618,7 +609,6 @@ class TestFinancialSyncIncrementalWithDisclosure:
         ctx.api.get_cashflow = AsyncMock(side_effect=RuntimeError("API error"))
         strategy = FinancialSyncStrategy(ctx)
         with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
             mock_cfg.get_max_batch_rows.return_value = 100
             mock_cfg.get_sync_max_concurrent_heavy.return_value = 5
             result = await strategy.run()
@@ -754,10 +744,8 @@ class TestFinancialSyncRepairPaths:
         ctx = make_ctx()
         progress_cb = MagicMock()
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            result = await strategy.repair_financial_data(["000001.SZ"], progress_callback=progress_cb)
-            assert isinstance(result, int)
+        result = await strategy.repair_financial_data(["000001.SZ"], progress_callback=progress_cb)
+        assert isinstance(result, int)
 
     @pytest.mark.asyncio
     async def test_repair_exception_continues(self):
@@ -767,10 +755,8 @@ class TestFinancialSyncRepairPaths:
         ctx.api.get_fina_indicator = AsyncMock(side_effect=RuntimeError("API error"))
         ctx.api.get_cashflow = AsyncMock(side_effect=RuntimeError("API error"))
         strategy = FinancialSyncStrategy(ctx)
-        with patch("data.sync.financial.ConfigHandler") as mock_cfg:
-            mock_cfg.get_sync_request_delay.return_value = 0
-            result = await strategy.repair_financial_data(["000001.SZ"])
-            assert isinstance(result, int)
+        result = await strategy.repair_financial_data(["000001.SZ"])
+        assert isinstance(result, int)
 
 
 class TestFinancialDedupWithAnnDate:

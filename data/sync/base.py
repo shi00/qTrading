@@ -10,6 +10,7 @@ import datetime
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 # Forward declaration for type hinting if needed,
@@ -31,6 +32,9 @@ class SyncContext:
     cache: Any  # CacheManager
     config: Any = None  # ConfigHandler (Optional)
     _processor_ref: Any = None  # weakref.ref(DataProcessor)
+    # Optional: request delay provider for testability.
+    # Signature: (is_heavy: bool) -> float. None = fall back to ConfigHandler.
+    request_delay_provider: Callable[[bool], float] | None = None
 
     @property
     def processor(self):

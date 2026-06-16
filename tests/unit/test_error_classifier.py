@@ -507,3 +507,20 @@ class TestClassifyErrorDBTypeMatching:
     def test_string_fallback_still_works_without_asyncpg_type(self):
         result = classify_error(Exception("password authentication failed"), context="db")
         assert result["code"] == "auth"
+
+
+class TestClassifyErrorBackwardCompat:
+    """ui.i18n re-export 契约测试（合并自 tests/unit/test_onboarding_wizard.py）。"""
+
+    def test_re_export_from_ui_i18n(self):
+        from ui.i18n import classify_error as ce_from_i18n
+        from utils.error_classifier import classify_error as ce_from_utils
+
+        assert ce_from_i18n is ce_from_utils, "ui.i18n.classify_error must re-export from utils.error_classifier"
+
+    def test_re_export_functional(self):
+        from ui.i18n import classify_error
+
+        e = FileNotFoundError("test")
+        result = classify_error(e)
+        assert result["code"] == "file_not_found"

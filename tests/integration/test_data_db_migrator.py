@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from data.persistence.db_migrator import DatabaseMigrator, DatabaseMigrationNeeded
 from data.persistence.db_url_override import override_db_url
 from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
-from tests.conftest import reset_singleton as _reset_singleton_ctx
+from tests.conftest import singleton_state as _singleton_state_ctx
 
 
 async def _create_isolated_db(params: dict, db_name: str) -> None:
@@ -677,7 +677,7 @@ class TestMigrationInterruptionRecovery:
         from data.cache.cache_manager import CacheManager
 
         # Create a minimal CacheManager for testing
-        with _reset_singleton_ctx(CacheManager, extra_attrs=["_initialized"]):
+        with _singleton_state_ctx(CacheManager, extra_attrs=["_initialized"]):
             cm = CacheManager.__new__(CacheManager)
             cm.engine = engine
             cm._disposed = False

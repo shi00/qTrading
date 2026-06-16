@@ -118,7 +118,7 @@
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) |
 | R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) |
-| R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `reset_singleton` 上下文管理器) |
+| R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器) |
 | R8 | **废弃 API** | 使用 `_write_db(is_many=True)` 进行批量写入 (会发 `DeprecationWarning`，必须用 `_save_upsert()`) |
 | R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 `DataSanitizer` 脱敏) |
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) |
@@ -516,18 +516,18 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 ### 7.2 测试编写规则
 
-- **单例隔离**: 单元测试（`tests/unit/`）由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置所有注册单例。集成测试和 e2e 测试不自动重置单例，需手动管理。需精细控制单例初始化状态时（如测试 `__init__` 重复初始化防护），可使用 `reset_singleton` 上下文管理器：
+- **单例隔离**: 单元测试（`tests/unit/`）由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置所有注册单例。集成测试和 e2e 测试不自动重置单例，需手动管理。需精细控制单例初始化状态时（如测试 `__init__` 重复初始化防护），可使用 `singleton_state` 上下文管理器：
 
   ```python
-  from tests.conftest import reset_singleton
+  from tests.conftest import singleton_state
 
-  with reset_singleton(TaskManager, extra_attrs=["_initialized"]):
+  with singleton_state(TaskManager, extra_attrs=["_initialized"]):
       mgr = TaskManager()
       # 测试逻辑...
   # 自动恢复原始单例状态
   ```
 
-- **外部服务 Mock**: 单元测试由 `mock_external_services` autouse fixture 自动 mock 外部网络调用和配置延迟 (`NewsFetcher`/`ReviewManager`/`ConfigHandler.get_sync_request_delay`)。测试自身模块需跳过 mock 时，在文件顶部声明 `pytestmark = pytest.mark.no_auto_mock`。
+- **外部服务 Mock**: 单元测试由 `mock_external_services` autouse fixture 自动 mock 外部网络调用 (`NewsFetcher`/`ReviewManager`)。测试自身模块需跳过 mock 时，在文件顶部声明 `pytestmark = pytest.mark.no_auto_mock`。
 
 - **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
 - **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。

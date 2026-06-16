@@ -16,12 +16,12 @@ from services.task_manager import (
     TaskManager,
     TaskStatus,
 )
-from tests.conftest import reset_singleton as _reset_singleton_ctx
+from tests.conftest import singleton_state as _singleton_state_ctx
 
 
 @pytest.fixture(autouse=True)
 def _reset_task_manager_singleton():
-    with _reset_singleton_ctx(TaskManager):
+    with _singleton_state_ctx(TaskManager):
         yield
 
 
