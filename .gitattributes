@@ -1,0 +1,6 @@
+# Auto-detect text files and normalize line endings to LF in the repository
+* text=auto
+
+# Requirements files must always use LF
+# (pip-compile generates platform-specific EOL; this ensures consistency)
+requirements*.txt text eol=lf
