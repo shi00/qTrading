@@ -43,6 +43,7 @@ class SchedulerService:
     """
 
     _instance = None
+    _initialized = False
     _lock = threading.Lock()  # Thread-safe singleton
 
     def __new__(cls):

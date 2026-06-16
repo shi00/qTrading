@@ -59,6 +59,7 @@ class TushareClient:
 
     pro: typing.Any
     _instance = None
+    _initialized = False
     _lock = threading.Lock()
 
     _ASYNC_TIMEOUT_MULTIPLIER = 1.5

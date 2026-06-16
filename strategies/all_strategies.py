@@ -49,6 +49,7 @@ class StrategyManager:
     """
 
     _instance = None
+    _initialized = False
     _lock = threading.Lock()
 
     def __new__(cls):
