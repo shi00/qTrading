@@ -146,7 +146,7 @@ class DataSanitizer:
         msg = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", msg)
 
         # 如果需要堆栈,也要脱敏
-        if show_traceback and hasattr(exception, "__traceback__"):
+        if show_traceback and isinstance(exception, BaseException):
             import traceback
 
             tb_lines = traceback.format_exception(
@@ -197,6 +197,12 @@ class DataSanitizer:
             # DataFrame特殊处理
             elif isinstance(v, pd.DataFrame):
                 result[k] = DataSanitizer.sanitize_dataframe(v)
+            elif isinstance(v, dict):
+                result[k] = DataSanitizer.sanitize_dict(v, sensitive_keys)
+            elif isinstance(v, list):
+                result[k] = [
+                    DataSanitizer.sanitize_dict(item, sensitive_keys) if isinstance(item, dict) else item for item in v
+                ]
             else:
                 result[k] = v
 

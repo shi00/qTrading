@@ -127,13 +127,25 @@ def log_async_operation(
 
             # 构建参数日志
             if log_args:
-                # 脱敏参数
+                # Inspect signature to check if the first parameter is self or cls
+                sig = inspect.signature(func)
+                params = list(sig.parameters.keys())
+                has_self = params[0] in ("self", "cls") if params else False
+
                 clean_args, clean_kwargs = DataSanitizer.sanitize_args(
-                    *(args[1:] if args else []),  # 跳过self
+                    *(args[1:] if has_self and args else args),
                     sensitive_patterns=sanitize_params or [],
                     **kwargs,
                 )
-                target_logger.debug(f"[{op_name}] args: {clean_kwargs}", stacklevel=2)
+
+                log_parts = []
+                if clean_args:
+                    log_parts.append(f"args: {clean_args}")
+                if clean_kwargs:
+                    log_parts.append(f"kwargs: {clean_kwargs}")
+
+                args_msg = " | ".join(log_parts) if log_parts else "no args"
+                target_logger.debug(f"[{op_name}] {args_msg}", stacklevel=2)
 
             target_logger.log(log_level, f"[{op_name}] started", stacklevel=2)
 

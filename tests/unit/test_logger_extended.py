@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from unittest.mock import patch
+from logging.handlers import RotatingFileHandler
 
 from utils.logger import get_logger, setup_logging, update_log_level
 
@@ -49,13 +50,10 @@ class TestLogger(unittest.TestCase):
 
             # Check file handlers properties
             file_handler = [
-                h
-                for h in logger.handlers
-                if isinstance(h, logging.handlers.RotatingFileHandler)  # type: ignore[untyped]
-                and "app.log" in h.baseFilename  # type: ignore[untyped]
+                h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
             ][0]
-            self.assertEqual(file_handler.maxBytes, 5 * 1024 * 1024)  # type: ignore[untyped]
-            self.assertEqual(file_handler.backupCount, 5)  # type: ignore[untyped]
+            self.assertEqual(file_handler.maxBytes, 5 * 1024 * 1024)
+            self.assertEqual(file_handler.backupCount, 5)
 
     def test_setup_logging_custom_config(self):
         """Test logging setup with custom configuration"""
@@ -69,13 +67,10 @@ class TestLogger(unittest.TestCase):
             logger = setup_logging()
 
             file_handler = [
-                h
-                for h in logger.handlers
-                if isinstance(h, logging.handlers.RotatingFileHandler)  # type: ignore[untyped]
-                and "app.log" in h.baseFilename  # type: ignore[untyped]
+                h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
             ][0]
-            self.assertEqual(file_handler.maxBytes, 1 * 1024 * 1024)  # type: ignore[untyped]
-            self.assertEqual(file_handler.backupCount, 2)  # type: ignore[untyped]
+            self.assertEqual(file_handler.maxBytes, 1 * 1024 * 1024)
+            self.assertEqual(file_handler.backupCount, 2)
 
     def test_logger_writing(self):
         """Test that logger actually writes to file"""
@@ -201,9 +196,7 @@ class TestSetupLoggingDegradation:
         ):
             logger = setup_logging("rotation_fallback_test")
         file_handlers = [
-            h
-            for h in logger.handlers
-            if isinstance(h, logging.handlers.RotatingFileHandler) and "app.log" in h.baseFilename
+            h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
         ]
         assert len(file_handlers) == 1
         assert file_handlers[0].maxBytes == 5 * 1024 * 1024
@@ -348,9 +341,7 @@ class TestLogFormatSelection:
             logger = setup_logging("json_format_test")
 
         file_handlers = [
-            h
-            for h in logger.handlers
-            if isinstance(h, logging.handlers.RotatingFileHandler) and "app.log" in h.baseFilename
+            h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
         ]
         assert len(file_handlers) == 1
         assert isinstance(file_handlers[0].formatter, JSONFormatter)
@@ -369,9 +360,7 @@ class TestLogFormatSelection:
             logger = setup_logging("text_format_test")
 
         file_handlers = [
-            h
-            for h in logger.handlers
-            if isinstance(h, logging.handlers.RotatingFileHandler) and "app.log" in h.baseFilename
+            h for h in logger.handlers if isinstance(h, RotatingFileHandler) and "app.log" in h.baseFilename
         ]
         assert len(file_handlers) == 1
         assert not isinstance(file_handlers[0].formatter, JSONFormatter)

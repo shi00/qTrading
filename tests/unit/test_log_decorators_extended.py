@@ -137,6 +137,51 @@ class TestLogAsyncOperation:
         assert "param2" in log_capture.text or "value2" in log_capture.text
 
     @pytest.mark.asyncio
+    async def test_log_args_positional_and_method_types(self, log_capture):
+        # 1. Standalone function - should log positional arguments
+        @log_async_operation(operation_name="test_standalone", log_args=True)
+        async def standalone_func(a, b):
+            return a + b
+
+        await standalone_func(1, 2)
+        assert "args: ('1', '2')" in log_capture.text
+
+        log_capture.clear()
+
+        # 2. Class method / instance method - should skip first argument
+        class Dummy:
+            @log_async_operation(operation_name="test_method", log_args=True)
+            async def instance_method(self, x):
+                return x
+
+            @classmethod
+            @log_async_operation(operation_name="test_classmethod", log_args=True)
+            async def class_method(cls, y):
+                return y
+
+            @staticmethod
+            @log_async_operation(operation_name="test_staticmethod", log_args=True)
+            async def static_method(z):
+                return z
+
+        d = Dummy()
+        await d.instance_method(10)
+        # self is skipped, so args should just be (10,)
+        assert "args: ('10',)" in log_capture.text
+
+        log_capture.clear()
+
+        await Dummy.class_method(20)
+        # cls is skipped, so args should just be (20,)
+        assert "args: ('20',)" in log_capture.text
+
+        log_capture.clear()
+
+        await Dummy.static_method(30)
+        # staticmethod has no self/cls, z is first argument, should be (30,)
+        assert "args: ('30',)" in log_capture.text
+
+    @pytest.mark.asyncio
     async def test_sanitize_params(self, log_capture):
         @log_async_operation(
             operation_name="test_sanitize",

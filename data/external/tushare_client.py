@@ -13,7 +13,7 @@ from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
-from utils.log_decorators import log_async_operation, PerfThreshold
+from utils.log_decorators import log_async_operation, track_performance, PerfThreshold
 
 logger = logging.getLogger(__name__)
 
@@ -721,6 +721,7 @@ class TushareClient:
             return None
         return pd.concat(df_list, ignore_index=True)
 
+    @track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     def get_trade_dates(self, start_date: datetime.date | str | None, end_date: datetime.date | str | None):
         """Get list of actual trading dates (includes holidays handling).
         NOTE: This is a SYNC method — must remain sync for APScheduler (non-asyncio thread).
@@ -746,6 +747,7 @@ class TushareClient:
             logger.warning("[API] get_trade_dates sync call failed: %s", DataSanitizer.sanitize_error(e))
         return []
 
+    @track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     def is_trading_day(self, date_str: typing.Any = None):
         """
         Check if a given date is a trading day with optimized caching.

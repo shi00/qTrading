@@ -192,6 +192,19 @@ class ThreadPoolManager:
 
         Usage: await ThreadPoolManager().run_async(TaskType.IO, my_func, arg1, key=val)
         """
+        import inspect
+
+        def is_coro(f):
+            if inspect.iscoroutinefunction(f):
+                return True
+            if hasattr(f, "func"):
+                return is_coro(f.func)
+            return False
+
+        if is_coro(func):
+            func_name = getattr(func, "__name__", None) or getattr(getattr(func, "func", None), "__name__", "unknown")
+            raise ValueError(f"Cannot run coroutine function '{func_name}' inside thread pool executor")
+
         loop = asyncio.get_running_loop()
         executor = self.get_executor(task_type)
 

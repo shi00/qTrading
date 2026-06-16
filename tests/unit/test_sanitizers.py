@@ -9,13 +9,13 @@ from utils.sanitizers import DataSanitizer
 
 class TestSanitizeToken:
     def test_none_token(self):
-        assert DataSanitizer.sanitize_token(None) == "***"
+        assert DataSanitizer.sanitize_token(None) == "***"  # type: ignore[arg-type]
 
     def test_empty_token(self):
         assert DataSanitizer.sanitize_token("") == "***"
 
     def test_non_string_token(self):
-        assert DataSanitizer.sanitize_token(12345) == "***"
+        assert DataSanitizer.sanitize_token(12345) == "***"  # type: ignore[arg-type]
 
     def test_short_token(self):
         assert DataSanitizer.sanitize_token("abc") == "***"
@@ -32,7 +32,7 @@ class TestSanitizeDataframe:
         assert DataSanitizer.sanitize_dataframe(None) == "None"
 
     def test_non_dataframe(self):
-        assert DataSanitizer.sanitize_dataframe([1, 2, 3]) == "list"
+        assert DataSanitizer.sanitize_dataframe([1, 2, 3]) == "list"  # type: ignore[arg-type]
 
     def test_empty_dataframe(self):
         df = pd.DataFrame()
@@ -187,6 +187,36 @@ class TestSanitizeDict:
         result = DataSanitizer.sanitize_dict(data, sensitive_keys=["custom"])
         assert "***" in result["custom_secret"]
 
+    def test_recursive_sanitize(self):
+        data = {
+            "name": "test",
+            "sensitive_field": {
+                "token": "abc123456789",
+                "nested_non_sensitive": "hello",
+            },
+            "nested_config_group": {
+                "password": "my_password",
+                "normal_field": "world",
+            },
+            "list_field": [
+                {"secret": "nested_secret"},
+                {"normal": "ok"},
+            ],
+        }
+        result = DataSanitizer.sanitize_dict(data)
+        # 1. sensitive_field contains "sensitive", but wait, "sensitive" is not in sensitive_keys. Let's make sure it is sensitive by adding "api_key" or "secret".
+        # Let's verify: we can make a key containing "secret" to test sensitive dict masking
+        data["sensitive_secret_group"] = {"nested_val": "secret_val"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["sensitive_secret_group"] == "***"
+
+        # 2. nested_config_group contains sensitive inner keys, so password should be masked, normal_field kept
+        assert result["nested_config_group"]["password"] == "my_***word"
+        assert result["nested_config_group"]["normal_field"] == "world"
+        # 3. list_field has inner dicts, secret should be masked, normal kept
+        assert result["list_field"][0]["secret"] == "nes***cret"
+        assert result["list_field"][1]["normal"] == "ok"
+
 
 class TestSanitizeArgs:
     def test_basic_args(self):
@@ -232,6 +262,7 @@ class TestAIServiceErrorSanitization:
                         strategy_key="value",
                     )
 
+        assert result is not None
         assert result["error"] == "<SANITIZED>", (
             "analyze_stock must sanitize exceptions via DataSanitizer.sanitize_error, "
             f"but got raw error: {result['error']}"
@@ -299,6 +330,7 @@ class TestAIServiceErrorSanitization:
                         strategy_key="value",
                     )
 
+        assert result is not None
         assert sensitive_data not in result["error"], (
             f"Raw str(e) leaked into error return. "
             f"Error methods must use DataSanitizer.sanitize_error(e), not str(e). "
@@ -338,6 +370,7 @@ class TestAIServiceErrorSanitization:
                     strategy_key="value",
                 )
 
+        assert result is not None
         assert "sk-LEAKED123" not in result["error"], f"Sensitive data leaked in error result: {result['error']}"
         assert "secret_value" not in result["error"], f"Sensitive data leaked in error result: {result['error']}"
 

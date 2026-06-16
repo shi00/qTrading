@@ -302,3 +302,29 @@ class TestThreadPoolManagerContextVarsPropagation:
         mgr = ThreadPoolManager()
         result = await mgr.run_async(TaskType.IO, get_correlation_id)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_run_async_raises_on_coroutine_function(self):
+        mgr = ThreadPoolManager()
+
+        async def dummy_coro():
+            pass
+
+        with pytest.raises(ValueError) as excinfo:
+            await mgr.run_async(TaskType.IO, dummy_coro)
+        assert "Cannot run coroutine function" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_run_async_raises_on_partial_coroutine_function(self):
+        import functools
+
+        mgr = ThreadPoolManager()
+
+        async def dummy_coro(a, b=2):
+            pass
+
+        partial_coro = functools.partial(dummy_coro, 1, b=3)
+        with pytest.raises(ValueError) as excinfo:
+            await mgr.run_async(TaskType.IO, partial_coro)
+        assert "Cannot run coroutine function" in str(excinfo.value)
+        assert "dummy_coro" in str(excinfo.value)

@@ -586,6 +586,7 @@ class TestTaskManagerTruncateResult:
     def test_long_string(self):
         long_str = "a" * 1000
         result = TaskManager._truncate_result_for_db(long_str, max_len=100)
+        assert result is not None
         assert len(result) == 100
 
 

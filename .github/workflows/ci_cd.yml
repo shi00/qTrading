@@ -361,7 +361,7 @@ jobs:
         run: |
           $logPath = "logs/e2e-flet-app.log"
           if (Test-Path $logPath) {
-            (Get-Content $logPath) -replace 'postgresql\+asyncpg://[^@]+@', 'postgresql+asyncpg://postgres:***@' | Set-Content $logPath
+            (Get-Content $logPath) -replace '([a-zA-Z0-9\+\.-]+)://([^:@\s]+):[^@\s]+@', '$1://$2:***@' | Set-Content $logPath
           }
 
       - name: Upload E2E test reports

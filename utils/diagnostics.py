@@ -121,10 +121,13 @@ class SystemDiagnosticsCollector:
             }
 
             # 6. 计算 ZIP 归档输出路径
+            import uuid
+
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            rand_id = uuid.uuid4().hex[:8]
             log_dir = os.path.join(config.APP_ROOT, "logs")
             os.makedirs(log_dir, exist_ok=True)
-            zip_filename = f"diagnostics_{timestamp}.zip"
+            zip_filename = f"diagnostics_{timestamp}_{rand_id}.zip"
             zip_path = os.path.abspath(os.path.join(log_dir, zip_filename))
 
             # 定义 JSON 序列化辅助函数
