@@ -926,6 +926,42 @@ class TestChunkedInQuery:
             extra_params=["prefix1"],
         )
 
+    @pytest.mark.asyncio
+    async def test_boundary_exactly_chunk_size_single_query(self):
+        """恰好 chunk_size 个值应只触发一次查询（边界值 500）。
+
+        覆盖 base_dao.py:145 的 `if len(values) <= chunk_size:` 单查询路径。
+        """
+        values = [f"{i:06d}.SH" for i in range(500)]
+        read_fn = AsyncMock(return_value=pd.DataFrame({"ts_code": values}))
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            values,
+            chunk_size=500,
+        )
+        assert read_fn.call_count == 1
+        assert len(result) == 500
+
+    @pytest.mark.asyncio
+    async def test_boundary_one_over_chunk_size_two_queries(self):
+        """chunk_size+1 个值应触发两次查询（边界值 501）。
+
+        覆盖 base_dao.py:159 的 `for i in range(0, len(values), chunk_size):` 多块路径。
+        """
+        values = [f"{i:06d}.SH" for i in range(501)]
+        chunk1_df = pd.DataFrame({"ts_code": values[:500]})
+        chunk2_df = pd.DataFrame({"ts_code": values[500:]})
+        read_fn = AsyncMock(side_effect=[chunk1_df, chunk2_df])
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            values,
+            chunk_size=500,
+        )
+        assert read_fn.call_count == 2
+        assert len(result) == 501
+
 
 class TestChunkedInWrite:
     """Verify chunked_in_write properly splits large IN clauses for write operations."""

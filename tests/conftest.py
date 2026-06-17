@@ -112,6 +112,7 @@ def _create_mock_keyring():
     mock_kr.clear = clear
     mock_kr.errors = MagicMock()
     mock_kr.errors.NoKeyringError = type("NoKeyringError", (Exception,), {})
+    mock_kr.errors.PasswordDeleteError = type("PasswordDeleteError", (Exception,), {})
     return mock_kr
 
 

@@ -340,11 +340,12 @@ class TestScreenerViewModelFlushBehavior:
 
         vm._on_ai_result_stream({"name": "test", "ai_score": 80, "thinking": ""})
         flushed = False
-        for _ in range(20):
+        # 用 sleep(0) 让出控制权给事件循环，不真实等待；增加轮询次数补偿
+        for _ in range(50):
             if len(vm._ai_buffer) == 0 or vm._full_results is not None:
                 flushed = True
                 break
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
         assert flushed
 
     def test_no_loop_preserves_buffer_not_lost(self):

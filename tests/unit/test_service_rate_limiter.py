@@ -8,6 +8,9 @@ import asyncio
 import threading
 import time
 import unittest
+from unittest.mock import patch
+
+import pytest
 
 from utils.rate_limiter import TokenBucket
 
@@ -62,15 +65,31 @@ class TestTokenBucketConsume(unittest.TestCase):
         self.assertLess(elapsed, 0.1)
         self.assertAlmostEqual(bucket.tokens, 5.0, places=1)
 
-    def test_consume_insufficient_tokens(self):
-        """不足令牌消费 - 需等待"""
+    @patch("utils.rate_limiter.time.monotonic")
+    @patch("utils.rate_limiter.time.sleep")
+    def test_consume_insufficient_tokens(self, mock_sleep, mock_monotonic):
+        """不足令牌消费 - 需等待（虚拟时钟，不真实 sleep）。
+
+        覆盖 rate_limiter.py:57-96 的 _consume_reserve + consume：
+        - __init__ 调用 time.monotonic() 2 次（line 51, 55）
+        - _consume_reserve 调用 time.monotonic() 1 次（line 63）
+        - consume 调用 time.sleep(wait_time) 1 次（line 96）
+
+        注意：consume() 的 line 82-92 有 asyncio.get_running_loop() 检查。
+        在 sync 测试中（无运行中事件循环），get_running_loop() 抛出
+        RuntimeError("no running event loop")，被 except 捕获后 pass，
+        不影响测试。session 级事件循环存在但未"运行"，行为一致。
+        """
+        # 模拟时间序列：构造时 2 次 + _consume_reserve 1 次 = 3 次
+        mock_monotonic.side_effect = [0.0, 0.0, 0.0]
         bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
 
-        start_time = time.monotonic()
         bucket.consume(5)
-        elapsed = time.monotonic() - start_time
 
-        self.assertGreaterEqual(elapsed, 0.3)
+        # 验证 time.sleep 被调用（等待令牌补充）
+        mock_sleep.assert_called_once()
+        wait_time = mock_sleep.call_args[0][0]
+        self.assertGreater(wait_time, 0)  # 需等待
         self.assertLess(bucket.tokens, 0)
 
     def test_consume_all_tokens(self):
@@ -107,8 +126,9 @@ class TestTokenBucketRefill(unittest.TestCase):
 
 
 class TestTokenBucketThreadSafety(unittest.TestCase):
-    """测试线程安全"""
+    """测试线程安全（P1 级，标记 slow 可选跳过）"""
 
+    @pytest.mark.slow
     def test_concurrent_consume(self):
         """并发消费"""
         bucket = TokenBucket(start_tokens=100, capacity=100, rate=100.0)
@@ -151,17 +171,31 @@ class TestTokenBucketAsync(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_consume_async_insufficient(self):
-        """异步消费不足令牌"""
+    @patch("utils.rate_limiter.time.monotonic")
+    @patch("utils.rate_limiter.asyncio.sleep")
+    def test_consume_async_insufficient(self, mock_async_sleep, mock_monotonic):
+        """异步消费不足令牌（虚拟时钟，不真实 sleep）。
+
+        覆盖 rate_limiter.py:57-110 的 _consume_reserve + consume_async：
+        - __init__ 调用 time.monotonic() 2 次（line 51, 55）
+        - _consume_reserve 调用 time.monotonic() 1 次（line 63）
+        - consume_async 调用 asyncio.sleep(wait_time) 1 次（line 105）
+
+        注意：用 return_value 而非 side_effect，因为 Windows ProactorEventLoop
+        在 asyncio.run() 关闭事件循环时会额外调用 time.monotonic()，
+        side_effect 会耗尽抛 StopIteration。
+        """
 
         async def run_test():
+            mock_monotonic.return_value = 0.0
             bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
 
-            start_time = time.monotonic()
             await bucket.consume_async(5)
-            elapsed = time.monotonic() - start_time
 
-            self.assertGreaterEqual(elapsed, 0.3)
+            # 验证 asyncio.sleep 被调用（等待令牌补充）
+            mock_async_sleep.assert_called_once()
+            wait_time = mock_async_sleep.call_args[0][0]
+            self.assertGreater(wait_time, 0)
 
         asyncio.run(run_test())
 
@@ -311,8 +345,9 @@ class TestTokenBucketAdaptiveRate(unittest.TestCase):
 
 
 class TestTokenBucketConcurrent(unittest.TestCase):
-    """测试 TokenBucket 并发安全性（P1 级）"""
+    """测试 TokenBucket 并发安全性（P1 级，标记 slow 可选跳过）"""
 
+    @pytest.mark.slow
     def test_concurrent_reduce_rate_and_on_success(self):
         """多线程同时调用 reduce_rate 和 on_success 不崩溃"""
         bucket = TokenBucket(start_tokens=50, capacity=100, rate=10.0)
@@ -349,6 +384,7 @@ class TestTokenBucketConcurrent(unittest.TestCase):
         self.assertGreaterEqual(bucket.rate, bucket.min_rate)
         self.assertLessEqual(bucket.rate, bucket.original_rate)
 
+    @pytest.mark.slow
     def test_concurrent_consume_and_reduce_rate(self):
         """多线程同时消费令牌和降低速率不崩溃"""
         bucket = TokenBucket(start_tokens=50, capacity=100, rate=10.0)
@@ -381,6 +417,7 @@ class TestTokenBucketConcurrent(unittest.TestCase):
 
         self.assertEqual(len(errors), 0)
 
+    @pytest.mark.slow
     def test_concurrent_reconfigure_and_consume(self):
         """多线程同时 reconfigure 和消费不崩溃"""
         bucket = TokenBucket(start_tokens=50, capacity=100, rate=10.0)

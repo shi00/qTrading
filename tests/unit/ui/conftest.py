@@ -64,6 +64,9 @@ def mock_app_colors():
     m.TABLE_GRID_H = "#2C2C2C"
     m.LOG_BG = "#000000"
     m.LOG_TEXT = "#CCCCCC"
+    m.CARD_BG = "#1E1E1E"
+    m.TABLE_ROW_HOVER = "#333333"
+    m.load_theme = MagicMock()
     m.subscribe = MagicMock()
     m.unsubscribe = MagicMock()
     return m
@@ -75,12 +78,15 @@ def mock_app_styles():
     m.CONTROL_WIDTH_MD = 300
     m.CONTROL_WIDTH_SM = 150
     m.CONTROL_WIDTH_LG = 400
-    m.primary_button.return_value = ft.ButtonStyle()
-    m.outline_button.return_value = ft.ButtonStyle()
-    m.accent_button.return_value = ft.ButtonStyle()
-    m.secondary_button.return_value = ft.ButtonStyle()
-    m.dashboard_card.return_value = {"padding": 10}
-    m.card.return_value = {"padding": 10}
+    m.CONTROL_WIDTH_XS = 80
+    m.primary_button = MagicMock(return_value=ft.ButtonStyle())
+    m.outline_button = MagicMock(return_value=ft.ButtonStyle())
+    m.accent_button = MagicMock(return_value=ft.ButtonStyle())
+    m.secondary_button = MagicMock(return_value=ft.ButtonStyle())
+    m.dashboard_card = MagicMock(return_value={"padding": 10})
+    m.card = MagicMock(return_value={"padding": 10})
+    m.data_table_row = MagicMock(return_value="#1E1E1E")
+    m.price_change_color = MagicMock(return_value="#4CAF50")
     return m
 
 
