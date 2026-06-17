@@ -236,6 +236,7 @@ class MyService:
 3. 实例创建必须受锁保护；优先在 `__new__` 中持锁，若存在 `get_instance()` 等统一入口，可由入口持锁以避免重复加锁死锁
 4. 支持 `_initialized` 标志防止重复初始化
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 方法 (由 `singleton_registry` 的集中 `atexit` 处理器调用，按注册逆序执行)
+6. 必须支持通过参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖
 
 **@register_singleton 单例**: `CacheManager`、`ThreadPoolManager`、`TaskManager`、`AIService`、`SchedulerService`、`DataProcessor`、`MarketDataService`、`NewsSubscriptionService`、`TushareClient`、`LocalModelManager`、`StrategyManager`。
 
