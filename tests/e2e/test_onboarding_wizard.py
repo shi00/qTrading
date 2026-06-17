@@ -137,11 +137,3 @@ async def test_wizard_db_validation_success(wizard_page):
 
     token_title = I18n.get("wizard_step1_title")
     await wizard_page.expect_text(token_title, timeout_ms=20000)
-
-
-@pytest.mark.network
-@pytest.mark.slow
-async def test_wizard_full_happy_path(wizard_page):
-    """需 E2E_REAL_TS_TOKEN / E2E_REAL_AI_KEY 等真实凭证，走到"配置完成"。
-    实现细节在 M3+ 落地；此处仅占位说明范围。"""
-    pytest.skip("需要真实 Tushare/LLM 凭证，仅本地/夜间运行")

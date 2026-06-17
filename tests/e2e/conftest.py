@@ -32,6 +32,17 @@ from core.i18n import I18n
 
 I18n.initialize("zh")
 
+# A1: 种子数据阈值从被测策略参数派生，消除隐式契约
+# 策略改阈值时种子自动跟随，契约由代码强制而非注释维持
+from strategies.market import VolumeBreakoutStrategy
+
+_vb_params = {p["name"]: p["default"] for p in VolumeBreakoutStrategy().get_parameters()}
+# 必过样本（平安银行）：显式高于 VolumeBreakoutStrategy 阈值
+_PA_PCT_CHG_RANGE = (_vb_params["pct_chg_min"] + 1.0, _vb_params["pct_chg_max"] - 1.0)
+_PA_TURNOVER_RANGE = (_vb_params["turnover_min"] + 0.5, _vb_params["turnover_min"] + 3.0)
+# 必不过样本（贵州茅台）：显式低于 pct_chg_min 阈值
+_MT_PCT_CHG_RANGE = (max(0.0, _vb_params["pct_chg_min"] - 1.8), max(0.1, _vb_params["pct_chg_min"] - 0.5))
+
 
 @pytest.fixture(scope="session")
 async def e2e_playwright():
@@ -82,6 +93,10 @@ def _terminate(proc):
         proc.wait(timeout=10)
     except Exception:  # noqa: BLE001
         proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            logger.warning("[E2E] Flet app PID %s 未能在 kill 后回收", proc.pid)
 
 
 class AppServer:
@@ -115,8 +130,8 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # Flet's web app downloads canvaskit.js and canvaskit.wasm from unpkg.com on startup.
     # In CI and sometimes local environments, unpkg.com can be extremely slow or timeout,
     # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
-    # To fix this, we intercept network requests and serve the canvaskit files directly from
-    # the local 'mock_assets' folder. We also abort font requests to speed up test execution.
+    # To fix this, we intercept canvaskit requests and serve them from local mock_assets.
+    # Other requests (fonts, etc.) continue to the network.
     # [PITFALL FIX] 拦截并缓存 CanvasKit WASM 文件加载
     # 坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
     # Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
@@ -158,14 +173,10 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             await page.wait_for_timeout(2000)
             error_text = I18n.get("error_db_init_failed")
             if await fp.has_text(error_text):
-                log_contents = ""
-                try:
-                    log_path = Path("logs/e2e-flet-app.log")
-                    if log_path.exists():
-                        log_contents = log_path.read_text(encoding="utf-8")
-                except Exception:
-                    pass
-                raise RuntimeError(f"Flet app shows DB initialization error UI.\nApp Log:\n{log_contents}")
+                # R9: 不内联日志原文（可能含 DB 连接串/密码），只引用已脱敏的日志工件路径
+                raise RuntimeError(
+                    "Flet app shows DB initialization error UI. See sanitized log artifact: logs/e2e-flet-app.log"
+                )
         except RuntimeError:
             await context.close()
             raise
@@ -231,7 +242,10 @@ async def _seed_e2e_data() -> None:
         with override_db_url(TEST_DATABASE_URL):
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
     except Exception as e:
-        logger.exception("Failed to run database migrations in E2E seed: %s", e)
+        # R9: 脱敏后抛出，用 from None 显式抑制异常链，防原始异常（可能含 DB 连接串）泄漏进 junit XML
+        from utils.sanitizers import DataSanitizer
+
+        raise RuntimeError(f"E2E seed aborted: DB migration failed: {DataSanitizer.sanitize_error(e)}") from None
     finally:
         await engine.dispose()
 
@@ -303,9 +317,9 @@ async def _seed_e2e_data() -> None:
             quote_rows = []
             indicator_rows = []
             for i, td in enumerate(trade_dates):
-                # 平安银行：pct_chg 3.0~6.0, turnover_rate 3.5~6.0（通过 VolumeBreakoutStrategy 过滤）
+                # 平安银行：pct_chg/turnover 显式高于 VolumeBreakoutStrategy 阈值（通过过滤）
                 pa_close = 12.0 + i * 0.05
-                pa_pct_chg = round(rng.uniform(3.0, 6.0), 4)
+                pa_pct_chg = round(rng.uniform(*_PA_PCT_CHG_RANGE), 4)
                 pa_pre_close = round(pa_close / (1 + pa_pct_chg / 100), 4)
                 pa_change = round(pa_close - pa_pre_close, 4)
                 pa_vol = rng.randint(500000, 1000000)
@@ -326,9 +340,9 @@ async def _seed_e2e_data() -> None:
                         1.0,
                     )
                 )
-                # 贵州茅台：pct_chg 0.2~1.5（不通过过滤）
+                # 贵州茅台：pct_chg 显式低于 pct_chg_min 阈值（不通过过滤）
                 mt_close = 1800.0 + i * 0.3
-                mt_pct_chg = round(rng.uniform(0.2, 1.5), 4)
+                mt_pct_chg = round(rng.uniform(*_MT_PCT_CHG_RANGE), 4)
                 mt_pre_close = round(mt_close / (1 + mt_pct_chg / 100), 4)
                 mt_change = round(mt_close - mt_pre_close, 4)
                 mt_vol = rng.randint(20000, 40000)
@@ -351,7 +365,7 @@ async def _seed_e2e_data() -> None:
                 )
 
                 # daily_indicators
-                pa_turnover = round(rng.uniform(3.5, 6.0), 4)
+                pa_turnover = round(rng.uniform(*_PA_TURNOVER_RANGE), 4)
                 indicator_rows.append(
                     (
                         "000001.SZ",

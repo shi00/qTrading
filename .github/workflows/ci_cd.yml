@@ -355,13 +355,17 @@ jobs:
         run: |
           python -m pytest tests/e2e/ -v --tb=short --junitxml=junit-e2e.xml
 
-      - name: Sanitize E2E log
+      - name: Sanitize E2E artifacts
         if: always()
         shell: pwsh
         run: |
-          $logPath = "logs/e2e-flet-app.log"
-          if (Test-Path $logPath) {
-            (Get-Content $logPath) -replace '([a-zA-Z0-9\+\.-]+)://([^:@\s]+):[^@\s]+@', '$1://$2:***@' | Set-Content $logPath
+          # R9: 脱敏所有可能含 DB 连接串（含密码）的文本工件，覆盖 .log 和 junit XML
+          $pattern = '([a-zA-Z0-9\+\.-]+)://([^:@\s]+):[^@\s]+@'
+          $replacement = '$1://$2:***@'
+          foreach ($filePath in @("logs/e2e-flet-app.log", "junit-e2e.xml")) {
+            if (Test-Path $filePath) {
+              (Get-Content $filePath) -replace $pattern, $replacement | Set-Content $filePath -Encoding UTF8
+            }
           }
 
       - name: Upload E2E test reports
