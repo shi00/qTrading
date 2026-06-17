@@ -532,6 +532,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 - **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
 - **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。
 - **事件循环策略**: Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 为 `session` 级。
+  > **已知技术债（P1-2）**：session 级事件循环导致 loop-local 缓存（`asyncio.Event`/`Lock`/`Semaphore`）跨测试泄漏，由 `tests/conftest.py` 的 `reset_loop_local_cache` autouse fixture 维持隔离。中期应降为 `function` 作用域以从根因消除泄漏，降级后可删除该 fixture。探测测试见 `tests/unit/test_infra_loop_isolation.py`。
 - **配置隔离**: 测试使用临时配置文件 (`tempfile.mkdtemp`)，通过 `pytest_configure` 在 import 之前重写 `utils.config_handler.CONFIG_FILE`。
 - **DB 隔离**: 集成测试连接 `test_astock` 数据库 (CI 通过 service container 启动 PostgreSQL 16)，通过 `TEST_DB_*` 环境变量配置。
 

@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+# P2-5: 文件含真实 asyncio.sleep（含 60s 长睡眠），标注 slow 以便 CI 分轨运行
+pytestmark = pytest.mark.slow
+
 
 class TestTushareClientBoundaryConditions:
     """Tushare API error handling boundary conditions - behavior tests"""

@@ -7,6 +7,13 @@ import pytest
 
 from tests.unit.ui.conftest import set_page, wrap_mock_page
 
+# P2-3: 本文件含若干纯 assert_called/assert_called_once 断言，保留理由：
+# - snack.assert_called_once(): show_snack 参数为 i18n key，硬编码 key 反而脆弱
+# - page.update.assert_called(): UI 刷新通知，无参数
+# - vm.bind/dispose.assert_called_once(): 生命周期接线，参数为内部回调
+# - i18n.subscribe/unsubscribe.assert_called_once(): 订阅注册，参数为 listener 函数
+# 这些断言验证"接线正确"而非"参数正确"，符合 UI 测试分层策略（§6.8 MVVM）
+
 
 class TestAutomationTab:
     patches: list

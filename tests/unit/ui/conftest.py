@@ -1,9 +1,10 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import flet as ft
 import pytest
 
 from tests.unit.ui.mock_flet import MockFletPage
+from utils.config_handler import ConfigHandler
 
 
 @pytest.fixture
@@ -92,7 +93,14 @@ def mock_app_styles():
 
 @pytest.fixture
 def mock_config_handler():
-    m = MagicMock()
+    """基于 create_autospec 的 ConfigHandler mock。
+
+    P2-2b: 使用 create_autospec 替代裸 MagicMock，使 mock 自动跟随
+    ConfigHandler 的方法签名。生产侧重命名/删除方法时，mock 访问会
+    立即抛 AttributeError，避免静默失效。
+    仅对测试真正读取的方法赋具体返回值，其余方法返回带 spec 的 MagicMock。
+    """
+    m = create_autospec(ConfigHandler, instance=False)
     m.is_auto_update_enabled.return_value = False
     m.get_auto_update_time.return_value = "16:30"
     m.is_doubao_schedule_enabled.return_value = False

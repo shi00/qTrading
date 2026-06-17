@@ -140,6 +140,16 @@ class MockFletPage:
         pass
 
     def run_task(self, func, *args, **kwargs):
+        """测试桩语义：同步调用 func，若是协程则关闭它。
+
+        P2-2c: 此实现不模拟真实 Flet 的协程调度语义（真实 run_task 会在
+        页面事件循环中异步执行协程并返回 Task）。测试中如需验证协程
+        执行结果，应直接 await 协程而非依赖 run_task。
+        保持此简化语义的原因（§1.4 不重构没坏的代码）：
+        1. 改为真实调度会绑定事件循环，破坏 session 级循环隔离策略
+        2. 现有测试依赖"run_task 不真正执行协程"的行为来验证接线而非结果
+        3. 若需验证协程执行，测试应直接 await，而非通过 run_task 间接调度
+        """
         mock_task = MagicMock()
         mock_task.cancel = MagicMock()
         try:
