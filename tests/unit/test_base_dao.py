@@ -926,6 +926,42 @@ class TestChunkedInQuery:
             extra_params=["prefix1"],
         )
 
+    @pytest.mark.asyncio
+    async def test_boundary_exactly_chunk_size_single_query(self):
+        """恰好 chunk_size 个值应只触发一次查询（边界值 500）。
+
+        覆盖 base_dao.py:145 的 `if len(values) <= chunk_size:` 单查询路径。
+        """
+        values = [f"{i:06d}.SH" for i in range(500)]
+        read_fn = AsyncMock(return_value=pd.DataFrame({"ts_code": values}))
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            values,
+            chunk_size=500,
+        )
+        assert read_fn.call_count == 1
+        assert len(result) == 500
+
+    @pytest.mark.asyncio
+    async def test_boundary_one_over_chunk_size_two_queries(self):
+        """chunk_size+1 个值应触发两次查询（边界值 501）。
+
+        覆盖 base_dao.py:159 的 `for i in range(0, len(values), chunk_size):` 多块路径。
+        """
+        values = [f"{i:06d}.SH" for i in range(501)]
+        chunk1_df = pd.DataFrame({"ts_code": values[:500]})
+        chunk2_df = pd.DataFrame({"ts_code": values[500:]})
+        read_fn = AsyncMock(side_effect=[chunk1_df, chunk2_df])
+        result = await BaseDao.chunked_in_query(
+            read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            values,
+            chunk_size=500,
+        )
+        assert read_fn.call_count == 2
+        assert len(result) == 501
+
 
 class TestChunkedInWrite:
     """Verify chunked_in_write properly splits large IN clauses for write operations."""
@@ -1104,6 +1140,8 @@ class TestBaseDaoSaveUpsertExtended:
             mock_stmt.on_conflict_do_nothing.return_value = mock_stmt
             result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], conn=mock_conn)
             assert result == 1
+            mock_stmt.on_conflict_do_nothing.assert_called_once()
+            mock_stmt.on_conflict_do_update.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_upsert_missing_non_pk_cols_filled(self):
@@ -2040,3 +2078,175 @@ class TestGuardedBegin:
             with pytest.raises(RuntimeError, match="Engine not initialized"):
                 async with dao._guarded_begin(conn=AsyncMock()):
                     pass
+
+
+class TestBaseDaoReadDbSelect:
+    """_read_db_select 的专项测试，覆盖 engine None/disposed/success/cancelled/suppress 分支。"""
+
+    @pytest.mark.asyncio
+    async def test_select_engine_none_raises(self):
+        dao = BaseDao(None)
+        with pytest.raises(RuntimeError, match="Engine not initialized"):
+            await dao._read_db_select(sa.select(1))
+
+    @pytest.mark.asyncio
+    async def test_select_engine_disposed_raises(self):
+        mock_engine = MagicMock()
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = True
+            with pytest.raises(EngineDisposedError):
+                await dao._read_db_select(sa.select(1))
+
+    @pytest.mark.asyncio
+    async def test_select_read_success(self):
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(1, "test")]
+        mock_result.keys.return_value = ["id", "name"]
+        mock_conn.execute.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame([(1, "test")], columns=["id", "name"]))
+            result = await dao._read_db_select(sa.select(1))
+            assert isinstance(result, pd.DataFrame)
+            assert list(result.columns) == ["id", "name"]
+
+    @pytest.mark.asyncio
+    async def test_select_cancelled_error_propagates(self):
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = asyncio.CancelledError()
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(asyncio.CancelledError):
+                await dao._read_db_select(sa.select(1))
+
+    @pytest.mark.asyncio
+    async def test_select_connection_error_raises_engine_disposed_when_suppressed(self):
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("no active connection")
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(EngineDisposedError):
+                await dao._read_db_select(sa.select(1), suppress_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_select_error_suppressed_returns_empty_df(self):
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("query error")
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            result = await dao._read_db_select(sa.select(1), suppress_errors=True)
+            assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_select_error_raises_when_not_suppressed(self):
+        mock_conn = AsyncMock()
+        mock_conn.execute.side_effect = Exception("query error")
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(Exception, match="query error"):
+                await dao._read_db_select(sa.select(1), suppress_errors=False)
+
+
+class TestBaseDaoReadDbMaxRowsAndParams:
+    """_read_db 的 max_rows 限制与 list→tuple 参数转换。"""
+
+    @pytest.mark.asyncio
+    async def test_max_rows_exceeded_raises(self):
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = [(1,)] * 100
+        mock_result.keys.return_value = ["id"]
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            with pytest.raises(ValueError, match="exceeding max_rows limit"):
+                await dao._read_db("SELECT 1", max_rows=10)
+
+    @pytest.mark.asyncio
+    async def test_list_params_converted_to_tuple(self):
+        mock_conn = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.fetchall.return_value = []
+        mock_result.keys.return_value = []
+        mock_conn.exec_driver_sql.return_value = mock_result
+        mock_engine = _setup_mock_engine_connect(mock_conn)
+        dao = BaseDao(mock_engine)
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.daos.base_dao.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance._disposed = False
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame())
+            await dao._read_db("SELECT 1 WHERE id IN ($1)", params=[1, 2, 3])
+            call_args = mock_conn.exec_driver_sql.call_args
+            assert isinstance(call_args[0][1], tuple)
+
+
+class TestBaseDaoPrepareDataParamsDateConversionError:
+    """_prepare_data_params 在 table_name 模式下日期转换失败的容错分支。"""
+
+    def test_with_table_name_date_conversion_error(self):
+        from sqlalchemy import Date
+
+        mock_table = MagicMock()
+        mock_date_col = MagicMock()
+        mock_date_col.name = "trade_date"
+        mock_date_col.type = Date()
+        mock_table.columns = [mock_date_col]
+
+        with patch("data.persistence.models.Base.metadata") as mock_meta:
+            mock_meta.tables = {"test_table": mock_table}
+            df = pd.DataFrame({"trade_date": ["invalid_date"]})
+            result = BaseDao._prepare_data_params(df, ["trade_date"], "test_table")
+            assert result is not None
+
+
+class TestChunkedInQueryMultipleChunks:
+    """chunked_in_query 多分片动态生成场景，补充 TestChunkedInQuery 的覆盖。"""
+
+    @pytest.mark.asyncio
+    async def test_multiple_chunks_dynamic(self):
+        call_count = 0
+
+        async def mock_read_fn(sql, params):
+            nonlocal call_count
+            call_count += 1
+            return pd.DataFrame({"id": [call_count * 2 - 1, call_count * 2]})
+
+        result = await BaseDao.chunked_in_query(
+            mock_read_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            list(range(1, 7)),
+            chunk_size=2,
+        )
+        assert len(result) == 6
+        assert call_count == 3

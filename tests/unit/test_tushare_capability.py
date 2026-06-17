@@ -7,6 +7,9 @@ import hashlib
 from data.external.tushare_client import TushareClient, TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
+# P2-5: 文件含真实 asyncio.sleep（10s 长睡眠），标注 slow 以便 CI 分轨运行
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture
 def tushare_client_mocks():

@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from strategies.strategy_prompts import (
     _UNIVERSAL_RULES,
     FORBIDDEN_STATIC_HEADERS,
@@ -32,30 +34,28 @@ class TestStrategyPromptsConstants:
 class TestKeyConsistency:
     """northbound key 一致性校验（合并自 tests/unit/test_strategy_prompts.py）。"""
 
-    def test_northbound_holding_key_exists(self):
-        assert "northbound_holding" in STRATEGY_PROMPTS
-
-    def test_northbound_flow_key_exists(self):
-        assert "northbound_flow" in STRATEGY_PROMPTS
+    @pytest.mark.parametrize("key", ["northbound_holding", "northbound_flow"])
+    def test_northbound_key_exists(self, key):
+        assert key in STRATEGY_PROMPTS
 
     def test_northbound_key_removed(self):
         assert "northbound" not in STRATEGY_PROMPTS
 
-    def test_northbound_holding_prompt_not_empty(self):
-        prompt = STRATEGY_PROMPTS["northbound_holding"]
+    @pytest.mark.parametrize("key", ["northbound_holding", "northbound_flow"])
+    def test_northbound_prompt_not_empty(self, key):
+        prompt = STRATEGY_PROMPTS[key]
         assert len(prompt.strip()) > 50
 
-    def test_northbound_flow_prompt_not_empty(self):
-        prompt = STRATEGY_PROMPTS["northbound_flow"]
-        assert len(prompt.strip()) > 50
-
-    def test_northbound_holding_mentions_holding(self):
-        prompt = STRATEGY_PROMPTS["northbound_holding"]
-        assert "持仓" in prompt or "增持" in prompt or "holding" in prompt.lower()
-
-    def test_northbound_flow_mentions_flow(self):
-        prompt = STRATEGY_PROMPTS["northbound_flow"]
-        assert "资金流" in prompt or "flow" in prompt.lower()
+    @pytest.mark.parametrize(
+        "key,keywords",
+        [
+            ("northbound_holding", ["持仓", "增持", "holding"]),
+            ("northbound_flow", ["资金流", "flow"]),
+        ],
+    )
+    def test_northbound_prompt_mentions_keyword(self, key, keywords):
+        prompt = STRATEGY_PROMPTS[key]
+        assert any(kw in prompt or kw.lower() in prompt.lower() for kw in keywords)
 
 
 class TestDataBoundary:

@@ -3,7 +3,7 @@ import queue
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from services.local_model_manager import LocalModelManager, _HAS_LLAMA_CPP
+from services.local_model_manager import LocalModelManager, _HAS_LLAMA_CPP, _SENTINEL, _persistent_worker
 
 
 class TestLocalModelManagerGetLoadedModelPath:
@@ -858,12 +858,16 @@ class TestCancelEventInterruptsInference:
             mgr._result_queue.get_nowait.side_effect = queue.Empty
             mgr._cancel_event.set()
 
-            with patch(
-                "services.local_model_manager.ConfigHandler.get_local_ai_config",
-                return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
+            with (
+                patch.object(mgr, "_shutdown_worker"),
+                patch(
+                    "services.local_model_manager.ConfigHandler.get_local_ai_config",
+                    return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
+                ),
             ):
                 with pytest.raises(RuntimeError, match="Inference cancelled"):
                     await mgr.run_inference("test prompt")
+                mgr._shutdown_worker.assert_called()
 
 
 class TestLoadModelClearsCancelEvent:
@@ -1238,3 +1242,269 @@ class TestInitAlreadyInitialized:
         # Should not reset any attributes
         assert mgr._last_config == {}
         LocalModelManager._initialized = False
+
+
+class TestPersistentWorkerImportFailure:
+    """_persistent_worker 在 llama-cpp-python 导入失败时的容错分支。"""
+
+    def test_llama_cpp_import_failure(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        with patch("importlib.import_module", side_effect=ImportError("no module")):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        mock_res_queue.put.assert_called_once()
+        call_args = mock_res_queue.put.call_args[0][0]
+        assert call_args[0] == "error"
+        assert "llama-cpp-python import failed" in call_args[1]
+        mock_req_queue.get.assert_not_called()
+
+    def test_llama_cpp_attribute_failure(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        with patch("importlib.import_module", side_effect=AttributeError("no attr")):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        mock_res_queue.put.assert_called_once()
+        call_args = mock_res_queue.put.call_args[0][0]
+        assert call_args[0] == "error"
+
+
+class TestPersistentWorkerModelLoadFailure:
+    """_persistent_worker 在模型加载失败时的容错分支。"""
+
+    def test_model_load_failure(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        mock_llama_module = MagicMock()
+        mock_llama_module.Llama.side_effect = Exception("model not found")
+
+        with patch("importlib.import_module", return_value=mock_llama_module):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        mock_res_queue.put.assert_called_once()
+        call_args = mock_res_queue.put.call_args[0][0]
+        assert call_args[0] == "error"
+        assert "Model load failed" in call_args[1]
+
+
+class TestPersistentWorkerInvalidRequest:
+    """_persistent_worker 在收到无效请求格式时的容错分支。"""
+
+    def test_invalid_request_format_not_tuple(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        mock_llama_module = MagicMock()
+        mock_llama = MagicMock()
+        mock_llama_module.Llama.return_value = mock_llama
+
+        mock_req_queue.get.side_effect = ["invalid_request", _SENTINEL]
+
+        with patch("importlib.import_module", return_value=mock_llama_module):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        error_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "error"]
+        assert len(error_calls) >= 1
+        assert "Invalid request format" in error_calls[0][0][0][1]
+
+    def test_invalid_request_format_wrong_length(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        mock_llama_module = MagicMock()
+        mock_llama = MagicMock()
+        mock_llama_module.Llama.return_value = mock_llama
+
+        mock_req_queue.get.side_effect = [("prompt", 100), _SENTINEL]
+
+        with patch("importlib.import_module", return_value=mock_llama_module):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        error_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "error"]
+        assert len(error_calls) >= 1
+
+
+class TestPersistentWorkerInferenceError:
+    """_persistent_worker 在推理异常时的容错分支。"""
+
+    def test_inference_error(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        mock_llama_module = MagicMock()
+        mock_llama = MagicMock()
+        mock_llama.create_chat_completion.side_effect = Exception("inference failed")
+        mock_llama_module.Llama.return_value = mock_llama
+
+        mock_req_queue.get.side_effect = [("prompt", 100, 0.7, "system"), _SENTINEL]
+
+        with patch("importlib.import_module", return_value=mock_llama_module):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        error_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "error"]
+        assert len(error_calls) >= 1
+        assert "inference failed" in error_calls[-1][0][0][1]
+
+
+class TestPersistentWorkerQueueGetError:
+    """_persistent_worker 在 queue.get 异常时继续循环的分支。"""
+
+    def test_queue_get_error_continues(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        mock_llama_module = MagicMock()
+        mock_llama = MagicMock()
+        mock_llama_module.Llama.return_value = mock_llama
+
+        mock_req_queue.get.side_effect = [Exception("queue error"), _SENTINEL]
+
+        with patch("importlib.import_module", return_value=mock_llama_module):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        ready_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "ready"]
+        assert len(ready_calls) == 1
+
+
+class TestPersistentWorkerSentinelShutdown:
+    """_persistent_worker 收到 sentinel 时正常关闭的分支。"""
+
+    def test_sentinel_shutdown(self):
+        mock_req_queue = MagicMock()
+        mock_res_queue = MagicMock()
+
+        mock_llama_module = MagicMock()
+        mock_llama = MagicMock()
+        mock_llama_module.Llama.return_value = mock_llama
+
+        mock_req_queue.get.side_effect = [_SENTINEL]
+
+        with patch("importlib.import_module", return_value=mock_llama_module):
+            _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
+
+        shutdown_calls = [c for c in mock_res_queue.put.call_args_list if c[0][0][0] == "shutdown"]
+        assert len(shutdown_calls) == 1
+
+
+class TestAwaitWorkerReadyOsAndTimeoutErrors:
+    """_await_worker_ready 在 OSError 与 queue.Empty 异常时的分支。"""
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_os_error(self):
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._result_queue = MagicMock()
+        mgr._result_queue.get_nowait = MagicMock(side_effect=OSError("os error"))
+        mgr._worker_proc = None
+
+        with patch.object(mgr, "_shutdown_worker"):
+            result = await mgr._await_worker_ready(timeout=0.1)
+            assert result is False
+            mgr._shutdown_worker.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_await_worker_ready_timeout_error(self):
+        mgr = LocalModelManager()
+        mgr._worker_ready = False
+        mgr._result_queue = MagicMock()
+        mgr._result_queue.get_nowait = MagicMock(side_effect=queue.Empty)
+        mgr._worker_proc = None
+
+        with patch.object(mgr, "_shutdown_worker"):
+            result = await mgr._await_worker_ready(timeout=0.1)
+            assert result is False
+            mgr._shutdown_worker.assert_called()
+
+
+class TestRunInferenceWorkerDiesDuringPolling:
+    """run_inference 在 polling 中 worker 死亡但队列仍有结果的分支。"""
+
+    @pytest.mark.asyncio
+    async def test_worker_dies_after_first_poll(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 30,
+                }
+
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+
+                poll_count = 0
+
+                def mock_get_nowait():
+                    nonlocal poll_count
+                    poll_count += 1
+                    if poll_count == 1:
+                        raise queue.Empty()
+                    return ("ok", "result")
+
+                mock_res_queue.get_nowait.side_effect = mock_get_nowait
+
+                mock_proc = MagicMock()
+                mock_proc.is_alive.side_effect = [True, False]
+
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
+                mgr._worker_proc = mock_proc
+
+                result = await mgr.run_inference("test prompt")
+                assert result == "result"
+
+
+class TestRunInferenceDeadlineReached:
+    """run_inference 在 deadline 达到后仍从队列拿到结果的分支。"""
+
+    @pytest.mark.asyncio
+    async def test_deadline_reached_with_result_at_end(self):
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._model_path = "/path/to/model.gguf"
+
+            with (
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/path/to/model.gguf",
+                    "local_model_timeout": 2.0,
+                }
+
+                mock_req_queue = MagicMock()
+                mock_res_queue = MagicMock()
+
+                call_count = 0
+
+                def mock_get_nowait():
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count <= 5:
+                        raise queue.Empty()
+                    return ("ok", "late result")
+
+                mock_res_queue.get_nowait.side_effect = mock_get_nowait
+
+                mock_proc = MagicMock()
+                mock_proc.is_alive.return_value = True
+
+                mgr._request_queue = mock_req_queue
+                mgr._result_queue = mock_res_queue
+                mgr._worker_ready = True
+                mgr._worker_proc = mock_proc
+
+                result = await mgr.run_inference("test prompt")
+                assert result == "late result"

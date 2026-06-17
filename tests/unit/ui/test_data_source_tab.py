@@ -2,6 +2,14 @@
 
 Tests the Tab's logic methods by constructing a lightweight instance
 with mocked Flet controls, bypassing the full __init__ UI construction.
+
+P2-3: 本文件含若干纯 assert_called/assert_called_once 断言，保留理由：
+- show_snack.assert_called_once(): show_snack 参数为 i18n key，硬编码 key 反而脆弱
+- vm.bind/dispose.assert_called_once(): 生命周期接线，参数为内部回调
+- i18n.subscribe/unsubscribe.assert_called_once(): 订阅注册，参数为 listener 函数
+- vm.recover_stale_state.assert_called_once(): 状态恢复接线，参数为内部状态
+- metric_*.set_value.assert_called_once(): UI 指标更新，参数为运行时数据
+这些断言验证"接线正确"而非"参数正确"，符合 UI 测试分层策略（§6.8 MVVM）
 """
 
 import time

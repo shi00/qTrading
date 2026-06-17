@@ -1,4 +1,4 @@
-"""main.py 补充测试 - 覆盖数据库升级、初始化失败、onboarding等场景"""
+"""main.py 测试 - 覆盖数据库升级、初始化失败、onboarding等场景"""
 
 import asyncio
 import os

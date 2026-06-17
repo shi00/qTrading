@@ -2,6 +2,13 @@
 
 TDD RED phase: these tests define the expected ViewModel contract.
 They will fail until DataSourceViewModel is implemented.
+
+P2-3: 本文件含若干纯 assert_called/assert_called_once 断言，保留理由：
+- on_health_checking/result/finished.assert_called_once(): 回调通知，参数为运行时数据
+- on_show_snack.assert_called(): toast 通知，参数为 i18n key + color
+- on_cache_cleared.assert_called_once(): 缓存清除通知，无参数
+这些断言验证"回调被触发"而非"参数正确"，副作用状态由配套 assert 验证
+（如 assert bound_vm.is_syncing is False）。
 """
 
 import asyncio

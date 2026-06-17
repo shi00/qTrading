@@ -1,9 +1,10 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, create_autospec
 
 import flet as ft
 import pytest
 
 from tests.unit.ui.mock_flet import MockFletPage
+from utils.config_handler import ConfigHandler
 
 
 @pytest.fixture
@@ -64,6 +65,9 @@ def mock_app_colors():
     m.TABLE_GRID_H = "#2C2C2C"
     m.LOG_BG = "#000000"
     m.LOG_TEXT = "#CCCCCC"
+    m.CARD_BG = "#1E1E1E"
+    m.TABLE_ROW_HOVER = "#333333"
+    m.load_theme = MagicMock()
     m.subscribe = MagicMock()
     m.unsubscribe = MagicMock()
     return m
@@ -75,18 +79,28 @@ def mock_app_styles():
     m.CONTROL_WIDTH_MD = 300
     m.CONTROL_WIDTH_SM = 150
     m.CONTROL_WIDTH_LG = 400
-    m.primary_button.return_value = ft.ButtonStyle()
-    m.outline_button.return_value = ft.ButtonStyle()
-    m.accent_button.return_value = ft.ButtonStyle()
-    m.secondary_button.return_value = ft.ButtonStyle()
-    m.dashboard_card.return_value = {"padding": 10}
-    m.card.return_value = {"padding": 10}
+    m.CONTROL_WIDTH_XS = 80
+    m.primary_button = MagicMock(return_value=ft.ButtonStyle())
+    m.outline_button = MagicMock(return_value=ft.ButtonStyle())
+    m.accent_button = MagicMock(return_value=ft.ButtonStyle())
+    m.secondary_button = MagicMock(return_value=ft.ButtonStyle())
+    m.dashboard_card = MagicMock(return_value={"padding": 10})
+    m.card = MagicMock(return_value={"padding": 10})
+    m.data_table_row = MagicMock(return_value="#1E1E1E")
+    m.price_change_color = MagicMock(return_value="#4CAF50")
     return m
 
 
 @pytest.fixture
 def mock_config_handler():
-    m = MagicMock()
+    """基于 create_autospec 的 ConfigHandler mock。
+
+    P2-2b: 使用 create_autospec 替代裸 MagicMock，使 mock 自动跟随
+    ConfigHandler 的方法签名。生产侧重命名/删除方法时，mock 访问会
+    立即抛 AttributeError，避免静默失效。
+    仅对测试真正读取的方法赋具体返回值，其余方法返回带 spec 的 MagicMock。
+    """
+    m = create_autospec(ConfigHandler, instance=False)
     m.is_auto_update_enabled.return_value = False
     m.get_auto_update_time.return_value = "16:30"
     m.is_doubao_schedule_enabled.return_value = False

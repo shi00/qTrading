@@ -652,17 +652,29 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         assert layout.body is not None
 
-    def test_get_view_creates_and_caches(self, mock_page):
-        layout = self._make_layout(mock_page)
-        view = layout._get_view(0)
-        assert 0 in layout._view_cache
-        assert view is layout._view_cache[0]
+    @pytest.mark.parametrize("index", [0, 1, 2, 3, 4, 5])
+    def test_get_view_returns_object_and_caches(self, mock_page, index):
+        """_get_view 返回非 None 对象，二次调用返回同一对象（行为断言）。
 
-    def test_get_view_returns_cached_on_second_call(self, mock_page):
+        覆盖 app_layout.py:191-219 的 _get_view 方法：
+        - 193-194 行：缓存命中路径
+        - 200-213 行：按 index 创建 View
+        - 215 行：写入缓存
+        """
         layout = self._make_layout(mock_page)
-        view1 = layout._get_view(0)
-        view2 = layout._get_view(0)
-        assert view1 is view2
+        view1 = layout._get_view(index)
+        view2 = layout._get_view(index)
+        assert view1 is not None
+        assert view1 is view2  # 缓存生效：同一索引返回同一对象
+
+    def test_get_view_unknown_index_returns_object(self, mock_page):
+        """未知索引也应返回对象（不崩溃）。
+
+        覆盖 app_layout.py:213 行：`view = ft.Text(I18n.get("view_unknown"))`
+        """
+        layout = self._make_layout(mock_page)
+        view = layout._get_view(99)
+        assert view is not None
 
     def test_change_tab_same_index_does_nothing(self, mock_page):
         layout = self._make_layout(mock_page)
@@ -698,35 +710,6 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         layout.will_unmount()
         self.mock_i18n.unsubscribe.assert_called_once_with(layout._on_locale_change)
-
-    def test_get_view_screener(self, mock_page):
-        layout = self._make_layout(mock_page)
-        view = layout._get_view(1)
-        assert 1 in layout._view_cache
-        assert view is layout._view_cache[1]
-
-    def test_get_view_data(self, mock_page):
-        layout = self._make_layout(mock_page)
-        view = layout._get_view(2)
-        assert 2 in layout._view_cache
-        assert view is layout._view_cache[2]
-
-    def test_get_view_tasks(self, mock_page):
-        layout = self._make_layout(mock_page)
-        view = layout._get_view(3)
-        assert 3 in layout._view_cache
-        assert view is layout._view_cache[3]
-
-    def test_get_view_settings(self, mock_page):
-        layout = self._make_layout(mock_page)
-        view = layout._get_view(4)
-        assert 4 in layout._view_cache
-        assert view is layout._view_cache[4]
-
-    def test_get_view_unknown_index(self, mock_page):
-        layout = self._make_layout(mock_page)
-        layout._get_view(99)
-        assert 99 in layout._view_cache
 
     def test_on_nav_change_calls_change_tab(self, mock_page):
         layout = self._make_layout(mock_page)

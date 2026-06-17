@@ -10,6 +10,9 @@ from data.domain_services.market_data_service import MarketDataService
 from utils.rate_limiter import TokenBucket
 from utils.thread_pool import ThreadPoolManager
 
+# P2-5: 文件含真实 asyncio.sleep（含 100s/60s 长睡眠），标注 slow 以便 CI 分轨运行
+pytestmark = pytest.mark.slow
+
 
 class TestNewsSubscriptionStopBehavior:
     """C-P1-2: Verify stop() behavioral contracts — not implementation details.
@@ -340,11 +343,12 @@ class TestScreenerViewModelFlushBehavior:
 
         vm._on_ai_result_stream({"name": "test", "ai_score": 80, "thinking": ""})
         flushed = False
-        for _ in range(20):
+        # 用 sleep(0) 让出控制权给事件循环，不真实等待；增加轮询次数补偿
+        for _ in range(50):
             if len(vm._ai_buffer) == 0 or vm._full_results is not None:
                 flushed = True
                 break
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(0)
         assert flushed
 
     def test_no_loop_preserves_buffer_not_lost(self):
