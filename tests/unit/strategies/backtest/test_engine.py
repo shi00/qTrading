@@ -1,4 +1,4 @@
-"""strategies/backtest/engine.py 补充测试 - 覆盖 _is_rebalance_day、_calc_ic_series、_apply_qfq 等"""
+"""strategies/backtest/engine.py 测试 - 覆盖 _is_rebalance_day、_calc_ic_series、_apply_qfq 等"""
 
 import math
 from datetime import date

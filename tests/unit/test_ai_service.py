@@ -13,6 +13,31 @@ from services.ai_service import (
 )
 
 
+def _make_svc_with_cloud():
+    """Factory: create AIService with cloud provider pre-configured.
+
+    Merged from test_ai_service_coverage.py (P2-1). Used by deep-branch
+    tests that need a clean cloud-configured service without the verbose
+    inline @patch pattern. Singleton isolation is handled by the
+    _reset_all_singletons autouse fixture in tests/unit/conftest.py.
+    """
+    with patch("services.ai_service.ConfigHandler") as mock_ch:
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "test-key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+            "model": "deepseek-v4-flash",
+        }
+        mock_ch.get_setting.return_value = False
+        mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+        mock_ch.get_failover_config.return_value = {
+            "primary": "deepseek/deepseek-v4-flash",
+            "fallbacks": [],
+        }
+        svc = AIService()
+    return svc
+
+
 class TestAIServiceInit:
     @patch("services.ai_service.ConfigHandler")
     def test_init(self, mock_ch):
@@ -188,6 +213,18 @@ class TestJsonParsingNoRfindFallback:
                 json_mode=True,
             )
 
+    @pytest.mark.asyncio
+    async def test_non_json_mode_returns_content_dict(self):
+        """Non-json mode returns {"content": str} dict without parsing."""
+        svc = _make_svc_with_cloud()
+        with patch.object(svc, "_chat_completion_litellm", AsyncMock(return_value={"content": "hello world"})):
+            result = await svc._chat_completion(
+                messages=[{"role": "user", "content": "hello"}],
+                provider="cloud",
+                json_mode=False,
+            )
+            assert result == {"content": "hello world"}
+
 
 class TestStreamInterruptPartialResult:
     @pytest.mark.asyncio
@@ -341,6 +378,15 @@ class TestAIServiceSetupClientAzure:
         svc = AIService()
         assert svc._is_cloud_configured is True
 
+    @patch("services.ai_service.LITELLM_AVAILABLE", True)
+    @patch("services.ai_service.ConfigHandler")
+    def test_no_api_key_disables_cloud(self, mock_ch):
+        """When api_key is missing, _is_cloud_configured must be False."""
+        mock_ch.get_llm_config.return_value = {"provider": "deepseek", "base_url": "http://api.test.com"}
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        assert svc._is_cloud_configured is False
+
 
 class TestAIServiceSetupClientNoBaseUrl:
     @patch("services.ai_service.LITELLM_AVAILABLE", True)
@@ -372,6 +418,21 @@ class TestAIServiceBuildLiteLLMParamsAzure:
         )
         assert params["model"] == "azure/mydeploy"
         assert "myresource" in params["api_base"]
+
+    def test_azure_no_resource_name_uses_base_url(self):
+        """Boundary: empty azure_resource_name falls back to base_url."""
+        llm_config = {
+            "provider": "azure",
+            "model": "mydeploy",
+            "api_key": "key",
+            "base_url": "http://custom.azure.com",
+            "azure_resource_name": "",
+        }
+        params = AIService._build_litellm_params(
+            llm_config=llm_config,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        assert params["api_base"] == "http://custom.azure.com"
 
 
 class TestAIServiceBuildLiteLLMParamsProviderPrefix:
@@ -551,6 +612,22 @@ class TestAIServiceVerifyConnection:
         result = await svc.verify_connection()
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_verify_success(self):
+        """verify_connection returns True when _chat_completion_litellm succeeds."""
+        svc = _make_svc_with_cloud()
+        with patch.object(svc, "_chat_completion_litellm", AsyncMock(return_value={"content": "ok"})):
+            result = await svc.verify_connection()
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_exception_raises(self):
+        """verify_connection re-raises when _chat_completion_litellm raises."""
+        svc = _make_svc_with_cloud()
+        with patch.object(svc, "_chat_completion_litellm", AsyncMock(side_effect=Exception("conn err"))):
+            with pytest.raises(Exception, match="conn err"):
+                await svc.verify_connection()
+
 
 class TestAIServiceTestConnection:
     @pytest.mark.asyncio
@@ -563,6 +640,78 @@ class TestAIServiceTestConnection:
     async def test_no_litellm(self):
         result = await AIService.test_connection(api_key="key")
         assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_model_returns_false(self):
+        """Empty model returns failure."""
+        result = await AIService.test_connection(api_key="key", model="")
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.LITELLM_AVAILABLE", True)
+    async def test_success_with_usage(self):
+        """Successful connection returns usage stats."""
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "ok"
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 5
+        mock_usage.completion_tokens = 1
+        mock_usage.total_tokens = 6
+        mock_response.usage = mock_usage
+        with (
+            patch("services.ai_service.acompletion", AsyncMock(return_value=mock_response)),
+            patch("services.ai_service._check_reasoning_support", return_value=False),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await AIService.test_connection(
+                provider="deepseek",
+                model="deepseek-v4-flash",
+                base_url="http://api.test.com",
+                api_key="test-key",
+            )
+            assert result["success"] is True
+            assert "usage" in result
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.LITELLM_AVAILABLE", True)
+    async def test_success_with_reasoning(self):
+        """Reasoning-capable model sets reasoning_supported flag."""
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "ok"
+        mock_response.usage = None
+        with (
+            patch("services.ai_service.acompletion", AsyncMock(return_value=mock_response)),
+            patch("services.ai_service._check_reasoning_support", return_value=True),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await AIService.test_connection(
+                provider="deepseek",
+                model="deepseek-v4-pro",
+                base_url="http://api.test.com",
+                api_key="test-key",
+            )
+            assert result["success"] is True
+            assert result.get("reasoning_supported") is True
+
+    @pytest.mark.asyncio
+    @patch("services.ai_service.LITELLM_AVAILABLE", True)
+    async def test_exception_returns_error(self):
+        """Connection failure returns structured error with error_code."""
+        with (
+            patch("services.ai_service.acompletion", AsyncMock(side_effect=Exception("conn fail"))),
+            patch("services.ai_service._check_reasoning_support", return_value=False),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await AIService.test_connection(
+                provider="deepseek",
+                model="deepseek-v4-flash",
+                base_url="http://api.test.com",
+                api_key="test-key",
+            )
+            assert result["success"] is False
+            assert "error_code" in result
 
 
 class TestAIServiceReloadConfig:
@@ -581,6 +730,21 @@ class TestAIServiceReloadConfig:
         mock_ch.get_setting.return_value = False
         svc = AIService()
         await svc.reload_config()
+        assert svc._local_model_loaded is False
+
+    @pytest.mark.asyncio
+    async def test_resets_local_model_and_semaphore(self):
+        """reload_config resets _local_model_loaded flag."""
+        svc = _make_svc_with_cloud()
+        with patch("services.ai_service.ConfigHandler") as mock_ch:
+            mock_ch.get_llm_config.return_value = {
+                "api_key": "key",
+                "provider": "deepseek",
+                "base_url": "http://api.test.com",
+                "model": "deepseek-v4-flash",
+            }
+            mock_ch.get_setting.return_value = False
+            await svc.reload_config()
         assert svc._local_model_loaded is False
 
 
@@ -734,6 +898,14 @@ class TestReasoningModelFallbackList:
                 assert _check_reasoning_support("gpt-5.5") is False
                 assert _check_reasoning_support("deepseek-v4-flash") is False
                 assert _check_reasoning_support("mistral-small-latest") is False
+
+    def test_litellm_supports_reasoning_true(self):
+        """Positive branch: litellm.utils.supports_reasoning returns True directly (no fallback)."""
+        with (
+            patch("services.ai_service.LITELLM_AVAILABLE", True),
+            patch("services.ai_service.litellm.utils.supports_reasoning", return_value=True),
+        ):
+            assert _check_reasoning_support("deepseek-v4-pro") is True
 
 
 class TestAIServiceAnalyzeTimeoutHandling:
@@ -1240,6 +1412,25 @@ class TestAIServiceClassifyNewsFallback:
         assert "category" in result, "E-P1-6: failure result must contain 'category' key"
         assert result["category"] == "unknown", "E-P1-6: failure category should be 'unknown'"
 
+    @pytest.mark.asyncio
+    async def test_local_fails_with_not_installed_fallback_cloud(self):
+        """Local 'not installed' branch falls back to cloud (call_count==2 confirms fallback)."""
+        svc = _make_svc_with_cloud()
+
+        async def mock_chat(messages, **kwargs):
+            if kwargs.get("provider") == "local":
+                raise Exception("ollama not installed")
+            return {"category_L1": "tech", "emoji": "💻", "sentiment": "Neutral"}
+
+        svc._chat_completion = AsyncMock(side_effect=mock_chat)
+        with (
+            patch("services.ai_service.ConfigHandler.get_ai_news_prompt", return_value="Classify news"),
+            patch("core.i18n.I18n.get", side_effect=lambda k, d=None: d if d is not None else k),
+        ):
+            result = await svc.classify_news("Tech news")
+        assert "category" in result
+        assert svc._chat_completion.call_count == 2  # local failed → cloud fallback happened
+
 
 class TestAIServiceGetSemaphore:
     @pytest.mark.asyncio
@@ -1278,6 +1469,46 @@ class TestAIServiceSetupLocalModel:
                 return_value=MagicMock(get_loaded_model_path=MagicMock(return_value=None))
             )
             await svc._setup_local_model()
+
+    @pytest.mark.asyncio
+    async def test_loads_model_from_config(self):
+        """Loads model from config path when not yet loaded."""
+        svc = _make_svc_with_cloud()
+        mock_manager = MagicMock()
+        mock_manager.get_loaded_model_path.return_value = None
+        mock_manager.load_model = AsyncMock()
+        with (
+            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch("services.ai_service.ConfigHandler.get_setting", return_value="/path/to/model"),
+        ):
+            await svc._setup_local_model()
+            mock_manager.load_model.assert_called_once_with("/path/to/model")
+
+    @pytest.mark.asyncio
+    async def test_skips_if_already_loaded(self):
+        """Skips load_model when manager already has a loaded model."""
+        svc = _make_svc_with_cloud()
+        mock_manager = MagicMock()
+        mock_manager.get_loaded_model_path.return_value = "/already/loaded"
+        with (
+            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch("services.ai_service.ConfigHandler.get_setting", return_value="/path/to/model"),
+        ):
+            await svc._setup_local_model()
+            mock_manager.load_model.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_config_path_skips(self):
+        """Skips load_model when config has no local_model_path."""
+        svc = _make_svc_with_cloud()
+        mock_manager = MagicMock()
+        mock_manager.get_loaded_model_path.return_value = None
+        with (
+            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch("services.ai_service.ConfigHandler.get_setting", return_value=None),
+        ):
+            await svc._setup_local_model()
+            mock_manager.load_model.assert_not_called()
 
 
 class TestAIServiceBuildLiteLLMParamsResponseFormat:
@@ -1420,3 +1651,352 @@ class TestAIServiceBuildLiteLLMParamsZhipu:
         )
         assert result["error"] == "All LLM providers unavailable"
         assert result["score"] == 0
+
+
+# ============================================================================
+# Merged from test_ai_service_coverage.py (P2-1: 一模块一测试文件)
+# Unique-coverage cases retained; pure duplicates dropped.
+# Factory helper: _make_svc_with_cloud() at top of file.
+# ============================================================================
+
+
+class TestAIServiceConfigureLitellm:
+    """LiteLLM 全局参数配置 (drop_params)."""
+
+    @patch("services.ai_service.LITELLM_AVAILABLE", True)
+    @patch("services.ai_service.ConfigHandler")
+    def test_configure_sets_drop_params(self, mock_ch):
+        """_configure_litellm sets litellm.drop_params = True."""
+        mock_ch.get_llm_config.return_value = {
+            "api_key": "key",
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+            "model": "deepseek-v4-flash",
+        }
+        mock_ch.get_setting.return_value = False
+        with patch("services.ai_service.litellm") as mock_litellm:
+            AIService()
+            assert mock_litellm.drop_params is True
+
+
+class TestAIServiceChatCompletionLocal:
+    """_chat_completion local provider 分支."""
+
+    @pytest.mark.asyncio
+    async def test_local_model_not_loaded_raises(self):
+        """Local model not loaded raises ValueError."""
+        svc = _make_svc_with_cloud()
+        mock_manager = MagicMock()
+        mock_manager.get_loaded_model_path.return_value = None
+        with (
+            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch.object(svc, "_setup_local_model", AsyncMock()),
+        ):
+            with pytest.raises(ValueError, match="Local model not loaded"):
+                await svc._chat_completion(
+                    messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}],
+                    provider="local",
+                    json_mode=False,
+                )
+
+    @pytest.mark.asyncio
+    async def test_local_model_success(self):
+        """Local model inference returns parsed JSON."""
+        svc = _make_svc_with_cloud()
+        mock_manager = MagicMock()
+        mock_manager.get_loaded_model_path.return_value = "/path/to/model"
+        mock_manager.run_inference = AsyncMock(return_value='{"category": "tech"}')
+        with (
+            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch.object(svc, "_setup_local_model", AsyncMock()),
+        ):
+            result = await svc._chat_completion(
+                messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}],
+                provider="local",
+                json_mode=True,
+            )
+            assert result["category"] == "tech"
+
+
+class TestAIServiceChatCompletionCloudNotAvailable:
+    """_chat_completion cloud provider 未配置分支."""
+
+    @pytest.mark.asyncio
+    async def test_raises_value_error(self):
+        """Cloud not configured raises ValueError."""
+        svc = _make_svc_with_cloud()
+        svc._is_cloud_configured = False
+        svc._litellm_config = {}
+        with pytest.raises(ValueError, match="Cloud LLM not configured"):
+            await svc._chat_completion(
+                messages=[{"role": "user", "content": "hello"}],
+                provider="cloud",
+            )
+
+
+class TestAIServiceChatCompletionLitellmNonStream:
+    """_chat_completion_litellm 非流式分支."""
+
+    @pytest.mark.asyncio
+    async def test_non_stream_response(self):
+        """Non-stream path returns content + usage stats."""
+        svc = _make_svc_with_cloud()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"score": 90}'
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 10
+        mock_usage.completion_tokens = 20
+        mock_usage.total_tokens = 30
+        mock_response.usage = mock_usage
+        with (
+            patch("services.ai_service.acompletion", AsyncMock(return_value=mock_response)),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+            )
+            assert result["content"] == '{"score": 90}'
+            assert result["usage"]["total_tokens"] == 30
+
+    @pytest.mark.asyncio
+    async def test_warns_on_large_prompt(self):
+        """Large prompt (>80k estimated tokens) does not crash; returns content."""
+        svc = _make_svc_with_cloud()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "ok"
+        mock_response.usage = None
+        long_msg = [{"role": "user", "content": "x" * 300000}]
+        with (
+            patch("services.ai_service.acompletion", AsyncMock(return_value=mock_response)),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await svc._chat_completion_litellm(messages=long_msg)
+            assert result["content"] == "ok"
+
+
+class TestAIServiceChatCompletionLitellmStream:
+    """_chat_completion_litellm 流式分支 (reasoning / no-reasoning / reasoning-only)."""
+
+    @pytest.mark.asyncio
+    async def test_stream_with_reasoning(self):
+        """Stream with reasoning_content returns both content and reasoning_content."""
+        svc = _make_svc_with_cloud()
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        delta1 = MagicMock()
+        delta1.content = "Hello"
+        delta1.reasoning_content = "thinking"
+        chunk1.choices[0].delta = delta1
+        chunk1.usage = None
+
+        chunk2 = MagicMock()
+        chunk2.choices = []
+        mock_usage = MagicMock()
+        mock_usage.prompt_tokens = 5
+        mock_usage.completion_tokens = 10
+        mock_usage.total_tokens = 15
+        chunk2.usage = mock_usage
+
+        async def mock_stream(**kwargs):
+            for c in [chunk1, chunk2]:
+                yield c
+
+        on_chunk = MagicMock()
+        with (
+            patch("services.ai_service.acompletion", return_value=mock_stream()),
+            patch("services.ai_service._check_reasoning_support", return_value=True),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+                on_chunk=on_chunk,
+            )
+            assert "content" in result
+            assert "reasoning_content" in result
+
+    @pytest.mark.asyncio
+    async def test_stream_no_reasoning(self):
+        """Stream without reasoning support returns content only."""
+        svc = _make_svc_with_cloud()
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        delta1 = MagicMock()
+        delta1.content = "Response text"
+        chunk1.choices[0].delta = delta1
+
+        async def mock_stream(**kwargs):
+            yield chunk1
+
+        with (
+            patch("services.ai_service.acompletion", return_value=mock_stream()),
+            patch("services.ai_service._check_reasoning_support", return_value=False),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+                on_chunk=MagicMock(),
+            )
+            assert result["content"] == "Response text"
+
+    @pytest.mark.asyncio
+    async def test_stream_only_reasoning_fills_content(self):
+        """When only reasoning_content is present, content is filled from reasoning."""
+        svc = _make_svc_with_cloud()
+        chunk1 = MagicMock()
+        chunk1.choices = [MagicMock()]
+        delta1 = MagicMock()
+        delta1.content = None
+        delta1.reasoning_content = "deep thought"
+        chunk1.choices[0].delta = delta1
+
+        async def mock_stream(**kwargs):
+            yield chunk1
+
+        with (
+            patch("services.ai_service.acompletion", return_value=mock_stream()),
+            patch("services.ai_service._check_reasoning_support", return_value=True),
+            patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
+        ):
+            result = await svc._chat_completion_litellm(
+                messages=[{"role": "user", "content": "hello"}],
+                on_chunk=MagicMock(),
+            )
+            assert result["content"] == "deep thought"
+
+
+class TestAIServiceAnalyzeStockDeepBranches:
+    """analyze_stock 深层分支: concepts 异常、learning context、backtest 安全、strategy_key 缺失."""
+
+    @pytest.mark.asyncio
+    async def test_concepts_exception_fallback(self):
+        """concepts.get raising Exception is caught; concepts key removed."""
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+
+        class BadDict(dict):
+            def get(self, key, default=None):
+                if key == "concepts":
+                    raise Exception("concepts error")
+                return super().get(key, default)
+
+        with patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"):
+            result = await svc.analyze_stock(
+                stock_info=BadDict({"ts_code": "000001.SZ"}),
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+            )
+        assert result["score"] == 50
+
+    @pytest.mark.asyncio
+    async def test_learning_context_fetch_failed(self):
+        """ReviewManager raising Exception is caught; history_context falls back to empty."""
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        with (
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("data.persistence.review_manager.ReviewManager", side_effect=Exception("rm error")),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+                include_learning_context=True,
+            )
+        assert result["score"] == 50
+
+    @pytest.mark.asyncio
+    async def test_include_learning_context_false(self):
+        """include_learning_context=False skips learning context fetch entirely."""
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        with patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+                include_learning_context=False,
+            )
+        assert result["score"] == 50
+
+    @pytest.mark.asyncio
+    async def test_fallback_learning_context_passes_non_none_as_of(self):
+        """Live-mode fallback path passes non-None as_of to prevent lookahead bias."""
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+
+        mock_rm = AsyncMock()
+        mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
+
+        with (
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                strategy_key="oversold",
+                include_learning_context=True,
+            )
+        assert result["score"] == 50
+        mock_rm.get_learning_context.assert_called_once()
+        call_kwargs = mock_rm.get_learning_context.call_args
+        as_of_arg = call_kwargs.kwargs.get("as_of") if call_kwargs.kwargs else call_kwargs[1].get("as_of")
+        assert as_of_arg is not None, "fallback path must pass non-None as_of to prevent lookahead bias"
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_fallback_raises_in_backtest_mode(self):
+        """Backtest mode with history_context=None raises ValueError (lookahead bias guard)."""
+        svc = _make_svc_with_cloud()
+        with pytest.raises(ValueError, match="analyze_stock called with history_context=None in backtest mode"):
+            await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context=None,
+                include_learning_context=True,
+                is_backtest=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_analyze_stock_fallback_works_in_live_mode(self):
+        """Live mode with history_context=None fetches learning context successfully."""
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        mock_rm = AsyncMock()
+        mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
+
+        with (
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
+        ):
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+                history_context=None,
+                include_learning_context=True,
+                is_backtest=False,
+            )
+            assert result["score"] == 50
+            mock_rm.get_learning_context.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_strategy_key_no_override(self):
+        """No strategy_key and no ui_prompt_override uses ConfigHandler.get_ai_system_prompt."""
+        svc = _make_svc_with_cloud()
+        svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
+        with patch("services.ai_service.ConfigHandler") as mock_ch:
+            mock_ch.get_ai_system_prompt.return_value = "default prompt"
+            mock_ch.get_setting.return_value = False
+            result = await svc.analyze_stock(
+                stock_info={"ts_code": "000001.SZ"},
+                tech_info={},
+                news_list=[],
+            )
+        assert result["score"] == 50
