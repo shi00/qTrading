@@ -6,15 +6,15 @@ from collections.abc import Callable
 
 import pandas as pd
 
+from core.i18n import I18n
+from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.persistence.quality_gate import QualityGateError
 from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
-from core.i18n import I18n
-from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 

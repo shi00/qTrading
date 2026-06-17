@@ -4,18 +4,18 @@ import os
 
 import flet as ft
 
-from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
+from core.i18n import I18n
+from utils.config_handler import ConfigHandler
+from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
+from utils.log_decorators import UILogger
+from utils.logger import setup_logging
+from utils.proxy_manager import ProxyManager
 from data.cache.cache_manager import CacheManager
 from services.news_subscription_service import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
-from core.i18n import I18n
 from ui.theme import apply_page_theme
 from ui.views.onboarding_wizard import OnboardingWizard
-from utils.config_handler import ConfigHandler
-from utils.logger import setup_logging
-from utils.proxy_manager import ProxyManager
-from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
-from utils.log_decorators import UILogger
+from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
 
 logger = logging.getLogger(__name__)
 

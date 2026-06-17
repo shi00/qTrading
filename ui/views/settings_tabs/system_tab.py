@@ -428,13 +428,17 @@ class SystemTab(ft.Container):
         try:
             new_locale = self.language_dropdown.value
             if new_locale:
+                if not ConfigHandler.set_locale(new_locale):
+                    self.language_dropdown.value = I18n.current_locale()
+                    self.show_snack(I18n.get("settings_language_save_failed"), color=AppColors.ERROR)
+                    self._safe_update()
+                    return
                 I18n.set_locale(new_locale)
-                ConfigHandler.set_locale(new_locale)
                 self.show_snack(I18n.get("settings_language_changed"))
         except Exception as ex:
             logger.error("[SystemTab] Language | Change failed: %s", DataSanitizer.sanitize_error(ex))
             logger.debug("[SystemTab] Language | Change failed traceback", exc_info=True)
-            self.show_snack(f"Error: {ex}", color=AppColors.ERROR)
+            self.show_snack(DataSanitizer.sanitize_error(ex), color=AppColors.ERROR)
 
     def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
         """语言变更回调 - 更新 Settings UI 文本"""

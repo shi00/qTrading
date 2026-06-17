@@ -11,11 +11,11 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from data.data_processor import DataProcessor
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error, get_error_message
+from data.data_processor import DataProcessor
 
 logger = logging.getLogger(__name__)
 

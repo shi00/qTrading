@@ -13,12 +13,12 @@ import logging
 from collections.abc import Callable
 from datetime import date
 
+from core.i18n import I18n
 from data.cache.cache_manager import CacheManager
+from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, BacktestResult
-from services.backtest_service import BacktestService
 from strategies.base_strategy import get_strategy_registry
-from core.i18n import I18n
 
 logger = logging.getLogger(__name__)
 

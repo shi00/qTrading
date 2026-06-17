@@ -1046,6 +1046,23 @@ class TestSystemTab:
         tab.on_language_change(None)
         snack.assert_called()
 
+    def test_on_language_change_persist_failure_skips_i18n_set(self, mock_page):
+        """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown，显示失败提示。"""
+        snack = MagicMock()
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.show_snack = snack
+        tab._safe_update = MagicMock()
+        self.mock_ch.set_locale.return_value = False
+        self.mock_i18n.current_locale.return_value = "zh_CN"
+        tab.language_dropdown.value = "en_US"
+
+        tab.on_language_change(None)
+
+        self.mock_i18n.set_locale.assert_not_called()
+        assert tab.language_dropdown.value == "zh_CN"
+        snack.assert_called_once()
+
     def test_did_mount_subscribes_i18n(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
