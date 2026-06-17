@@ -9,7 +9,7 @@ from ui.i18n import I18n
 logger = logging.getLogger(__name__)
 
 
-async def test_diagnostic_all_tabs(e2e_page):
+async def test_settings_all_tabs(e2e_page):
     settings_label = I18n.get("nav_settings")
     await e2e_page.click_text(settings_label, timeout_ms=15000)
 

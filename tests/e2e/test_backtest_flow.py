@@ -39,3 +39,20 @@ async def test_backtest_flow(e2e_page):
         metric_label = I18n.get(i18n_key)
         timeout = 60000 if idx == 0 else 5000
         await e2e_page.expect_text(metric_label, timeout_ms=timeout)
+
+
+async def test_backtest_no_strategy(e2e_page):
+    """E2: 未选策略时点击运行，显示错误提示。"""
+    backtest_label = I18n.get("nav_backtest")
+    await e2e_page.click_text(backtest_label, timeout_ms=15000)
+
+    backtest_title = I18n.get("backtest_view_title")
+    await e2e_page.expect_text(backtest_title)
+
+    # 不选策略，直接点击运行
+    run_text = I18n.get("backtest_run")
+    await e2e_page.click_button(run_text, timeout_ms=10000)
+
+    # 验证错误提示
+    no_strategy_text = I18n.get("backtest_no_strategy")
+    await e2e_page.expect_text(no_strategy_text, timeout_ms=5000)
