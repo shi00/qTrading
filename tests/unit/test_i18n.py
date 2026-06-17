@@ -224,6 +224,19 @@ class TestI18nAPICompatibility:
         I18n.initialize(None)
         assert I18n.current_locale() == DEFAULT_LOCALE
 
+    def test_set_locale_does_not_call_config_handler(self, monkeypatch):
+        """ARCH-001 fix: set_locale must not persist to ConfigHandler."""
+        from utils.config_handler import ConfigHandler
+
+        calls: list[str] = []
+        monkeypatch.setattr(ConfigHandler, "set_locale", lambda loc: calls.append(loc))
+
+        I18n.initialize()
+        I18n.set_locale("en_US")
+
+        assert calls == [], "I18n.set_locale must not call ConfigHandler.set_locale (ARCH-001)"
+        assert I18n.current_locale() == "en_US"
+
 
 class TestI18nDynamicLoading:
     """Test dynamic loading and caching mechanisms."""

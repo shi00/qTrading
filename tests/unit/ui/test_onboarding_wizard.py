@@ -226,6 +226,21 @@ class TestOnboardingWizard:
         assert wizard.header_desc is original_desc
         self.mock_ch.set_locale.assert_called_with("en_US")
 
+    def test_on_language_change_wizard_persist_failure_skips_i18n_set(self, mock_page):
+        """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown。"""
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        wizard._safe_update = MagicMock()
+        self.mock_ch.set_locale.return_value = False
+        self.mock_i18n.current_locale.return_value = "zh_CN"
+        wizard.wizard_language_dropdown = MagicMock()
+        wizard.wizard_language_dropdown.value = "en_US"
+
+        wizard._on_language_change_wizard(MagicMock())
+
+        self.mock_i18n.set_locale.assert_not_called()
+        assert wizard.wizard_language_dropdown.value == "zh_CN"
+
     def test_on_panel_loading_change_shows_overlay_when_loading(self, mock_page):
         """面板加载中 → 遮罩显示"""
         wizard = self._make_wizard(mock_page)

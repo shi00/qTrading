@@ -86,6 +86,7 @@
     "settings_language": "语言",
     "settings_language_desc": "选择界面显示语言",
     "settings_language_changed": "语言已切换",
+    "settings_language_save_failed": "语言设置保存失败，请重试",
     "settings_theme": "主题",
     "settings_api": "API 设置",
     "settings_token": "Tushare Token",

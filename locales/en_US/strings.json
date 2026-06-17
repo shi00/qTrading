@@ -82,6 +82,7 @@
     "settings_language": "Language",
     "settings_language_desc": "Select display language",
     "settings_language_changed": "Language changed",
+    "settings_language_save_failed": "Failed to save language setting, please retry",
     "settings_theme": "Theme",
     "settings_api": "API Settings",
     "settings_token": "Tushare Token",

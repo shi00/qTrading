@@ -31,6 +31,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -1043,8 +1044,12 @@ class OnboardingWizard(ft.Container):
         """Handle language change in Onboarding Wizard"""
         try:
             new_locale = self.wizard_language_dropdown.value
+            if not ConfigHandler.set_locale(new_locale):
+                self.wizard_language_dropdown.value = I18n.current_locale()
+                logger.warning(f"[OnboardingWizard] Failed to persist locale: {new_locale}")
+                self._safe_update()
+                return
             I18n.set_locale(new_locale)
-            ConfigHandler.set_locale(new_locale)
 
             if hasattr(self, "header_title"):
                 self.header_title.value = I18n.get("wizard_welcome_title")
@@ -1087,7 +1092,7 @@ class OnboardingWizard(ft.Container):
 
             self._safe_update()
         except Exception as ex:
-            logger.error(f"[OnboardingWizard] Language change failed: {ex}")
+            logger.error("[OnboardingWizard] Language change failed: %s", DataSanitizer.sanitize_error(ex))
 
     def _safe_update(self):  # pragma: no cover
         try:
