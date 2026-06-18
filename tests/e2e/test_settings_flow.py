@@ -49,8 +49,11 @@ async def test_settings_language_switch(e2e_page):
     await e2e_page.click_text(tab_system, timeout_ms=8000)
 
     # 切换语言为 English
+    # 注意：语言下拉框的实际 label 是 get_language_label()（如 "简体中文 / English"），而不是 "语言"
+    actual_lang_label = I18n.get_language_label()
+    await e2e_page.expect_text(actual_lang_label, timeout_ms=10000)  # Wait for the tab to render
+
     lang_label = I18n.get("settings_language")
-    await e2e_page.expect_text(lang_label, timeout_ms=10000)  # Wait for the tab to render
     lang_en = I18n.get("settings_lang_en")
     await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
 
