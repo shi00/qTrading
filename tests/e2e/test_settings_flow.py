@@ -49,15 +49,50 @@ async def test_settings_language_switch(e2e_page):
     await e2e_page.click_text(tab_system, timeout_ms=8000)
 
     # 切换语言为 English
-    lang_label = I18n.get("settings_language")
-    lang_en = I18n.get("settings_lang_en")
-    await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
+    # 注意：语言下拉框的实际 label 是 get_language_label()（如 "简体中文 / English"），而不是 "语言"
+    actual_lang_label = I18n.get_language_label()
+    await e2e_page.expect_text(actual_lang_label, timeout_ms=10000)  # Wait for the tab to render
 
-    # 验证 UI 文本已切换为英文（导航栏 "Screener" 出现）
-    # 不验证 SnackBar 文本，因为 SnackBar 显示时 locale 已切换，文本语言不可预测
-    await e2e_page.expect_text("Screener", timeout_ms=10000)
+    # 等待前一个测试的 Snackbar 动画完成，防止 CanvasKit 吞噬点击事件
+    await e2e_page.page.wait_for_timeout(1000)
 
-    # 切回中文，避免影响后续测试
-    lang_zh = I18n.get("settings_lang_zh")
-    await e2e_page.select_dropdown(lang_label, lang_zh, timeout_ms=10000)
+    try:
+        lang_label = I18n.get("settings_language")
+        lang_en = I18n.get("settings_lang_en")
+        await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
+
+        # 手动同步测试进程的 I18n 状态，以便生成正确的英文断言字符串
+        I18n.set_locale("en_US")
+
+        # 验证 UI 文本已切换为英文（导航栏 "Screener" 出现）
+        await e2e_page.expect_text("Screener", timeout_ms=10000)
+
+        # 切回中文之前的验证
+        actual_lang_label_en = I18n.get_language_label()
+        await e2e_page.expect_text(actual_lang_label_en, timeout_ms=10000)
+
+        await e2e_page.page.wait_for_timeout(1000)
+
+    finally:
+        # 无论测试中途是否报错，都必须尝试切回中文，否则 session 级 app 将永久处于英文，导致后续所有测试失败
+        try:
+            # 此时的 UI 在英文状态下，我们使用英文的 label ("Language") 查找下拉框
+            # 如果 I18n 已经是 en_US，则会返回 "Language"
+            lang_label_en = I18n.get("settings_language")
+            # 我们想选的选项是 "简体中文"
+            lang_zh = I18n.get("settings_lang_zh", locale="zh_CN")
+
+            # 使用 force 和短暂的 timeout 尝试恢复
+            await e2e_page.select_dropdown(lang_label_en, lang_zh, timeout_ms=8000)
+        except Exception as e:
+            # 如果恢复失败，打印错误但不掩盖原测试的异常
+            import logging
+
+            logging.getLogger(__name__).error(f"Failed to restore language to zh_CN in finally block: {e}")
+        finally:
+            # 同步恢复测试进程的 I18n 状态
+            I18n.set_locale("zh_CN")
+            # 稍作等待以确保 UI 回到中文
+            await e2e_page.page.wait_for_timeout(1000)
+
     await e2e_page.expect_text("选股", timeout_ms=10000)

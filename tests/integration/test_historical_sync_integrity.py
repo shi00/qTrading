@@ -559,13 +559,13 @@ class TestLowFrequencyTableScoring:
         ):
             scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
 
-            if datetime.date(2024, 1, 1) in scores:
-                result = scores[datetime.date(2024, 1, 1)]
-                for table in LOW_FREQUENCY_TABLES:
-                    if table in result.get("tables", {}):
-                        assert result["tables"][table].get("passed") is True
-                        assert result["tables"][table].get("exempt") is True
-                        assert result["tables"][table].get("ratio") is None
+            assert datetime.date(2024, 1, 1) in scores, "应有 2024-01-01 的质量评分结果"
+            result = scores[datetime.date(2024, 1, 1)]
+            for table in LOW_FREQUENCY_TABLES:
+                if table in result.get("tables", {}):
+                    assert result["tables"][table].get("passed") is True
+                    assert result["tables"][table].get("exempt") is True
+                    assert result["tables"][table].get("ratio") is None
 
     @pytest.mark.asyncio
     async def test_low_frequency_tables_do_not_inflate_score(self, quote_dao):
@@ -607,40 +607,40 @@ class TestLowFrequencyTableScoring:
         ):
             scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
 
-            if datetime.date(2024, 1, 1) in scores:
-                result = scores[datetime.date(2024, 1, 1)]
-                score = result.get("score", 0)
-                for table in LOW_FREQUENCY_TABLES:
-                    if table in result.get("tables", {}):
-                        assert result["tables"][table].get("exempt") is True
-                        assert result["tables"][table].get("ratio") is None
-                exempt_count = sum(
-                    1 for t, info in result.get("tables", {}).items() if info.get("exempt") or info.get("ratio") is None
-                )
-                non_exempt_count = sum(
-                    1
-                    for t, info in result.get("tables", {}).items()
-                    if not info.get("exempt") and info.get("ratio") is not None
-                )
-                if non_exempt_count > 0 and exempt_count > 0:
-                    from utils.config_handler import ConfigHandler
+            assert datetime.date(2024, 1, 1) in scores, "应有 2024-01-01 的质量评分结果"
+            result = scores[datetime.date(2024, 1, 1)]
+            score = result.get("score", 0)
+            for table in LOW_FREQUENCY_TABLES:
+                if table in result.get("tables", {}):
+                    assert result["tables"][table].get("exempt") is True
+                    assert result["tables"][table].get("ratio") is None
+            exempt_count = sum(
+                1 for t, info in result.get("tables", {}).items() if info.get("exempt") or info.get("ratio") is None
+            )
+            non_exempt_count = sum(
+                1
+                for t, info in result.get("tables", {}).items()
+                if not info.get("exempt") and info.get("ratio") is not None
+            )
+            if non_exempt_count > 0 and exempt_count > 0:
+                from utils.config_handler import ConfigHandler
 
-                    quality_config = ConfigHandler.get_sync_integrity_config()
-                    quality_weights = quality_config.get("quality_weights", {})
-                    total_weight = 0
-                    weighted_score = 0
-                    for t, info in result["tables"].items():
-                        if info.get("exempt") or info.get("ratio") is None:
-                            continue
-                        if "ratio" in info:
-                            w = quality_weights.get(t, 5)
-                            weighted_score += info["ratio"] * w
-                            total_weight += w
-                    expected_score = int(min(100, (weighted_score / total_weight) * 100)) if total_weight > 0 else 0
-                    assert score == expected_score, (
-                        f"Score {score} should equal weighted score {expected_score}, "
-                        f"not inflated by {exempt_count} exempt tables"
-                    )
+                quality_config = ConfigHandler.get_sync_integrity_config()
+                quality_weights = quality_config.get("quality_weights", {})
+                total_weight = 0
+                weighted_score = 0
+                for t, info in result["tables"].items():
+                    if info.get("exempt") or info.get("ratio") is None:
+                        continue
+                    if "ratio" in info:
+                        w = quality_weights.get(t, 5)
+                        weighted_score += info["ratio"] * w
+                        total_weight += w
+                expected_score = int(min(100, (weighted_score / total_weight) * 100)) if total_weight > 0 else 0
+                assert score == expected_score, (
+                    f"Score {score} should equal weighted score {expected_score}, "
+                    f"not inflated by {exempt_count} exempt tables"
+                )
 
 
 class TestBreakpointResumeCoreTables:
@@ -934,15 +934,50 @@ class TestHistoricalLayerViolation:
     @pytest.mark.asyncio
     async def test_no_direct_dao_access(self):
         """
-        测试不直接访问 quote_dao._read_db
+        测试不直接访问 DAO 的 _read_db
 
-        场景：验证代码不包含 quote_dao._read_db 调用
+        场景：用 AST 解析 historical.py 源码，确保不直接导入具体 DAO 类、
+        不调用 _read_db（应通过 context.cache 访问）
         """
-        from data.sync.historical import HistoricalSyncStrategy
+        import ast
+        import inspect
 
-        assert not hasattr(HistoricalSyncStrategy, "quote_dao") or "_read_db" not in dir(HistoricalSyncStrategy), (
-            "HistoricalSyncStrategy should not access quote_dao._read_db directly"
+        from data.sync import historical as historical_mod
+
+        source = inspect.getsource(historical_mod)
+        tree = ast.parse(source)
+
+        # 具体业务 DAO 类名（不应在 sync 层直接导入）
+        concrete_dao_names = {
+            "QuoteDao",
+            "FinancialDao",
+            "HolderDao",
+            "MacroDao",
+            "MarketDao",
+            "ScreenerDao",
+            "SyncDao",
+        }
+
+        imported_names: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    imported_names.add(alias.asname or alias.name)
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported_names.add(alias.asname or alias.name.split(".")[-1])
+
+        forbidden_imports = imported_names & concrete_dao_names
+        assert not forbidden_imports, (
+            f"historical.py 不应直接导入具体 DAO 类 {forbidden_imports}，应通过 context.cache 访问"
         )
+
+        # 检测方法体内是否调用 _read_db
+        read_db_calls: list[str] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "_read_db":
+                read_db_calls.append(f"line {node.lineno}")
+        assert not read_db_calls, f"historical.py 不应直接调用 _read_db（{read_db_calls}），应通过 context.cache 访问"
 
 
 class TestP0RedundantFallbackRemoved:
@@ -1083,18 +1118,18 @@ class TestP1IndexTablesInLowFrequency:
         ):
             scores = await quote_dao.get_bulk_sync_quality_scores("20240101", "20240101")
 
-            if datetime.date(2024, 1, 1) in scores:
-                result = scores[datetime.date(2024, 1, 1)]
-                for table in FIXED_EXPECTED_TABLES:
-                    if table in result.get("tables", {}):
-                        table_info = result["tables"][table]
-                        assert table_info["passed"] is True, (
-                            f"{table} should be passed=True with fixed expected={FIXED_EXPECTED_TABLES[table]}, "
-                            f"but got expected={table_info['expected']}, count={table_info['count']}, ratio={table_info['ratio']}"
-                        )
-                        assert table_info["expected"] == FIXED_EXPECTED_TABLES[table], (
-                            f"{table} expected should be {FIXED_EXPECTED_TABLES[table]}, got {table_info['expected']}"
-                        )
+            assert datetime.date(2024, 1, 1) in scores, "应有 2024-01-01 的质量评分结果"
+            result = scores[datetime.date(2024, 1, 1)]
+            for table in FIXED_EXPECTED_TABLES:
+                if table in result.get("tables", {}):
+                    table_info = result["tables"][table]
+                    assert table_info["passed"] is True, (
+                        f"{table} should be passed=True with fixed expected={FIXED_EXPECTED_TABLES[table]}, "
+                        f"but got expected={table_info['expected']}, count={table_info['count']}, ratio={table_info['ratio']}"
+                    )
+                    assert table_info["expected"] == FIXED_EXPECTED_TABLES[table], (
+                        f"{table} expected should be {FIXED_EXPECTED_TABLES[table]}, got {table_info['expected']}"
+                    )
 
 
 class TestP1TradingDayValidation:
@@ -1148,10 +1183,10 @@ class TestP1SyncVersionParameterized:
         with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query):
             await financial_dao.get_incomplete_financial_stocks()
 
-            if call_args:
-                query, params = call_args[0]
-                assert params[0] == 1
-                assert params[1] == 4
+            assert call_args, "应至少捕获一次查询调用"
+            query, params = call_args[0]
+            assert params[0] == 1
+            assert params[1] == 4
 
     @pytest.mark.asyncio
     async def test_get_incomplete_financial_stocks_custom_params(self, financial_dao):
@@ -1169,10 +1204,10 @@ class TestP1SyncVersionParameterized:
         with patch.object(financial_dao, "_read_db", new_callable=AsyncMock, side_effect=capture_query):
             await financial_dao.get_incomplete_financial_stocks(min_periods=8, sync_version=2)
 
-            if call_args:
-                query, params = call_args[0]
-                assert params[0] == 2
-                assert params[1] == 8
+            assert call_args, "应至少捕获一次查询调用"
+            query, params = call_args[0]
+            assert params[0] == 2
+            assert params[1] == 8
 
 
 class TestP2SyncResultMergeDateNormalization:
@@ -1589,64 +1624,79 @@ class TestCacheManagerGetIncompleteFinancialStocks:
 
 
 class TestConsecutiveFailuresCircuitBreaker:
-    """测试 historical.py 连续失败熔断机制 (P1-5)"""
+    """测试 historical.py 连续失败熔断机制 (P1-5)
 
-    def test_consecutive_counter_resets_on_success(self):
-        """连续失败计数器在成功后重置"""
-        consecutive_failures = 0
+    P2-2 fix: 调用真实 _run_historical_sync 测试熔断，而非局部变量演算。
+    """
 
-        consecutive_failures += 1
-        consecutive_failures += 1
-        assert consecutive_failures == 2
+    @pytest.mark.asyncio
+    async def test_consecutive_failures_triggers_circuit_breaker(self, mock_context, monkeypatch):
+        """连续失败超过阈值时触发熔断，中止同步。
 
-        consecutive_failures = 0
-        assert consecutive_failures == 0
+        场景：10 个交易日，全部失败，CB_THRESHOLD = max(3, int(10*0.2)) = 3。
+        串行执行时第 5 个任务检测到 consecutive_failures=4 > 3，触发熔断。
+        """
+        from data.sync.historical import HistoricalSyncStrategy
 
-        for _ in range(5):
-            consecutive_failures += 1
-        assert consecutive_failures == 5
+        # 串行执行，确保熔断在批次内触发
+        monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_max_concurrent_heavy", lambda: 1)
+        # 禁用重试，避免 asyncio.sleep 拖慢测试
+        monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_retry_count", lambda: 0)
 
-        consecutive_failures = 0
-        assert consecutive_failures == 0
+        trade_dates = [datetime.date(2024, 1, d) for d in range(1, 11)]
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=trade_dates[-1])
+        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=trade_dates)
+        mock_context.cache.get_cached_dates_for_table = AsyncMock(return_value=set())
+        mock_context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={})
 
-    def test_consecutive_threshold_triggers_abort(self):
-        """连续失败超过阈值触发熔断"""
-        consecutive_failures = 0
-        CB_THRESHOLD = 3
-        abort_sync = False
+        strategy = HistoricalSyncStrategy(mock_context)
+        strategy.sync_daily_market_snapshot = AsyncMock(side_effect=ConnectionError("Network down"))
 
-        for _ in range(4):
-            consecutive_failures += 1
-            if consecutive_failures > CB_THRESHOLD:
-                abort_sync = True
-                break
+        result = SyncResult()
+        await strategy._run_historical_sync(days=10, progress_callback=None, result=result)
 
-        assert abort_sync is True
-        assert consecutive_failures == 4
+        # 熔断被触发（errors 包含 Circuit breaker triggered）
+        assert any("Circuit breaker triggered" in err for err in result.errors), f"应触发熔断，errors={result.errors}"
+        # 熔断后不应继续处理所有日期
+        assert strategy.sync_daily_market_snapshot.await_count < 10
 
-    def test_interleaved_failures_no_abort(self):
-        """交替失败和成功不触发熔断（非连续）"""
-        consecutive_failures = 0
-        CB_THRESHOLD = 3
-        abort_sync = False
+    @pytest.mark.asyncio
+    async def test_success_resets_consecutive_failures(self, mock_context, monkeypatch):
+        """成功重置连续失败计数器，交替失败不触发熔断。
 
-        for result in ["fail", "success", "fail", "success", "fail"]:
-            if result == "success":
-                consecutive_failures = 0
-            else:
-                consecutive_failures += 1
-                if consecutive_failures > CB_THRESHOLD:
-                    abort_sync = True
-                    break
+        场景：10 个交易日，交替失败/成功，consecutive_failures 不超过 1，不触发熔断。
+        """
+        from data.sync.historical import HistoricalSyncStrategy
 
-        assert abort_sync is False
-        assert consecutive_failures == 1
+        monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_max_concurrent_heavy", lambda: 1)
+        # 禁用重试，避免 asyncio.sleep 拖慢测试
+        monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_retry_count", lambda: 0)
 
-    def test_cb_threshold_dynamic_calculation(self):
-        """熔断阈值随总天数动态调整"""
-        assert min(50, max(10, int(0 * 0.1) if 0 > 0 else 10)) == 10
-        assert min(50, max(10, int(50 * 0.1))) == 10
-        assert min(50, max(10, int(100 * 0.1))) == 10
-        assert min(50, max(10, int(200 * 0.1))) == 20
-        assert min(50, max(10, int(500 * 0.1))) == 50
-        assert min(50, max(10, int(1000 * 0.1))) == 50
+        trade_dates = [datetime.date(2024, 1, d) for d in range(1, 11)]
+        mock_context.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=trade_dates[-1])
+        mock_context.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=trade_dates)
+        mock_context.cache.get_cached_dates_for_table = AsyncMock(return_value=set())
+        mock_context.cache.get_bulk_sync_quality_scores = AsyncMock(return_value={})
+
+        strategy = HistoricalSyncStrategy(mock_context)
+
+        call_count = 0
+
+        async def alternating_success_failure(date, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count % 2 == 0:
+                raise ConnectionError("Network down")
+            return True
+
+        strategy.sync_daily_market_snapshot = AsyncMock(side_effect=alternating_success_failure)
+
+        result = SyncResult()
+        await strategy._run_historical_sync(days=10, progress_callback=None, result=result)
+
+        # 交替失败不触发熔断
+        assert result.status != "failed" or not any("Circuit breaker triggered" in err for err in result.errors), (
+            f"交替失败不应触发熔断，errors={result.errors}"
+        )
+        # 应处理所有日期
+        assert strategy.sync_daily_market_snapshot.await_count == 10

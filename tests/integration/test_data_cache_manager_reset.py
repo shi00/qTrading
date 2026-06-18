@@ -10,13 +10,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.cache.cache_manager import CacheManager
-from data.persistence.db_url_override import override_db_url
 from tests.conftest import singleton_state
 
 
 @pytest.mark.integration
 class TestClearAllCacheReset:
     """Integration tests for the clear_all_cache → init_db round-trip."""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _db_url_override(self, test_db_url_override):
+        """自动应用 DB URL 覆盖（P2-4），避免每个测试方法重复 with override_db_url。"""
 
     @pytest_asyncio.fixture
     async def cache_mgr(self, test_engine: AsyncEngine):
@@ -43,8 +46,7 @@ class TestClearAllCacheReset:
                 if dao is not None:
                     dao.engine = test_engine
 
-            with override_db_url(str(test_engine.url)):
-                await mgr.init_db(auto_migrate=True)
+            await mgr.init_db(auto_migrate=True)
 
             yield mgr
 
@@ -56,8 +58,7 @@ class TestClearAllCacheReset:
     @pytest.mark.asyncio
     async def test_clear_all_cache_recreates_tables(self, cache_mgr: CacheManager, test_engine: AsyncEngine):
         """After clear_all_cache(), all application tables should exist."""
-        with override_db_url(str(test_engine.url)):
-            await cache_mgr.clear_all_cache()
+        await cache_mgr.clear_all_cache()
 
         # Verify key tables exist by querying them (empty but present)
         async with test_engine.connect() as conn:
@@ -83,8 +84,7 @@ class TestClearAllCacheReset:
     @pytest.mark.asyncio
     async def test_clear_all_cache_has_valid_alembic_version(self, cache_mgr: CacheManager, test_engine: AsyncEngine):
         """After clear_all_cache(), alembic_version should contain a valid revision."""
-        with override_db_url(str(test_engine.url)):
-            await cache_mgr.clear_all_cache()
+        await cache_mgr.clear_all_cache()
 
         async with test_engine.connect() as conn:
             result = await conn.execute(text("SELECT version_num FROM alembic_version"))
@@ -98,17 +98,15 @@ class TestClearAllCacheReset:
     @pytest.mark.asyncio
     async def test_clear_all_cache_schema_initialized_flag(self, cache_mgr: CacheManager, test_engine: AsyncEngine):
         """After clear_all_cache(), _schema_initialized should be True."""
-        with override_db_url(str(test_engine.url)):
-            await cache_mgr.clear_all_cache()
+        await cache_mgr.clear_all_cache()
 
         assert cache_mgr._schema_initialized is True, "_schema_initialized should be True after clear_all_cache"
 
     @pytest.mark.asyncio
     async def test_clear_all_cache_idempotent(self, cache_mgr: CacheManager, test_engine: AsyncEngine):
         """Calling clear_all_cache() twice should succeed without errors."""
-        with override_db_url(str(test_engine.url)):
-            await cache_mgr.clear_all_cache()
-            await cache_mgr.clear_all_cache()
+        await cache_mgr.clear_all_cache()
+        await cache_mgr.clear_all_cache()
 
         async with test_engine.connect() as conn:
             result = await conn.execute(text("SELECT version_num FROM alembic_version"))

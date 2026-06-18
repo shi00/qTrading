@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 
 from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
+from data.persistence.db_url_override import override_db_url
 
 
 @pytest.fixture
@@ -591,22 +592,15 @@ class TestTushareConfigPanel:
 class TestDatabaseConfigServiceMigrations:
     """Tests for DatabaseConfigService migration methods"""
 
+    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):
-        import config
-
+        """统一使用 override_db_url 覆盖 DB URL（P2-4）。"""
         from tests.integration.conftest import TEST_DB_URL
 
-        old_config_url = config.DB_URL
-        old_env_url = os.environ.get("DATABASE_URL")
-        config.DB_URL = TEST_DB_URL
-        os.environ["DATABASE_URL"] = TEST_DB_URL
-        yield
-        config.DB_URL = old_config_url
-        if old_env_url is not None:
-            os.environ["DATABASE_URL"] = old_env_url
-        elif "DATABASE_URL" in os.environ:
-            del os.environ["DATABASE_URL"]
+        with override_db_url(TEST_DB_URL):
+            yield
 
     @pytest_asyncio.fixture(autouse=True)
     async def _restore_tables(self, test_engine):
@@ -722,22 +716,15 @@ class TestDatabaseConfigServiceMigrations:
 class TestDatabaseConfigPanelSaveConfig:
     """Tests for DatabaseConfigPanel.save_config with table creation"""
 
+    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):
-        import config
-
+        """统一使用 override_db_url 覆盖 DB URL（P2-4）。"""
         from tests.integration.conftest import TEST_DB_URL
 
-        old_config_url = config.DB_URL
-        old_env_url = os.environ.get("DATABASE_URL")
-        config.DB_URL = TEST_DB_URL
-        os.environ["DATABASE_URL"] = TEST_DB_URL
-        yield
-        config.DB_URL = old_config_url
-        if old_env_url is not None:
-            os.environ["DATABASE_URL"] = old_env_url
-        elif "DATABASE_URL" in os.environ:
-            del os.environ["DATABASE_URL"]
+        with override_db_url(TEST_DB_URL):
+            yield
 
     @pytest_asyncio.fixture(autouse=True)
     async def _restore_tables(self, test_engine):
@@ -860,22 +847,15 @@ class TestDatabaseConfigPanelSaveConfig:
 class TestOnboardingWizardDatabaseValidation:
     """Tests for OnboardingWizard database validation via ViewModel"""
 
+    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):
-        import config
-
+        """统一使用 override_db_url 覆盖 DB URL（P2-4）。"""
         from tests.integration.conftest import TEST_DB_URL
 
-        old_config_url = config.DB_URL
-        old_env_url = os.environ.get("DATABASE_URL")
-        config.DB_URL = TEST_DB_URL
-        os.environ["DATABASE_URL"] = TEST_DB_URL
-        yield
-        config.DB_URL = old_config_url
-        if old_env_url is not None:
-            os.environ["DATABASE_URL"] = old_env_url
-        elif "DATABASE_URL" in os.environ:
-            del os.environ["DATABASE_URL"]
+        with override_db_url(TEST_DB_URL):
+            yield
 
     @pytest_asyncio.fixture(autouse=True)
     async def _restore_tables(self, test_engine):

@@ -1,7 +1,7 @@
-import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
+import pytest
 
 # Make sure to import the class to be tested
 # Assuming path is setup or we run as module
@@ -15,13 +15,15 @@ from data.external.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 
 
-class TestTushareClient(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        TushareClient._reset_singleton()
+@pytest.fixture(autouse=True)
+def _reset_tushare_client():
+    """每个测试前后重置 TushareClient 单例（集成测试不享受 unit conftest 的 autouse 单例重置）。"""
+    TushareClient._reset_singleton()
+    yield
+    TushareClient._reset_singleton()
 
-    def tearDown(self):
-        TushareClient._reset_singleton()
 
+class TestTushareClient:
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     async def test_get_top_list_attaches_net_amount_unit_metadata(self, mock_set_token, mock_pro_api):
@@ -39,14 +41,8 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
 
         df = await client.get_top_list("20230101")
 
-        self.assertEqual(
-            df.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["net_amount"],
-            TOP_LIST_NET_AMOUNT_UNIT,
-        )
-        self.assertEqual(
-            df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["net_amount"],
-            TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
-        )
+        assert df.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["net_amount"] == TOP_LIST_NET_AMOUNT_UNIT
+        assert df.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["net_amount"] == TOP_LIST_NET_AMOUNT_UNIT_SOURCE
 
     # Legacy RateLimiter tests removed as RateLimiter class was replaced by TokenBucket
 
@@ -86,7 +82,7 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
             await client.get_daily_quotes(ts_code="000001.SZ")
 
             # get_daily_quotes calls daily and adj_factor, so consume_async might be called multiple times
-            self.assertGreaterEqual(client._rate_limiter.consume_async.call_count, 1)
+            assert client._rate_limiter.consume_async.call_count >= 1
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -114,9 +110,9 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
 
         result = await client.get_daily_quotes(ts_code="000001.SZ")
 
-        self.assertIsNotNone(result)
-        self.assertEqual(mock_api_instance.daily.call_count, 3)
-        self.assertGreaterEqual(mock_sleep.call_count, 2)
+        assert result is not None
+        assert mock_api_instance.daily.call_count == 3
+        assert mock_sleep.call_count >= 2
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -142,9 +138,9 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
 
         result = await client.get_daily_quotes(ts_code="000001.SZ")
 
-        self.assertIsNotNone(result)
-        self.assertEqual(mock_api_instance.daily.call_count, 2)
-        self.assertGreaterEqual(mock_sleep.call_count, 1)
+        assert result is not None
+        assert mock_api_instance.daily.call_count == 2
+        assert mock_sleep.call_count >= 1
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -164,14 +160,11 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
         client = TushareClient(token="dummy")
         client._rate_limiter = None
 
-        with self.assertRaises(Exception) as context:
+        with pytest.raises(Exception) as context:
             await client.get_daily_quotes(ts_code="000001.SZ")
-        self.assertEqual(str(context.exception), "General Error")
+        assert str(context.value) == "General Error"
 
-        self.assertEqual(
-            mock_api_instance.daily.call_count,
-            3,
-        )  # Max retries default is 3
+        assert mock_api_instance.daily.call_count == 3  # Max retries default is 3
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -192,32 +185,26 @@ class TestTushareClient(unittest.IsolatedAsyncioTestCase):
         client = TushareClient(token="dummy")
 
         is_open = client.is_trading_day("20250101")
-        self.assertTrue(is_open)
-        self.assertEqual(mock_api_instance.trade_cal.call_count, 1)
+        assert is_open
+        assert mock_api_instance.trade_cal.call_count == 1
 
         # Verify API called with full year range
         args, kwargs = mock_api_instance.trade_cal.call_args
-        self.assertEqual(kwargs["start_date"], "20250101")
-        self.assertEqual(kwargs["end_date"], "20251231")
+        assert kwargs["start_date"] == "20250101"
+        assert kwargs["end_date"] == "20251231"
 
         # 2. Second Call (Same Year, Different Date): Should HIT CACHE (No API call)
         is_open_2 = client.is_trading_day("20250102")  # Not in the mocked list
-        self.assertFalse(is_open_2)
-        self.assertEqual(mock_api_instance.trade_cal.call_count, 1)  # Count stays 1
+        assert not is_open_2
+        assert mock_api_instance.trade_cal.call_count == 1  # Count stays 1
 
         # 3. Third Call (Different Year): Should hit API again
         client.is_trading_day("20260101")
-        self.assertEqual(mock_api_instance.trade_cal.call_count, 2)  # Count increases
+        assert mock_api_instance.trade_cal.call_count == 2  # Count increases
 
 
-class TestSlowApiLimiters(unittest.IsolatedAsyncioTestCase):
+class TestSlowApiLimiters:
     """测试慢速 API 专用限流器（P0 级）"""
-
-    def setUp(self):
-        TushareClient._reset_singleton()
-
-    def tearDown(self):
-        TushareClient._reset_singleton()
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -226,22 +213,22 @@ class TestSlowApiLimiters(unittest.IsolatedAsyncioTestCase):
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
             client = TushareClient(token="dummy")
 
-            self.assertIn("top10_holders", client._api_limiters)
-            self.assertIn("concept_detail", client._api_limiters)
-            self.assertIn("daily", client._api_limiters)
-            self.assertGreater(len(client._api_limiters), 2)
+            assert "top10_holders" in client._api_limiters
+            assert "concept_detail" in client._api_limiters
+            assert "daily" in client._api_limiters
+            assert len(client._api_limiters) > 2
 
             top10_limiter = client._api_limiters["top10_holders"]
             expected_rate = (200 / 60.0) * 0.5
-            self.assertAlmostEqual(top10_limiter.rate, expected_rate, places=2)
+            assert abs(top10_limiter.rate - expected_rate) < 0.005
 
             concept_limiter = client._api_limiters["concept_detail"]
             expected_rate_concept = (200 / 60.0) * 0.3
-            self.assertAlmostEqual(concept_limiter.rate, expected_rate_concept, places=2)
+            assert abs(concept_limiter.rate - expected_rate_concept) < 0.005
 
             daily_limiter = client._api_limiters["daily"]
             expected_rate_daily = (200 / 60.0) * 2.5
-            self.assertAlmostEqual(daily_limiter.rate, expected_rate_daily, places=2)
+            assert abs(daily_limiter.rate - expected_rate_daily) < 0.005
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -250,8 +237,8 @@ class TestSlowApiLimiters(unittest.IsolatedAsyncioTestCase):
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
             client = TushareClient(token="dummy")
 
-            self.assertIsNone(client._rate_limiter)
-            self.assertEqual(client._api_limiters, {})
+            assert client._rate_limiter is None
+            assert client._api_limiters == {}
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -439,21 +426,15 @@ class TestSlowApiLimiters(unittest.IsolatedAsyncioTestCase):
             client = TushareClient(token="dummy")
             client._rate_limiter = None
 
-            with self.assertRaises(Exception) as context:
+            with pytest.raises(Exception) as context:
                 await client.get_daily_quotes(ts_code="000001.SZ")
-            self.assertIn("积分", str(context.exception))
+            assert "积分" in str(context.value)
 
-            self.assertEqual(mock_api_instance.daily.call_count, 1)
+            assert mock_api_instance.daily.call_count == 1
 
 
-class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
+class TestSetTokenRebuildsLimiters:
     """测试 set_token 正确重建限流器（P0 级）"""
-
-    def setUp(self):
-        TushareClient._reset_singleton()
-
-    def tearDown(self):
-        TushareClient._reset_singleton()
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -463,13 +444,13 @@ class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
             client = TushareClient(token="old_token")
 
             old_limiter = client._rate_limiter
-            self.assertIsNotNone(old_limiter)
+            assert old_limiter is not None
 
             with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
                 client.set_token("new_token")
 
-                self.assertIsNotNone(client._rate_limiter)
-                self.assertAlmostEqual(client._rate_limiter.rate, 200 / 60.0, places=2)
+                assert client._rate_limiter is not None
+                assert abs(client._rate_limiter.rate - 200 / 60.0) < 0.005
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -481,13 +462,13 @@ class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
             with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
                 client.set_token("new_token")
 
-                self.assertIn("top10_holders", client._api_limiters)
-                self.assertIn("concept_detail", client._api_limiters)
-                self.assertIn("daily", client._api_limiters)
+                assert "top10_holders" in client._api_limiters
+                assert "concept_detail" in client._api_limiters
+                assert "daily" in client._api_limiters
 
                 new_top10 = client._api_limiters["top10_holders"]
                 expected_rate = (200 / 60.0) * 0.5
-                self.assertAlmostEqual(new_top10.rate, expected_rate, places=2)
+                assert abs(new_top10.rate - expected_rate) < 0.005
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -496,14 +477,14 @@ class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
             client = TushareClient(token="old_token")
 
-            self.assertIsNotNone(client._rate_limiter)
-            self.assertGreater(len(client._api_limiters), 0)
+            assert client._rate_limiter is not None
+            assert len(client._api_limiters) > 0
 
             with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
                 client.set_token("new_token")
 
-                self.assertIsNone(client._rate_limiter)
-                self.assertEqual(client._api_limiters, {})
+                assert client._rate_limiter is None
+                assert client._api_limiters == {}
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -512,24 +493,18 @@ class TestSetTokenRebuildsLimiters(unittest.IsolatedAsyncioTestCase):
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
             client = TushareClient(token="old_token")
 
-            self.assertIsNone(client._rate_limiter)
+            assert client._rate_limiter is None
 
             with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
                 client.set_token("new_token")
 
-                self.assertIsNotNone(client._rate_limiter)
-                self.assertAlmostEqual(client._rate_limiter.rate, 200 / 60.0, places=2)
-                self.assertIn("top10_holders", client._api_limiters)
+                assert client._rate_limiter is not None
+                assert abs(client._rate_limiter.rate - 200 / 60.0) < 0.005
+                assert "top10_holders" in client._api_limiters
 
 
-class TestClassVariableDirtyDataFix(unittest.IsolatedAsyncioTestCase):
+class TestClassVariableDirtyDataFix:
     """P0-2 修复验证：类变量残留脏数据问题"""
-
-    def setUp(self):
-        TushareClient._reset_singleton()
-
-    def tearDown(self):
-        TushareClient._reset_singleton()
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -541,15 +516,15 @@ class TestClassVariableDirtyDataFix(unittest.IsolatedAsyncioTestCase):
             client1 = TushareClient(token="token1")
             client1._trade_cal_cache.add("20250101")
             client1._loaded_years.add("2025")
-            self.assertEqual(len(client1._trade_cal_cache), 1)
-            self.assertEqual(len(client1._loaded_years), 1)
+            assert len(client1._trade_cal_cache) == 1
+            assert len(client1._loaded_years) == 1
 
         TushareClient._reset_singleton()
 
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
             client2 = TushareClient(token="token2")
-            self.assertEqual(len(client2._trade_cal_cache), 0)
-            self.assertEqual(len(client2._loaded_years), 0)
+            assert len(client2._trade_cal_cache) == 0
+            assert len(client2._loaded_years) == 0
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -566,8 +541,8 @@ class TestClassVariableDirtyDataFix(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
             client2 = TushareClient(token="token2")
-            self.assertIsNot(client2._rate_limiter, old_limiter)
-            self.assertIsNot(client2._api_limiters.get("top10_holders"), old_api_limiter)
+            assert client2._rate_limiter is not old_limiter
+            assert client2._api_limiters.get("top10_holders") is not old_api_limiter
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
@@ -577,17 +552,13 @@ class TestClassVariableDirtyDataFix(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
             client = TushareClient(token="dummy")
-            self.assertIn("_trade_cal_cache", client.__dict__)
-            self.assertIn("_loaded_years", client.__dict__)
-            self.assertIn("_calendar_lock", client.__dict__)
+            assert "_trade_cal_cache" in client.__dict__
+            assert "_loaded_years" in client.__dict__
+            assert "_calendar_lock" in client.__dict__
 
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_no_class_level_mutable_state(self, mock_set_token, mock_pro_api):
         """类级别不应有可变状态（_trade_cal_cache, _loaded_years）"""
-        self.assertFalse(hasattr(TushareClient, "_trade_cal_cache"))
-        self.assertFalse(hasattr(TushareClient, "_loaded_years"))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert not hasattr(TushareClient, "_trade_cal_cache")
+        assert not hasattr(TushareClient, "_loaded_years")

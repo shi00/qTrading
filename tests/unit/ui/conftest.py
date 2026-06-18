@@ -4,6 +4,7 @@ import flet as ft
 import pytest
 
 from tests.unit.ui.mock_flet import MockFletPage
+from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 
 
@@ -25,61 +26,36 @@ def mock_i18n():
 
 @pytest.fixture
 def mock_app_colors():
-    m = MagicMock()
-    m.TEXT_PRIMARY = "#FFF"
-    m.TEXT_SECONDARY = "#AAA"
-    m.TEXT_ON_PRIMARY = "#FFF"
-    m.TEXT_HINT = "#888"
-    m.PRIMARY = "#6750A4"
-    m.PRIMARY_DARK = "#0D47A1"
-    m.PRIMARY_LIGHT = "#BBDEFB"
-    m.ERROR = "#F44336"
-    m.SUCCESS = "#4CAF50"
-    m.WARNING = "#FF9800"
-    m.INFO = "#2196F3"
-    m.ACCENT = "#BB86FC"
-    m.ACCENT_HOVER = "#004D40"
-    m.DIVIDER = "#333"
-    m.BORDER = "#444"
-    m.SURFACE = "#1E1E1E"
-    m.SURFACE_VARIANT = "#2D2D2D"
-    m.BACKGROUND = "#121212"
-    m.INPUT_BG = "#2D2D2D"
-    m.INPUT_BORDER = "#424242"
-    m.INPUT_TEXT = "#FFFFFF"
-    m.UP = "#F44336"
-    m.DOWN = "#4CAF50"
-    m.UP_RED = "#F44336"
-    m.DOWN_GREEN = "#4CAF50"
-    m.RISE = "#F44336"
-    m.FALL = "#4CAF50"
-    m.TABLE_HEADER_BG = "#252526"
-    m.TABLE_HEADER_TEXT = "#E0E0E0"
-    m.TABLE_ROW_ODD = "#1E1E1E"
-    m.TABLE_ROW_EVEN = "#181818"
-    m.TABLE_CELL_TEXT = "#CCCCCC"
-    m.TABLE_CELL_NUMERIC = "#FFFFFF"
-    m.TABLE_BORDER = "#333333"
-    m.TABLE_GRID = "#2C2C2C"
-    m.TABLE_GRID_V = "#2C2C2C"
-    m.TABLE_GRID_H = "#2C2C2C"
-    m.LOG_BG = "#000000"
-    m.LOG_TEXT = "#CCCCCC"
-    m.CARD_BG = "#1E1E1E"
-    m.TABLE_ROW_HOVER = "#333333"
-    m.load_theme = MagicMock()
-    m.subscribe = MagicMock()
-    m.unsubscribe = MagicMock()
+    """基于 create_autospec 的 AppColors mock。
+
+    方法签名跟随 AppColors 类定义；颜色 token 从真实类复制，
+    确保 token 重命名/删除时测试立即失败（P2-2）。
+    """
+    m = create_autospec(AppColors, instance=True)
+    # 复制所有公开数据属性（颜色字符串、常量），保持与生产单一真相源对齐
+    for attr in dir(AppColors):
+        if attr.startswith("_"):
+            continue
+        val = getattr(AppColors, attr, None)
+        if isinstance(val, (str, int, float)):
+            setattr(m, attr, val)
     return m
 
 
 @pytest.fixture
 def mock_app_styles():
-    m = MagicMock()
-    m.CONTROL_WIDTH_MD = 300
-    m.CONTROL_WIDTH_SM = 150
-    m.CONTROL_WIDTH_LG = 400
-    m.CONTROL_WIDTH_XS = 80
+    """基于 create_autospec 的 AppStyles mock。
+
+    方法签名跟随 AppStyles 类定义；尺寸常量从真实类复制（P2-2）。
+    """
+    m = create_autospec(AppStyles, instance=True)
+    for attr in dir(AppStyles):
+        if attr.startswith("_"):
+            continue
+        val = getattr(AppStyles, attr, None)
+        if isinstance(val, (str, int, float)):
+            setattr(m, attr, val)
+    # 样式工厂方法返回真实 ButtonStyle/dict，避免组件渲染时类型不匹配
     m.primary_button = MagicMock(return_value=ft.ButtonStyle())
     m.outline_button = MagicMock(return_value=ft.ButtonStyle())
     m.accent_button = MagicMock(return_value=ft.ButtonStyle())

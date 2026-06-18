@@ -1,11 +1,11 @@
 # AStockScreener (QTrading) - 智能 A 股 AI 量化交易员
 
-[![CI/CD](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml/badge.svg)]()
-[![Python](https://img.shields.io/badge/python-3.13%2B-blue)]()
-[![Coverage](https://img.shields.io/badge/coverage-85%25%2B-brightgreen)]()
-[![UI](https://img.shields.io/badge/UI-Flet-00d2b4)]()
-[![Data Engine](https://img.shields.io/badge/Data-Polars-orange)]()
-[![AI Engine](https://img.shields.io/badge/AI-Local%20%2B%20Cloud-blueviolet)]()
+[![CI/CD](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml/badge.svg)](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://github.com/shi00/qTrading)
+[![Coverage](https://img.shields.io/badge/coverage-85%25%2B-brightgreen)](https://github.com/shi00/qTrading)
+[![UI](https://img.shields.io/badge/UI-Flet-00d2b4)](https://github.com/shi00/qTrading)
+[![Data Engine](https://img.shields.io/badge/Data-Polars-orange)](https://github.com/shi00/qTrading)
+[![AI Engine](https://img.shields.io/badge/AI-Local%20%2B%20Cloud-blueviolet)](https://github.com/shi00/qTrading)
 
 **AStockScreener** 是一个极速、隐私优先的本地化量化选股与深度分析平台。它通过将 **高性能 Polars 向量化计算引擎** 与 **大语言模型 (LLM)** 深度结合，提供从"海量指标毫秒级初筛"到"AI 逻辑深度回顾"的全链路工业级投研协作能力。
 
@@ -77,7 +77,7 @@
 | **计算引擎** | [Polars](https://pola.rs/) + Pandas |
 | **数据库** | [PostgreSQL](https://www.postgresql.org/) + [SQLAlchemy 2.0](https://www.sqlalchemy.org/) |
 | **数据迁移** | [Alembic](https://alembic.sqlalchemy.org/) |
-| **AI 推理** | 11 家 LLM 供应商 (云端) / [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) (本地) |
+| **AI 推理** | 10 家 LLM 供应商 (云端) + 自定义 / [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) (本地) |
 | **LLM 网关** | [LiteLLM](https://github.com/BerriAI/litellm) (多模型统一接口) |
 | **数据源** | [Tushare Pro](https://tushare.pro/) (核心行情) + [Akshare](https://akshare.akfamily.xyz/) (补充) |
 | **任务调度** | [APScheduler](https://apscheduler.readthedocs.io/) |
@@ -88,7 +88,7 @@
 
 ## 🏗️ 项目架构
 
-采用 **领域驱动设计 (DDD)** 原则，清晰分层：
+采用清晰分层架构（核心/数据/服务/策略/表现 + 横切 utils）：
 
 ```
 astock_screener/
@@ -225,7 +225,7 @@ astock_screener/
 │   ├── thread_pool.py          # 线程池管理（IO/CPU 分离）
 │   ├── rate_limiter.py         # 令牌桶限流器
 │   ├── technical_analysis.py   # 技术指标计算
-│   ├── llm_providers.py        # LLM 供应商配置（11 家）
+│   ├── llm_providers.py        # LLM 供应商配置（10 家 + 自定义）
 │   ├── scheduler_service.py    # 调度服务
 │   ├── proxy_manager.py        # 网络代理管理
 │   ├── shutdown.py             # 优雅退出协调器
@@ -304,7 +304,7 @@ graph TB
 
     subgraph APPLICATION["<b>应用服务层 Application</b>"]
         direction LR
-        AI["🤖 AIService<br/>LiteLLM 多模型网关<br/>11 家供应商统一接口"]
+        AI["🤖 AIService<br/>LiteLLM 多模型网关<br/>10 家供应商 + 自定义"]
         TASK["📋 TaskManager<br/>异步任务调度<br/>IO/CPU 线程池分离"]
         LOCAL["💻 LocalModelManager<br/>GGUF 本地推理<br/>内存管理 | 并发锁"]
         SCHED["⏰ SchedulerService<br/>APScheduler 定时任务<br/>数据同步调度"]
@@ -373,7 +373,7 @@ graph TB
     style CROSS fill:#eceff1,stroke:#546e7a
 ```
 
-> **架构原则**: 严格遵循 **领域驱动设计 (DDD)** 四层架构。上层仅依赖下层，横切关注点（配置、安全、日志、退出）贯穿所有层级。CI/CD 流水线强制 **85% 代码覆盖率** 门禁。
+> **架构原则**: 严格遵循分层架构（core/app/data/services/strategies/ui/utils，详见 CLAUDE.md §4.1）。上层仅依赖下层，横切关注点（配置、安全、日志、退出）贯穿所有层级。CI/CD 流水线强制 **85% 代码覆盖率** 门禁。
 
 ---
 
@@ -389,7 +389,10 @@ graph TB
 ```bash
 git clone https://github.com/shi00/qTrading.git
 cd qTrading
-pip install -r requirements.txt
+uv venv
+.venv\Scripts\activate  # Windows
+uv pip install --system -r requirements.txt
+# 可选依赖（playwright/brotlicffi）：uv pip install --system -r requirements-optional.txt
 ```
 
 ### 3. 配置数据库
@@ -398,7 +401,7 @@ pip install -r requirements.txt
 
 ```bash
 # 必需：数据库连接
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/astock
+DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/astock_screener
 ```
 
 ### 4. 运行
@@ -446,7 +449,7 @@ python -m pytest tests/integration/test_historical_sync_integrity.py -v
 | 模块 | 代表性测试 | 验证要点 |
 |------|-----------|---------|
 | AI 服务 | `test_ai_service.py` | 多供应商参数构建、推理模型检测、边界条件（空模型/空 Key） |
-| LLM 配置 | `test_llm_providers.py` | 11 家供应商完整性、模型 ID 合法性、上下文窗口有效性 |
+| LLM 配置 | `test_llm_providers.py` | 10 家供应商完整性、模型 ID 合法性、上下文窗口有效性 |
 | 配置管理 | `test_config_handler.py` | 读写锁安全、加密存储、Keyring 降级 |
 | 数据同步 | `test_historical_sync_integrity.py` | 断点续传、质量评分、退市股票处理 |
 | 回顾系统 | `test_review_round_trip.py` | AI 回顾全流程、经验注入 |
@@ -482,9 +485,12 @@ python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 ```python
 @register_strategy("oversold")
 class OversoldStrategy(BaseStrategy, AIStrategyMixin):
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
-        # 策略逻辑
-        pass
+    required_context_keys: tuple[str, ...] = ("screening_data",)
+
+    @require_quality(QualityTier.SILVER)
+    async def filter(self, context: StrategyContext):
+        # 策略逻辑：返回过滤后的 DataFrame
+        ...
 ```
 
 ### 数据质量门控

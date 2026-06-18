@@ -3,6 +3,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
+from core.i18n import I18n
 from strategies.utils import StrategyContext
 
 logger = logging.getLogger(__name__)
@@ -91,8 +92,15 @@ class BaseStrategy(ABC):
         Return a dynamic description based on current UI parameters.
         By default, it just returns the static I18n description.
         Override in subclasses if the description needs to reflect slider values.
+
+        # [PITFALL_WARNING] E2E 测试断言避坑指南
+        # 坑点：测试工程师在写 E2E 时，经常图省事直接用 `I18n.get(self.desc_key)` 去页面上断言策略描述。
+        # 原因：部分策略（如 OversoldStrategy）会重写此方法，返回带有滑动条参数（如 RSI < 30）的动态字符串。
+        # 后果：如果 UI 渲染的是带参动态文本，而测试代码还在傻傻等待静态文本，必然导致 TimeoutError。
+        # 正确做法：在 E2E 测试中断言策略描述时，必须去对应策略子类检查其是否重写了此方法，
+        #         如果是，必须使用 `.format(...)` 构造出真正的动态预期字符串后再进行 expect_text。
         """
-        return self.description
+        return I18n.get(self.desc_key)
 
     def get_parameters(self) -> list[dict[str, Any]]:
         """

@@ -142,27 +142,13 @@ def alembic_db_engine(pg_params):
     db_url = f"postgresql://{params['user']}:{encoded_pwd}@{params['host']}:{params['port']}/{db_name}"
     engine = create_engine(db_url)
 
-    # Set DATABASE_URL environment variable so Alembic env.py picks it up
-    original_db_url = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = db_url
+    # 统一使用 override_db_url 覆盖 DB URL（P2-4）
+    from data.persistence.db_url_override import override_db_url
 
-    # Also override config.DB_URL
-    import config
-
-    original_config_db_url = config.DB_URL
-    config.DB_URL = db_url
-
-    cfg = _make_alembic_cfg(db_url)
-    command.upgrade(cfg, "head")
-
-    # Restore original values
-    config.DB_URL = original_config_db_url
-    if original_db_url is not None:
-        os.environ["DATABASE_URL"] = original_db_url
-    elif "DATABASE_URL" in os.environ:
-        del os.environ["DATABASE_URL"]
-
-    yield engine, db_name
+    with override_db_url(db_url):
+        cfg = _make_alembic_cfg(db_url)
+        command.upgrade(cfg, "head")
+        yield engine, db_name
 
     # Cleanup: drop database
     async def _drop_db():

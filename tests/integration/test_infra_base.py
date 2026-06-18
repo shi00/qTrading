@@ -1,5 +1,5 @@
 import logging
-import os
+from contextlib import ExitStack
 
 import pytest_asyncio
 from sqlalchemy import text
@@ -10,42 +10,13 @@ logger = logging.getLogger(__name__)
 
 from tests.integration.conftest import TEST_DB_URL
 from data.cache.cache_manager import CacheManager
+from data.persistence.db_url_override import override_db_url
+from data.persistence.models import Base
 
-TABLE_NAMES = [
-    "block_trade",
-    "daily_indicators",
-    "daily_quotes",
-    "dividend",
-    "fina_audit",
-    "fina_forecast",
-    "fina_mainbz",
-    "financial_reports",
-    "index_daily",
-    "index_dailybasic",
-    "index_weight",
-    "limit_list",
-    "macro_economy",
-    "margin_daily",
-    "market_news",
-    "moneyflow_daily",
-    "moneyflow_hsgt",
-    "northbound_holding",
-    "pledge_stat",
-    "repurchase",
-    "screening_history",
-    "screening_thinking",
-    "shibor_daily",
-    "stk_holdernumber",
-    "stock_basic",
-    "stock_concepts",
-    "stock_sync_status",
-    "suspend_d",
-    "sync_status",
-    "task_history",
-    "top10_holders",
-    "top_list",
-    "trade_cal",
-]
+# 动态从 ORM metadata 生成 truncate 表清单，避免与 schema 真相源脱钩（P1-1）。
+# 排除 alembic_version（迁移版本表，不应被清空）。
+_EXCLUDED_TABLES = frozenset({"alembic_version"})
+TABLE_NAMES = [t.name for t in reversed(Base.metadata.sorted_tables) if t.name not in _EXCLUDED_TABLES]
 
 
 async def _truncate_all_tables(engine: AsyncEngine):
@@ -61,7 +32,7 @@ async def _truncate_all_tables(engine: AsyncEngine):
         try:
             async with engine.begin() as conn:
                 await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"[TestDB] TRUNCATE {table} failed: {e}")
 
 
@@ -143,13 +114,8 @@ class TestDatabaseBase(_AssertionMixin):
         await self.asyncTearDown()
 
     async def asyncSetUp(self):
-        import config
-
-        self._original_config_db_url = config.DB_URL
-        config.DB_URL = TEST_DB_URL
-
-        self._original_db_url = os.environ.get("DATABASE_URL")
-        os.environ["DATABASE_URL"] = TEST_DB_URL
+        self._url_stack = ExitStack()
+        self._url_stack.enter_context(override_db_url(TEST_DB_URL))
 
         CacheManager._instance = None
         CacheManager._initialized = False
@@ -165,14 +131,7 @@ class TestDatabaseBase(_AssertionMixin):
         if hasattr(self, "cache"):
             await self.cache.close()
 
-        import config
-
-        config.DB_URL = self._original_config_db_url
-
-        if self._original_db_url is not None:
-            os.environ["DATABASE_URL"] = self._original_db_url
-        elif "DATABASE_URL" in os.environ:
-            del os.environ["DATABASE_URL"]
+        self._url_stack.close()
 
         CacheManager._instance = None
         CacheManager._initialized = False

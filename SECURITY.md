@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.x.x   | :white_check_mark: |
+| 0.7.x   | :white_check_mark: |
+| < 0.7   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -16,7 +17,7 @@ We take security vulnerabilities seriously. If you discover a security vulnerabi
 
 Instead, please report them via:
 
-1. **GitHub Security Advisories** (Preferred): Use the [Security Advisories](https://github.com/louis2sin/AStockScreener/security/advisories) feature to report a vulnerability privately.
+1. **GitHub Security Advisories** (Preferred): Use the [Security Advisories](https://github.com/shi00/qTrading/security/advisories) feature to report a vulnerability privately.
 
 2. **Email**: Send details to `louis2sin@gmail.com` with the subject line `[SECURITY] AStockScreener Vulnerability Report`.
 
@@ -82,11 +83,7 @@ AStockScreener implements the following security measures:
 
 ### diskcache (CVE-2025-69872)
 
-The application uses `diskcache` for performance optimization. This package has a known vulnerability related to pickle deserialization. We mitigate this risk by:
-
-- Not exposing the cache directory to untrusted users
-- Using the cache only for internal performance optimization
-- Monitoring for upstream fixes
+`diskcache` 为传递依赖（非应用直接使用，源码无 `import diskcache`），仅出现在 `requirements*.txt` 与 `.security/audit-allowlist.yml`。该包存在 pickle 反序列化漏洞，因应用不反序列化不可信输入，风险可控，通过 allowlist 跟踪。
 
 See [`.security/audit-allowlist.yml`](.security/audit-allowlist.yml) for details.
 
@@ -95,3 +92,4 @@ See [`.security/audit-allowlist.yml`](.security/audit-allowlist.yml) for details
 | Date | Description |
 |------|-------------|
 | 2026-05-22 | Initial security policy; implemented CodeQL, Gitleaks, SBOM, and attestation |
+| 2026-06-18 | 升级 aiohttp 至 3.14.0 修复 CVE-2026-47265/CVE-2026-34993；litellm 升级传递依赖修复 |

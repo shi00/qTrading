@@ -3,6 +3,14 @@ name = "AStockScreener"
 version = "0.7.0"
 description = "智能 A 股 AI 量化交易员"
 requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+]
 
 # urllib3>=2.7.0: Fix Brotli decode error for requests; must be >= 2.6.2
 # brotlicffi: Fast Brotli compression support for urllib3 (optional dep, must be explicit)
@@ -90,6 +98,7 @@ markers = [
     "slow: Slow tests (real sleeps, heavy I/O)",
     "network: Tests requiring real network access",
     "database: Tests requiring database connection",
+    "migration: Tests that perform DDL (drop_all/create_all) on shared engine, should run serially",
     "ai: Tests requiring AI service",
     "no_auto_mock: Skip auto-mocking of external services in conftest",
 ]

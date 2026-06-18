@@ -22,6 +22,14 @@ repos:
         language: system
         types_or: [ python, pyi ]
 
+      - id: no-isolated-asyncio-testcase
+        name: Check no IsolatedAsyncioTestCase usage
+        entry: python scripts/check_no_isolated_asyncio.py
+        language: system
+        types_or: [ python, pyi ]
+        pass_filenames: true
+        exclude: ^scripts/check_no_isolated_asyncio\.py$
+
       - id: pip-compile-core
         name: pip-compile requirements.txt
         entry: uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
@@ -47,5 +55,5 @@ repos:
         name: Verify and Fix Versions
         entry: python scripts/verify_versions.py --fix
         language: system
-        files: ^(pyproject\.toml|installer\.iss|\.release-please-manifest\.json)$
+        files: ^(pyproject\.toml|installer\.iss|\.release-please-manifest\.json|README\.md|CONTRIBUTING\.md|SECURITY\.md|CLAUDE\.md)$
         pass_filenames: false

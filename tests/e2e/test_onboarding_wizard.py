@@ -6,6 +6,7 @@ import pytest
 pytestmark = pytest.mark.e2e
 
 from ui.i18n import I18n
+from tests.e2e.timeouts import TIMEOUTS
 
 
 from urllib.parse import unquote_plus
@@ -102,7 +103,7 @@ async def test_wizard_db_validation_failure(wizard_page):
     btn_verify = I18n.get("wizard_btn_verify_next")
     await wizard_page.click_button(btn_verify)
 
-    await wizard_page.expect_text(db_title, timeout_ms=10000)
+    await wizard_page.expect_text(db_title, timeout_ms=TIMEOUTS.TITLE)
 
     token_title = I18n.get("wizard_step1_title")
     assert not await wizard_page.has_text(token_title)
@@ -136,4 +137,4 @@ async def test_wizard_db_validation_success(wizard_page):
     await wizard_page.click_button(btn_verify)
 
     token_title = I18n.get("wizard_step1_title")
-    await wizard_page.expect_text(token_title, timeout_ms=20000)
+    await wizard_page.expect_text(token_title, timeout_ms=TIMEOUTS.WIZARD_TOKEN)
