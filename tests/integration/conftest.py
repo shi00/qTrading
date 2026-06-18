@@ -142,6 +142,20 @@ async def db_transaction(test_engine: AsyncEngine):
         await txn.rollback()
 
 
+@pytest.fixture
+def test_db_url_override():
+    """统一 override_db_url fixture（P2-4）。
+
+    用法：在测试类或测试函数中声明该 fixture，即可在整个测试作用域内
+    覆盖 config.DB_URL / DATABASE_URL / ConfigHandler.get_db_url，
+    避免手动保存/恢复全局状态。
+
+    禁止在测试中直接写 `config.DB_URL = ...`，除非测试目标就是验证配置模块本身。
+    """
+    with override_db_url(TEST_DB_URL):
+        yield TEST_DB_URL
+
+
 @pytest.fixture(autouse=True)
 def _reset_thread_pool():
     from utils.thread_pool import ThreadPoolManager
