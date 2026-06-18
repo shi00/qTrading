@@ -2,6 +2,9 @@
 
 用法：
     python scripts/detect_flaky.py
+    python scripts/detect_flaky.py --scope unit --runs 3
+    python scripts/detect_flaky.py --scope integration --runs 3
+    python scripts/detect_flaky.py --scope all --runs 3
     python scripts/detect_flaky.py --path tests/unit/ --runs 3
 
 退出码：
@@ -14,18 +17,32 @@ import argparse
 import subprocess
 import sys
 
+_SCOPE_PATHS = {
+    "unit": "tests/unit/",
+    "integration": "tests/integration/",
+    "all": "tests/unit/ tests/integration/",
+}
+
 
 def main():
     parser = argparse.ArgumentParser(description="检测 flaky 测试")
-    parser.add_argument("--path", default="tests/unit/", help="测试路径（默认 tests/unit/）")
+    parser.add_argument(
+        "--scope",
+        choices=["unit", "integration", "all"],
+        default="all",
+        help="测试范围（默认 all，覆盖 unit 和 integration）",
+    )
+    parser.add_argument("--path", default=None, help="测试路径（覆盖 --scope，例如 tests/unit/）")
     parser.add_argument("--runs", type=int, default=3, help="运行次数（默认 3）")
     args = parser.parse_args()
+
+    test_path = args.path if args.path else _SCOPE_PATHS[args.scope]
 
     results = []
     for i in range(args.runs):
         print(f"运行 {i + 1}/{args.runs}...")
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", args.path, "-q", "--tb=no", "-p", "no:randomly"],
+            [sys.executable, "-m", "pytest", *test_path.split(), "-q", "--tb=no", "-p", "no:randomly"],
             capture_output=True,
             text=True,
         )

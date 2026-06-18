@@ -50,12 +50,6 @@ _ENCODED_PASSWORD = quote_plus(TEST_DB_PASSWORD) if TEST_DB_PASSWORD else ""
 TEST_DB_URL = f"postgresql+asyncpg://{TEST_DB_USER}:{_ENCODED_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
 
 
-def pytest_collection_modifyitems(items):
-    for item in items:
-        if not any(marker.name in ("unit", "integration", "e2e") for marker in item.iter_markers()):
-            item.add_marker(pytest.mark.integration)
-
-
 _test_engine: AsyncEngine | None = None
 _test_db_initialized = False
 

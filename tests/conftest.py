@@ -198,6 +198,25 @@ def pytest_configure(config):
     utils.config_handler.CONFIG_FILE = _temp_config_file
 
 
+def pytest_collection_modifyitems(items):
+    """Auto-assign layer markers based on test file path.
+
+    Items without an explicit unit/integration/e2e marker get one
+    based on their directory. Items outside tests/unit|integration|e2e
+    default to unit (conservative default to avoid exclusion).
+    """
+    for item in items:
+        if any(marker.name in ("unit", "integration", "e2e") for marker in item.iter_markers()):
+            continue
+        path = str(item.fspath).replace("\\", "/")
+        if "tests/integration/" in path:
+            item.add_marker(pytest.mark.integration)
+        elif "tests/e2e/" in path:
+            item.add_marker(pytest.mark.e2e)
+        else:
+            item.add_marker(pytest.mark.unit)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def isolate_config_file():
     """

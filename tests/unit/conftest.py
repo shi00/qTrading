@@ -1,12 +1,6 @@
 import pytest
 
 
-def pytest_collection_modifyitems(items):
-    for item in items:
-        if not any(marker.name in ("unit", "integration", "e2e") for marker in item.iter_markers()):
-            item.add_marker(pytest.mark.unit)
-
-
 @pytest.fixture(autouse=True)
 def _reset_all_singletons():
     """Reset all registered singletons before and after each unit test.
