@@ -53,6 +53,9 @@ async def test_settings_language_switch(e2e_page):
     actual_lang_label = I18n.get_language_label()
     await e2e_page.expect_text(actual_lang_label, timeout_ms=10000)  # Wait for the tab to render
 
+    # 等待前一个测试产生的 Snackbar 动画或框架重绘完成，防止 CanvasKit 吞噬点击事件
+    await e2e_page.page.wait_for_timeout(1000)
+
     lang_label = I18n.get("settings_language")
     lang_en = I18n.get("settings_lang_en")
     await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
