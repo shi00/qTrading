@@ -56,18 +56,6 @@
   2. [步骤B] → 验证: [具体检查点/命令]
   ```
 
-### 1.9 关键验证命令
-
-修改代码后，按以下顺序自检（完整命令见 CONTRIBUTING.md §2）：
-
-```bash
-ruff check .              # Lint
-ruff format --check .     # 格式化
-pyright                   # 类型检查 (配置见 pyrightconfig.json)
-python -m pytest tests/unit/ -v -m "not slow"   # 单元测试
-pre-commit run --all-files  # 全量 hook 检查
-```
-
 ### 1.6 编码与交付
 
 - **拒绝占位符**：提供完整、可运行的代码，不要使用 `// ... 现有代码 ...` 或 `# TODO` 省略逻辑（除非明确要求）。
@@ -93,6 +81,18 @@ pre-commit run --all-files  # 全量 hook 检查
 | 性能优化 | §6.7 性能红线、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | §8、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
 | 新增/修改回测 | §6.4、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
+
+### 1.9 关键验证命令
+
+修改代码后，按以下顺序自检（完整命令见 CONTRIBUTING.md §2）：
+
+```bash
+ruff check .              # Lint
+ruff format --check .     # 格式化
+pyright                   # 类型检查 (配置见 pyrightconfig.json)
+python -m pytest tests/unit/ -v -m "not slow"   # 单元测试
+pre-commit run --all-files  # 全量 hook 检查
+```
 
 ---
 

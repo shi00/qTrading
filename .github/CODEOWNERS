@@ -32,3 +32,10 @@ requirements*.in @louis2sin
 # Security
 .security/ @louis2sin
 .gitleaks.toml @louis2sin
+
+# Documentation
+CLAUDE.md @louis2sin
+README.md @louis2sin
+CONTRIBUTING.md @louis2sin
+SECURITY.md @louis2sin
+docs/ @louis2sin

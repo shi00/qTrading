@@ -47,5 +47,5 @@ repos:
         name: Verify and Fix Versions
         entry: python scripts/verify_versions.py --fix
         language: system
-        files: ^(pyproject\.toml|installer\.iss|\.release-please-manifest\.json)$
+        files: ^(pyproject\.toml|installer\.iss|\.release-please-manifest\.json|README\.md|CONTRIBUTING\.md|SECURITY\.md|CLAUDE\.md)$
         pass_filenames: false

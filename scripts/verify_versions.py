@@ -4,6 +4,10 @@ Checks:
 1. installer.iss fallback version matches pyproject.toml version
 2. package.json pyright version matches CI pinned pyright version
 3. .release-please-manifest.json version matches pyproject.toml version
+4. Repo URL consistency (no stale louis2sin/AStockScreener in docs)
+5. SECURITY.md supported version matches pyproject.toml major.minor
+6. No empty markdown links ]() in README.md
+7. CLAUDE.md reference-style pointers (见 `xxx.py`) target existing files
 
 Usage: python scripts/verify_versions.py
 """
@@ -21,6 +25,13 @@ INSTALLER_PATH = ROOT / "installer.iss"
 PACKAGE_JSON_PATH = ROOT / "package.json"
 RELEASE_MANIFEST_PATH = ROOT / ".release-please-manifest.json"
 CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci_cd.yml"
+README_PATH = ROOT / "README.md"
+CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
+SECURITY_PATH = ROOT / "SECURITY.md"
+CLAUDE_PATH = ROOT / "CLAUDE.md"
+
+STALE_REPO_URL = "louis2sin/AStockScreener"
+EXPECTED_REPO_URL = "shi00/qTrading"
 
 
 def get_pyproject_version() -> str:
@@ -76,6 +87,70 @@ def update_release_manifest_version(new_ver: str) -> None:
         f.write("\n")
 
 
+def check_repo_url_consistency() -> list[str]:
+    """Check 4: No stale repo URL in docs."""
+    errors = []
+    for doc_path in [README_PATH, CONTRIBUTING_PATH, SECURITY_PATH]:
+        if not doc_path.exists():
+            continue
+        content = doc_path.read_text(encoding="utf-8")
+        if STALE_REPO_URL in content:
+            errors.append(f"{doc_path.name} contains stale repo URL '{STALE_REPO_URL}', expected '{EXPECTED_REPO_URL}'")
+    return errors
+
+
+def check_security_supported_version(pyproject_ver: str) -> list[str]:
+    """Check 5: SECURITY.md supported version matches pyproject major.minor."""
+    errors = []
+    if not SECURITY_PATH.exists():
+        return errors
+    content = SECURITY_PATH.read_text(encoding="utf-8")
+    major_minor = ".".join(pyproject_ver.split(".")[:2])
+    pattern = rf"\| {re.escape(major_minor)}\.x\s+\| :white_check_mark:"
+    if not re.search(pattern, content):
+        errors.append(
+            f"SECURITY.md supported version table missing '{major_minor}.x' (pyproject version: {pyproject_ver})"
+        )
+    return errors
+
+
+def check_empty_markdown_links() -> list[str]:
+    """Check 6: No empty markdown links ]() in README.md."""
+    errors = []
+    if not README_PATH.exists():
+        return errors
+    content = README_PATH.read_text(encoding="utf-8")
+    for i, line in enumerate(content.splitlines(), 1):
+        if "]()" in line:
+            errors.append(f"README.md:{i} contains empty markdown link ']()'")
+    return errors
+
+
+def check_claude_references() -> list[str]:
+    """Check 7: CLAUDE.md reference-style pointers target existing files."""
+    errors = []
+    if not CLAUDE_PATH.exists():
+        return errors
+    content = CLAUDE_PATH.read_text(encoding="utf-8")
+    # Match patterns like: 见 `xxx.py` or 见 `xxx/yyy.py`
+    refs = re.findall(r"见 `([^`]+)`", content)
+    for ref in refs:
+        # Skip non-file references (e.g., section references like §4.1)
+        if ref.startswith("§") or not (
+            ref.endswith(".py") or ref.endswith(".yml") or ref.endswith(".yaml") or ref.endswith(".json")
+        ):
+            continue
+        # Try as full path from root first
+        target = ROOT / ref
+        if target.exists():
+            continue
+        # Try as filename (search recursively)
+        matches = list(ROOT.rglob(ref))
+        if not matches:
+            errors.append(f"CLAUDE.md references '{ref}' but file does not exist")
+    return errors
+
+
 def main() -> None:
     errors: list[str] = []
     fixed_any = False
@@ -124,6 +199,18 @@ def main() -> None:
             errors.append(
                 f".release-please-manifest.json version '{manifest_ver}' != pyproject.toml version '{pyproject_ver}'"
             )
+
+    # Check 4: Repo URL consistency
+    errors.extend(check_repo_url_consistency())
+
+    # Check 5: SECURITY.md supported version
+    errors.extend(check_security_supported_version(pyproject_ver))
+
+    # Check 6: Empty markdown links
+    errors.extend(check_empty_markdown_links())
+
+    # Check 7: CLAUDE.md reference validity
+    errors.extend(check_claude_references())
 
     if fixed_any:
         print("Auto-fixed version mismatches. Please stage the changes and try committing again.")
