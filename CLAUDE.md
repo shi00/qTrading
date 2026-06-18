@@ -4,7 +4,7 @@
 > 请严格遵循以下交互准则、架构原则、设计规则和编码规范。
 >
 > **对应版本**：0.7.0，最后校对：2026-06-18
-> **阅读顺序建议**：§1 (AI 助手交互准则) → §3 (红线，先读后写) → §9 (目录结构，定位代码) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+> **阅读顺序建议**：§3 (红线，先读后写) → §1.9 (验证命令) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ---
 
@@ -55,6 +55,18 @@
   1. [步骤A] → 验证: [具体检查点/命令]
   2. [步骤B] → 验证: [具体检查点/命令]
   ```
+
+### 1.9 关键验证命令
+
+修改代码后，按以下顺序自检（完整命令见 CONTRIBUTING.md §2）：
+
+```bash
+ruff check .              # Lint
+ruff format --check .     # 格式化
+pyright                   # 类型检查 (配置见 pyrightconfig.json)
+python -m pytest tests/unit/ -v -m "not slow"   # 单元测试
+pre-commit run --all-files  # 全量 hook 检查
+```
 
 ### 1.6 编码与交付
 
@@ -134,7 +146,7 @@
 ### 3.2 ✅ 强制要求
 
 - 所有异步操作的 CPU/IO 任务必须通过 `ThreadPoolManager` 提交到对应线程池 (`TaskType.IO` / `TaskType.CPU`)。
-- `BaseDao` 的批量写入必须使用 `_save_upsert()`，分块由基类自动处理 (`_UPSERT_CHUNK_SIZE=500`)。
+- `BaseDao` 的批量写入必须使用 `_save_upsert()`，分块大小见 `base_dao.py` 的 `_UPSERT_CHUNK_SIZE`。
 - Pre-commit hooks 必须在提交前执行并保持通过。
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。
@@ -238,7 +250,7 @@ class MyService:
 4. 支持 `_initialized` 标志防止重复初始化
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 方法 (由 `singleton_registry` 的集中 `atexit` 处理器调用，按注册逆序执行)
 
-**@register_singleton 单例**: `CacheManager`、`ThreadPoolManager`、`TaskManager`、`AIService`、`SchedulerService`、`DataProcessor`、`MarketDataService`、`NewsSubscriptionService`、`TushareClient`、`LocalModelManager`、`StrategyManager`。
+**@register_singleton 单例**: 见 `utils/singleton_registry.py` 的注册清单（当前含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/LocalModelManager/StrategyManager）。
 
 **非注册单例**: `ConfigHandler` (静态方法/类方法 + RWLockFair 保护)、`ProxyManager` (非装饰器单例)。
 
@@ -331,11 +343,11 @@ from data.cache.cache_manager import CacheManager
 
 - **异步引擎**: 使用 `asyncpg` 驱动 (通过 SQLAlchemy asyncio)。
 - **参数占位符**: 使用 `$1, $2, ...` (asyncpg 原生占位符，非 `%s`)。
-- **批量写入**: 使用 `_save_upsert()` (基于 `ON CONFLICT DO UPDATE`，内置分块 `_UPSERT_CHUNK_SIZE=500`)。
-- **分块 IN 查询**: 使用 `chunked_in_query()` 避免 PostgreSQL 参数上限 (`_IN_CHUNK_SIZE=500`)。
+- **批量写入**: 使用 `_save_upsert()` (基于 `ON CONFLICT DO UPDATE`，内置分块，大小见 `base_dao.py`)。
+- **分块 IN 查询**: 使用 `chunked_in_query()` 避免 PostgreSQL 参数上限 (分块大小见 `base_dao.py`)。
 - **引擎状态检查**: DAO 操作前必须确认引擎仍可用；关机/释放后继续访问时应抛出或传播 `EngineDisposedError`，调用方按关机降级处理。
 - **维护锁**: DAO 操作前 `await self._get_maintenance_event().wait()` 等待维护完成 (基类已自动处理)。
-- **慢查询阈值**: 读 500ms / 写 2000ms / UPSERT 2000ms (基类自动告警，无需手动埋点)。
+- **慢查询阈值**: 见 `base_dao.py` 配置 (基类自动告警，无需手动埋点)。
 - **DB 异常应在 DAO 层处理**: 业务层只接收 `EngineDisposedError` 和业务异常，不应直接捕获 `asyncpg.*Error`。
 
 ### 5.7 错误处理模式
@@ -396,11 +408,9 @@ class MyStrategy(BaseStrategy):
         ...
 ```
 
-- **策略入口**: `strategies/all_strategies.py` 通过导入所有策略模块触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 字典统一暴露。
-- **策略依赖检查**: 每个策略声明 `required_context_keys` 和 `required_tables`，运行前通过 `check_dependencies()` 验证数据就绪状态，返回 `ready` / `degraded` / `unready`。`CONTEXT_KEY_TABLE_MAP` (`BaseStrategy` 类属性) 定义了 context key 到表名的映射。
-- **动态参数**: 重写 `get_parameters()` 暴露可调参数 (`slider` / `number` / `dropdown` 三种 UI 控件)。
-- **动态描述**: 重写 `get_dynamic_description(current_params)` 让描述随参数变化。
-- **依赖声明**: 声明 `required_context_keys` / `required_tables` / `required_history_days`。可选声明 `required_apis: tuple[str, ...] = ()`（所需外部 API 端点列表，用于依赖检查）。
+- **策略入口**: `strategies/all_strategies.py` 通过导入触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 统一暴露。
+- **策略 API**: 依赖声明 (`required_context_keys`/`required_tables`/`required_history_days`/`required_apis`)、动态参数 (`get_parameters()`)、动态描述 (`get_dynamic_description()`)、依赖检查 (`check_dependencies()`) — 详见 `strategies/base_strategy.py`。
+- **新增策略流程**: 见 CONTRIBUTING.md「新增一个策略」。
 
 ### 6.2 Polars 向量化策略基类
 
@@ -440,7 +450,7 @@ class MyPolarsStrategy(PolarsBaseStrategy):
 - `_save_upsert()` — 批量 UPSERT (**推荐**，基于 `pg_insert` + `ON CONFLICT`)
 - `chunked_in_query()` — 分块 IN 查询 (避免参数上限)
 
-**DAO 继承体系**: `BaseDao` → `StockDao` / `QuoteDao` / `FinancialDao` / `MarketDao` / `ScreenerDao` / `SyncDao` / `MacroDao` / `HolderDao` / `BacktestDAO`
+**DAO 继承体系**: `BaseDao` → 具体子类见 `data/persistence/daos/` 目录
 
 ### 6.5 数据同步架构
 
@@ -477,16 +487,7 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
   - `AsyncOperationLogger` — 复杂流程分段日志上下文管理器
   - **取舍**: 同一函数只挂一个性能装饰器，优先选 `@log_async_operation` (功能更完整)。
 
-**标准性能红线 (`PerfThreshold`)**:
-
-| 常量 | 阈值 | 场景 |
-|------|------|------|
-| `MEMORY_COMPUTE` | 50ms | 内存与本地纯计算 |
-| `DB_SINGLE_QUERY` | 200ms | 数据库单行/少数读写 |
-| `EXTERNAL_NETWORK` | 2000ms | 外部公网接口调用 (如 Tushare) |
-| `DB_BULK_IO` | 5000ms | 数据库大批量聚合插入 |
-| `AI_INFERENCE` | 15000ms | 本地大模型推理计算 |
-| `GLOBAL_INIT` | 15000ms | 全局初始化大动作 |
+**标准性能红线 (`PerfThreshold`)**: 具体数值见 `utils/log_decorators.py`，涵盖内存计算/DB单查询/外部网络/DB批量IO/AI推理/全局初始化六类场景。
 
 ### 6.8 MVVM 表现层
 
@@ -555,7 +556,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 1. **Fast Ruff Check & Format** (Python 3.13 + 3.14 experimental)
 2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步)
 3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
-4. **Pyright Type Check** (`pyright==1.1.410`，`continue-on-error: false`)
+4. **Pyright Type Check** (版本见 `ci_cd.yml`，`continue-on-error: false`)
 5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
 6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration)
 7. **Windows E2E Tests** (`tests/e2e/`，Chromium + PostgreSQL)
@@ -568,17 +569,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### 8.1 Pre-commit Hooks
 
-本项目使用 7 个 pre-commit hook (定义在 `.pre-commit-config.yaml`)，提交前必须全部通过：
-
-| Hook | 功能 |
-|------|------|
-| `ruff-check` | Ruff Lint 检查 (自动修复 `--fix`) |
-| `ruff-format` | Ruff 代码格式化 |
-| `type-ignore-reason` | 拒绝裸 `# type: ignore` (必须带 `[reason]`) |
-| `pip-compile-core` | 同步 `pyproject.toml` → `requirements.txt` (使用 `uv pip compile --universal`) |
-| `pip-compile-dev` | 同步 `pyproject.toml[dev]` → `requirements-dev.txt` (使用 `uv pip compile --universal`) |
-| `pip-compile-optional` | 同步 `pyproject.toml[optional]` → `requirements-optional.txt` (使用 `uv pip compile --universal`) |
-| `verify-versions` | 校验 pyproject.toml / installer.iss / .release-please-manifest.json 版本一致性 (自动 `--fix`) |
+本项目使用 7 个 pre-commit hook (定义在 `.pre-commit-config.yaml`，含 Ruff lint/format、裸 `type: ignore` 检测、requirements 同步、版本一致性校验)，提交前必须全部通过。
 
 ---
 
