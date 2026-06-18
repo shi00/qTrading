@@ -120,7 +120,7 @@ class MacroSyncStrategy(ISyncStrategy):
         operation_name="MacroSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def run(self, **kwargs: typing.Any) -> SyncResult:
+    async def _run_impl(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
 

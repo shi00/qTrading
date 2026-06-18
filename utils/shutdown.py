@@ -348,6 +348,7 @@ class ShutdownCoordinator:
 
     async def _step5_unload_ai_model(self):
         logger.info("[Shutdown] Step 5: Unloading AI model...")
+        # 关机路径专用，不依赖 ThreadPoolManager（避免关机时与池关闭竞态）
         await asyncio.to_thread(self._step5_unload_ai_model_sync)
 
     def _step5_unload_ai_model_sync(self):
@@ -363,6 +364,7 @@ class ShutdownCoordinator:
 
     async def _step6_shutdown_thread_pools(self):
         logger.info("[Shutdown] Step 6: Shutting down Thread Pools...")
+        # 关机路径专用，不依赖 ThreadPoolManager（避免关机时与池关闭竞态）
         await asyncio.to_thread(self._step6_shutdown_thread_pools_sync)
 
     def _step6_shutdown_thread_pools_sync(self):

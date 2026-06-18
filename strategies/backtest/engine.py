@@ -88,10 +88,14 @@ class VectorBacktestEngine:
         if progress_callback:
             progress_callback(0.5, "Simulating trades...")
 
+        # BT-002: 加载 stock_meta（含 delist_date）用于区分退市与临时停牌
+        stock_meta = await self.data_provider.get_stock_meta()
+
         trades, positions, skipped_orders, sim_warnings = self._simulate_trades(
             signals,
             quotes_df,
             trade_dates,
+            stock_meta=stock_meta,
         )
 
         if progress_callback:
@@ -510,6 +514,7 @@ class VectorBacktestEngine:
         signals: pl.DataFrame,
         quotes_df: pl.DataFrame,
         trade_dates: list[date],
+        stock_meta: dict[str, dict] | None = None,
     ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[str]]:
         if signals.is_empty():
             return (
@@ -519,7 +524,7 @@ class VectorBacktestEngine:
                 [],
             )
 
-        simulator = PortfolioSimulator(self.config, self.cost_model)
+        simulator = PortfolioSimulator(self.config, self.cost_model, stock_meta=stock_meta)
 
         for exec_date in trade_dates:
             day_signals = signals.filter(pl.col("execution_date") == exec_date)

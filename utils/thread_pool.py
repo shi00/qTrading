@@ -140,6 +140,16 @@ class ThreadPoolManager:
 
     @property
     def io_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+        """IO pool. Raises RuntimeError after shutdown.
+
+        Design note (ASYNC-011): ``shutdown()`` sets ``_shutdown_event``
+        permanently and then sets ``_io_pool = None``. Because the
+        shutdown-event check above raises first, the recovery branch
+        below is unreachable AFTER shutdown. It remains reachable
+        BEFORE shutdown if ``_io_pool`` is manually reset to None
+        (e.g. for testing or recovery), in which case the pool is
+        transparently re-initialized.
+        """
         if self._shutdown_event.is_set():
             raise RuntimeError("Cannot access io_pool after shutdown")
         if self._io_pool is None:
@@ -149,12 +159,36 @@ class ThreadPoolManager:
 
     @property
     def cpu_pool(self) -> concurrent.futures.ThreadPoolExecutor:
+        """CPU pool. Raises RuntimeError after shutdown.
+
+        See ``io_pool`` docstring for design rationale (ASYNC-011).
+        """
         if self._shutdown_event.is_set():
             raise RuntimeError("Cannot access cpu_pool after shutdown")
         if self._cpu_pool is None:
             self._init_pools()
         assert self._cpu_pool is not None
         return self._cpu_pool
+
+    @property
+    def io_pool_max_workers(self) -> int:
+        """Max workers of the IO pool (public API, ASYNC-010).
+
+        Returns 0 if the pool is not initialized or has been shut down.
+        """
+        if self._io_pool is None or self._shutdown_event.is_set():
+            return 0
+        return self._io_pool._max_workers
+
+    @property
+    def cpu_pool_max_workers(self) -> int:
+        """Max workers of the CPU pool (public API, ASYNC-010).
+
+        Returns 0 if the pool is not initialized or has been shut down.
+        """
+        if self._cpu_pool is None or self._shutdown_event.is_set():
+            return 0
+        return self._cpu_pool._max_workers
 
     def get_executor(
         self,

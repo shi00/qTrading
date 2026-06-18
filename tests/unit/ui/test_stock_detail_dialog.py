@@ -376,3 +376,57 @@ class TestStockDetailDialogLoadChart:
 
         await dlg.load_chart("000001.SZ")
         dlg.chart_container.update.assert_called()
+
+
+def _collect_markdown_controls(control, found):
+    """Recursively collect ft.Markdown controls from the flet control tree."""
+    import flet as ft
+
+    if isinstance(control, ft.Markdown):
+        found.append(control)
+        return
+    for attr_name in ("content",):
+        child = getattr(control, attr_name, None)
+        if child is not None and hasattr(child, "__class__"):
+            _collect_markdown_controls(child, found)
+    for attr_name in ("controls",):
+        children = getattr(control, attr_name, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    _collect_markdown_controls(child, found)
+
+
+class TestStockDetailDialogMarkdownTapLink:
+    """SEC-010: verify ft.Markdown controls register on_tap_link=safe_open_url."""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {})
+
+    def test_markdown_controls_have_on_tap_link(self):
+        from ui.components._markdown_safe import safe_open_url
+
+        data = {"ai_reason": "test reason", "thinking": "test thinking"}
+        dlg = self._make_dialog(data)
+        found: list = []
+        _collect_markdown_controls(dlg.content, found)
+        assert len(found) >= 2  # ai_reason + thinking markdown
+        for md in found:
+            assert md.on_tap_link is safe_open_url

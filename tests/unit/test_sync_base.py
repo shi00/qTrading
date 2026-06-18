@@ -279,7 +279,7 @@ class TestISyncStrategyCancelSemantics:
         ctx = SyncContext(api=MagicMock(), cache=MagicMock())
 
         class ConcreteStrategy(ISyncStrategy):
-            async def run(self, **kwargs):
+            async def _run_impl(self, **kwargs):
                 return SyncResult()
 
         return ConcreteStrategy(ctx)

@@ -7,6 +7,14 @@ import pytest
 from utils.sanitizers import DataSanitizer
 
 
+@pytest.fixture(autouse=True)
+def _reset_known_secrets():
+    """每个测试前后清空 _known_secrets，避免测试间状态污染。"""
+    DataSanitizer._reset_known_secrets()
+    yield
+    DataSanitizer._reset_known_secrets()
+
+
 class TestSanitizeToken:
     def test_none_token(self):
         assert DataSanitizer.sanitize_token(None) == "***"  # type: ignore[arg-type]
@@ -19,6 +27,17 @@ class TestSanitizeToken:
 
     def test_short_token(self):
         assert DataSanitizer.sanitize_token("abc") == "***"
+
+    def test_short_token_boundary_15(self):
+        """长度 15（< 16）的 token 应全部隐藏"""
+        assert DataSanitizer.sanitize_token("a" * 15) == "***"
+
+    def test_token_boundary_16(self):
+        """长度 16（>= 16）的 token 应部分脱敏"""
+        token = "a" * 16
+        result = DataSanitizer.sanitize_token(token)
+        assert result == "aaa***aaaa"
+        assert "***" in result
 
     def test_long_token(self):
         result = DataSanitizer.sanitize_token("tushare_abc123xyz789")
@@ -153,6 +172,86 @@ class TestSanitizeError:
         assert "the secret is out" in result
 
 
+class TestRegisterSecret:
+    """SEC-007: register_secret + sanitize_error 精确替换"""
+
+    def test_register_secret_replaces_bare_token(self):
+        """异常 message 含裸 token（无 key= 前缀）时精确替换"""
+        token = "tushare_bare_token_xyz123abc"
+        DataSanitizer.register_secret(token)
+        err = ValueError(f"Connection refused for user with token {token}")
+        result = DataSanitizer.sanitize_error(err)
+        assert token not in result
+        assert "***" in result
+
+    def test_register_secret_replaces_in_traceback(self):
+        """traceback 中含裸 token 时也应精确替换"""
+        token = "tushare_traceback_secret_456"
+        DataSanitizer.register_secret(token)
+        try:
+            raise RuntimeError(f"Auth failed: {token}")
+        except RuntimeError as e:
+            result = DataSanitizer.sanitize_error(e, show_traceback=True)
+            assert token not in result
+
+    def test_register_secret_empty_value(self):
+        """空值不应注册"""
+        DataSanitizer.register_secret("")
+        assert DataSanitizer._known_secrets == set()
+
+    def test_register_secret_short_value(self):
+        """过短的值（< 8）不应注册，避免 str.replace 误替换"""
+        DataSanitizer.register_secret("abc")
+        assert DataSanitizer._known_secrets == set()
+
+    def test_register_secret_none_value(self):
+        """None 不应注册"""
+        DataSanitizer.register_secret(None)  # type: ignore[arg-type]
+        assert DataSanitizer._known_secrets == set()
+
+    def test_register_secret_non_string_value(self):
+        """非字符串不应注册"""
+        DataSanitizer.register_secret(12345678)  # type: ignore[arg-type]
+        assert DataSanitizer._known_secrets == set()
+
+    def test_register_secret_dedup(self):
+        """重复注册相同值不应增长集合"""
+        token = "duplicate_secret_value_12345"
+        DataSanitizer.register_secret(token)
+        DataSanitizer.register_secret(token)
+        assert len(DataSanitizer._known_secrets) == 1
+
+    def test_no_replacement_without_registration(self):
+        """未注册的 token 不应被精确替换（仅依赖模式匹配）"""
+        token = "unregistered_secret_xyz"
+        err = ValueError(f"some error {token} happened")
+        result = DataSanitizer.sanitize_error(err)
+        # 未注册且无 key= 前缀，模式匹配不应触发，token 保留
+        assert token in result
+
+    def test_multiple_secrets_replaced(self):
+        """多个已注册 secret 都应被替换"""
+        s1 = "secret_one_abcdefgh"
+        s2 = "secret_two_ijklmnop"
+        DataSanitizer.register_secret(s1)
+        DataSanitizer.register_secret(s2)
+        err = ValueError(f"Failed: {s1} and {s2}")
+        result = DataSanitizer.sanitize_error(err)
+        assert s1 not in result
+        assert s2 not in result
+
+    def test_register_secret_cap(self):
+        """达到上限后跳过新注册，避免内存泄漏"""
+        # 填满到上限
+        for i in range(DataSanitizer._MAX_KNOWN_SECRETS):
+            DataSanitizer.register_secret(f"secret_value_{i:03d}_padding")
+        assert len(DataSanitizer._known_secrets) == DataSanitizer._MAX_KNOWN_SECRETS
+        # 尝试注册新值，应被跳过
+        DataSanitizer.register_secret("new_secret_overflow_xyz")
+        assert "new_secret_overflow_xyz" not in DataSanitizer._known_secrets
+        assert len(DataSanitizer._known_secrets) == DataSanitizer._MAX_KNOWN_SECRETS
+
+
 class TestSanitizeDict:
     def test_normal_keys(self):
         data = {"name": "test", "value": 42}
@@ -212,10 +311,10 @@ class TestSanitizeDict:
         assert result["sensitive_field"]["token"] == "tes***3456"
 
         # 2. nested_config_group contains sensitive inner keys, so password should be masked, normal_field kept
-        assert result["nested_config_group"]["password"] == "my_***word"
+        assert result["nested_config_group"]["password"] == "***"
         assert result["nested_config_group"]["normal_field"] == "world"
         # 3. list_field has inner dicts, secret should be masked, normal kept
-        assert result["list_field"][0]["secret"] == "nes***cret"
+        assert result["list_field"][0]["secret"] == "***"
         assert result["list_field"][1]["normal"] == "ok"
 
 

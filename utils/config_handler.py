@@ -378,6 +378,7 @@ class ConfigHandler:
         # 1. 环境变量优先（最高优先级）
         env_token = os.environ.get(ENV_FALLBACK_MAP["ts_token"])
         if env_token:
+            DataSanitizer.register_secret(env_token)
             return env_token
 
         # 2. keyring
@@ -387,6 +388,7 @@ class ConfigHandler:
         except Exception as e:
             logger.debug("Keyring get_password for ts_token failed: %s", DataSanitizer.sanitize_error(e))
         if kr_token:
+            DataSanitizer.register_secret(kr_token)
             return kr_token
 
         # 3. 加密配置文件（如果 SecurityManager 可用）
@@ -400,6 +402,7 @@ class ConfigHandler:
                 logger.info("Migrated ts_token from config to keyring and cleared legacy value")
             except Exception as e:
                 logger.debug("Keyring migration failed: %s", DataSanitizer.sanitize_error(e))
+        DataSanitizer.register_secret(decrypted)
         return decrypted
 
     @staticmethod

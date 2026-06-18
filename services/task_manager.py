@@ -150,7 +150,10 @@ class TaskManager:
         limit = ConfigHandler.get_max_concurrent_tasks()
         if limit <= 0:
             try:
-                limit = ThreadPoolManager().cpu_pool._max_workers
+                # ASYNC-010: use the public property instead of the private _max_workers.
+                limit = ThreadPoolManager().cpu_pool_max_workers
+                if limit <= 0:
+                    limit = 5
             except Exception as e:
                 logger.debug(f"[TaskManager] Failed to read cpu_pool max_workers, using default: {e}")
                 limit = 5

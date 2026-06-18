@@ -648,6 +648,11 @@ def validate_schema_definitions(strict: bool = False):
     Logs warnings for any missing definitions to help maintain data dictionary consistency.
     Also validates column-level consistency between ORM and data dictionary.
 
+    For Alembic migration ↔ ORM full-attribute consistency checks (column types,
+    nullable, server_default, primary keys, foreign keys, indexes, unique constraints),
+    see ``tests/integration/test_orm_migration_consistency.py`` which runs against an
+    isolated PostgreSQL database after ``alembic upgrade head``.
+
     Args:
         strict: If True, raises ValueError on any schema inconsistency.
     """

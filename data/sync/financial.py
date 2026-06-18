@@ -143,7 +143,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         operation_name="FinancialSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def run(
+    async def _run_impl(
         self,
         periods: list[str] | None = None,
         force: bool = False,

@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from collections.abc import Callable
 from typing import Any
 
+from utils.correlation import ensure_correlation_id
+
 # Forward declaration for type hinting if needed,
 # but usually avoid circular imports by strict typing or Protocol
 # from data.external.tushare_client import TushareClient
@@ -203,9 +205,18 @@ class ISyncStrategy(ABC):
 
         return df
 
-    @abstractmethod
     async def run(self, **kwargs: typing.Any) -> SyncResult:
+        """Execute the synchronization logic.
+
+        Template method (OBS-010): ensures a correlation_id exists for the
+        sync chain so logs can be traced, then delegates to ``_run_impl``.
+        ``ensure_correlation_id`` is idempotent — if upstream already set a
+        correlation_id (e.g. scheduler / UI handler), it is preserved.
         """
-        Execute the synchronization logic.
-        """
+        ensure_correlation_id()
+        return await self._run_impl(**kwargs)
+
+    @abstractmethod
+    async def _run_impl(self, **kwargs: typing.Any) -> SyncResult:
+        """Actual synchronization logic implemented by subclasses."""
         pass

@@ -22,6 +22,7 @@ from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 from data.cache.cache_manager import CacheManager
 from data.constants import get_column_unit
@@ -66,6 +67,24 @@ class MarketDataService:
         with cls._lock:
             cls._instance = None
             cls._initialized = False
+
+    @classmethod
+    def _atexit_cleanup(cls):
+        """Cleanup background tasks on process exit."""
+        if cls._instance is None:
+            return
+        inst = cls._instance
+        # Cancel main poll loop task
+        task = getattr(inst, "_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        # Cancel background tasks (e.g. scheduled stop_async)
+        tasks = getattr(inst, "_background_tasks", None)
+        if not isinstance(tasks, set):
+            return
+        for t in list(tasks):
+            if not t.done():
+                t.cancel()
 
     def __init__(self):
         if self._initialized:
@@ -238,6 +257,17 @@ class MarketDataService:
         hsgt_empty = isinstance(results[1], Exception) or (
             not isinstance(results[1], Exception) and results[1].get("value") == "-"
         )
+        # MKT-002: Data readiness fallback.
+        # ``get_latest_trade_date()`` uses MARKET_CLOSE_HOUR (15:00) to decide
+        # whether "today" is the latest trade date. Between 15:00 and the
+        # completion of data ingestion, querying today's data returns empty.
+        # This block detects that gap (indices/hsgt empty on the latest trade
+        # date) and transparently falls back to the previous trade date. The
+        # ``data_stale`` flag is surfaced to the UI so users know the data is
+        # not up-to-date. This is preferred over modifying
+        # ``get_latest_trade_date()`` because "latest trade date" is a
+        # calendar concept, while "data ready" is an ingestion concept —
+        # conflating them would leak ingestion state into the calendar API.
         if indices_empty or hsgt_empty:
             prev_date_val = self.trade_calendar.get_prev_trade_date(eval_date)
             if isinstance(prev_date_val, datetime.date):
@@ -292,7 +322,7 @@ class MarketDataService:
         if listener_count > 0:
             for listener in list(self._listeners):
                 try:
-                    listener()
+                    await ThreadPoolManager().run_async(TaskType.IO, listener)
                 except Exception as e:
                     logger.error("[MarketDataService] Listener error: %s", DataSanitizer.sanitize_error(e))
 

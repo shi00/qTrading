@@ -32,6 +32,7 @@ class PortfolioSimulator:
         self,
         config: BacktestConfig,
         cost_model: TransactionCostModel,
+        stock_meta: dict[str, dict] | None = None,
     ):
         self.config = config
         self.cost_model = cost_model
@@ -42,6 +43,9 @@ class PortfolioSimulator:
         self.positions_list: list[dict] = []
         self.warnings: list[str] = []
         self._last_known_prices: dict[str, float] = {}
+        # BT-002: stock_meta 提供 delist_date 字段，用于区分退市与临时停牌
+        # 结构: {ts_code: {"delist_date": date | None}}
+        self.stock_meta: dict[str, dict] = stock_meta or {}
 
     def reset(self) -> None:
         self.cash = self.config.initial_capital
@@ -75,6 +79,13 @@ class PortfolioSimulator:
             quote = day_quotes.filter(pl.col("ts_code") == ts_code)
 
             if quote.is_empty():
+                # BT-002: 区分退市与临时停牌
+                # 退市标的（exec_date >= delist_date）按最后已知价强制清算；
+                # 临时停牌保留持仓，由 _record_daily_positions 用最后已知价估算市值。
+                if self._is_delisted(ts_code, exec_date):
+                    self._liquidate_delisted_position(ts_code, pos, exec_date)
+                    continue
+
                 self.skipped_list.append(
                     {
                         "trade_date": exec_date,
@@ -152,6 +163,65 @@ class PortfolioSimulator:
             self.cash += cost.net_amount
             del self.positions[ts_code]
             self._last_known_prices.pop(ts_code, None)
+
+    def _is_delisted(self, ts_code: str, exec_date: date) -> bool:
+        """BT-002: 判断标的在 exec_date 是否已退市。
+
+        依据 stock_meta 中的 delist_date 字段：exec_date >= delist_date 视为已退市。
+        """
+        meta = self.stock_meta.get(ts_code)
+        if meta is None:
+            return False
+        delist_date = meta.get("delist_date")
+        return delist_date is not None and exec_date >= delist_date
+
+    def _liquidate_delisted_position(self, ts_code: str, pos: dict, exec_date: date) -> None:
+        """BT-002: 退市标的按最后已知价清算。
+
+        - 清算价格使用 _last_known_prices 中的最后已知价（退市前最后一个交易日的 qfq_close）
+        - 不计交易成本（非真实交易，强制簿记）
+        - cash += volume * last_price
+        - 从 positions 移除
+        - 记录 warning 日志
+        """
+        last_price = self._last_known_prices.get(ts_code)
+        if last_price is None:
+            # 无最后已知价兜底：保留持仓，按临时停牌处理
+            self.skipped_list.append(
+                {
+                    "trade_date": exec_date,
+                    "ts_code": ts_code,
+                    "direction": "sell",
+                    "reason": "no_quote",
+                    "intended_volume": pos["volume"],
+                }
+            )
+            self.warnings.append(f"{exec_date}: {ts_code} sell skipped (no_quote)")
+            return
+
+        volume = pos["volume"]
+        proceeds = volume * last_price
+        realized_pnl = proceeds - pos["cost_basis"]
+
+        self.trades_list.append(
+            {
+                "trade_date": exec_date,
+                "ts_code": ts_code,
+                "action": "sell",
+                "price": last_price,
+                "volume": volume,
+                "gross_amount": proceeds,
+                "total_cost": 0.0,
+                "net_amount": proceeds,
+                "realized_pnl": realized_pnl,
+                "hold_days": (exec_date - pos["entry_date"]).days,
+            }
+        )
+
+        self.cash += proceeds
+        del self.positions[ts_code]
+        self._last_known_prices.pop(ts_code, None)
+        self.warnings.append(f"{exec_date}: {ts_code} liquidated (delisted) at {last_price}")
 
     def _buy_signals(
         self,

@@ -326,7 +326,8 @@ class NewsFetcher:
 
         def _fetch():
             # Direct call to Sina US API
-            url = "http://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO/US_CategoryService.getList"
+            # SEC-006: Use HTTPS to prevent MITM tampering on the wire.
+            url = "https://stock.finance.sina.com.cn/usstock/api/jsonp.php/IO/US_CategoryService.getList"
             params = {
                 "page": "1",
                 "num": "100",
@@ -351,7 +352,17 @@ class NewsFetcher:
                 json_str = content[start + 1 : end]
                 try:
                     data = json.loads(json_str)
+                    # SEC-006: schema validation — reject unexpected structures
+                    # that could result from MITM tampering on legacy HTTP.
+                    if not isinstance(data, dict):
+                        logger.warning("[News] Sina US API returned non-dict JSON, skipping")
+                        _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                        return []
                     result = data.get("data", [])
+                    if not isinstance(result, list):
+                        logger.warning("[News] Sina US API 'data' field is not a list, skipping")
+                        _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                        return []
                     if result:
                         _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
                     else:

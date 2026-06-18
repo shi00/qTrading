@@ -105,7 +105,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         operation_name="HistoricalSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def run(
+    async def _run_impl(
         self,
         days: int = 250,
         progress_callback: typing.Callable | None = None,

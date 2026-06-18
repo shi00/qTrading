@@ -556,3 +556,344 @@ class TestCashScaling:
         expected_max_volume = int(1_000_000.0 / price / 100) * 100
         assert volume <= expected_max_volume
         assert volume > 0
+
+
+class TestDelistedLiquidation:
+    """BT-002: 退市标的清算测试"""
+
+    @pytest.fixture
+    def config(self) -> BacktestConfig:
+        return BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.0,
+            rebalance_freq="signal",
+        )
+
+    def _make_simulator(
+        self,
+        config: BacktestConfig,
+        stock_meta: dict[str, dict] | None = None,
+    ) -> PortfolioSimulator:
+        return PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig()),
+            stock_meta=stock_meta,
+        )
+
+    def test_delisted_position_liquidated_at_last_known_price(self, config: BacktestConfig) -> None:
+        """退市标的在退市日被强制清算，清算价格使用最后已知价"""
+        delist_date = date(2024, 1, 15)
+        stock_meta = {"000001.SZ": {"delist_date": delist_date}}
+        simulator = self._make_simulator(config, stock_meta=stock_meta)
+
+        # 模拟已建仓的持仓
+        last_known_price = 10.5
+        volume = 1000
+        cost_basis = 10_000.0
+        simulator.positions["000001.SZ"] = {
+            "volume": volume,
+            "cost_basis": cost_basis,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = last_known_price
+
+        initial_cash = simulator.cash
+
+        # exec_date >= delist_date，且当日无行情（退市后无数据）
+        exec_date = date(2024, 1, 16)
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+
+        simulator._sell_all_positions(exec_date, day_quotes)
+
+        # 断言：持仓被移除
+        assert "000001.SZ" not in simulator.positions
+
+        # 断言：现金增加（清算价格 × 持仓量）
+        expected_proceeds = volume * last_known_price
+        assert simulator.cash == initial_cash + expected_proceeds
+
+        # 断言：记录了 sell 交易
+        trades = simulator.get_results()[0]
+        sell_trades = trades.filter(pl.col("action") == "sell")
+        assert len(sell_trades) == 1
+        assert sell_trades["ts_code"][0] == "000001.SZ"
+        assert float(sell_trades["price"][0]) == last_known_price
+        assert int(sell_trades["volume"][0]) == volume
+        assert float(sell_trades["net_amount"][0]) == expected_proceeds
+
+        # 断言：记录了 warning 日志
+        assert any("liquidated (delisted)" in w for w in simulator.warnings)
+
+    def test_delisted_liquidation_uses_qfq_last_known_price(self, config: BacktestConfig) -> None:
+        """清算价格使用 qfq_close（复权价）作为最后已知价，与 NAV 口径一致"""
+        stock_meta = {"000002.SZ": {"delist_date": date(2024, 1, 10)}}
+        simulator = self._make_simulator(config, stock_meta=stock_meta)
+
+        # 第一天：有行情，建立最后已知价
+        day1_quotes = pl.DataFrame(
+            {
+                "ts_code": ["000002.SZ"],
+                "raw_open": [10.0],
+                "raw_close": [10.2],
+                "qfq_open": [10.0],
+                "qfq_close": [10.5],  # qfq_close 与 raw_close 不同
+                "is_tradable": [True],
+            }
+        )
+        simulator.positions["000002.SZ"] = {
+            "volume": 500,
+            "cost_basis": 5_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        # 通过 _record_daily_positions 建立 _last_known_prices
+        simulator._record_daily_positions(date(2024, 1, 8), day1_quotes)
+        assert simulator._last_known_prices["000002.SZ"] == 10.5
+
+        initial_cash = simulator.cash
+
+        # 退市日：无该标的行情（用其他标的占位以保持列结构）
+        delist_day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator._sell_all_positions(date(2024, 1, 10), delist_day_quotes)
+
+        # 断言：清算价格 = qfq_close = 10.5
+        assert "000002.SZ" not in simulator.positions
+        assert simulator.cash == initial_cash + 500 * 10.5
+
+    def test_delisted_no_last_known_price_falls_back_to_skip(self, config: BacktestConfig) -> None:
+        """退市但无最后已知价时，兜底按临时停牌处理（保留持仓）"""
+        stock_meta = {"000003.SZ": {"delist_date": date(2024, 1, 10)}}
+        simulator = self._make_simulator(config, stock_meta=stock_meta)
+
+        simulator.positions["000003.SZ"] = {
+            "volume": 200,
+            "cost_basis": 2_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        # 不设置 _last_known_prices
+
+        # 用其他标的占位以保持列结构
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator._sell_all_positions(date(2024, 1, 10), day_quotes)
+
+        # 断言：持仓保留（兜底处理）
+        assert "000003.SZ" in simulator.positions
+        skipped = simulator.get_results()[2]
+        no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
+        assert len(no_quote_skips) == 1
+
+    def test_non_delisted_stock_not_liquidated(self, config: BacktestConfig) -> None:
+        """delist_date 在未来时，不触发清算（按临时停牌处理）"""
+        stock_meta = {"000004.SZ": {"delist_date": date(2024, 2, 28)}}
+        simulator = self._make_simulator(config, stock_meta=stock_meta)
+
+        simulator.positions["000004.SZ"] = {
+            "volume": 300,
+            "cost_basis": 3_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000004.SZ"] = 10.5
+
+        initial_cash = simulator.cash
+
+        # exec_date < delist_date，临时停牌；用其他标的占位以保持列结构
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator._sell_all_positions(date(2024, 1, 16), day_quotes)
+
+        # 断言：持仓保留，现金不变
+        assert "000004.SZ" in simulator.positions
+        assert simulator.cash == initial_cash
+        skipped = simulator.get_results()[2]
+        assert len(skipped.filter(pl.col("reason") == "no_quote")) == 1
+
+    def test_stock_without_meta_treated_as_suspended(self, config: BacktestConfig) -> None:
+        """stock_meta 中无该标的记录时，按临时停牌处理（不影响现有行为）"""
+        simulator = self._make_simulator(config, stock_meta={})
+
+        simulator.positions["000005.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000005.SZ"] = 10.5
+
+        initial_cash = simulator.cash
+        # 用其他标的占位以保持列结构
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator._sell_all_positions(date(2024, 1, 16), day_quotes)
+
+        # 断言：持仓保留，现金不变（与原有 no_quote 行为一致）
+        assert "000005.SZ" in simulator.positions
+        assert simulator.cash == initial_cash
+
+
+class TestSuspendedMarketValueEstimation:
+    """BT-002: 临时停牌标的市值估算测试"""
+
+    @pytest.fixture
+    def config(self) -> BacktestConfig:
+        return BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.0,
+            rebalance_freq="signal",
+        )
+
+    def test_suspended_position_kept_and_valued_at_last_known_price(self, config: BacktestConfig) -> None:
+        """临时停牌标的保留持仓，市值用最后已知价估算，不触发卖出"""
+        # delist_date 为 None（未退市）
+        stock_meta = {"000001.SZ": {"delist_date": None}}
+        simulator = PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig()),
+            stock_meta=stock_meta,
+        )
+
+        last_known_price = 12.0
+        volume = 800
+        cost_basis = 8_000.0
+        simulator.positions["000001.SZ"] = {
+            "volume": volume,
+            "cost_basis": cost_basis,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = last_known_price
+
+        initial_cash = simulator.cash
+
+        # 当日无该标的行情（临时停牌）；用其他标的占位以保持列结构
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+
+        # 调用 process_day（is_rebalance=True 触发卖出尝试）
+        simulator.process_day(date(2024, 1, 16), pl.DataFrame(), day_quotes, is_rebalance=True)
+
+        # 断言：持仓保留
+        assert "000001.SZ" in simulator.positions
+
+        # 断言：现金不变（未触发卖出）
+        assert simulator.cash == initial_cash
+
+        # 断言：记录了 no_quote skip
+        skipped = simulator.get_results()[2]
+        no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
+        assert len(no_quote_skips) == 1
+        assert no_quote_skips["direction"][0] == "sell"
+
+        # 断言：_record_daily_positions 用最后已知价估算市值
+        positions_history = simulator.get_results()[1]
+        last_day = positions_history.row(-1, named=True)
+        assert last_day["trade_date"] == date(2024, 1, 16)
+        pos_detail = last_day["positions"]["000001.SZ"]
+        assert pos_detail["estimated"] is True
+        assert pos_detail["market_value"] == volume * last_known_price
+
+        # 断言：total_value 包含估算市值
+        expected_total = initial_cash + volume * last_known_price
+        assert last_day["total_value"] == expected_total
+
+    def test_suspended_position_does_not_record_sell_trade(self, config: BacktestConfig) -> None:
+        """临时停牌标的不会记录 sell 交易"""
+        stock_meta = {"000002.SZ": {"delist_date": None}}
+        simulator = PortfolioSimulator(
+            config,
+            TransactionCostModel(TransactionCostConfig()),
+            stock_meta=stock_meta,
+        )
+
+        simulator.positions["000002.SZ"] = {
+            "volume": 500,
+            "cost_basis": 5_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000002.SZ"] = 11.0
+
+        # 用其他标的占位以保持列结构
+        day_quotes = pl.DataFrame(
+            {
+                "ts_code": ["other.SZ"],
+                "raw_open": [5.0],
+                "raw_close": [5.0],
+                "qfq_open": [5.0],
+                "qfq_close": [5.0],
+                "is_tradable": [True],
+            }
+        )
+        simulator.process_day(date(2024, 1, 16), pl.DataFrame(), day_quotes, is_rebalance=True)
+
+        trades = simulator.get_results()[0]
+        # 不应产生任何 sell 交易
+        if not trades.is_empty():
+            sell_trades = trades.filter(pl.col("action") == "sell")
+            assert len(sell_trades) == 0

@@ -16,6 +16,32 @@ import pandas as pd
 class DataSanitizer:
     """统一的数据脱敏工具类"""
 
+    # 已注册的 secret 值集合，用于 sanitize_error 中的精确替换。
+    # 设有上限以避免内存泄漏（token 轮换/测试场景下重复注册不同值）。
+    _known_secrets: set[str] = set()
+    _MAX_KNOWN_SECRETS = 50
+    # 注册的最小长度阈值，过短的值易在 str.replace 时产生误替换。
+    _MIN_SECRET_LEN = 8
+
+    @classmethod
+    def register_secret(cls, value: str) -> None:
+        """注册已知 secret 值，供 sanitize_error 做精确替换。
+
+        Args:
+            value: secret 原始值（如 token、API key、DB 密码）
+        """
+        if not value or not isinstance(value, str) or len(value) < cls._MIN_SECRET_LEN:
+            return
+        if len(cls._known_secrets) >= cls._MAX_KNOWN_SECRETS:
+            # 达到上限时跳过新注册，避免无界增长；已有 secret 仍受保护
+            return
+        cls._known_secrets.add(value)
+
+    @classmethod
+    def _reset_known_secrets(cls) -> None:
+        """清空已注册 secret 集合。仅供测试隔离使用。"""
+        cls._known_secrets.clear()
+
     @staticmethod
     def sanitize_token(token: str) -> str:
         """
@@ -34,7 +60,7 @@ class DataSanitizer:
             return "***"
 
         # 短token直接全部隐藏
-        if len(token) < 8:
+        if len(token) < 16:
             return "***"
 
         # 标准格式: 前3位 + *** + 后4位
@@ -145,6 +171,12 @@ class DataSanitizer:
 
         msg = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", msg)
 
+        # 邻接模式匹配后，对已注册 secret 做精确替换（兜底裸 token 泄露）
+        # 使用 list() 快照避免迭代期间其他线程 register_secret 修改集合
+        for secret in list(DataSanitizer._known_secrets):
+            if secret in msg:
+                msg = msg.replace(secret, "***")
+
         # 如果需要堆栈,也要脱敏
         if show_traceback and isinstance(exception, BaseException):
             import traceback
@@ -166,6 +198,10 @@ class DataSanitizer:
                 line = DataSanitizer._PATTERN_BEARER.sub("Bearer ***", line)
                 line = DataSanitizer._PATTERN_WIN_PATH.sub("<PATH>", line)
                 line = DataSanitizer._PATTERN_UNIX_PATH.sub("<PATH>", line)
+                # 精确替换已注册 secret（与主流程一致）
+                for secret in list(DataSanitizer._known_secrets):
+                    if secret in line:
+                        line = line.replace(secret, "***")
                 tb_clean.append(line)
             return "\n".join(tb_clean)
 

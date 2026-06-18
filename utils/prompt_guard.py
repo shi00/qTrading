@@ -6,6 +6,10 @@ logger = logging.getLogger(__name__)
 
 MAX_PROMPT_LENGTH = 8000
 
+# Zero-width / invisible characters used to obfuscate injection patterns.
+# Kept separate from _normalize_unicode to avoid touching validated behavior.
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00ad\u2060\u180e]")
+
 _INJECTION_PATTERNS = [
     re.compile(
         r"ignore\s+(all\s+)?(previous|above|prior|following|below)\s+(instructions?|rules?|prompts?)", re.IGNORECASE
@@ -64,6 +68,17 @@ def validate_prompt(prompt: str) -> tuple[bool, str]:
     Returns:
         (is_valid, warning_message) — is_valid is True if the prompt passes all checks.
         warning_message is empty when valid, or contains a description of the issue.
+
+    Limitation (SEC-003):
+        This function is a regex blacklist and only intercepts common jailbreak
+        phrases. It is NOT a complete defense — a determined attacker can bypass
+        it with paraphrasing, encoding tricks, or novel patterns. Defense in
+        depth relies on three layers:
+        1. System prompt declares external content as untrusted data (SEC-001).
+        2. External content is neutralized before entering the prompt
+           (neutralize_external_text in this module).
+        3. LLM output is sanitized and length-limited before rendering
+           (services/ai_service.validate_ai_analysis_response, SEC-002).
     """
     if not prompt or not prompt.strip():
         return True, ""
@@ -114,3 +129,28 @@ def sanitize_prompt(prompt: str) -> str:
         logger.warning(f"[PromptGuard] Truncating prompt from {len(prompt)} to {MAX_PROMPT_LENGTH} characters.")
         return prompt[:MAX_PROMPT_LENGTH]
     return prompt
+
+
+def neutralize_external_text(text: str, max_len: int = 2000) -> str:
+    """Neutralize untrusted external text before injecting into LLM prompts (SEC-001).
+
+    Defends against prompt injection via three layers:
+    1. Strips zero-width / invisible characters used to obfuscate injection patterns.
+    2. Replaces angle brackets ``<`` / ``>`` with single guillemets ``‹`` / ``›``
+       so XML-style structural tags (e.g. ``</recent_news>``, ``<system>``) lose
+       their tag semantics and cannot close/open prompt structure tags.
+    3. Truncates to ``max_len`` to bound prompt size.
+
+    Unlike :func:`validate_prompt`, this is applied to external data fields
+    (news titles, stock names, global context) rather than user-typed prompts,
+    and does not reject the input — only renders it inert.
+    """
+    if not text:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    text = _ZERO_WIDTH_RE.sub("", text)
+    text = text.replace("<", "‹").replace(">", "›")
+    if len(text) > max_len:
+        text = text[:max_len]
+    return text

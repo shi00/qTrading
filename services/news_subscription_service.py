@@ -12,6 +12,7 @@ from utils.config_handler import ConfigHandler
 from utils.loop_local import get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
+from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.persistence.daos.base_dao import EngineDisposedError
 from services.ai_service import AIService
@@ -373,7 +374,6 @@ class NewsSubscriptionService:
         if not hasattr(self, "_listener_errors"):
             self._listener_errors = {}
 
-        loop = asyncio.get_running_loop()
         for listener in list(target):
             try:
                 sig = inspect.signature(listener)
@@ -389,19 +389,19 @@ class NewsSubscriptionService:
                     if param_count >= 2:
                         _l, _ut, _d = listener, update_type, data
                         await asyncio.wait_for(
-                            loop.run_in_executor(None, lambda _l=_l, _ut=_ut, _d=_d: _l(_ut, _d)),
+                            ThreadPoolManager().run_async(TaskType.IO, _l, _ut, _d),
                             timeout=5.0,
                         )
                     elif param_count == 1:
                         _l, _ut = listener, update_type
                         await asyncio.wait_for(
-                            loop.run_in_executor(None, lambda _l=_l, _ut=_ut: _l(_ut)),
+                            ThreadPoolManager().run_async(TaskType.IO, _l, _ut),
                             timeout=5.0,
                         )
                     else:
                         _l = listener
                         await asyncio.wait_for(
-                            loop.run_in_executor(None, lambda _l=_l: _l()),
+                            ThreadPoolManager().run_async(TaskType.IO, _l),
                             timeout=5.0,
                         )
                 if listener in self._listener_errors:
@@ -513,7 +513,6 @@ class NewsSubscriptionService:
                         display_msg = clean_content
                         enable_alerts = ConfigHandler.get_config("enable_news_alerts", True)
                         if enable_alerts:
-                            loop = asyncio.get_running_loop()
                             for listener in list(self._alert_listeners):
                                 try:
                                     if inspect.iscoroutinefunction(listener) or getattr(listener, "is_async", False):
@@ -521,7 +520,7 @@ class NewsSubscriptionService:
                                     else:
                                         _l, _msg = listener, display_msg
                                         await asyncio.wait_for(
-                                            loop.run_in_executor(None, lambda _l=_l, _msg=_msg: _l(_msg)),
+                                            ThreadPoolManager().run_async(TaskType.IO, _l, _msg),
                                             timeout=3.0,
                                         )
                                 except TimeoutError:

@@ -858,3 +858,69 @@ class TestBacktestDataProviderGetFundamentalScreeningData:
         result = await provider._get_fundamental_screening_data("20240102")
 
         assert result is None
+
+
+class TestGetStockMeta:
+    """BT-002: get_stock_meta 加载 delist_date 字段测试"""
+
+    @pytest.mark.asyncio
+    async def test_get_stock_meta_returns_delist_date(self) -> None:
+        """get_stock_meta 返回 {ts_code: {"delist_date": date | None}} 结构"""
+        cache = MagicMock()
+        cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "delist_date": [pd.Timestamp("2024-01-15"), None, pd.NaT],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        meta = await provider.get_stock_meta()
+
+        assert "000001.SZ" in meta
+        assert meta["000001.SZ"]["delist_date"] == date(2024, 1, 15)
+        assert meta["000002.SZ"]["delist_date"] is None
+        assert meta["000003.SZ"]["delist_date"] is None
+
+    @pytest.mark.asyncio
+    async def test_get_stock_meta_empty_df(self) -> None:
+        """stock_basic 为空时返回空 dict"""
+        cache = MagicMock()
+        cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame())
+        provider = BacktestDataProvider(cache)
+
+        meta = await provider.get_stock_meta()
+        assert meta == {}
+
+    @pytest.mark.asyncio
+    async def test_get_stock_meta_load_failure(self) -> None:
+        """加载失败时返回空 dict 并不抛异常"""
+        cache = MagicMock()
+        cache.get_stock_basic = AsyncMock(side_effect=RuntimeError("db error"))
+        provider = BacktestDataProvider(cache)
+
+        meta = await provider.get_stock_meta()
+        assert meta == {}
+
+    @pytest.mark.asyncio
+    async def test_get_stock_meta_timestamp_converted_to_date(self) -> None:
+        """Timestamp 类型的 delist_date 被转换为 datetime.date"""
+        cache = MagicMock()
+        cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000004.SZ"],
+                    "delist_date": [pd.Timestamp("2024-06-30")],
+                }
+            )
+        )
+        provider = BacktestDataProvider(cache)
+
+        meta = await provider.get_stock_meta()
+
+        delist_date = meta["000004.SZ"]["delist_date"]
+        assert isinstance(delist_date, date)
+        assert not hasattr(delist_date, "date")  # 不是 Timestamp
+        assert delist_date == date(2024, 6, 30)

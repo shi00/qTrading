@@ -2,6 +2,10 @@
 Prompt 数据声明校验器
 
 用于确保 System Prompt 中声明的数据与实际注入的数据一致。
+
+职责边界：本模块仅校验数据声明一致性（Prompt 声明的数据源是否真实可用），
+不负责 LLM 响应内容的安全校验。LLM 响应自由文本字段的长度限制与控制字符
+清理见 ``services/ai_service.validate_ai_analysis_response``。
 """
 
 import random

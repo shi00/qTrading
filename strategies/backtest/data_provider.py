@@ -348,3 +348,36 @@ class BacktestDataProvider:
         if isinstance(value, str):
             return value
         return str(value)
+
+    async def get_stock_meta(self) -> dict[str, dict]:
+        """BT-002: 加载 stock_basic 元数据，包含 delist_date 字段。
+
+        用于 PortfolioSimulator 区分退市与临时停牌：
+        - delist_date 非空且 exec_date >= delist_date → 退市，按最后已知价清算
+        - delist_date 为空或 exec_date < delist_date → 临时停牌，保留持仓
+
+        Returns:
+            {ts_code: {"delist_date": date | None}}
+        """
+        try:
+            stock_basic_df = await self.cache.get_stock_basic()
+        except Exception as e:
+            logger.warning("[BacktestDataProvider] Failed to load stock_basic for stock_meta: %s", e)
+            return {}
+
+        if stock_basic_df is None or stock_basic_df.empty:
+            return {}
+
+        meta: dict[str, dict] = {}
+        for row in stock_basic_df.itertuples(index=False):
+            ts_code = getattr(row, "ts_code", None)
+            if ts_code is None:
+                continue
+            delist_date = getattr(row, "delist_date", None)
+            # pandas 可能返回 Timestamp/NaT/None，统一转换为 date | None
+            if delist_date is None or pd.isna(delist_date):
+                delist_date = None
+            elif hasattr(delist_date, "date"):
+                delist_date = delist_date.date()
+            meta[ts_code] = {"delist_date": delist_date}
+        return meta

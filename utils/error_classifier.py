@@ -242,8 +242,9 @@ def get_error_message(error_info: dict) -> str:
     """
     Translate error_info from classify_error into a human-readable message.
 
-    This function bridges utils → ui: only callers that already depend on
-    ui.i18n should use this helper.  Pure utils/strategies code should
+    This function bridges utils → core: callers depend on core.i18n
+    (the allowed single-direction dependency, see core/__init__.py).
+    Pure utils/strategies code that does not need localized messages should
     just read error_info["message_key"] and pass it up.
     """
     from core.i18n import I18n

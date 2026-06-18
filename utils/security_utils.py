@@ -31,7 +31,21 @@ def _get_machine_fingerprint():
 
 
 def _derive_key_from_machine(salt: bytes) -> bytes:
-    """Derive a 256-bit key from machine fingerprint using PBKDF2."""
+    """Derive a 256-bit key from machine fingerprint using PBKDF2.
+
+    Security notes (SEC-004):
+        - This function is ONLY used by ``migrate_to_derived_key`` for the
+          legacy migration path. New installs never go through this path:
+          ``SecurityManager.get_key`` raises ``SecurityError`` when no key
+          file exists, guiding users to keyring or environment variables.
+        - The machine fingerprint alone has limited entropy, but combined
+          with the high-entropy salt (``.secret.salt``, 32 random bytes from
+          ``secrets.token_bytes``), the overall entropy is sufficient for
+          the migration scenario.
+        - Long-term direction on Windows: migrate to DPAPI
+          (``CryptProtectData``) which binds the key to the OS user account
+          and removes the need for a machine-fingerprint-based PBKDF2 path.
+    """
     fingerprint = _get_machine_fingerprint()
     return hashlib.pbkdf2_hmac("sha256", fingerprint, salt, iterations=600_000, dklen=32)
 
@@ -93,7 +107,20 @@ class SecurityError(Exception):
 class SecurityManager:
     """
     Manages AES-GCM encryption for sensitive data.
-    Key is stored in .secret.key file in APP_ROOT.
+
+    Key storage strategy (in priority order):
+        1. Keyring (preferred, OS-backed secure storage)
+        2. Environment variables (TS_TOKEN, DB_PASSWORD, AI_API_KEY)
+        3. File-based key (.secret.key) — legacy compatibility only
+
+    Security warning (SEC-005):
+        The file-based key (``.secret.key``) stores the AES key as base64
+        plaintext. It is protected only by filesystem permissions (chmod 600
+        on Linux, hidden attribute on Windows). This is equivalent to
+        plaintext storage — an attacker with read access to the file can
+        decrypt all credentials. Strongly prefer keyring or environment
+        variables. New installs never create this file: ``get_key`` raises
+        ``SecurityError`` to guide users to safer alternatives.
 
     Improvements:
     - Atomic writes to prevent key corruption.
@@ -101,6 +128,9 @@ class SecurityManager:
     - Strict error handling (no accidental overwrites).
     """
 
+    # Legacy path: base64-encoded AES key stored as plaintext on disk.
+    # Security equivalent to plaintext — see class docstring (SEC-005).
+    # Prefer keyring or environment variables for new deployments.
     KEY_FILE = os.path.join(APP_ROOT, ".secret.key")
     KEY_FILE_BAK = os.path.join(APP_ROOT, ".secret.key.bak")
     _key = None

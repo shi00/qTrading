@@ -9,6 +9,7 @@ import flet as ft
 import pandas as pd
 
 from data.persistence.metadata_manager import MetaDataManager
+from ui.components._markdown_safe import safe_open_url
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
 from ui.i18n import I18n, translate_strategy_name
@@ -1455,6 +1456,7 @@ class ScreenerView(ft.Container):
             selectable=True,  # pragma: no cover
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,  # pragma: no cover
             code_theme="atom-one-dark",  # type: ignore[arg-type]  # pragma: no cover
+            on_tap_link=safe_open_url,  # pragma: no cover
         )  # pragma: no cover
 
         content_md = ft.Markdown(  # pragma: no cover
@@ -1462,6 +1464,7 @@ class ScreenerView(ft.Container):
             selectable=True,  # pragma: no cover
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,  # pragma: no cover
             code_theme="atom-one-dark",  # type: ignore[arg-type]  # pragma: no cover
+            on_tap_link=safe_open_url,  # pragma: no cover
         )  # pragma: no cover
 
         reasoning_tile = ft.ExpansionTile(  # pragma: no cover
@@ -1571,6 +1574,7 @@ class ScreenerView(ft.Container):
             I18n.get("ai_card_analyzing"),
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+            on_tap_link=safe_open_url,
         )
         progress_ring = ft.ProgressRing(width=14, height=14, stroke_width=2)
         card_content = ft.Column(

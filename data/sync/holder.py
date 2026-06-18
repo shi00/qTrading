@@ -66,7 +66,7 @@ class HolderSyncStrategy(ISyncStrategy):
         operation_name="HolderSyncStrategy.run",
         threshold_ms=PerfThreshold.DB_BULK_IO,
     )
-    async def run(self, **kwargs: typing.Any) -> SyncResult:
+    async def _run_impl(self, **kwargs: typing.Any) -> SyncResult:
         result = SyncResult()
         self._cancelled = False
         errors = 0

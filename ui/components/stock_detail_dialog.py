@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import flet as ft
 
+from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_png
 from ui.i18n import I18n
 from ui.theme import AppColors
@@ -279,6 +280,7 @@ class StockDetailDialog(ft.AlertDialog):
                             str(ai_reason) if ai_reason else I18n.get("detail_ai_no_analysis"),
                             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                             selectable=True,
+                            on_tap_link=safe_open_url,
                             # Markdown styles need care, but default usually adapts or we can set code_theme?
                             # Flet Markdown inherits default theme colors.
                         ),
@@ -303,6 +305,7 @@ class StockDetailDialog(ft.AlertDialog):
                                     ),
                                     extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
                                     selectable=True,
+                                    on_tap_link=safe_open_url,
                                 ),
                                 padding=10,
                                 bgcolor=AppColors.SURFACE_VARIANT,

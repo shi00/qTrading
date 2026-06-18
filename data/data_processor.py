@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import os
 import threading
 import weakref
 
@@ -200,9 +201,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         """Gracefully close resources"""
         try:
             await self.stop()
-            # Give pending tasks a moment to catch cancellation and release DB locks
-            await asyncio.sleep(1.0)
-
+            # ASYNC-009: Removed unconditional `await asyncio.sleep(1.0)`.
+            # Pending task cancellation and DB lock release are handled by
+            # shutdown step0 (``cancel_all_running_async(join_timeout=3.0)``)
+            # in ``utils/shutdown.py``, which joins cancelled tasks with a
+            # proper timeout. A fixed sleep here wastes shutdown budget.
             if self.cache:
                 await self.cache.close()
         except Exception as e:
@@ -702,7 +705,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         from core.i18n import I18n
 
         # Run schema validation (DD-01)
-        validate_schema_definitions()
+        # STRICT_SCHEMA_GATE defaults to "1" (strict enabled) to fail fast on
+        # ORM ↔ data dictionary drift; set STRICT_SCHEMA_GATE=0 to bypass.
+        validate_schema_definitions(strict=os.environ.get("STRICT_SCHEMA_GATE", "1") == "1")
 
         # Clear any previous cancel state
         self.clear_cancel()
