@@ -61,6 +61,14 @@ class TestStrategies(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(self.mgr.get_strategy("growth"))
         self.assertTrue(len(self.mgr.get_all_names()) > 0)
 
+    def test_get_dynamic_description(self):
+        s = self.mgr.get_strategy("value")
+        desc = s.get_dynamic_description({})
+        from core.i18n import I18n
+
+        self.assertEqual(desc, I18n.get(s.desc_key))
+        self.assertNotEqual(desc, "strategy_value_desc")
+
     async def test_value_strategy(self):
         s = ValueStrategy()
         res = await s.filter(self.context)

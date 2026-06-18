@@ -3,6 +3,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
+from core.i18n import I18n
 from strategies.utils import StrategyContext
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,7 @@ class BaseStrategy(ABC):
         By default, it just returns the static I18n description.
         Override in subclasses if the description needs to reflect slider values.
         """
-        return self.description
+        return I18n.get(self.desc_key)
 
     def get_parameters(self) -> list[dict[str, Any]]:
         """
