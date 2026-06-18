@@ -591,6 +591,8 @@ class TestTushareConfigPanel:
 class TestDatabaseConfigServiceMigrations:
     """Tests for DatabaseConfigService migration methods"""
 
+    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):
         import config
@@ -721,6 +723,8 @@ class TestDatabaseConfigServiceMigrations:
 
 class TestDatabaseConfigPanelSaveConfig:
     """Tests for DatabaseConfigPanel.save_config with table creation"""
+
+    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
 
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):
@@ -859,6 +863,8 @@ class TestDatabaseConfigPanelSaveConfig:
 
 class TestOnboardingWizardDatabaseValidation:
     """Tests for OnboardingWizard database validation via ViewModel"""
+
+    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
 
     @pytest_asyncio.fixture(autouse=True)
     async def _patch_db_url(self):

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_mixin import PreFetchedContext
@@ -15,381 +16,405 @@ class TestOversoldRequiredHistoryDays(unittest.TestCase):
         self.assertEqual(s.required_history_days, 120)
 
 
-class TestOversoldFilterDependencies(unittest.IsolatedAsyncioTestCase):
-    def _make_dp(self):
-        dp = MagicMock()
-        dp._quality_tier = QualityTier.GOLD
-        dp.cache = MagicMock()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        return dp
+def _make_dp_for_filter_deps():
+    dp = MagicMock()
+    dp._quality_tier = QualityTier.GOLD
+    dp.cache = MagicMock()
+    dp.trade_calendar = MagicMock()
+    dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+    return dp
 
-    async def test_filter_unready_dependencies(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        context = {"data_processor": dp, "params": {}}
-        with patch.object(
-            s,
-            "check_dependencies",
-            return_value={"status": "unready", "missing_keys": ["screening_data"], "missing_tables": []},
-        ):
+
+async def test_filter_unready_dependencies():
+    s = OversoldStrategy()
+    dp = _make_dp_for_filter_deps()
+    context = {"data_processor": dp, "params": {}}
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "unready", "missing_keys": ["screening_data"], "missing_tables": []},
+    ):
+        result = await s.filter(context)
+        assert result.empty
+
+
+async def test_filter_degraded_dependencies():
+    s = OversoldStrategy()
+    dp = _make_dp_for_filter_deps()
+    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    context = {"data_processor": dp, "screening_data": data, "params": {}}
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={
+            "status": "degraded",
+            "empty_keys": ["northbound_data"],
+            "missing_keys": [],
+            "missing_tables": [],
+        },
+    ):
+        with patch.object(s, "_math_filter", return_value=pd.DataFrame()):
             result = await s.filter(context)
-            self.assertTrue(result.empty)
-
-    async def test_filter_degraded_dependencies(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        context = {"data_processor": dp, "screening_data": data, "params": {}}
-        with patch.object(
-            s,
-            "check_dependencies",
-            return_value={
-                "status": "degraded",
-                "empty_keys": ["northbound_data"],
-                "missing_keys": [],
-                "missing_tables": [],
-            },
-        ):
-            with patch.object(s, "_math_filter", return_value=pd.DataFrame()):
-                result = await s.filter(context)
-                self.assertTrue(result.empty)
+            assert result.empty
 
 
-class TestOversoldMathFilterEdgeCases(unittest.IsolatedAsyncioTestCase):
-    def _make_dp(self):
-        dp = MagicMock()
-        dp.cache = MagicMock()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 1, 15))
-        return dp
+def _make_dp_for_math_filter():
+    dp = MagicMock()
+    dp.cache = MagicMock()
+    dp.trade_calendar = MagicMock()
+    dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+    dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 1, 15))
+    return dp
 
-    async def test_no_snapshot_data(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        context = {"data_processor": dp, "params": {}}
-        result = await s._math_filter(context, 14, 30, 1.5)
-        self.assertTrue(result.empty)
 
-    async def test_no_data_processor(self):
-        s = OversoldStrategy()
-        context = {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}), "params": {}}
-        result = await s._math_filter(context, 14, 30, 1.5)
-        self.assertTrue(result.empty)
+async def test_no_snapshot_data():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    context = {"data_processor": dp, "params": {}}
+    result = await s._math_filter(context, 14, 30, 1.5)
+    assert result.empty
 
-    async def test_trade_date_string_parse(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "20240614", "params": {}}
+
+async def test_no_data_processor():
+    s = OversoldStrategy()
+    context = {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}), "params": {}}
+    result = await s._math_filter(context, 14, 30, 1.5)
+    assert result.empty
+
+
+async def test_trade_date_string_parse():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "20240614", "params": {}}
+    await s._math_filter(context, 14, 30, 1.5)
+    dp.trade_calendar.get_latest_trade_date.assert_not_called()
+
+
+async def test_trade_date_dash_format():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "2024-06-14", "params": {}}
+    await s._math_filter(context, 14, 30, 1.5)
+
+
+async def test_trade_date_invalid_string():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "invalid", "params": {}}
+    result = await s._math_filter(context, 14, 30, 1.5)
+    assert result.empty
+
+
+async def test_trade_date_date_object():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    await s._math_filter(context, 14, 30, 1.5)
+
+
+async def test_no_trade_date_auto_resolve():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {"screening_data": snapshot, "data_processor": dp, "params": {}}
+    await s._math_filter(context, 14, 30, 1.5)
+    dp.trade_calendar.get_latest_trade_date.assert_called_once()
+
+
+async def test_no_end_date_returns_empty():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {"screening_data": snapshot, "data_processor": dp, "params": {}}
+    result = await s._math_filter(context, 14, 30, 1.5)
+    assert result.empty
+
+
+async def test_no_start_date_fallback():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    await s._math_filter(context, 14, 30, 1.5)
+
+
+async def test_no_historical_data():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    result = await s._math_filter(context, 14, 30, 1.5)
+    assert result.empty
+
+
+async def test_quality_gate_error_reraises():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(side_effect=QualityGateError("quality too low"))
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    with pytest.raises(QualityGateError):
         await s._math_filter(context, 14, 30, 1.5)
-        dp.trade_calendar.get_latest_trade_date.assert_not_called()
 
-    async def test_trade_date_dash_format(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "2024-06-14", "params": {}}
+
+async def test_generic_exception_reraises():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(side_effect=ValueError("test error"))
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    with pytest.raises(RuntimeError):
         await s._math_filter(context, 14, 30, 1.5)
 
-    async def test_trade_date_invalid_string(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "invalid", "params": {}}
-        result = await s._math_filter(context, 14, 30, 1.5)
-        self.assertTrue(result.empty)
 
-    async def test_trade_date_date_object(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
+async def test_rsi_filter_with_data():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    n_days = 60
+    dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    history_data = {
+        "ts_code": ["000001.SZ"] * n_days,
+        "trade_date": [d.strftime("%Y%m%d") for d in dates],
+        "open": [10.0] * n_days,
+        "high": [10.5] * n_days,
+        "low": [9.5] * n_days,
+        "close": [10.0 - i * 0.05 for i in range(n_days)],
+        "vol": [1000.0 + i * 50 for i in range(n_days)],
+        "amount": [10000.0 + i * 500 for i in range(n_days)],
+        "pct_chg": [-0.5] * n_days,
+    }
+    history_pdf = pd.DataFrame(history_data)
+    dp.cache.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    result = await s._math_filter(context, 14, 30, 0.5)
+    assert isinstance(result, pd.DataFrame)
+
+
+async def test_rsi_filter_no_candidates():
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    n_days = 60
+    dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    history_data = {
+        "ts_code": ["000001.SZ"] * n_days,
+        "trade_date": [d.strftime("%Y%m%d") for d in dates],
+        "open": [10.0] * n_days,
+        "high": [10.5] * n_days,
+        "low": [9.5] * n_days,
+        "close": [10.0 + i * 0.05 for i in range(n_days)],
+        "vol": [1000.0] * n_days,
+        "amount": [10000.0] * n_days,
+        "pct_chg": [0.5] * n_days,
+    }
+    history_pdf = pd.DataFrame(history_data)
+    dp.cache.get_daily_quotes = AsyncMock(return_value=history_pdf)
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [13.0]})
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": datetime.date(2024, 6, 14),
+        "params": {},
+    }
+    result = await s._math_filter(context, 14, 30, 1.5)
+    assert result.empty
+
+
+def _make_dp_for_prefetch():
+    dp = MagicMock()
+    dp.cache = MagicMock()
+    dp.trade_calendar = MagicMock()
+    dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 5, 15))
+    return dp
+
+
+async def test_no_dp_returns_early():
+    s = OversoldStrategy()
+    prefetched = PreFetchedContext()
+    result = await s._prefetch_strategy_specific(pd.DataFrame(), {}, prefetched)
+    assert result is prefetched
+
+
+async def test_prefetch_indicators():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    dp.cache.get_daily_indicators_bulk = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    result = await s._prefetch_strategy_specific(candidates, context, prefetched)
+    assert result.indicators is not None
+
+
+async def test_prefetch_indicators_no_start_date():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
+    dp.cache.get_daily_indicators_bulk = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    await s._prefetch_strategy_specific(candidates, context, prefetched)
+
+
+async def test_prefetch_indicators_exception():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    dp.cache.get_daily_indicators_bulk = AsyncMock(side_effect=Exception("db error"))
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    await s._prefetch_strategy_specific(candidates, context, prefetched)
+
+
+async def test_prefetch_sector_stats():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    screening_data = pd.DataFrame({"ts_code": ["000001.SZ"], "industry": ["电子"], "pct_chg": [-2.0]})
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp, "screening_data": screening_data}
+    result = await s._prefetch_strategy_specific(candidates, context, prefetched)
+    assert result.sector_stats is not None
+
+
+async def test_prefetch_market_data():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    idx_df = pd.DataFrame(
+        {
+            "ts_code": ["000001.SH", "000001.SH", "399001.SZ", "399001.SZ", "399006.SZ", "399006.SZ"],
+            "trade_date": ["20240613", "20240614", "20240613", "20240614", "20240613", "20240614"],
+            "close": [3100.0, 3120.0, 9500.0, 9520.0, 2100.0, 2110.0],
+            "pct_chg": [0.5, 0.6, -0.3, 0.2, 1.0, 0.5],
         }
-        await s._math_filter(context, 14, 30, 1.5)
+    )
+    dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    result = await s._prefetch_strategy_specific(candidates, context, prefetched)
+    assert result.market_context is not None
 
-    async def test_no_trade_date_auto_resolve(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {"screening_data": snapshot, "data_processor": dp, "params": {}}
-        await s._math_filter(context, 14, 30, 1.5)
-        dp.trade_calendar.get_latest_trade_date.assert_called_once()
 
-    async def test_no_end_date_returns_empty(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {"screening_data": snapshot, "data_processor": dp, "params": {}}
-        result = await s._math_filter(context, 14, 30, 1.5)
-        self.assertTrue(result.empty)
+async def test_prefetch_market_data_empty_index():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    dp.cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    await s._prefetch_strategy_specific(candidates, context, prefetched)
 
-    async def test_no_start_date_fallback(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
+
+async def test_prefetch_market_data_exception():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    dp.cache.get_index_daily_range = AsyncMock(side_effect=Exception("db error"))
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    await s._prefetch_strategy_specific(candidates, context, prefetched)
+
+
+async def test_prefetch_market_no_start_date():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
+    idx_df = pd.DataFrame(
+        {
+            "ts_code": ["000001.SH"],
+            "trade_date": ["20240614"],
+            "close": [3100.0],
+            "pct_chg": [0.5],
         }
-        await s._math_filter(context, 14, 30, 1.5)
-
-    async def test_no_historical_data(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
-        }
-        result = await s._math_filter(context, 14, 30, 1.5)
-        self.assertTrue(result.empty)
-
-    async def test_quality_gate_error_reraises(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(side_effect=QualityGateError("quality too low"))
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
-        }
-        with self.assertRaises(QualityGateError):
-            await s._math_filter(context, 14, 30, 1.5)
-
-    async def test_generic_exception_reraises(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_quotes = AsyncMock(side_effect=ValueError("test error"))
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
-        }
-        with self.assertRaises(RuntimeError):
-            await s._math_filter(context, 14, 30, 1.5)
-
-    async def test_rsi_filter_with_data(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        n_days = 60
-        dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
-        dates.reverse()
-        history_data = {
-            "ts_code": ["000001.SZ"] * n_days,
-            "trade_date": [d.strftime("%Y%m%d") for d in dates],
-            "open": [10.0] * n_days,
-            "high": [10.5] * n_days,
-            "low": [9.5] * n_days,
-            "close": [10.0 - i * 0.05 for i in range(n_days)],
-            "vol": [1000.0 + i * 50 for i in range(n_days)],
-            "amount": [10000.0 + i * 500 for i in range(n_days)],
-            "pct_chg": [-0.5] * n_days,
-        }
-        history_pdf = pd.DataFrame(history_data)
-        dp.cache.get_daily_quotes = AsyncMock(return_value=history_pdf)
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
-        }
-        result = await s._math_filter(context, 14, 30, 0.5)
-        self.assertIsInstance(result, pd.DataFrame)
-
-    async def test_rsi_filter_no_candidates(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        n_days = 60
-        dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
-        dates.reverse()
-        history_data = {
-            "ts_code": ["000001.SZ"] * n_days,
-            "trade_date": [d.strftime("%Y%m%d") for d in dates],
-            "open": [10.0] * n_days,
-            "high": [10.5] * n_days,
-            "low": [9.5] * n_days,
-            "close": [10.0 + i * 0.05 for i in range(n_days)],
-            "vol": [1000.0] * n_days,
-            "amount": [10000.0] * n_days,
-            "pct_chg": [0.5] * n_days,
-        }
-        history_pdf = pd.DataFrame(history_data)
-        dp.cache.get_daily_quotes = AsyncMock(return_value=history_pdf)
-        snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [13.0]})
-        context = {
-            "screening_data": snapshot,
-            "data_processor": dp,
-            "trade_date": datetime.date(2024, 6, 14),
-            "params": {},
-        }
-        result = await s._math_filter(context, 14, 30, 1.5)
-        self.assertTrue(result.empty)
+    )
+    dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    await s._prefetch_strategy_specific(candidates, context, prefetched)
 
 
-class TestOversoldPrefetchStrategySpecific(unittest.IsolatedAsyncioTestCase):
-    def _make_dp(self):
-        dp = MagicMock()
-        dp.cache = MagicMock()
-        dp.trade_calendar = MagicMock()
-        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2024, 5, 15))
-        return dp
-
-    async def test_no_dp_returns_early(self):
-        s = OversoldStrategy()
-        prefetched = PreFetchedContext()
-        result = await s._prefetch_strategy_specific(pd.DataFrame(), {}, prefetched)
-        self.assertIs(result, prefetched)
-
-    async def test_prefetch_indicators(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_indicators_bulk = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        result = await s._prefetch_strategy_specific(candidates, context, prefetched)
-        self.assertIsNotNone(result.indicators)
-
-    async def test_prefetch_indicators_no_start_date(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
-        dp.cache.get_daily_indicators_bulk = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        await s._prefetch_strategy_specific(candidates, context, prefetched)
-
-    async def test_prefetch_indicators_exception(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_daily_indicators_bulk = AsyncMock(side_effect=Exception("db error"))
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        await s._prefetch_strategy_specific(candidates, context, prefetched)
-
-    async def test_prefetch_sector_stats(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        screening_data = pd.DataFrame({"ts_code": ["000001.SZ"], "industry": ["电子"], "pct_chg": [-2.0]})
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp, "screening_data": screening_data}
-        result = await s._prefetch_strategy_specific(candidates, context, prefetched)
-        self.assertIsNotNone(result.sector_stats)
-
-    async def test_prefetch_market_data(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        idx_df = pd.DataFrame(
-            {
-                "ts_code": ["000001.SH", "000001.SH", "399001.SZ", "399001.SZ", "399006.SZ", "399006.SZ"],
-                "trade_date": ["20240613", "20240614", "20240613", "20240614", "20240613", "20240614"],
-                "close": [3100.0, 3120.0, 9500.0, 9520.0, 2100.0, 2110.0],
-                "pct_chg": [0.5, 0.6, -0.3, 0.2, 1.0, 0.5],
-            }
+async def test_prefetch_market_trend_bullish():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    idx_data = []
+    for i in range(25):
+        idx_data.append(
+            {"ts_code": "000001.SH", "trade_date": f"202406{10 + i:02d}", "close": 3000.0 + i * 5, "pct_chg": 0.3}
         )
-        dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        result = await s._prefetch_strategy_specific(candidates, context, prefetched)
-        self.assertIsNotNone(result.market_context)
+    idx_df = pd.DataFrame(idx_data)
+    dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = datetime.date(2024, 6, 14)
+    context = {"data_processor": dp}
+    result = await s._prefetch_strategy_specific(candidates, context, prefetched)
+    if result.market_context and "000001.SH" in result.market_context:
+        assert result.market_context["000001.SH"]["trend"] in ["多头趋势", "空头趋势", "震荡整理", "未知"]
 
-    async def test_prefetch_market_data_empty_index(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_index_daily_range = AsyncMock(return_value=pd.DataFrame())
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        await s._prefetch_strategy_specific(candidates, context, prefetched)
 
-    async def test_prefetch_market_data_exception(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.cache.get_index_daily_range = AsyncMock(side_effect=Exception("db error"))
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        await s._prefetch_strategy_specific(candidates, context, prefetched)
-
-    async def test_prefetch_market_no_start_date(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        dp.trade_calendar.get_start_date_by_trade_days = AsyncMock(return_value=None)
-        idx_df = pd.DataFrame(
-            {
-                "ts_code": ["000001.SH"],
-                "trade_date": ["20240614"],
-                "close": [3100.0],
-                "pct_chg": [0.5],
-            }
-        )
-        dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        await s._prefetch_strategy_specific(candidates, context, prefetched)
-
-    async def test_prefetch_market_trend_bullish(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        idx_data = []
-        for i in range(25):
-            idx_data.append(
-                {"ts_code": "000001.SH", "trade_date": f"202406{10 + i:02d}", "close": 3000.0 + i * 5, "pct_chg": 0.3}
-            )
-        idx_df = pd.DataFrame(idx_data)
-        dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = datetime.date(2024, 6, 14)
-        context = {"data_processor": dp}
-        result = await s._prefetch_strategy_specific(candidates, context, prefetched)
-        if result.market_context and "000001.SH" in result.market_context:
-            self.assertIn(result.market_context["000001.SH"]["trend"], ["多头趋势", "空头趋势", "震荡整理", "未知"])
-
-    async def test_prefetch_no_trade_date(self):
-        s = OversoldStrategy()
-        dp = self._make_dp()
-        candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        prefetched = PreFetchedContext()
-        prefetched.trade_date = None
-        context = {"data_processor": dp}
-        await s._prefetch_strategy_specific(candidates, context, prefetched)
+async def test_prefetch_no_trade_date():
+    s = OversoldStrategy()
+    dp = _make_dp_for_prefetch()
+    candidates = pd.DataFrame({"ts_code": ["000001.SZ"]})
+    prefetched = PreFetchedContext()
+    prefetched.trade_date = None
+    context = {"data_processor": dp}
+    await s._prefetch_strategy_specific(candidates, context, prefetched)
 
 
 class TestOversoldComputeSectorStats(unittest.TestCase):

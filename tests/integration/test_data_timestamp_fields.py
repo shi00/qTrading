@@ -1,8 +1,8 @@
 import asyncio
-import unittest
 from datetime import date, datetime
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -63,140 +63,136 @@ class TestCreatedAtSchema:
         assert col.server_default is not None, f"Table {table_name}.created_at missing server_default"
 
 
-class TestCreatedAtUpsert(unittest.IsolatedAsyncioTestCase):
-    """验证 created_at 在 Upsert 场景下不被覆盖（使用 PostgreSQL 测试数据库 test_astock）"""
+@pytest_asyncio.fixture
+async def db_engine():
+    """创建独立 test_astock 数据库引擎，测试后清理"""
+    from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 
-    async def asyncSetUp(self):
-        """使用独立的 test_astock 数据库进行测试"""
+    test_db_url = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
+    engine = create_async_engine(test_db_url, echo=False)
 
-        from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
+    from data.persistence.db_migrator import DatabaseMigrator
+    import sqlalchemy as sa
 
-        self.test_db_url = (
-            f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
+    await DatabaseMigrator.init_db(engine, auto_migrate=True)
+
+    yield engine
+
+    # Teardown: 清理测试数据
+    async with engine.begin() as conn:
+        await conn.execute(text("DELETE FROM sync_status WHERE table_name LIKE 'test_created_at_%'"))
+        await conn.execute(text("DELETE FROM daily_indicators WHERE ts_code LIKE 'test_created_at_%'"))
+    await engine.dispose()
+
+
+async def test_created_at_equals_updated_at_on_insert(db_engine):
+    """首次插入时，created_at 和 updated_at 由数据库设置，应该相等"""
+    import pandas as pd
+
+    from data.persistence.daos.market_dao import MarketDao
+
+    dao = MarketDao(db_engine)
+    ts_code = "test_created_at_equal"
+
+    df = pd.DataFrame(
+        [
+            {
+                "ts_code": ts_code,
+                "trade_date": date.today(),
+                "pe": 10.5,
+                "pb": 1.2,
+            }
+        ]
+    )
+
+    await dao.save_daily_indicators(df)
+
+    async with db_engine.connect() as conn:
+        result = await conn.execute(
+            text("SELECT created_at, updated_at FROM daily_indicators WHERE ts_code = :ts_code"),
+            {"ts_code": ts_code},
         )
-        self.engine = create_async_engine(self.test_db_url, echo=False)
+        row = result.fetchone()
 
-        from data.persistence.models import Base
-        from data.persistence.db_migrator import DatabaseMigrator
-        import sqlalchemy as sa
+    created_at = row[0]  # type: ignore[untyped]
+    updated_at = row[1]  # type: ignore[untyped]
+    assert created_at is not None, "created_at should be set by DB"
+    assert updated_at is not None, "updated_at should be set by DB"
 
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
-        await DatabaseMigrator.init_db(self.engine, auto_migrate=True)
+    time_diff = abs((updated_at - created_at).total_seconds())
+    assert time_diff < 1.0, (
+        f"created_at and updated_at should be nearly equal on insert (DB-managed), diff={time_diff}s"
+    )
 
-    async def asyncTearDown(self):
-        """清理测试数据"""
-        if hasattr(self, "engine"):
-            async with self.engine.begin() as conn:
-                await conn.execute(text("DELETE FROM sync_status WHERE table_name LIKE 'test_created_at_%'"))
-                await conn.execute(text("DELETE FROM daily_indicators WHERE ts_code LIKE 'test_created_at_%'"))
-            await self.engine.dispose()
 
-    async def test_created_at_equals_updated_at_on_insert(self):
-        """首次插入时，created_at 和 updated_at 由数据库设置，应该相等"""
-        import pandas as pd
+async def test_created_at_preserved_on_upsert(db_engine):
+    """首次插入后 Upsert 更新，created_at 应保持不变"""
+    table_name = "test_created_at_table"
+    now = datetime.now().replace(tzinfo=None)
 
-        from data.persistence.daos.market_dao import MarketDao
-
-        dao = MarketDao(self.engine)
-        ts_code = "test_created_at_equal"
-
-        df = pd.DataFrame(
-            [
-                {
-                    "ts_code": ts_code,
-                    "trade_date": date.today(),
-                    "pe": 10.5,
-                    "pb": 1.2,
-                }
-            ]
+    async with db_engine.begin() as conn:
+        await conn.execute(
+            text("""
+                INSERT INTO sync_status (table_name, last_sync_date, last_data_date, record_count, status, updated_at)
+                VALUES (:table_name, :last_sync_date, :last_data_date, :record_count, :status, :updated_at)
+            """),
+            {
+                "table_name": table_name,
+                "last_sync_date": now,
+                "last_data_date": now.date(),
+                "record_count": 100,
+                "status": "success",
+                "updated_at": now,
+            },
         )
 
-        await dao.save_daily_indicators(df)
+    async with db_engine.connect() as conn:
+        result = await conn.execute(
+            text("SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"),
+            {"table_name": table_name},
+        )
+        row = result.fetchone()
+    created_at_1 = row[0]  # type: ignore[untyped]
+    assert created_at_1 is not None, "created_at should be set on first insert"
 
-        async with self.engine.connect() as conn:
-            result = await conn.execute(
-                text("SELECT created_at, updated_at FROM daily_indicators WHERE ts_code = :ts_code"),
-                {"ts_code": ts_code},
-            )
-            row = result.fetchone()
+    await asyncio.sleep(1)
+    now2 = datetime.now().replace(tzinfo=None)
 
-        created_at = row[0]  # type: ignore[untyped]
-        updated_at = row[1]  # type: ignore[untyped]
-        assert created_at is not None, "created_at should be set by DB"
-        assert updated_at is not None, "updated_at should be set by DB"
-
-        time_diff = abs((updated_at - created_at).total_seconds())
-        assert time_diff < 1.0, (
-            f"created_at and updated_at should be nearly equal on insert (DB-managed), diff={time_diff}s"
+    async with db_engine.begin() as conn:
+        await conn.execute(
+            text("""
+                INSERT INTO sync_status (table_name, last_sync_date, last_data_date, record_count, status, updated_at)
+                VALUES (:table_name, :last_sync_date, :last_data_date, :record_count, :status, :updated_at)
+                ON CONFLICT(table_name) DO UPDATE SET
+                    last_sync_date = EXCLUDED.last_sync_date,
+                    last_data_date = EXCLUDED.last_data_date,
+                    record_count = EXCLUDED.record_count,
+                    status = EXCLUDED.status,
+                    updated_at = EXCLUDED.updated_at
+            """),
+            {
+                "table_name": table_name,
+                "last_sync_date": now2,
+                "last_data_date": now2.date(),
+                "record_count": 200,
+                "status": "success",
+                "updated_at": now2,
+            },
         )
 
-    async def test_created_at_preserved_on_upsert(self):
-        """首次插入后 Upsert 更新，created_at 应保持不变"""
-        table_name = "test_created_at_table"
-        now = datetime.now().replace(tzinfo=None)
-
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                text("""
-                    INSERT INTO sync_status (table_name, last_sync_date, last_data_date, record_count, status, updated_at)
-                    VALUES (:table_name, :last_sync_date, :last_data_date, :record_count, :status, :updated_at)
-                """),
-                {
-                    "table_name": table_name,
-                    "last_sync_date": now,
-                    "last_data_date": now.date(),
-                    "record_count": 100,
-                    "status": "success",
-                    "updated_at": now,
-                },
-            )
-
-        async with self.engine.connect() as conn:
-            result = await conn.execute(
-                text("SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"),
-                {"table_name": table_name},
-            )
-            row = result.fetchone()
-        created_at_1 = row[0]  # type: ignore[untyped]
-        assert created_at_1 is not None, "created_at should be set on first insert"
-
-        await asyncio.sleep(1)
-        now2 = datetime.now().replace(tzinfo=None)
-
-        async with self.engine.begin() as conn:
-            await conn.execute(
-                text("""
-                    INSERT INTO sync_status (table_name, last_sync_date, last_data_date, record_count, status, updated_at)
-                    VALUES (:table_name, :last_sync_date, :last_data_date, :record_count, :status, :updated_at)
-                    ON CONFLICT(table_name) DO UPDATE SET
-                        last_sync_date = EXCLUDED.last_sync_date,
-                        last_data_date = EXCLUDED.last_data_date,
-                        record_count = EXCLUDED.record_count,
-                        status = EXCLUDED.status,
-                        updated_at = EXCLUDED.updated_at
-                """),
-                {
-                    "table_name": table_name,
-                    "last_sync_date": now2,
-                    "last_data_date": now2.date(),
-                    "record_count": 200,
-                    "status": "success",
-                    "updated_at": now2,
-                },
-            )
-
-        async with self.engine.connect() as conn:
-            result = await conn.execute(
-                text("SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"),
-                {"table_name": table_name},
-            )
-            row = result.fetchone()
-        created_at_2 = row[0]  # type: ignore[untyped]
-        updated_at_2 = row[1]  # type: ignore[untyped]
-        assert created_at_2 == created_at_1, "created_at should NOT change on upsert"
-        assert updated_at_2 > created_at_2, "updated_at should be newer than created_at"
+    async with db_engine.connect() as conn:
+        result = await conn.execute(
+            text("SELECT created_at, updated_at FROM sync_status WHERE table_name = :table_name"),
+            {"table_name": table_name},
+        )
+        row = result.fetchone()
+    created_at_2 = row[0]  # type: ignore[untyped]
+    updated_at_2 = row[1]  # type: ignore[untyped]
+    assert created_at_2 == created_at_1, "created_at should NOT change on upsert"
+    assert updated_at_2 > created_at_2, "updated_at should be newer than created_at"
 
 
 class TestMacroDaoNoCreatedInjection:

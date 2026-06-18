@@ -98,6 +98,7 @@ markers = [
     "slow: Slow tests (real sleeps, heavy I/O)",
     "network: Tests requiring real network access",
     "database: Tests requiring database connection",
+    "migration: Tests that perform DDL (drop_all/create_all) on shared engine, should run serially",
     "ai: Tests requiring AI service",
     "no_auto_mock: Skip auto-mocking of external services in conftest",
 ]

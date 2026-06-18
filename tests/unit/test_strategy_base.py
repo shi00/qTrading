@@ -1,8 +1,10 @@
 import datetime
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from data.persistence.quality_gate import QualityTier
 from strategies.ai_mixin import AIStrategyMixin
@@ -24,173 +26,201 @@ from strategies.oversold_strategy import OversoldStrategy
 from strategies.utils import fmt_val, safe_float
 
 
-class TestStrategies(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.mgr = StrategyManager()
+@pytest.fixture
+def strategies_ctx():
+    mgr = StrategyManager()
 
-        self.base_data = pd.DataFrame(
-            {
-                "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
-                "name": ["Stock A", "Stock B", "Stock C"],
-                "industry": ["Bank", "Real Estate", "Tech"],
-                "pe_ttm": [10.0, 50.0, 5.0],
-                "pb": [1.0, 5.0, 0.8],
-                "dv_ttm": [3.0, 0.5, 4.5],
-                "pct_chg": [3.0, 8.0, -4.0],
-                "turnover_rate": [5.0, 1.0, 2.0],
-                "total_mv": [6000000, 100000, 200000],
-                "or_yoy": [25.0, 10.0, 5.0],
-                "netprofit_yoy": [30.0, 5.0, -10.0],
-                "roe": [16.0, 8.0, 5.0],
-                "debt_to_assets": [40.0, 80.0, 60.0],
-            },
-        )
+    base_data = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+            "name": ["Stock A", "Stock B", "Stock C"],
+            "industry": ["Bank", "Real Estate", "Tech"],
+            "pe_ttm": [10.0, 50.0, 5.0],
+            "pb": [1.0, 5.0, 0.8],
+            "dv_ttm": [3.0, 0.5, 4.5],
+            "pct_chg": [3.0, 8.0, -4.0],
+            "turnover_rate": [5.0, 1.0, 2.0],
+            "total_mv": [6000000, 100000, 200000],
+            "or_yoy": [25.0, 10.0, 5.0],
+            "netprofit_yoy": [30.0, 5.0, -10.0],
+            "roe": [16.0, 8.0, 5.0],
+            "debt_to_assets": [40.0, 80.0, 60.0],
+        },
+    )
 
-        self.dp_mock = MagicMock()
-        self.dp_mock._quality_tier = QualityTier.GOLD
+    dp_mock = MagicMock()
+    dp_mock._quality_tier = QualityTier.GOLD
 
-        self.context = {
-            "screening_data": self.base_data,
-            "fundamental_screening_data": self.base_data,
-            "data_processor": self.dp_mock,
-        }
+    context = {
+        "screening_data": base_data,
+        "fundamental_screening_data": base_data,
+        "data_processor": dp_mock,
+    }
 
-    def test_manager(self):
-        s = self.mgr.get_strategy("value")
-        self.assertIsInstance(s, ValueStrategy)
-        self.assertIsNotNone(self.mgr.get_strategy("growth"))
-        self.assertTrue(len(self.mgr.get_all_names()) > 0)
+    return SimpleNamespace(mgr=mgr, base_data=base_data, dp_mock=dp_mock, context=context)
 
-    def test_get_dynamic_description(self):
-        s = self.mgr.get_strategy("value")
-        desc = s.get_dynamic_description({})
-        from core.i18n import I18n
 
-        self.assertEqual(desc, I18n.get(s.desc_key))
-        self.assertNotEqual(desc, "strategy_value_desc")
+def test_manager(strategies_ctx):
+    s = strategies_ctx.mgr.get_strategy("value")
+    assert isinstance(s, ValueStrategy)
+    assert strategies_ctx.mgr.get_strategy("growth") is not None
+    assert len(strategies_ctx.mgr.get_all_names()) > 0
 
-    async def test_value_strategy(self):
-        s = ValueStrategy()
-        res = await s.filter(self.context)
-        self.assertIn("000001.SZ", res["ts_code"].values)
-        self.assertNotIn("000002.SZ", res["ts_code"].values)
 
-    async def test_growth_strategy(self):
-        s = GrowthStrategy()
-        res = await s.filter(self.context)
-        self.assertIn("000001.SZ", res["ts_code"].values)
-        self.assertEqual(len(res), 1)
+def test_get_dynamic_description(strategies_ctx):
+    s = strategies_ctx.mgr.get_strategy("value")
+    desc = s.get_dynamic_description({})
+    from core.i18n import I18n
 
-    async def test_dividend_strategy(self):
-        s = DividendStrategy()
-        res = await s.filter(self.context)
-        self.assertIn("000003.SZ", res["ts_code"].values)
-        self.assertNotIn("000001.SZ", res["ts_code"].values)
+    assert desc == I18n.get(s.desc_key)
+    assert desc != "strategy_value_desc"
 
-    async def test_volume_breakout(self):
-        s = VolumeBreakoutStrategy()
-        res = await s.filter(self.context)
-        self.assertIn("000001.SZ", res["ts_code"].values)
-        self.assertNotIn("000002.SZ", res["ts_code"].values)
 
-    async def test_northbound(self):
-        nb_data = pd.DataFrame(
-            {"ts_code": ["000001.SZ", "000002.SZ"], "ratio": [6.0, 1.0]},
-        )
-        ctx = {"northbound_data": nb_data, "screening_data": self.base_data, "data_processor": self.dp_mock}
-        s = NorthboundHoldingStrategy()
-        res = await s.filter(ctx)
-        self.assertIn("000001.SZ", res["ts_code"].values)
-        self.assertNotIn("000002.SZ", res["ts_code"].values)
-        self.assertTrue((await s.filter({"data_processor": self.dp_mock})).empty)
+async def test_value_strategy(strategies_ctx):
+    s = ValueStrategy()
+    res = await s.filter(strategies_ctx.context)
+    assert "000001.SZ" in res["ts_code"].values
+    assert "000002.SZ" not in res["ts_code"].values
 
-    async def test_oversold(self):
-        s = OversoldStrategy()
-        dp_mock = MagicMock()
-        dp_mock._quality_tier = 2
-        trade_calendar_mock = MagicMock()
-        trade_calendar_mock.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
-        trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
-        dp_mock.trade_calendar = trade_calendar_mock
-        cache_mock = MagicMock()
-        cache_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
-        dates = pd.date_range(end="20230101", periods=30).strftime("%Y%m%d").tolist()
-        c_prices = list(range(35, 5, -1))
-        history_data = []
-        for i, (d, p) in enumerate(zip(dates, c_prices, strict=True)):
-            vol = 3000 if i == 29 else 1000
-            history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
-        history_df = pd.DataFrame(history_data)
-        cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
-        dp_mock.cache = cache_mock
-        ctx = self.context.copy()
-        ctx["data_processor"] = dp_mock
-        res = await s.filter(ctx)
-        self.assertIn("000003.SZ", res["ts_code"].values)
 
-    async def test_oversold_volume_threshold_filters_candidates(self):
-        s = OversoldStrategy()
-        dp_mock = MagicMock()
-        dp_mock._quality_tier = 2
-        trade_calendar_mock = MagicMock()
-        trade_calendar_mock.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 30))
-        trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
-        dp_mock.trade_calendar = trade_calendar_mock
+async def test_growth_strategy(strategies_ctx):
+    s = GrowthStrategy()
+    res = await s.filter(strategies_ctx.context)
+    assert "000001.SZ" in res["ts_code"].values
+    assert len(res) == 1
 
-        dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
-        history_data = []
-        for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [200], strict=True):
-            history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
-        history_df = pd.DataFrame(history_data)
 
-        cache_mock = MagicMock()
-        cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
-        dp_mock.cache = cache_mock
+async def test_dividend_strategy(strategies_ctx):
+    s = DividendStrategy()
+    res = await s.filter(strategies_ctx.context)
+    assert "000003.SZ" in res["ts_code"].values
+    assert "000001.SZ" not in res["ts_code"].values
 
-        ctx = self.context.copy()
-        ctx["data_processor"] = dp_mock
-        ctx["params"] = {"vol_ratio_threshold": 1.5}
-        res_lo = await s.filter(ctx)
-        self.assertIn("000003.SZ", res_lo["ts_code"].values)
 
-        ctx["params"] = {"vol_ratio_threshold": 1.7}
-        res_hi = await s.filter(ctx)
-        self.assertTrue(res_hi.empty)
+async def test_volume_breakout(strategies_ctx):
+    s = VolumeBreakoutStrategy()
+    res = await s.filter(strategies_ctx.context)
+    assert "000001.SZ" in res["ts_code"].values
+    assert "000002.SZ" not in res["ts_code"].values
 
-    async def test_institutional(self):
-        lhb_data = pd.DataFrame(
-            {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]},
-        )
-        ctx = {"top_list": lhb_data, "screening_data": self.base_data, "data_processor": self.dp_mock}
-        s = InstitutionalStrategy()
-        res = await s.filter(ctx)
-        self.assertIn("000001.SZ", res["ts_code"].values)
-        self.assertNotIn("000002.SZ", res["ts_code"].values)
 
-    async def test_block_trade(self):
-        block_data_pass = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [10], "price": [10]},
-        )
-        ctx = {"block_trade": block_data_pass, "screening_data": self.base_data, "data_processor": self.dp_mock}
-        s = BlockTradeStrategy()
-        res = await s.filter(ctx)
-        self.assertIn("000001.SZ", res["ts_code"].values)
+async def test_northbound(strategies_ctx):
+    nb_data = pd.DataFrame(
+        {"ts_code": ["000001.SZ", "000002.SZ"], "ratio": [6.0, 1.0]},
+    )
+    ctx = {
+        "northbound_data": nb_data,
+        "screening_data": strategies_ctx.base_data,
+        "data_processor": strategies_ctx.dp_mock,
+    }
+    s = NorthboundHoldingStrategy()
+    res = await s.filter(ctx)
+    assert "000001.SZ" in res["ts_code"].values
+    assert "000002.SZ" not in res["ts_code"].values
+    assert (await s.filter({"data_processor": strategies_ctx.dp_mock})).empty
 
-    async def test_cashflow(self):
-        s = CashFlowStrategy()
-        res = await s.filter(self.context)
-        self.assertIn("000001.SZ", res["ts_code"].values)
 
-    async def test_large_pe(self):
-        s = LargePEStrategy()
-        res = await s.filter(self.context)
-        self.assertIn("000001.SZ", res["ts_code"].values)
+async def test_oversold(strategies_ctx):
+    s = OversoldStrategy()
+    dp_mock = MagicMock()
+    dp_mock._quality_tier = 2
+    trade_calendar_mock = MagicMock()
+    trade_calendar_mock.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
+    trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
+    dp_mock.trade_calendar = trade_calendar_mock
+    cache_mock = MagicMock()
+    cache_mock.get_latest_trade_date = AsyncMock(return_value="20230101")
+    dates = pd.date_range(end="20230101", periods=30).strftime("%Y%m%d").tolist()
+    c_prices = list(range(35, 5, -1))
+    history_data = []
+    for i, (d, p) in enumerate(zip(dates, c_prices, strict=True)):
+        vol = 3000 if i == 29 else 1000
+        history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
+    history_df = pd.DataFrame(history_data)
+    cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
+    dp_mock.cache = cache_mock
+    ctx = strategies_ctx.context.copy()
+    ctx["data_processor"] = dp_mock
+    res = await s.filter(ctx)
+    assert "000003.SZ" in res["ts_code"].values
 
-    async def test_empty_input(self):
-        s = ValueStrategy()
-        self.assertTrue((await s.filter({"data_processor": self.dp_mock})).empty)
-        self.assertTrue((await s.filter({"screening_data": None, "data_processor": self.dp_mock})).empty)
-        self.assertTrue((await s.filter({"screening_data": pd.DataFrame(), "data_processor": self.dp_mock})).empty)
+
+async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
+    s = OversoldStrategy()
+    dp_mock = MagicMock()
+    dp_mock._quality_tier = 2
+    trade_calendar_mock = MagicMock()
+    trade_calendar_mock.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 30))
+    trade_calendar_mock.get_start_date_by_trade_days = AsyncMock(return_value=datetime.date(2022, 8, 1))
+    dp_mock.trade_calendar = trade_calendar_mock
+
+    dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
+    history_data = []
+    for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [200], strict=True):
+        history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
+    history_df = pd.DataFrame(history_data)
+
+    cache_mock = MagicMock()
+    cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
+    dp_mock.cache = cache_mock
+
+    ctx = strategies_ctx.context.copy()
+    ctx["data_processor"] = dp_mock
+    ctx["params"] = {"vol_ratio_threshold": 1.5}
+    res_lo = await s.filter(ctx)
+    assert "000003.SZ" in res_lo["ts_code"].values
+
+    ctx["params"] = {"vol_ratio_threshold": 1.7}
+    res_hi = await s.filter(ctx)
+    assert res_hi.empty
+
+
+async def test_institutional(strategies_ctx):
+    lhb_data = pd.DataFrame(
+        {"ts_code": ["000001.SZ", "000002.SZ"], "net_amount": [3500.0, 100.0]},
+    )
+    ctx = {
+        "top_list": lhb_data,
+        "screening_data": strategies_ctx.base_data,
+        "data_processor": strategies_ctx.dp_mock,
+    }
+    s = InstitutionalStrategy()
+    res = await s.filter(ctx)
+    assert "000001.SZ" in res["ts_code"].values
+    assert "000002.SZ" not in res["ts_code"].values
+
+
+async def test_block_trade(strategies_ctx):
+    block_data_pass = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "amount": [1200], "vol": [10], "price": [10]},
+    )
+    ctx = {
+        "block_trade": block_data_pass,
+        "screening_data": strategies_ctx.base_data,
+        "data_processor": strategies_ctx.dp_mock,
+    }
+    s = BlockTradeStrategy()
+    res = await s.filter(ctx)
+    assert "000001.SZ" in res["ts_code"].values
+
+
+async def test_cashflow(strategies_ctx):
+    s = CashFlowStrategy()
+    res = await s.filter(strategies_ctx.context)
+    assert "000001.SZ" in res["ts_code"].values
+
+
+async def test_large_pe(strategies_ctx):
+    s = LargePEStrategy()
+    res = await s.filter(strategies_ctx.context)
+    assert "000001.SZ" in res["ts_code"].values
+
+
+async def test_empty_input(strategies_ctx):
+    s = ValueStrategy()
+    assert (await s.filter({"data_processor": strategies_ctx.dp_mock})).empty
+    assert (await s.filter({"screening_data": None, "data_processor": strategies_ctx.dp_mock})).empty
+    assert (await s.filter({"screening_data": pd.DataFrame(), "data_processor": strategies_ctx.dp_mock})).empty
 
 
 class TestAIIntegration(unittest.TestCase):
@@ -309,94 +339,97 @@ class TestAIIntegration(unittest.TestCase):
         self.assertIn("N/A", ctx)
 
 
-class TestPhase2Trigger(unittest.IsolatedAsyncioTestCase):
-    async def test_phase2_bypassed_when_ai_not_configured(self):
-        s = ValueStrategy()
-        candidates = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
-        )
-        context = {"params": {}}
-        with patch("strategies.ai_mixin.AIService") as mock_ai:
-            mock_instance = MagicMock()
-            mock_instance.is_cloud_available.return_value = False
-            mock_ai.return_value = mock_instance
-            result = await s.run_ai_analysis(candidates, context)
-            self.assertEqual(len(result), 1)
-            self.assertIn("ts_code", result.columns)
-            self.assertNotIn("ai_score", result.columns)
+async def test_phase2_bypassed_when_ai_not_configured():
+    s = ValueStrategy()
+    candidates = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
+    )
+    context = {"params": {}}
+    with patch("strategies.ai_mixin.AIService") as mock_ai:
+        mock_instance = MagicMock()
+        mock_instance.is_cloud_available.return_value = False
+        mock_ai.return_value = mock_instance
+        result = await s.run_ai_analysis(candidates, context)
+        assert len(result) == 1
+        assert "ts_code" in result.columns
+        assert "ai_score" not in result.columns
 
-    async def test_phase2_triggered_when_ai_available(self):
-        s = ValueStrategy()
-        candidates = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
-        )
-        dp_mock = MagicMock()
-        dp_mock.is_cancelled.return_value = False
-        dp_mock.cache = MagicMock()
-        dp_mock.get_latest_trade_date = AsyncMock(return_value=None)
-        context = {"data_processor": dp_mock, "params": {}}
-        with patch("strategies.ai_mixin.AIService") as mock_ai:
-            mock_instance = MagicMock()
-            mock_instance.is_cloud_available.return_value = True
-            mock_ai.return_value = mock_instance
-            with patch("strategies.ai_mixin.NewsFetcher") as mock_news:
-                mock_news.get_us_major_moves = AsyncMock(return_value="")
-                mock_news.get_stock_news = AsyncMock(return_value=[])
-            with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
-                mock_rm_instance = MagicMock()
-                mock_rm_instance.get_learning_context = AsyncMock(return_value="")
-                mock_rm.return_value = mock_rm_instance
-            with patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=30):
-                with patch.object(s, "_mixin_analyze_single", new_callable=AsyncMock) as mock_analyze:
-                    mock_analyze.return_value = {
-                        "score": 75,
-                        "summary": "Good",
-                        "thinking": "",
-                        "confidence": 80,
-                        "uncertainty_factors": [],
-                    }
-                    result = await s.run_ai_analysis(candidates, context)
-                    self.assertIsNotNone(result)
-                    mock_analyze.assert_called_once()
-                    self.assertIn("ai_score", result.columns)
 
-    async def test_market_strategy_skips_ai_analysis(self):
-        s = VolumeBreakoutStrategy()
-        data = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
-        )
-        dp_mock = MagicMock()
-        dp_mock._quality_tier = QualityTier.GOLD
-        context = {"screening_data": data, "params": {}, "data_processor": dp_mock}
-        with patch("strategies.ai_mixin.AIService") as mock_ai:
-            _ = await s.filter(context)
-            mock_ai.assert_not_called()
+async def test_phase2_triggered_when_ai_available():
+    s = ValueStrategy()
+    candidates = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
+    )
+    dp_mock = MagicMock()
+    dp_mock.is_cancelled.return_value = False
+    dp_mock.cache = MagicMock()
+    dp_mock.get_latest_trade_date = AsyncMock(return_value=None)
+    context = {"data_processor": dp_mock, "params": {}}
+    with patch("strategies.ai_mixin.AIService") as mock_ai:
+        mock_instance = MagicMock()
+        mock_instance.is_cloud_available.return_value = True
+        mock_ai.return_value = mock_instance
+        with patch("strategies.ai_mixin.NewsFetcher") as mock_news:
+            mock_news.get_us_major_moves = AsyncMock(return_value="")
+            mock_news.get_stock_news = AsyncMock(return_value=[])
+        with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
+            mock_rm_instance = MagicMock()
+            mock_rm_instance.get_learning_context = AsyncMock(return_value="")
+            mock_rm.return_value = mock_rm_instance
+        with patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=30):
+            with patch.object(s, "_mixin_analyze_single", new_callable=AsyncMock) as mock_analyze:
+                mock_analyze.return_value = {
+                    "score": 75,
+                    "summary": "Good",
+                    "thinking": "",
+                    "confidence": 80,
+                    "uncertainty_factors": [],
+                }
+                result = await s.run_ai_analysis(candidates, context)
+                assert result is not None
+                mock_analyze.assert_called_once()
+                assert "ai_score" in result.columns
 
-    async def test_market_strategy_no_progress_callback(self):
-        s = VolumeBreakoutStrategy()
-        data = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
-        )
-        dp_mock = MagicMock()
-        dp_mock._quality_tier = QualityTier.GOLD
-        progress_mock = MagicMock()
-        context = {"screening_data": data, "params": {}, "on_progress": progress_mock, "data_processor": dp_mock}
-        await s.filter(context)
-        progress_mock.assert_not_called()
 
-    async def test_phase2_bypassed_when_dp_missing(self):
-        s = ValueStrategy()
-        candidates = pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
-        )
-        context = {"params": {}}
-        with patch("strategies.ai_mixin.AIService") as mock_ai:
-            mock_instance = MagicMock()
-            mock_instance.is_cloud_available.return_value = True
-            mock_ai.return_value = mock_instance
-            result = await s.run_ai_analysis(candidates, context)
-            self.assertEqual(len(result), 1)
-            self.assertNotIn("ai_score", result.columns)
+async def test_market_strategy_skips_ai_analysis():
+    s = VolumeBreakoutStrategy()
+    data = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
+    )
+    dp_mock = MagicMock()
+    dp_mock._quality_tier = QualityTier.GOLD
+    context = {"screening_data": data, "params": {}, "data_processor": dp_mock}
+    with patch("strategies.ai_mixin.AIService") as mock_ai:
+        _ = await s.filter(context)
+        mock_ai.assert_not_called()
+
+
+async def test_market_strategy_no_progress_callback():
+    s = VolumeBreakoutStrategy()
+    data = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
+    )
+    dp_mock = MagicMock()
+    dp_mock._quality_tier = QualityTier.GOLD
+    progress_mock = MagicMock()
+    context = {"screening_data": data, "params": {}, "on_progress": progress_mock, "data_processor": dp_mock}
+    await s.filter(context)
+    progress_mock.assert_not_called()
+
+
+async def test_phase2_bypassed_when_dp_missing():
+    s = ValueStrategy()
+    candidates = pd.DataFrame(
+        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
+    )
+    context = {"params": {}}
+    with patch("strategies.ai_mixin.AIService") as mock_ai:
+        mock_instance = MagicMock()
+        mock_instance.is_cloud_available.return_value = True
+        mock_ai.return_value = mock_instance
+        result = await s.run_ai_analysis(candidates, context)
+        assert len(result) == 1
+        assert "ai_score" not in result.columns
 
 
 class TestUtils(unittest.TestCase):
@@ -527,146 +560,141 @@ class TestDependencyCheck(unittest.TestCase):
         self.assertIn("northbound_holding", result["missing_tables"])
 
 
-class TestPolarsBaseFilterBranches(unittest.IsolatedAsyncioTestCase):
-    def _make_dp(self):
-        dp = MagicMock()
-        dp._quality_tier = QualityTier.GOLD
-        dp.cache = MagicMock()
-        return dp
+def _make_dp():
+    dp = MagicMock()
+    dp._quality_tier = QualityTier.GOLD
+    dp.cache = MagicMock()
+    return dp
 
-    def _make_strategy(self, **kwargs):
-        from strategies.polars_base import PolarsBaseStrategy
 
-        class TestStrategy(PolarsBaseStrategy):
-            key = "test_polars"
+def _make_strategy(**kwargs):
+    from strategies.polars_base import PolarsBaseStrategy
 
-            def __init__(self):
-                super().__init__("test_name", "test_desc")
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
+    class TestStrategy(PolarsBaseStrategy):
+        key = "test_polars"
 
-            def _filter_logic(self, lf, context):
-                return lf
+        def __init__(self):
+            super().__init__("test_name", "test_desc")
+            for k, v in kwargs.items():
+                setattr(self, k, v)
 
-        return TestStrategy()
+        def _filter_logic(self, lf, context):
+            return lf
 
-    async def test_degraded_dependency(self):
-        s = self._make_strategy()
-        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        dp = self._make_dp()
-        context = {
-            "screening_data": data,
-            "data_processor": dp,
-            "params": {},
-            "_dependency_status": {"status": "degraded", "empty_keys": ["northbound_data"]},
-        }
-        with patch.object(
-            s,
-            "check_dependencies",
-            return_value={
-                "status": "degraded",
-                "empty_keys": ["northbound_data"],
-                "missing_keys": [],
-                "missing_tables": [],
-            },
-        ):
-            with patch("strategies.ai_mixin.AIService") as mock_ai:
-                mock_ai.return_value.is_cloud_available.return_value = False
-                result = await s.filter(context)
-                self.assertEqual(len(result), 1)
+    return TestStrategy()
 
-    async def test_fundamental_coverage_unavailable(self):
-        s = self._make_strategy(requires_fundamental_coverage=True)
-        dp = self._make_dp()
-        context = {"data_processor": dp, "params": {}}
-        with patch.object(
-            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
-        ):
+
+async def test_degraded_dependency():
+    s = _make_strategy()
+    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    dp = _make_dp()
+    context = {
+        "screening_data": data,
+        "data_processor": dp,
+        "params": {},
+        "_dependency_status": {"status": "degraded", "empty_keys": ["northbound_data"]},
+    }
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={
+            "status": "degraded",
+            "empty_keys": ["northbound_data"],
+            "missing_keys": [],
+            "missing_tables": [],
+        },
+    ):
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = False
             result = await s.filter(context)
-            self.assertTrue(result.empty)
+            assert len(result) == 1
 
-    async def test_fundamental_coverage_available(self):
-        s = self._make_strategy(requires_fundamental_coverage=True)
-        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        dp = self._make_dp()
-        context = {"fundamental_screening_data": data, "data_processor": dp, "params": {}}
-        with patch.object(
-            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
-        ):
-            with patch("strategies.ai_mixin.AIService") as mock_ai:
-                mock_ai.return_value.is_cloud_available.return_value = False
-                result = await s.filter(context)
-                self.assertEqual(len(result), 1)
 
-    async def test_screening_data_fallback_to_data_key(self):
-        s = self._make_strategy()
-        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        dp = self._make_dp()
-        context = {"data": data, "data_processor": dp, "params": {}}
-        with patch.object(
-            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
-        ):
-            with patch("strategies.ai_mixin.AIService") as mock_ai:
-                mock_ai.return_value.is_cloud_available.return_value = False
-                result = await s.filter(context)
-                self.assertEqual(len(result), 1)
+async def test_fundamental_coverage_unavailable():
+    s = _make_strategy(requires_fundamental_coverage=True)
+    dp = _make_dp()
+    context = {"data_processor": dp, "params": {}}
+    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+        result = await s.filter(context)
+        assert result.empty
 
-    async def test_filter_logic_exception_reraises(self):
-        from strategies.polars_base import PolarsBaseStrategy
 
-        class FailStrategy(PolarsBaseStrategy):
-            key = "fail_polars"
-
-            def __init__(self):
-                super().__init__("fail_name", "fail_desc")
-
-            def _filter_logic(self, lf, context):
-                raise ValueError("test error")
-
-        s = FailStrategy()
-        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        dp = self._make_dp()
-        context = {"screening_data": data, "data_processor": dp, "params": {}}
-        with patch.object(
-            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
-        ):
-            with self.assertRaises(RuntimeError) as cm:
-                await s.filter(context)
-            self.assertIn("test error", str(cm.exception))
-
-    async def test_empty_candidates_returns_empty(self):
-        from strategies.polars_base import PolarsBaseStrategy
-
-        class EmptyStrategy(PolarsBaseStrategy):
-            key = "empty_polars"
-
-            def __init__(self):
-                super().__init__("empty_name", "empty_desc")
-
-            def _filter_logic(self, lf, context):
-                return lf.filter(pl.lit(False))
-
-        import polars as pl
-
-        s = EmptyStrategy()
-        data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
-        dp = self._make_dp()
-        context = {"screening_data": data, "data_processor": dp, "params": {}}
-        with patch.object(
-            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
-        ):
+async def test_fundamental_coverage_available():
+    s = _make_strategy(requires_fundamental_coverage=True)
+    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    dp = _make_dp()
+    context = {"fundamental_screening_data": data, "data_processor": dp, "params": {}}
+    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = False
             result = await s.filter(context)
-            self.assertTrue(result.empty)
+            assert len(result) == 1
 
-    async def test_no_screening_data_returns_empty(self):
-        s = self._make_strategy()
-        dp = self._make_dp()
-        context = {"data_processor": dp, "params": {}}
-        with patch.object(
-            s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}
-        ):
+
+async def test_screening_data_fallback_to_data_key():
+    s = _make_strategy()
+    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    dp = _make_dp()
+    context = {"data": data, "data_processor": dp, "params": {}}
+    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+        with patch("strategies.ai_mixin.AIService") as mock_ai:
+            mock_ai.return_value.is_cloud_available.return_value = False
             result = await s.filter(context)
-            self.assertTrue(result.empty)
+            assert len(result) == 1
+
+
+async def test_filter_logic_exception_reraises():
+    from strategies.polars_base import PolarsBaseStrategy
+
+    class FailStrategy(PolarsBaseStrategy):
+        key = "fail_polars"
+
+        def __init__(self):
+            super().__init__("fail_name", "fail_desc")
+
+        def _filter_logic(self, lf, context):
+            raise ValueError("test error")
+
+    s = FailStrategy()
+    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    dp = _make_dp()
+    context = {"screening_data": data, "data_processor": dp, "params": {}}
+    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+        with pytest.raises(RuntimeError) as cm:
+            await s.filter(context)
+        assert "test error" in str(cm.value)
+
+
+async def test_empty_candidates_returns_empty():
+    from strategies.polars_base import PolarsBaseStrategy
+
+    class EmptyStrategy(PolarsBaseStrategy):
+        key = "empty_polars"
+
+        def __init__(self):
+            super().__init__("empty_name", "empty_desc")
+
+        def _filter_logic(self, lf, context):
+            return lf.filter(pl.lit(False))
+
+    import polars as pl
+
+    s = EmptyStrategy()
+    data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
+    dp = _make_dp()
+    context = {"screening_data": data, "data_processor": dp, "params": {}}
+    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+        result = await s.filter(context)
+        assert result.empty
+
+
+async def test_no_screening_data_returns_empty():
+    s = _make_strategy()
+    dp = _make_dp()
+    context = {"data_processor": dp, "params": {}}
+    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+        result = await s.filter(context)
+        assert result.empty
 
 
 if __name__ == "__main__":
