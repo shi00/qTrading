@@ -3,6 +3,7 @@
 > 本文件为 LLM 对话上下文文件，每次在 Trae/Cursor 等 IDE 中与 AI 对话时自动加载。
 > 请严格遵循以下交互准则、架构原则、设计规则和编码规范。
 >
+> **对应版本**：0.7.0，最后校对：2026-06-18
 > **阅读顺序建议**：§1 (AI 助手交互准则) → §3 (红线，先读后写) → §9 (目录结构，定位代码) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ---
@@ -383,8 +384,8 @@ from strategies.utils import StrategyContext
 
 @register_strategy("my_strategy")
 class MyStrategy(BaseStrategy):
-    required_context_keys = ["screening_data"]
-    required_tables = ["daily_quotes"]
+    required_context_keys: tuple[str, ...] = ("screening_data",)
+    required_tables: tuple[str, ...] = ("daily_quotes",)
     required_history_days = 60
 
     def __init__(self):
@@ -399,7 +400,7 @@ class MyStrategy(BaseStrategy):
 - **策略依赖检查**: 每个策略声明 `required_context_keys` 和 `required_tables`，运行前通过 `check_dependencies()` 验证数据就绪状态，返回 `ready` / `degraded` / `unready`。`CONTEXT_KEY_TABLE_MAP` (`BaseStrategy` 类属性) 定义了 context key 到表名的映射。
 - **动态参数**: 重写 `get_parameters()` 暴露可调参数 (`slider` / `number` / `dropdown` 三种 UI 控件)。
 - **动态描述**: 重写 `get_dynamic_description(current_params)` 让描述随参数变化。
-- **依赖声明**: 声明 `required_context_keys` / `required_tables` / `required_history_days`。可选声明 `required_apis: list[str] = []`（所需外部 API 端点列表，用于依赖检查）。
+- **依赖声明**: 声明 `required_context_keys` / `required_tables` / `required_history_days`。可选声明 `required_apis: tuple[str, ...] = ()`（所需外部 API 端点列表，用于依赖检查）。
 
 ### 6.2 Polars 向量化策略基类
 
@@ -418,7 +419,7 @@ class MyPolarsStrategy(PolarsBaseStrategy):
         return lf.filter(pl.col("pct_chg") > 5.0)
 ```
 
-> 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 直接继承 `BaseStrategy`）可使用 `@require_quality` 装饰器。
+> 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 继承 `BaseStrategy` + `AIStrategyMixin`）可使用 `@require_quality` 装饰器。
 
 ### 6.3 AI 策略混入 (AIStrategyMixin)
 

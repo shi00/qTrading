@@ -20,10 +20,10 @@
 
 ### 报告 Bug
 
-如果你发现了 bug，请通过 [GitHub Issues](https://github.com/louis2sin/AStockScreener/issues) 提交。提交前请：
+如果你发现了 bug，请通过 [GitHub Issues](https://github.com/shi00/qTrading/issues) 提交。提交前请：
 
 1. 搜索现有 issues，确认没有被报告过
-2. 使用 issue 模板，提供以下信息：
+2. 按以下清单提供信息：
    - 问题描述
    - 复现步骤
    - 期望行为
@@ -59,8 +59,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/louis2sin/AStockScreener.git
-cd AStockScreener
+git clone https://github.com/shi00/qTrading.git
+cd qTrading
 
 # 创建虚拟环境
 uv venv
@@ -75,11 +75,11 @@ uv pip install --system -r requirements-dev.txt
 # 安装 pre-commit hooks
 pre-commit install
 
-# 项目使用 7 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、requirements 同步、版本一致性校验)，详见 CLAUDE.md §8.1 或 `.pre-commit-config.yaml`。
-
 # 运行测试验证环境
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ```
+
+> 项目使用 7 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、requirements 同步、版本一致性校验)，详见 CLAUDE.md §8.1 或 `.pre-commit-config.yaml`。
 
 ### 数据库设置
 
@@ -310,7 +310,7 @@ python main.py
 1. 在 `strategies/` 下创建 `xxx_strategy.py`。
 2. 使用 `@register_strategy("key")` 装饰器注册；继承 `BaseStrategy` (普通) 或 `PolarsBaseStrategy` (向量化)。
 3. 声明 `required_context_keys` / `required_tables` / `required_history_days`。
-4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。
+4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。继承 `PolarsBaseStrategy` 时已自带 AI 阶段（可通过 `enable_ai_analysis = False` 关闭）。
 5. 在 `strategies/all_strategies.py` 的 `_import_all_strategies()` 中导入该模块以触发自动注册。
 6. 在 `locales/` 添加 `strategy_xxx` / `strategy_xxx_desc` 等 i18n key。
 7. 在 `tests/unit/` 下编写单测。
@@ -341,7 +341,7 @@ python main.py
 
 | 现象 | 可能原因 | 排查点 |
 |------|---------|--------|
-| 测试间状态污染 | 单例未注册到 `singleton_registry`（检查 `@register_singleton`）；或需精细控制时用 `singleton_state` 包裹并检查 `extra_attrs` |
+| 测试间状态污染 | 单例未注册到 `singleton_registry` | 检查 `@register_singleton`；需精细控制时用 `singleton_state` 包裹并检查 `extra_attrs` |
 | `RuntimeError: no running event loop` | 跨循环使用同步原语 | 改用 `get_loop_local` |
 | `EngineDisposedError` | 关机期间继续访问 DB | 在调用方捕获并降级，或检查 `_disposed` 早退 |
 | 慢查询告警 | SQL 缺索引 / 数据量过大 / N+1 | 看 `[ClassName] Slow Read/Write` 日志，结合 `EXPLAIN` |
