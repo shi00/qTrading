@@ -480,6 +480,23 @@ async def seed_e2e_data():
 
 @pytest.fixture(scope="session")
 def flet_app(tmp_path_factory, seed_e2e_data):
+    """
+    [PITFALL_WARNING] 全局 Session 级 Flet App 与 状态污染 (Ripple Effect)
+
+    坑点：整个 E2E 测试套件只会在最开始启动 *一次* Flet 应用进程（为了节省启动时间）。
+    因此，所有的测试用例都在 **同一个正在运行的 App 实例** 上进行。
+
+    影响：如果你在测试 A 中修改了全局状态（例如：切换了语言、主题、甚至缓存了某个页面的数据），
+    这些状态修改会 **持久化并泄漏** 到测试 B、测试 C 中！
+
+    典型案例：
+    测试 A 切换语言到英文后失败退出，导致测试 B 寻找中文 "选股" 时全部抛出 Timeout 超时错误。
+
+    应对策略：
+    1. 【必须】所有修改了全局状态的测试用例，必须使用 `try...finally` 块确保将状态恢复到基准线！
+    2. 对于语言切换等破坏性极强的状态，建议放在测试套件的末尾执行（通过文件命名或 pytest 排序）。
+    3. 如果遇到莫名其妙的下游测试全部超时，请首先检查上一个执行的用例是否引发了状态污染。
+    """
     proc, url = _spawn(
         tmp_path_factory,
         config={

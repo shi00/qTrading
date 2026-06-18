@@ -172,8 +172,19 @@ class FletPage:
     ) -> None:
         norm_label = current_or_label.lower()
         match_keys = [current_or_label, norm_label]
-        if "语言" in norm_label or "language" in norm_label:
-            match_keys.extend(["language", "语言", "locale", "简体中文", "english", "chinese", "简体中文 / english"])
+        if "语言" in norm_label or "language" in norm_label or "locale" in norm_label:
+            match_keys.extend(
+                [
+                    "language",
+                    "语言",
+                    "locale",
+                    "简体中文",
+                    "english",
+                    "chinese",
+                    "简体中文 / english",
+                    "english / 简体中文",
+                ]
+            )
         elif "主题" in norm_label or "theme" in norm_label:
             match_keys.extend(["theme", "主题", "浅色", "深色", "light", "dark", "浅色 / 深色", "light / dark"])
 
@@ -254,11 +265,24 @@ class FletPage:
 
         if not initial_visible:
             trigger_targets = []
+
+            # Prioritize inputs across all keys
             for key in match_keys:
                 trigger_targets.append(self.page.locator(f'input[aria-label*="{key}" i]').first)
+
+            # Prioritize comboboxes and buttons across all keys
+            for key in match_keys:
+                trigger_targets.append(self.page.locator(f'[role="combobox"][aria-label*="{key}" i]').first)
+            for key in match_keys:
+                trigger_targets.append(self.page.locator(f'[role="button"][aria-label*="{key}" i]').first)
+
+            # Generic aria-label fallback across all keys
+            for key in match_keys:
                 trigger_targets.append(self.page.locator(f'[aria-label*="{key}" i]').first)
+
             trigger_targets.append(self.page.get_by_text(current_or_label, exact=False).first)
 
+            last_clicked_target = None
             triggered = False
             for idx, target in enumerate(trigger_targets):
                 try:
@@ -282,6 +306,7 @@ class FletPage:
                             )
                         await target.click(timeout=self._tm(3000), force=True)
                         triggered = True
+                        last_clicked_target = target
                         logger.debug("触发器候选[%d]点击成功", idx)
                         break
                 except Exception as ex:
@@ -294,12 +319,21 @@ class FletPage:
                     if await check_option_visible():
                         break
 
-        wait_cycles = max(1, (self._tm(timeout_ms) // 2) // 200)
+        wait_cycles = max(1, self._tm(timeout_ms) // 200)
         option_ready = False
-        for _ in range(wait_cycles):
+        for i in range(wait_cycles):
             if await check_option_visible():
                 option_ready = True
                 break
+
+            # 每隔约 2 秒重试一次点击，防止点击被 CanvasKit 动画吞噬
+            if not initial_visible and i > 0 and i % 10 == 0 and last_clicked_target:
+                logger.debug("下拉选项未出现，重试点击触发器...")
+                try:
+                    await last_clicked_target.click(timeout=self._tm(3000), force=True)
+                except Exception as ex:
+                    logger.debug("重试点击触发器失败: %s", ex)
+
             await self.page.wait_for_timeout(200)
 
         if not option_ready:
