@@ -65,6 +65,13 @@ async def test_settings_language_switch(e2e_page):
     await e2e_page.expect_text("Screener", timeout_ms=10000)
 
     # 切回中文，避免影响后续测试
+    actual_lang_label_en = I18n.get_language_label()
+    await e2e_page.expect_text(actual_lang_label_en, timeout_ms=10000)
+
+    # 同样地，等待语言切换成功的 Snackbar 动画完成，防止 CanvasKit 吞噬点击事件
+    await e2e_page.page.wait_for_timeout(1000)
+
+    lang_label_en = I18n.get("settings_language")
     lang_zh = I18n.get("settings_lang_zh")
-    await e2e_page.select_dropdown(lang_label, lang_zh, timeout_ms=10000)
+    await e2e_page.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
     await e2e_page.expect_text("选股", timeout_ms=10000)
