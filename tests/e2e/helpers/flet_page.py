@@ -3,6 +3,8 @@ from typing import Any
 
 from playwright.async_api import Page, Playwright, Browser, BrowserContext
 
+from tests.e2e.timeouts import TIMEOUTS
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,7 +23,7 @@ class FletPage:
     def get_context(self) -> tuple[Playwright, Browser, BrowserContext, Page, Any] | None:
         return self._pw_context
 
-    async def open(self, url: str, timeout_ms: int = 45000) -> None:
+    async def open(self, url: str, timeout_ms: int = TIMEOUTS.PAGE_OPEN) -> None:
         scaled = self._tm(timeout_ms)
         await self.page.goto(url, wait_until="domcontentloaded", timeout=scaled)
         await self.page.wait_for_selector("flutter-view, flt-glass-pane, flt-semantics-placeholder", timeout=scaled)
@@ -36,7 +38,7 @@ class FletPage:
                 break
             await self.page.wait_for_timeout(1000)
 
-    async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = 8000) -> None:
+    async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         scaled = self._tm(timeout_ms)
         btn = self.page.get_by_role(role, name=name)
         by_label = self.page.locator(
@@ -86,14 +88,14 @@ class FletPage:
         # If everything fails, try clicking the combined locator to trigger standard playwright error
         await loc_combined.click(timeout=self._tm(3000))
 
-    async def click_button(self, name: str, timeout_ms: int = 8000) -> None:
+    async def click_button(self, name: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         await self._click_with_fallback(name, "button", timeout_ms)
 
-    async def click_tab(self, text: str, timeout_ms: int = 8000) -> None:
+    async def click_tab(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击 Tab 按钮（Flet 0.28.3 ElevatedButton(icon+text) 兼容）。"""
         await self._click_with_fallback(text, "button", timeout_ms)
 
-    async def click_text(self, text: str, timeout_ms: int = 8000) -> None:
+    async def click_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         scaled = self._tm(timeout_ms)
         loc_text = self.page.get_by_text(text, exact=False)
         loc_aria = self.page.locator(
@@ -103,7 +105,7 @@ class FletPage:
         await loc_combined.wait_for(state="attached", timeout=scaled)
         await loc_combined.click(timeout=scaled, force=True)
 
-    async def fill_textbox(self, label: str, value: str, timeout_ms: int = 8000) -> None:
+    async def fill_textbox(self, label: str, value: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         scaled = self._tm(timeout_ms)
         loc1 = self.page.get_by_role("textbox", name=label)
         loc2 = self.page.locator(
@@ -165,7 +167,9 @@ class FletPage:
                 logger.error(f"fill_textbox fallback failed for label '{label}': {fallback_exc}")
                 raise
 
-    async def select_dropdown(self, current_or_label: str, option_text: str, timeout_ms: int = 8000) -> None:
+    async def select_dropdown(
+        self, current_or_label: str, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION
+    ) -> None:
         norm_label = current_or_label.lower()
         match_keys = [current_or_label, norm_label]
         if "语言" in norm_label or "language" in norm_label:
@@ -308,7 +312,7 @@ class FletPage:
         if not clicked:
             raise RuntimeError(f"Failed to click option '{option_text}' (key: '{opt_match_key}')")
 
-    async def expect_text(self, text: str, timeout_ms: int = 8000) -> None:
+    async def expect_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         scaled = self._tm(timeout_ms)
         loc_text = self.page.get_by_text(text, exact=False)
         loc_aria = self.page.locator(
