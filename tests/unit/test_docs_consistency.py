@@ -1,13 +1,16 @@
 """Tests for documentation consistency (J② + J⑤).
 
-Ensures docs don't drift from code:
+Ensures real project files don't drift:
+- Version consistency: installer.iss / release-please-manifest / pyright versions match pyproject.toml
 - LLM provider count matches LLM_PROVIDERS
 - SECURITY supported version matches pyproject.toml
 - No stale repo URLs
 - No empty markdown links
+- CLAUDE.md references point to existing files
 - README strategy example signature matches actual code
 """
 
+import json
 import re
 import sys
 import tomllib
@@ -23,6 +26,10 @@ SECURITY_PATH = ROOT / "SECURITY.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
+INSTALLER_PATH = ROOT / "installer.iss"
+PACKAGE_JSON_PATH = ROOT / "package.json"
+RELEASE_MANIFEST_PATH = ROOT / ".release-please-manifest.json"
+CI_WORKFLOW_PATH = ROOT / ".github" / "workflows" / "ci_cd.yml"
 
 
 def _get_pyproject_version() -> str:
@@ -33,6 +40,40 @@ def _get_pyproject_version() -> str:
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+class TestVersionConsistency:
+    """Check 1-3: Real file version consistency (mirrors verify_versions.py)."""
+
+    def test_installer_version_matches_pyproject(self):
+        """installer.iss fallback version must match pyproject.toml version."""
+        content = _read(INSTALLER_PATH)
+        m = re.search(r'#define\s+MyAppVersion\s+"([^"]+)"', content)
+        assert m, f"Could not find MyAppVersion in {INSTALLER_PATH}"
+        installer_ver = m.group(1)
+        pyproject_ver = _get_pyproject_version()
+        assert installer_ver == pyproject_ver, (
+            f"installer.iss version '{installer_ver}' != pyproject.toml version '{pyproject_ver}'"
+        )
+
+    def test_pyright_versions_match(self):
+        """package.json pyright version must match CI pinned pyright version."""
+        with open(PACKAGE_JSON_PATH, encoding="utf-8") as f:
+            pkg_ver = json.load(f)["devDependencies"]["pyright"]
+        ci_content = _read(CI_WORKFLOW_PATH)
+        m = re.search(r"pip install pyright==(\S+)", ci_content)
+        assert m, f"Could not find pyright version in {CI_WORKFLOW_PATH}"
+        ci_ver = m.group(1)
+        assert pkg_ver == ci_ver, f"package.json pyright '{pkg_ver}' != CI pyright '{ci_ver}'"
+
+    def test_release_manifest_version_matches_pyproject(self):
+        """.release-please-manifest.json version must match pyproject.toml version."""
+        with open(RELEASE_MANIFEST_PATH, encoding="utf-8") as f:
+            manifest_ver = json.load(f)["."]
+        pyproject_ver = _get_pyproject_version()
+        assert manifest_ver == pyproject_ver, (
+            f".release-please-manifest.json version '{manifest_ver}' != pyproject.toml version '{pyproject_ver}'"
+        )
 
 
 class TestLLMProviderCount:
@@ -93,6 +134,25 @@ class TestEmptyMarkdownLinks:
         content = _read(README_PATH)
         for i, line in enumerate(content.splitlines(), 1):
             assert "]()" not in line, f"README.md:{i} contains empty markdown link ']()'"
+
+
+class TestClaudeReferences:
+    """Check 7: CLAUDE.md reference-style pointers target existing files."""
+
+    def test_claude_file_references_exist(self):
+        """CLAUDE.md '见 `xxx.py`' references should point to existing files."""
+        content = _read(CLAUDE_PATH)
+        refs = re.findall(r"见 `([^`]+)`", content)
+        for ref in refs:
+            if ref.startswith("§") or not (
+                ref.endswith(".py") or ref.endswith(".yml") or ref.endswith(".yaml") or ref.endswith(".json")
+            ):
+                continue
+            target = ROOT / ref
+            if target.exists():
+                continue
+            matches = list(ROOT.rglob(ref))
+            assert matches, f"CLAUDE.md references '{ref}' but file does not exist"
 
 
 class TestStrategyExampleSignature:
