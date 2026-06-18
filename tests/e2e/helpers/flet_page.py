@@ -112,26 +112,58 @@ class FletPage:
         loc_combined = loc1.or_(loc2).first
 
         try:
-            await loc_combined.wait_for(state="visible", timeout=scaled)
-            el = loc_combined
-        except Exception:
-            # Fallback: check if there's exactly 1 textbox on the page
             try:
-                loc3 = self.page.get_by_role("textbox")
-                await loc3.first.wait_for(state="visible", timeout=self._tm(2000))
-                if await loc3.count() == 1:
-                    el = loc3.first
-                else:
-                    el = loc1.first
+                await loc_combined.wait_for(state="visible", timeout=scaled)
+                el = loc_combined
             except Exception:
-                el = loc1.first
+                # Fallback: check if there's exactly 1 textbox on the page
+                try:
+                    loc3 = self.page.get_by_role("textbox")
+                    await loc3.first.wait_for(state="visible", timeout=self._tm(2000))
+                    if await loc3.count() == 1:
+                        el = loc3.first
+                    else:
+                        el = loc1.first
+                except Exception:
+                    el = loc1.first
 
-        await el.click(timeout=scaled)
-        try:
-            await el.fill(value, timeout=scaled)
+            await el.click(timeout=scaled)
+            try:
+                await el.fill(value, timeout=scaled)
+            except Exception:
+                await el.clear()
+                await el.type(value, delay=30)
         except Exception:
-            await el.clear()
-            await el.type(value, delay=30)
+            try:
+                # [PITFALL_WARNING] Flet TextField 元素定位黑洞
+                # 坑点：在 Flet Web 中，get_by_role("textbox", name="xxx") 几乎永远找不到输入框。
+                # 原因：CanvasKit 渲染模式下，DOM 节点并不是标准的 input，而是一个扁平的 <flt-semantics>。
+                #      Flet 经常把 TextField 的 label 文本“吸附”到极远的父级容器的 aria-label 上，
+                #      或者完全吞噬角色属性。这导致精确匹配文本框根本不可能。
+                # 应对：我们只能采用极其宽泛的模糊匹配（见上方的 [aria-label*="..."]）。
+                #      如果连模糊匹配都失败了，这里提供了一个“最后的倔强” fallback：
+                #      尝试直接去点击那个 label 的纯文本节点，然后用键盘模拟全选删除和输入。
+                # 针对 Flet multiline=True 的黑盒行为：它把 label 文本合并到了父容器（如 tabpanel）的 aria-label 中
+                logger.warning(
+                    f"fill_textbox standard method failed for label '{label}', trying fallback (aria-label click + keyboard)"
+                )
+
+                # 寻找 aria-label 包含目标文本的节点
+                label_loc = self.page.locator(f'[aria-label*="{label}"]').first
+                await label_loc.wait_for(state="attached", timeout=3000)
+
+                # Flet 的这种父节点通常有 pointer-events: none，但 force=True 会计算中心坐标并触发真正的鼠标点击
+                # 由于这是整个区域的父节点，点击中心极大概率落在 expand=True 的多行文本框内
+                await label_loc.click(force=True)
+
+                # 清除原有内容并输入
+                await self.page.keyboard.press("Control+A")
+                await self.page.keyboard.press("Backspace")
+                await self.page.keyboard.type(value, delay=50)
+                return
+            except Exception as fallback_exc:
+                logger.error(f"fill_textbox fallback failed for label '{label}': {fallback_exc}")
+                raise
 
     async def select_dropdown(self, current_or_label: str, option_text: str, timeout_ms: int = 8000) -> None:
         norm_label = current_or_label.lower()
@@ -309,7 +341,13 @@ class FletPage:
         if logger.isEnabledFor(logging.DEBUG):
             self._dump_dom_debug(text)
 
-        # Trigger standard playwright timeout error for trace and stacktrace
+        # [PITFALL_WARNING] expect_text 报错 "Timeout 1ms exceeded" 的幻觉
+        # 坑点：当这个函数因为超时找不到元素而报错时，Playwright 抛出的异常会显示 "Timeout 1ms exceeded"。
+        # 原因：由于 Flet 的渲染特殊性，本函数内部实现了一个总时长为 timeout_ms 的轮询等待循环（见上方）。
+        #      如果轮询结束仍然没找到文本，为了向外抛出带有完整堆栈信息的 Playwright TimeoutError，
+        #      这里故意执行了一个 timeout=1ms 的 wait_for 触发报错。
+        # 正确做法：看到 "Timeout 1ms exceeded" 报错时，不要以为是 timeout_ms 参数没传进去，
+        #         这实际上意味着它已经实打实地等待了你传入的足额时间（比如 5000ms 或 15000ms）后依然失败。
         await loc_combined.wait_for(state="attached", timeout=1)
 
     async def has_text(self, text: str) -> bool:

@@ -41,6 +41,12 @@ async def test_backtest_flow(e2e_page):
         await e2e_page.expect_text(metric_label, timeout_ms=timeout)
 
 
+# [PITFALL_WARNING] UX 设计与测试用例冲突避坑指南
+# 坑点：测试企图验证“未选择策略时点击回测”的报错提示。
+# 原因：BacktestView 的 UI 逻辑会在页面加载时默认选中第一个可用策略，
+#      因此用户在界面上永远无法将其清空并置于“无策略”状态。
+# 正确做法：不要尝试用底层 API（如 select_dropdown）去强行重置状态以验证这种不可能发生的路径。
+#         应当直接跳过该用例，或联系 PM 修改需求。
 @pytest.mark.skip(
     reason="BacktestView auto-selects the first strategy by default, making the 'no strategy' state unreachable from the UI"
 )
