@@ -4,6 +4,8 @@ Verifies that after clear_all_cache(), all tables are recreated and
 alembic_version has a valid version string.
 """
 
+import logging
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -11,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.cache.cache_manager import CacheManager
 from tests.conftest import singleton_state
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.mark.integration
@@ -52,8 +56,8 @@ class TestClearAllCacheReset:
 
             try:
                 await mgr.close()
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[TestCacheReset] cache_mgr.close() failed: %s", e)
 
     @pytest.mark.asyncio
     async def test_clear_all_cache_recreates_tables(self, cache_mgr: CacheManager, test_engine: AsyncEngine):

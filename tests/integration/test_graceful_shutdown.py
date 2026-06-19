@@ -4,73 +4,16 @@ Tests directly import and exercise ShutdownCoordinator instead of maintaining
 a parallel simplified copy of the cleanup code.
 """
 
+# ruff: noqa: F811
+# F811: pytest fixture 通过参数名注入，导入的 fixture 名与测试函数参数同名会触发 F811 误报（INT-P2-2）
+
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.integration.test_infra_base import mock_singletons  # noqa: F401
 from utils.shutdown import ShutdownCoordinator
-
-
-@pytest.fixture
-def mock_singletons():
-    """Mock all Singletons to prevent real execution by setting their _instances"""
-    from services.task_manager import TaskManager
-    from services.news_subscription_service import NewsSubscriptionService
-    from data.data_processor import DataProcessor
-    from data.cache.cache_manager import CacheManager
-    from data.domain_services.market_data_service import MarketDataService
-    from services.local_model_manager import LocalModelManager
-    from utils.thread_pool import ThreadPoolManager
-    from utils.scheduler_service import SchedulerService
-
-    orig_tm = TaskManager._instance
-    orig_news = NewsSubscriptionService._instance
-    orig_dp = DataProcessor._instance
-    orig_cache = CacheManager._instance
-    orig_mds = MarketDataService._instance
-    orig_llm = LocalModelManager._instance
-    orig_tp = ThreadPoolManager._instance
-    svc = SchedulerService()
-    orig_scheduler_running = getattr(svc.scheduler, "running", None) if hasattr(svc, "scheduler") else None
-    orig_scheduler_stop = getattr(svc, "stop", None)
-
-    try:
-        TaskManager._instance = AsyncMock()
-        NewsSubscriptionService._instance = AsyncMock()
-        DataProcessor._instance = AsyncMock()
-        CacheManager._instance = AsyncMock()
-        CacheManager._instance.engine = AsyncMock()
-        MarketDataService._instance = AsyncMock()
-        LocalModelManager._instance = MagicMock()
-        LocalModelManager._instance._worker_ready = True
-        ThreadPoolManager._instance = MagicMock()
-        svc.scheduler = MagicMock()
-        svc.scheduler.running = True
-        svc.stop = MagicMock()
-
-        yield {
-            "TaskManager": TaskManager,
-            "scheduler": svc,
-            "NewsSubscriptionService": NewsSubscriptionService,
-            "DataProcessor": DataProcessor,
-            "CacheManager": CacheManager,
-            "MarketDataService": MarketDataService,
-            "LocalModelManager": LocalModelManager,
-            "ThreadPoolManager": ThreadPoolManager,
-        }
-    finally:
-        TaskManager._instance = orig_tm
-        NewsSubscriptionService._instance = orig_news
-        DataProcessor._instance = orig_dp
-        CacheManager._instance = orig_cache
-        MarketDataService._instance = orig_mds
-        LocalModelManager._instance = orig_llm
-        ThreadPoolManager._instance = orig_tp
-        if orig_scheduler_running is not None:
-            svc.scheduler.running = orig_scheduler_running
-        if orig_scheduler_stop is not None:
-            svc.stop = orig_scheduler_stop
 
 
 @pytest.mark.asyncio

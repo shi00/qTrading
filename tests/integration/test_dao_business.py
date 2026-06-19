@@ -27,34 +27,11 @@ from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.sync_dao import SyncDao
+from tests.integration.test_infra_base import make_clean_db_fixture
 
 
-@pytest_asyncio.fixture(scope="function", autouse=True)
-async def clean_db(test_engine: AsyncEngine):
-    """每个测试前清理数据库（容错处理表不存在）"""
-    import contextlib
-
-    tables = [
-        "daily_indicators",
-        "daily_quotes",
-        "stock_basic",
-        "financial_reports",
-        "moneyflow_hsgt",
-        "index_weight",
-        "market_news",
-        "screening_history",
-        "stk_holdernumber",
-        "top10_holders",
-        "macro_economy",
-        "shibor_daily",
-        "sync_status",
-        "stock_sync_status",
-    ]
-    async with test_engine.begin() as conn:
-        for table in tables:
-            with contextlib.suppress(Exception):
-                await conn.execute(text(f"DELETE FROM {table}"))
-    yield
+# 共享 clean_db fixture：表清单从 ORM metadata 动态生成（INT-P2-1）
+clean_db = make_clean_db_fixture()
 
 
 @pytest_asyncio.fixture
