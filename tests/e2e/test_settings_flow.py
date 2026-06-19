@@ -1,3 +1,5 @@
+import base64
+
 import pytest
 
 pytestmark = pytest.mark.e2e
@@ -48,20 +50,48 @@ async def test_settings_theme_switch(e2e_page):
     await e2e_page.expect_text(theme_updated, timeout_ms=5000)
 
     # 强断言：验证主题色真实变化（深色 → 浅色），而非仅 snackbar 提示
-    is_light_bg = await e2e_page.page.evaluate(
-        """() => {
-            const candidates = ['flutter-view', 'flt-glass-pane', 'body'];
-            for (const sel of candidates) {
-                const el = document.querySelector(sel);
-                if (!el) continue;
-                const c = getComputedStyle(el).backgroundColor;
-                const parts = c.match(/\\d+/g);
-                if (!parts || parts.length < 3) continue;
-                if (parseInt(parts[0]) > 200 && parseInt(parts[1]) > 200 && parseInt(parts[2]) > 200) return true;
-            }
-            return false;
-        }"""
-    )
+    # [PITFALL FIX] CanvasKit 渲染下 DOM 背景透明，canvas readPixels/drawImage 也因
+    #                preserveDrawingBuffer=false 失效，改用 page.screenshot() 捕获实际渲染像素
+    # 坑点：apply_page_theme 设置 page.bgcolor = None，背景色由 CanvasKit 在 canvas 内渲染，
+    #       DOM 元素（flutter-view/flt-glass-pane/body）的 backgroundColor 为透明，
+    #       且 flt-glass-pane canvas 因 preserveDrawingBuffer=false 导致
+    #       drawImage/readPixels 返回透明像素，原有检测方法在 CanvasKit 模式下全部失效。
+    # 应对：通过 page.screenshot() 捕获浏览器实际渲染的像素（包含 canvas 内容），
+    #       将截图作为 base64 传回浏览器，用 2D canvas 解码并采样像素颜色。
+    #       加入轮询循环，等待 CanvasKit 重新渲染新主题。
+    await e2e_page.page.wait_for_timeout(500)  # 等待 CanvasKit 重新渲染
+    is_light_bg = False
+    for _ in range(15):  # 最多 ~6s，每 400ms 检查一次
+        try:
+            screenshot_bytes = await e2e_page.page.screenshot(
+                clip={"x": 0, "y": 0, "width": 10, "height": 10},
+                type="png",
+            )
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode("ascii")
+            is_light_bg = await e2e_page.page.evaluate(
+                """async (b64) => {
+                    try {
+                        const response = await fetch('data:image/png;base64,' + b64);
+                        const blob = await response.blob();
+                        const bitmap = await createImageBitmap(blob);
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 1;
+                        canvas.height = 1;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(bitmap, 0, 0, 1, 1, 0, 0, 1, 1);
+                        const d = ctx.getImageData(0, 0, 1, 1).data;
+                        return d[0] > 200 && d[1] > 200 && d[2] > 200;
+                    } catch (e) {
+                        return false;
+                    }
+                }""",
+                screenshot_b64,
+            )
+        except Exception:
+            is_light_bg = False
+        if is_light_bg:
+            break
+        await e2e_page.page.wait_for_timeout(400)
     assert is_light_bg, "切换到浅色主题后，页面背景色应为浅色"
 
 
@@ -87,20 +117,40 @@ async def test_settings_language_switch(e2e_page):
 
     lang_label = I18n.get("settings_language")
     lang_en = I18n.get("settings_lang_en")
-    await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
+    lang_zh = I18n.get("settings_lang_zh")
 
-    # 手动同步测试进程的 I18n 状态，以便生成正确的英文断言字符串
-    I18n.set_locale("en_US")
+    try:
+        await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
 
-    # 验证 UI 文本已切换为英文（导航栏 "Screener" 出现）
-    await e2e_page.expect_text("Screener", timeout_ms=10000)
+        # 手动同步测试进程的 I18n 状态，以便生成正确的英文断言字符串
+        I18n.set_locale("en_US")
 
-    # 强断言：验证设置页文案已切换为英文（而非仅导航栏变化）
-    theme_label_en = I18n.get("settings_theme")
-    await e2e_page.expect_text(theme_label_en, timeout_ms=10000)
+        # 验证 UI 文本已切换为英文（导航栏 "Screener" 出现）
+        await e2e_page.expect_text("Screener", timeout_ms=10000)
 
-    # 切回中文之前的验证
-    actual_lang_label_en = I18n.get_language_label()
-    await e2e_page.expect_text(actual_lang_label_en, timeout_ms=10000)
+        # 强断言：验证设置页文案已切换为英文（而非仅导航栏变化）
+        theme_label_en = I18n.get("settings_theme")
+        await e2e_page.expect_text(theme_label_en, timeout_ms=10000)
 
-    # 配置还原由 pristine_config fixture 自动处理（见 tests/e2e/conftest.py）
+        # 切回中文之前的验证
+        actual_lang_label_en = I18n.get_language_label()
+        await e2e_page.expect_text(actual_lang_label_en, timeout_ms=10000)
+    finally:
+        # [PITFALL FIX] 必须还原 flet_app 内存中的 I18n locale！
+        # 坑点：pristine_config fixture 只还原磁盘配置文件和测试进程 I18n，
+        #       但 flet_app 是 session 级单进程，其内存中的 I18n._locale 仍是 en_US。
+        #       这会导致后续测试（settings_tabs/smoke/task_center）寻找中文导航文本时全部超时失败。
+        # 应对：通过 UI 主动切换回中文，触发 app 进程的 I18n.set_locale("zh_CN")。
+        # 此时 app 已是英文界面，dropdown label 显示为 "Language"。
+        lang_label_en = I18n.get("settings_language", locale="en_US")
+        try:
+            await e2e_page.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
+            # 轮询等待中文导航文本重新出现，确认 locale 已还原
+            nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
+            for _ in range(25):
+                if await e2e_page.has_text(nav_settings_zh):
+                    break
+                await e2e_page.page.wait_for_timeout(200)
+        except Exception:
+            # 还原失败时不抛出，避免掩盖原始测试失败；下游测试会显式失败暴露问题
+            pass
