@@ -13,6 +13,7 @@ class TestDatabaseManagerSecurity(TestDatabaseBase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
 
+        self._orig_db_url_sync = config.DB_URL_SYNC
         config.DB_URL_SYNC = (
             f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
         )
@@ -25,14 +26,16 @@ class TestDatabaseManagerSecurity(TestDatabaseBase):
                 text("CREATE TABLE IF NOT EXISTS test_users (id SERIAL PRIMARY KEY, username TEXT, password TEXT)")
             )
             await conn.execute(text("DELETE FROM test_users"))
-            await conn.execute(text("INSERT INTO test_users (username, password) VALUES ('admin', 'secret')"))
-            await conn.execute(text("INSERT INTO test_users (username, password) VALUES ('guest', '12345')"))
+            await conn.execute(text("INSERT INTO test_users (username, password) VALUES ('admin', 'test_pwd_admin')"))
+            await conn.execute(text("INSERT INTO test_users (username, password) VALUES ('guest', 'test_pwd_guest')"))
 
     async def asyncTearDown(self):
         if hasattr(self, "db_manager"):
             self.db_manager.close()
         if hasattr(self, "_ddl_engine"):
             await self._ddl_engine.dispose()
+        if hasattr(self, "_orig_db_url_sync"):
+            config.DB_URL_SYNC = self._orig_db_url_sync
         await super().asyncTearDown()
 
     def test_query_table_sql_injection_in_filter(self):

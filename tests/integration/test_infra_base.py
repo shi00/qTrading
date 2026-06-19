@@ -1,6 +1,7 @@
 import logging
 from contextlib import ExitStack
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, ProgrammingError
@@ -26,14 +27,103 @@ async def _truncate_all_tables(engine: AsyncEngine):
         async with engine.begin() as conn:
             await conn.execute(text(f"TRUNCATE TABLE {tables_str} CASCADE"))
         return
-    except (OperationalError, ProgrammingError):
-        pass
+    except (OperationalError, ProgrammingError) as e:
+        logger.warning("[TestDB] TRUNCATE all tables failed, falling back to per-table: %s", e)
     for table in TABLE_NAMES:
         try:
             async with engine.begin() as conn:
                 await conn.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"[TestDB] TRUNCATE {table} failed: {e}")
+            logger.warning("[TestDB] TRUNCATE %s failed: %s", table, e)
+
+
+def make_clean_db_fixture(tables: list[str] | None = None):
+    """工厂函数：创建 clean_db autouse fixture，DELETE 模式清理表。
+
+    Args:
+        tables: 指定表名列表；若为 None 则从 ORM metadata 动态生成（排除 alembic_version）。
+    """
+    table_list = tables if tables is not None else TABLE_NAMES
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def clean_db(test_engine: AsyncEngine):
+        """每个测试前清理数据库表（容错处理表不存在）。"""
+        async with test_engine.begin() as conn:
+            for table in table_list:
+                try:
+                    await conn.execute(text(f"DELETE FROM {table}"))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[TestDB] DELETE %s failed: %s", table, e)
+        yield
+
+    return clean_db
+
+
+@pytest.fixture
+def mock_singletons():
+    """Mock all Singletons to prevent real execution by setting their _instances.
+
+    合并自 test_graceful_shutdown.py 与 test_shutdown_step_failure_recovery.py（INT-P2-2）。
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from data.cache.cache_manager import CacheManager
+    from data.data_processor import DataProcessor
+    from data.domain_services.market_data_service import MarketDataService
+    from services.local_model_manager import LocalModelManager
+    from services.news_subscription_service import NewsSubscriptionService
+    from services.task_manager import TaskManager
+    from utils.scheduler_service import SchedulerService
+    from utils.thread_pool import ThreadPoolManager
+
+    orig_tm = TaskManager._instance
+    orig_news = NewsSubscriptionService._instance
+    orig_dp = DataProcessor._instance
+    orig_cache = CacheManager._instance
+    orig_mds = MarketDataService._instance
+    orig_llm = LocalModelManager._instance
+    orig_tp = ThreadPoolManager._instance
+    svc = SchedulerService()
+    orig_scheduler_running = getattr(svc.scheduler, "running", None) if hasattr(svc, "scheduler") else None
+    orig_scheduler_stop = getattr(svc, "stop", None)
+
+    try:
+        TaskManager._instance = AsyncMock()
+        NewsSubscriptionService._instance = AsyncMock()
+        DataProcessor._instance = AsyncMock()
+        CacheManager._instance = AsyncMock()
+        CacheManager._instance.engine = AsyncMock()
+        MarketDataService._instance = AsyncMock()
+        LocalModelManager._instance = MagicMock()
+        LocalModelManager._instance._llm = MagicMock()
+        LocalModelManager._instance._worker_ready = True
+        ThreadPoolManager._instance = MagicMock()
+        svc.scheduler = MagicMock()
+        svc.scheduler.running = True
+        svc.stop = MagicMock()
+
+        yield {
+            "TaskManager": TaskManager,
+            "scheduler": svc,
+            "NewsSubscriptionService": NewsSubscriptionService,
+            "DataProcessor": DataProcessor,
+            "CacheManager": CacheManager,
+            "MarketDataService": MarketDataService,
+            "LocalModelManager": LocalModelManager,
+            "ThreadPoolManager": ThreadPoolManager,
+        }
+    finally:
+        TaskManager._instance = orig_tm
+        NewsSubscriptionService._instance = orig_news
+        DataProcessor._instance = orig_dp
+        CacheManager._instance = orig_cache
+        MarketDataService._instance = orig_mds
+        LocalModelManager._instance = orig_llm
+        ThreadPoolManager._instance = orig_tp
+        if orig_scheduler_running is not None:
+            svc.scheduler.running = orig_scheduler_running
+        if orig_scheduler_stop is not None:
+            svc.stop = orig_scheduler_stop
 
 
 class _AssertionMixin:
