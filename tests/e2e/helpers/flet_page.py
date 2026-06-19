@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -31,7 +32,7 @@ class FletPage:
         if await ph.count() > 0:
             await ph.first.dispatch_event("click")
             await self.page.wait_for_selector("flt-semantics", timeout=scaled)
-        await self.page.wait_for_timeout(int(3000 * self._timeout_multiplier))
+        # 条件等待：轮询直至语义节点数 >= 5（替代固定 sleep）
         for _ in range(10):
             count = await self.page.locator("flt-semantics, [role]").count()
             if count >= 5:
@@ -190,20 +191,9 @@ class FletPage:
 
         match_keys = list(set(match_keys))
 
+        # 调用方必须传入已本地化的选项文案（由 tests/e2e/labels.py 提供），
+        # 不再内部映射策略/主题 key→显示名。
         opt_match_key = option_text
-        opt_lower = option_text.lower()
-        if "深色" in opt_lower or "dark" in opt_lower:
-            opt_match_key = "dark"
-        elif "浅色" in opt_lower or "light" in opt_lower:
-            opt_match_key = "light"
-        elif "简体中文" in opt_lower or "chinese" in opt_lower or "zh" in opt_lower:
-            opt_match_key = "简体中文"
-        elif "english" in opt_lower or "en" in opt_lower:
-            opt_match_key = "english"
-        elif "volume_breakout" in opt_lower:
-            opt_match_key = "放量突破"
-        elif "oversold" in opt_lower:
-            opt_match_key = "超跌反弹"
 
         def get_option_locators():
             return [
@@ -341,6 +331,7 @@ class FletPage:
                 self._dump_semantics_debug()
             raise RuntimeError(f"Timeout waiting for option '{option_text}' (key: '{opt_match_key}') to appear")
 
+        # 等待选项渲染稳定（CanvasKit 动画收尾），防止点击被动画吞噬
         await self.page.wait_for_timeout(350)
         clicked = await click_option()
         if not clicked:
@@ -360,10 +351,8 @@ class FletPage:
             logger.debug("Combined locator wait_for failed for text '%s': %s", text, e)
 
         # Fallback: poll input field values
-        import time
-
-        start_time = time.time()
-        while (time.time() - start_time) * 1000 < scaled:
+        start_time = asyncio.get_event_loop().time()
+        while (asyncio.get_event_loop().time() - start_time) * 1000 < scaled:
             try:
                 inputs_match = self.page.locator("input")
                 count = await inputs_match.count()

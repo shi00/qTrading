@@ -19,6 +19,7 @@ async def test_table_viewer(e2e_page):
     # 选择 daily_quotes 表
     table_label = I18n.get("data_select_table")
     await e2e_page.select_dropdown(table_label, "daily_quotes", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理表选择（内部状态变更，无法通过 DOM 观察，保留最小渲染等待）
     await e2e_page.page.wait_for_timeout(2000)
 
     # 点击查询按钮
@@ -107,6 +108,7 @@ async def test_table_viewer_switch(e2e_page):
     # 选择 daily_quotes 表
     table_label = I18n.get("data_select_table")
     await e2e_page.select_dropdown(table_label, "daily_quotes", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理表选择（内部状态变更，无法通过 DOM 观察，保留最小渲染等待）
     await e2e_page.page.wait_for_timeout(2000)
 
     query_btn = e2e_page.page.locator('[aria-label="查询"], [aria-label*="查询"]').first
@@ -117,6 +119,7 @@ async def test_table_viewer_switch(e2e_page):
 
     # 切换到 stock_basic 表
     await e2e_page.select_dropdown(table_label, "stock_basic", timeout_ms=TIMEOUTS.TITLE)
+    # 等待 Flet 处理表选择（内部状态变更，无法通过 DOM 观察，保留最小渲染等待）
     await e2e_page.page.wait_for_timeout(2000)
 
     await query_btn.wait_for(state="attached", timeout=TIMEOUTS.INTERACTION)

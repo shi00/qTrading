@@ -289,14 +289,16 @@ class TestTaskCenterView:
         view = self._make_view(mock_page)
         view.task_manager = self.mock_tm
         view.did_mount()
-        self.mock_tm.subscribe.assert_called_once()
+        self.mock_tm.subscribe.assert_called_once_with(view._on_tasks_updated)
         self.mock_tm.get_all_tasks.assert_called_once()
+        assert view._mounted is True  # 副作用：挂载状态变更
 
     def test_will_unmount_unsubscribes(self, mock_page):
         view = self._make_view(mock_page)
         view.task_manager = self.mock_tm
         view.will_unmount()
-        self.mock_tm.unsubscribe.assert_called_once()
+        self.mock_tm.unsubscribe.assert_called_once_with(view._on_tasks_updated)
+        assert view._mounted is False  # 副作用：挂载状态变更
 
     def _make_task(self, status=TaskStatus.QUEUED, **kwargs):
         from services.task_manager import AppTask
@@ -466,7 +468,7 @@ class TestTaskCenterView:
         set_page(view, wrap_mock_page(mock_page))
         view._mounted = True
         view._on_tasks_updated([])
-        mock_page.run_task.assert_called_once()
+        mock_page.run_task.assert_called_once_with(view._safe_refresh, [])
 
     def test_on_tasks_updated_not_mounted(self, mock_page):
         view = self._make_view(mock_page)
@@ -690,8 +692,7 @@ class TestAppLayout:
 
     def test_update_theme_propagates_to_cached_views(self, mock_page):
         layout = self._make_layout(mock_page)
-        mock_view = MagicMock()
-        layout._view_cache[0] = mock_view
+        mock_view = layout._get_view(0)  # 通过公共 API 创建并缓存视图
         layout.update_theme()
         mock_view.update_theme.assert_called_once()
 
@@ -828,7 +829,6 @@ class TestAppLayout:
             },
         )
         with patch("ui.app_layout.ScreenerView", FakeSV):
-            layout._view_cache[1] = FakeSV()
             await layout.run_strategy_from_home("test_strategy")
             assert layout._current_tab_index == 1
 
@@ -837,14 +837,18 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         layout.body.update = MagicMock()
         layout.nav_rail.update = MagicMock()
-
-        FakeSV = type("FakeScreenerView", (), {"__init__": lambda self, *a, **kw: None})
+        select_and_run_mock = AsyncMock()
+        FakeSV = type(
+            "FakeScreenerView",
+            (),
+            {
+                "__init__": lambda self, *a, **kw: None,
+                "select_and_run_strategy": select_and_run_mock,
+            },
+        )
         with patch("ui.app_layout.ScreenerView", FakeSV):
-            mock_screener = MagicMock(spec=FakeSV)
-            mock_screener.select_and_run_strategy = AsyncMock()
-            layout._view_cache[1] = mock_screener
             await layout.run_strategy_from_home("my_strategy")
-            mock_screener.select_and_run_strategy.assert_called_once_with("my_strategy")
+            select_and_run_mock.assert_called_once_with("my_strategy")
 
     @pytest.mark.asyncio
     async def test_run_strategy_from_home_cancels_existing_debounce(self, mock_page):
@@ -862,6 +866,5 @@ class TestAppLayout:
             },
         )
         with patch("ui.app_layout.ScreenerView", FakeSV):
-            layout._view_cache[1] = FakeSV()
             await layout.run_strategy_from_home("test_strategy")
             mock_task.cancel.assert_called_once()

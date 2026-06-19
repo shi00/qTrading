@@ -41,7 +41,93 @@ _vb_params = {p["name"]: p["default"] for p in VolumeBreakoutStrategy().get_para
 _PA_PCT_CHG_RANGE = (_vb_params["pct_chg_min"] + 1.0, _vb_params["pct_chg_max"] - 1.0)
 _PA_TURNOVER_RANGE = (_vb_params["turnover_min"] + 0.5, _vb_params["turnover_min"] + 3.0)
 # 必不过样本（贵州茅台）：显式低于 pct_chg_min 阈值
-_MT_PCT_CHG_RANGE = (max(0.0, _vb_params["pct_chg_min"] - 1.8), max(0.1, _vb_params["pct_chg_min"] - 0.5))
+_MT_PCT_CHG_RANGE = (max(0.0, _vb_params["pct_chg_min"] - 1.8), max(0.0, _vb_params["pct_chg_min"] - 0.5))
+
+# A8: 裸 SQL 列清单常量化 — 与 ORM 模型对齐校验
+# INSERT 仅写入业务列（省略 updated_at/created_at 等 server_default 列及可空列），
+# 故常量是 ORM 列的子集；此处断言子集关系以捕获 schema 漂移/列名拼写错误。
+from data.persistence.models import (
+    DailyIndicators,
+    DailyQuotes,
+    IndexDaily,
+    StockBasic,
+    SyncStatus,
+    TradeCal,
+)
+
+STOCK_BASIC_COLUMNS = (
+    "ts_code",
+    "symbol",
+    "name",
+    "area",
+    "industry",
+    "market",
+    "list_date",
+    "list_status",
+)
+TRADE_CAL_COLUMNS = ("cal_date", "exchange", "is_open", "pretrade_date")
+DAILY_QUOTES_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+    "adj_factor",
+)
+DAILY_INDICATORS_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "pe_ttm",
+    "pb",
+    "ps_ttm",
+    "total_mv",
+    "circ_mv",
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+)
+INDEX_DAILY_COLUMNS = (
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+)
+SYNC_STATUS_COLUMNS = (
+    "table_name",
+    "last_sync_date",
+    "last_data_date",
+    "record_count",
+    "status",
+    "last_result_status",
+    "error_count",
+)
+
+
+def _assert_columns_subset(name: str, cols: tuple[str, ...], orm_cls: type) -> None:
+    orm_cols = {c.name for c in orm_cls.__table__.columns}
+    extra = set(cols) - orm_cols
+    assert not extra, f"{name} 含 {orm_cls.__name__} ORM 不存在的列: {extra}"
+
+
+_assert_columns_subset("STOCK_BASIC_COLUMNS", STOCK_BASIC_COLUMNS, StockBasic)
+_assert_columns_subset("TRADE_CAL_COLUMNS", TRADE_CAL_COLUMNS, TradeCal)
+_assert_columns_subset("DAILY_QUOTES_COLUMNS", DAILY_QUOTES_COLUMNS, DailyQuotes)
+_assert_columns_subset("DAILY_INDICATORS_COLUMNS", DAILY_INDICATORS_COLUMNS, DailyIndicators)
+_assert_columns_subset("INDEX_DAILY_COLUMNS", INDEX_DAILY_COLUMNS, IndexDaily)
+_assert_columns_subset("SYNC_STATUS_COLUMNS", SYNC_STATUS_COLUMNS, SyncStatus)
 
 
 @pytest.fixture(scope="session")
@@ -54,7 +140,17 @@ async def e2e_playwright():
 
 @pytest.fixture(scope="session")
 async def e2e_browser(e2e_playwright):
-    browser = await e2e_playwright.chromium.launch(channel=BROWSER_CHANNEL, headless=True)
+    # 启动期断言 canvaskit.wasm 本地存在（route handler 离线化依赖此文件）
+    wasm_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / "canvaskit.wasm"
+    if not wasm_path.exists():
+        raise RuntimeError(
+            f"canvaskit.wasm not found at {wasm_path}. "
+            "E2E 离线化依赖此文件，请从 https://unpkg.com/canvaskit-wasm@latest/bin/canvaskit.wasm "
+            "下载并放置到 tests/e2e/mock_assets/canvaskit/ 目录"
+        )
+    browser = await e2e_playwright.chromium.launch(
+        channel=BROWSER_CHANNEL, headless=os.environ.get("E2E_HEADED", "0") != "1"
+    )
     yield browser
     await browser.close()
 
@@ -66,12 +162,6 @@ def event_loop_policy():
     return asyncio.DefaultEventLoopPolicy()
 
 
-def pytest_collection_modifyitems(items):
-    for item in items:
-        if not any(marker.name in ("unit", "integration", "e2e") for marker in item.iter_markers()):
-            item.add_marker(pytest.mark.e2e)
-
-
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -79,12 +169,12 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"rep_{rep.when}", rep)
 
 
-def _spawn(tmp_path_factory, config: dict, env_overrides: dict):
+def _spawn(tmp_path_factory, config: dict, env_overrides: dict) -> tuple:
     cfg_dir = tmp_path_factory.mktemp("e2e_cfg")
     cfg_file = cfg_dir / "user_settings.json"
     cfg_file.write_text(json.dumps(config), encoding="utf-8")
     proc, url = start_flet_app(cfg_file, env_overrides)
-    return proc, url
+    return proc, url, cfg_file
 
 
 def _terminate(proc):
@@ -100,9 +190,10 @@ def _terminate(proc):
 
 
 class AppServer:
-    def __init__(self, proc, url: str):
+    def __init__(self, proc, url: str, config_file: Path | None = None):
         self.proc = proc
         self.url = url
+        self.config_file = config_file
 
     def is_alive(self) -> bool:
         return self.proc.poll() is None
@@ -131,27 +222,31 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # In CI and sometimes local environments, unpkg.com can be extremely slow or timeout,
     # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
     # To fix this, we intercept canvaskit requests and serve them from local mock_assets.
-    # Other requests (fonts, etc.) continue to the network.
-    # [PITFALL FIX] 拦截并缓存 CanvasKit WASM 文件加载
+    # Other external requests (fonts, icons, etc.) are aborted to force offline mode.
+    # [PITFALL FIX] 拦截外部资源请求，强制离线化 E2E 测试
     # 坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
     # Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。
     # 更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
-    # 解决方案：我们在 e2e 启动时拦截对 canvaskit 文件的请求，并使用本地预下载的版本进行响应。
-    # 这将原本需要数十秒的网络请求压缩至几毫秒，从而稳定保障 Flet UI 的秒级加载。
-    async def intercept_canvaskit(route, request):
+    # 解决方案：拦截外部资源请求，canvaskit 命中本地缓存则 fulfill，其余外部请求强制 abort（离线）。
+    # 内部请求（Flet app 本身、data/blob URI）继续放行。
+    async def intercept_external(route, request):
         url = request.url
+        # 内部请求（Flet app 本身、data/blob URI）直接放行
+        if url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:")):
+            await route.continue_()
+            return
+        # 外部资源：仅 canvaskit 命中本地缓存
         if "canvaskit" in url:
             filename = url.split("/")[-1]
-            from pathlib import Path
-
             local_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / filename
             if local_path.exists():
                 content_type = "application/wasm" if filename.endswith(".wasm") else "application/javascript"
-                await route.fulfill(status=200, content_type=content_type, body=local_path.read_bytes())
+                await route.fulfill(status=200, content_type=content_type, path=str(local_path))
                 return
-        await route.continue_()
+        # 未命中本地缓存的外部请求：强制离线
+        await route.abort()
 
-    await page.route("**/*", intercept_canvaskit)
+    await page.route("**/*", intercept_external)
 
     try:
         await fp.open(app.url)
@@ -170,13 +265,15 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # Only enabled for flet_app (which calls initialize_services).
     if check_db_error:
         try:
-            await page.wait_for_timeout(2000)
             error_text = I18n.get("error_db_init_failed")
-            if await fp.has_text(error_text):
-                # R9: 不内联日志原文（可能含 DB 连接串/密码），只引用已脱敏的日志工件路径
-                raise RuntimeError(
-                    "Flet app shows DB initialization error UI. See sanitized log artifact: logs/e2e-flet-app.log"
-                )
+            # 轮询等待错误 UI 出现（fail-fast，替代固定 2s sleep）
+            for _ in range(10):  # 最多 2s，每 200ms 检查一次
+                if await fp.has_text(error_text):
+                    # R9: 不内联日志原文（可能含 DB 连接串/密码），只引用已脱敏的日志工件路径
+                    raise RuntimeError(
+                        "Flet app shows DB initialization error UI. See sanitized log artifact: logs/e2e-flet-app.log"
+                    )
+                await page.wait_for_timeout(200)
         except RuntimeError:
             await context.close()
             raise
@@ -274,8 +371,8 @@ async def _seed_e2e_data() -> None:
 
             # stock_basic
             await conn.execute(
-                """
-                INSERT INTO stock_basic (ts_code, symbol, name, area, industry, market, list_date, list_status)
+                f"""
+                INSERT INTO stock_basic ({", ".join(STOCK_BASIC_COLUMNS)})
                 VALUES
                     ($1, $2, $3, $4, $5, $6, $7, $8),
                     ($9, $10, $11, $12, $13, $14, $15, $16)
@@ -308,7 +405,7 @@ async def _seed_e2e_data() -> None:
                 cal_rows.append((d, "SSE", is_open, pretrade))
                 d += timedelta(days=1)
             await conn.executemany(
-                "INSERT INTO trade_cal (cal_date, exchange, is_open, pretrade_date) VALUES ($1, $2, $3, $4)",
+                f"INSERT INTO trade_cal ({', '.join(TRADE_CAL_COLUMNS)}) VALUES ($1, $2, $3, $4)",
                 cal_rows,
             )
 
@@ -397,17 +494,17 @@ async def _seed_e2e_data() -> None:
                 )
 
             await conn.executemany(
-                """
+                f"""
                 INSERT INTO daily_quotes
-                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+                    ({", ".join(DAILY_QUOTES_COLUMNS)})
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
                 quote_rows,
             )
             await conn.executemany(
-                """
+                f"""
                 INSERT INTO daily_indicators
-                    (ts_code, trade_date, pe_ttm, pb, ps_ttm, total_mv, circ_mv, turnover_rate, turnover_rate_f, volume_ratio)
+                    ({", ".join(DAILY_INDICATORS_COLUMNS)})
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
                 indicator_rows,
@@ -437,9 +534,9 @@ async def _seed_e2e_data() -> None:
                     )
                 )
             await conn.executemany(
-                """
+                f"""
                 INSERT INTO index_daily
-                    (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount)
+                    ({", ".join(INDEX_DAILY_COLUMNS)})
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 index_rows,
@@ -455,9 +552,9 @@ async def _seed_e2e_data() -> None:
                 ("index_daily", today, today, 60, "success", "success", 0),
             ]
             await conn.executemany(
-                """
+                f"""
                 INSERT INTO sync_status
-                    (table_name, last_sync_date, last_data_date, record_count, status, last_result_status, error_count)
+                    ({", ".join(SYNC_STATUS_COLUMNS)})
                 VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
                 sync_rows,
@@ -465,6 +562,20 @@ async def _seed_e2e_data() -> None:
 
             # suspend_d — 空表（无停牌记录，确保 is_tradable=TRUE）
             # financial_reports — 空表（volume_breakout 不依赖此数据）
+
+            # A8: 关键表计数断言 — 期望计数从播种数据派生，计数不符抛 RuntimeError
+            # 表名为硬编码字面量（非用户输入），无 SQL 注入风险
+            _expected_counts = {
+                "stock_basic": 2,
+                "daily_quotes": len(quote_rows),
+                "daily_indicators": len(indicator_rows),
+                "trade_cal": len(cal_rows),
+                "index_daily": len(index_rows),
+            }
+            for _table, _expected in _expected_counts.items():
+                _actual = await conn.fetchval(f"SELECT count(*) FROM {_table}")
+                if _actual != _expected:
+                    raise RuntimeError(f"E2E seed 计数不符: table={_table}, expected={_expected}, actual={_actual}")
 
         logger.info("[E2E Seeding] Database seeded successfully.")
     finally:
@@ -497,7 +608,7 @@ def flet_app(tmp_path_factory, seed_e2e_data):
     2. 对于语言切换等破坏性极强的状态，建议放在测试套件的末尾执行（通过文件命名或 pytest 排序）。
     3. 如果遇到莫名其妙的下游测试全部超时，请首先检查上一个执行的用例是否引发了状态污染。
     """
-    proc, url = _spawn(
+    proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={
             "onboarding_complete": True,
@@ -520,19 +631,19 @@ def flet_app(tmp_path_factory, seed_e2e_data):
             "DATABASE_URL": TEST_DATABASE_URL,
         },
     )
-    app = AppServer(proc, url)
+    app = AppServer(proc, url, cfg_file)
     yield app
     _terminate(proc)
 
 
 @pytest.fixture(scope="session")
 def wizard_app(tmp_path_factory):
-    proc, url = _spawn(
+    proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={"locale": "zh"},
         env_overrides={"DATABASE_URL": TEST_DATABASE_URL},
     )
-    app = AppServer(proc, url)
+    app = AppServer(proc, url, cfg_file)
     yield app
     _terminate(proc)
 
@@ -549,3 +660,53 @@ async def wizard_page(e2e_browser, wizard_app: AppServer, request):
     fp = await _make_page(e2e_browser, wizard_app, request)
     yield fp
     await _teardown_page(fp)
+
+
+@pytest.fixture(autouse=True)
+def pristine_config(request):
+    """配置快照/还原：仅对标记 ``mutates_config`` 的用例激活。
+
+    用例前快照当前配置文件 + 测试进程 I18n locale，用例后还原。
+    覆盖主题/语言两个维度（配置文件整体快照，含 DB 等所有键）。
+
+    注意：Flet app 是 session 级单进程，其内存中的 ConfigHandler 缓存无法从测试进程
+    直接清空。本 fixture 还原磁盘配置文件，确保下一次 app 重启读到干净配置；
+    同时还原测试进程的 I18n locale，避免后续用例的断言字符串语言错乱。
+    """
+    marker = request.node.get_closest_marker("mutates_config")
+    if marker is None:
+        yield
+        return
+
+    # 根据用例请求的 page fixture 推断对应的 app 配置文件
+    config_file: Path | None = None
+    if "e2e_page" in request.fixturenames:
+        app: AppServer = request.getfixturevalue("flet_app")
+        config_file = app.config_file
+    elif "wizard_page" in request.fixturenames:
+        app = request.getfixturevalue("wizard_app")
+        config_file = app.config_file
+
+    # 快照磁盘配置文件
+    file_snapshot: str | None = None
+    if config_file and config_file.exists():
+        file_snapshot = config_file.read_text(encoding="utf-8")
+
+    # 快照测试进程 I18n locale
+    locale_snapshot = I18n.current_locale()
+
+    yield
+
+    # 还原磁盘配置文件
+    if config_file and file_snapshot is not None:
+        try:
+            config_file.write_text(file_snapshot, encoding="utf-8")
+        except OSError as e:
+            logger.warning("[pristine_config] 还原配置文件失败 %s: %s", config_file, e)
+
+    # 还原测试进程 I18n locale
+    if I18n.current_locale() != locale_snapshot:
+        try:
+            I18n.set_locale(locale_snapshot)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[pristine_config] 还原 I18n locale 到 %s 失败: %s", locale_snapshot, e)

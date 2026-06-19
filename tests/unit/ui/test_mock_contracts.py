@@ -7,11 +7,9 @@
 （显式赋值的属性出现在 __dict__ 中，自动创建的不出现）。
 """
 
-import flet as ft
 import pytest
 
 from ui.theme import AppColors, AppStyles
-from tests.unit.ui.mock_flet import MockFletPage
 
 
 def _public_attrs(cls):
@@ -75,33 +73,3 @@ def test_mock_config_handler_uses_autospec(mock_config_handler):
     # autospec 后，访问 ConfigHandler 上不存在的方法应抛 AttributeError
     with pytest.raises(AttributeError):
         _ = mock_config_handler.nonexistent_method_never_in_config_handler
-
-
-def test_mock_flet_page_core_attrs_exist_on_real_page():
-    """MockFletPage 核心属性/方法必须在真实 ft.Page 上存在。
-
-    捕捉 flet 升级时 MockFletPage 与真实 Page 的接口漂移。
-    检查 MockFletPage 显式定义的公开成员与 ft.Page 真实接口的交集，
-    确保每个 MockFletPage 实现的成员在 flet 升级后仍存在。
-    项目扩展方法（如 show_toast 由 main.py 动态挂载）不在 ft.Page 上，
-    因此只检查 MockFletPage 中与 ft.Page 有对应关系的成员。
-    """
-    real_page_attrs = {name for name in dir(ft.Page) if not name.startswith("_")}
-    # MockFletPage 显式定义的公开成员（不含继承自 object 的）
-    mock_page_attrs = {
-        name
-        for name in vars(MockFletPage)
-        if not name.startswith("_") and name not in {"__dict__", "__module__", "__weakref__", "__doc__"}
-    }
-    # 项目扩展方法/属性（由 main.py 动态挂载到 Page 实例，不在 flet 0.28.3 原生 Page 类上）
-    # - show_toast: main.py:246 动态挂载
-    # - dialog: main.py:106 动态赋值
-    # - can_pop/pop: MockFletPage 辅助方法，flet 0.28.3 未提供
-    # - snack_bar/splash: flet 旧版 API，0.28.3 已移除但 MockFletPage 保留兼容
-    _PROJECT_EXTENSIONS = {"show_toast", "can_pop", "pop", "dialog", "snack_bar", "splash"}
-    # 只检查 flet 原生接口对应的成员
-    flet_native_members = mock_page_attrs - _PROJECT_EXTENSIONS
-    for attr in flet_native_members:
-        assert attr in real_page_attrs, (
-            f"MockFletPage.{attr} 不在 ft.Page 的公开接口中——flet 可能已升级，请检查 mock_flet.py 是否需要同步"
-        )

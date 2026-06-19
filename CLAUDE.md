@@ -251,6 +251,16 @@ class MyService:
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 方法 (由 `singleton_registry` 的集中 `atexit` 处理器调用，按注册逆序执行)
 6. 必须支持通过参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖
 
+**设计准则：依赖注入优先**
+
+新增单例须支持依赖注入/可注入时钟：构造函数应接收可选的 config/clock 注入参数，默认走生产实现（ConfigHandler/time.monotonic），测试可传 fake。这样无需替换 sys.modules 或全局 patch。
+
+```python
+def __init__(self, *, config=None, clock=None):
+    self._config = config  # None → 走 ConfigHandler
+    self._clock = clock or time.monotonic  # None → 走 time.monotonic
+```
+
 **@register_singleton 单例**: 见 `utils/singleton_registry.py` 的注册清单（当前含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/LocalModelManager/StrategyManager）。
 
 **非注册单例**: `ConfigHandler` (静态方法/类方法 + RWLockFair 保护)、`ProxyManager` (非装饰器单例)。

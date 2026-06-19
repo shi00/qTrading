@@ -6,12 +6,12 @@ Tests for TokenBucket rate limiter.
 
 import asyncio
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
 import pytest
 
+from tests.virtual_clock import VirtualClock
 from utils.rate_limiter import TokenBucket
 
 
@@ -56,18 +56,18 @@ class TestTokenBucketConsume(unittest.TestCase):
 
     def test_consume_sufficient_tokens(self):
         """充足令牌消费"""
-        bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+        clock = VirtualClock()
+        with patch("utils.rate_limiter.time.monotonic", clock.now), patch("utils.rate_limiter.time.sleep", clock.sleep):
+            bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
 
-        start_time = time.monotonic()
-        bucket.consume(5)
-        elapsed = time.monotonic() - start_time
+            start = clock.now()
+            bucket.consume(5)
+            elapsed = clock.now() - start
 
-        self.assertLess(elapsed, 0.1)
-        self.assertAlmostEqual(bucket.tokens, 5.0, places=1)
+            self.assertLess(elapsed, 0.1)
+            self.assertAlmostEqual(bucket.tokens, 5.0, places=1)
 
-    @patch("utils.rate_limiter.time.monotonic")
-    @patch("utils.rate_limiter.time.sleep")
-    def test_consume_insufficient_tokens(self, mock_sleep, mock_monotonic):
+    def test_consume_insufficient_tokens(self):
         """不足令牌消费 - 需等待（虚拟时钟，不真实 sleep）。
 
         覆盖 rate_limiter.py:57-96 的 _consume_reserve + consume：
@@ -80,17 +80,15 @@ class TestTokenBucketConsume(unittest.TestCase):
         RuntimeError("no running event loop")，被 except 捕获后 pass，
         不影响测试。session 级事件循环存在但未"运行"，行为一致。
         """
-        # 模拟时间序列：构造时 2 次 + _consume_reserve 1 次 = 3 次
-        mock_monotonic.side_effect = [0.0, 0.0, 0.0]
-        bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
+        clock = VirtualClock()
+        with patch("utils.rate_limiter.time.monotonic", clock.now), patch("utils.rate_limiter.time.sleep", clock.sleep):
+            bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
 
-        bucket.consume(5)
+            bucket.consume(5)
 
-        # 验证 time.sleep 被调用（等待令牌补充）
-        mock_sleep.assert_called_once()
-        wait_time = mock_sleep.call_args[0][0]
-        self.assertGreater(wait_time, 0)  # 需等待
-        self.assertLess(bucket.tokens, 0)
+            # 验证虚拟时钟推进（等待令牌补充）
+            self.assertGreater(clock.now(), 0)
+            self.assertLess(bucket.tokens, 0)
 
     def test_consume_all_tokens(self):
         """消费所有令牌"""
@@ -113,16 +111,20 @@ class TestTokenBucketRefill(unittest.TestCase):
     """测试令牌补充"""
 
     def test_refill_tokens(self):
-        bucket = TokenBucket(start_tokens=0, capacity=100, rate=10.0)
-        bucket.last_update = time.monotonic() - 1.0
-        bucket._consume_reserve(0)
-        self.assertGreater(bucket.tokens, 0)
+        clock = VirtualClock()
+        with patch("utils.rate_limiter.time.monotonic", clock.now):
+            bucket = TokenBucket(start_tokens=0, capacity=100, rate=10.0)
+            clock.advance(1.0)
+            bucket._consume_reserve(0)
+            self.assertGreater(bucket.tokens, 0)
 
     def test_refill_not_exceed_capacity(self):
-        bucket = TokenBucket(start_tokens=10, capacity=20, rate=100.0)
-        bucket.last_update = time.monotonic() - 1.0
-        bucket._consume_reserve(0)
-        self.assertLessEqual(bucket.tokens, 20.0)
+        clock = VirtualClock()
+        with patch("utils.rate_limiter.time.monotonic", clock.now):
+            bucket = TokenBucket(start_tokens=10, capacity=20, rate=100.0)
+            clock.advance(1.0)
+            bucket._consume_reserve(0)
+            self.assertLessEqual(bucket.tokens, 20.0)
 
 
 class TestTokenBucketThreadSafety(unittest.TestCase):
@@ -158,44 +160,45 @@ class TestTokenBucketAsync(unittest.TestCase):
 
     def test_consume_async_sufficient(self):
         """异步消费充足令牌"""
+        clock = VirtualClock()
 
         async def run_test():
-            bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
+            with (
+                patch("utils.rate_limiter.time.monotonic", clock.now),
+                patch("utils.rate_limiter.asyncio.sleep", clock.async_sleep),
+            ):
+                bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
 
-            start_time = time.monotonic()
-            await bucket.consume_async(5)
-            elapsed = time.monotonic() - start_time
+                start = clock.now()
+                await bucket.consume_async(5)
+                elapsed = clock.now() - start
 
-            self.assertLess(elapsed, 0.1)
-            self.assertAlmostEqual(bucket.tokens, 5.0, places=1)
+                self.assertLess(elapsed, 0.1)
+                self.assertAlmostEqual(bucket.tokens, 5.0, places=1)
 
         asyncio.run(run_test())
 
-    @patch("utils.rate_limiter.time.monotonic")
-    @patch("utils.rate_limiter.asyncio.sleep")
-    def test_consume_async_insufficient(self, mock_async_sleep, mock_monotonic):
+    def test_consume_async_insufficient(self):
         """异步消费不足令牌（虚拟时钟，不真实 sleep）。
 
         覆盖 rate_limiter.py:57-110 的 _consume_reserve + consume_async：
         - __init__ 调用 time.monotonic() 2 次（line 51, 55）
         - _consume_reserve 调用 time.monotonic() 1 次（line 63）
         - consume_async 调用 asyncio.sleep(wait_time) 1 次（line 105）
-
-        注意：用 return_value 而非 side_effect，因为 Windows ProactorEventLoop
-        在 asyncio.run() 关闭事件循环时会额外调用 time.monotonic()，
-        side_effect 会耗尽抛 StopIteration。
         """
+        clock = VirtualClock()
 
         async def run_test():
-            mock_monotonic.return_value = 0.0
-            bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
+            with (
+                patch("utils.rate_limiter.time.monotonic", clock.now),
+                patch("utils.rate_limiter.asyncio.sleep", clock.async_sleep),
+            ):
+                bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
 
-            await bucket.consume_async(5)
+                await bucket.consume_async(5)
 
-            # 验证 asyncio.sleep 被调用（等待令牌补充）
-            mock_async_sleep.assert_called_once()
-            wait_time = mock_async_sleep.call_args[0][0]
-            self.assertGreater(wait_time, 0)
+                # 验证虚拟时钟推进（等待令牌补充）
+                self.assertGreater(clock.now(), 0)
 
         asyncio.run(run_test())
 
@@ -357,7 +360,6 @@ class TestTokenBucketConcurrent(unittest.TestCase):
             try:
                 for _ in range(50):
                     bucket.reduce_rate(0.9)
-                    time.sleep(0.001)
             except Exception as e:
                 errors.append(e)
 
@@ -365,7 +367,6 @@ class TestTokenBucketConcurrent(unittest.TestCase):
             try:
                 for _ in range(50):
                     bucket.on_success()
-                    time.sleep(0.001)
             except Exception as e:
                 errors.append(e)
 
@@ -394,7 +395,6 @@ class TestTokenBucketConcurrent(unittest.TestCase):
             try:
                 for _ in range(20):
                     bucket.consume(1)
-                    time.sleep(0.002)
             except Exception as e:
                 errors.append(e)
 
@@ -402,7 +402,6 @@ class TestTokenBucketConcurrent(unittest.TestCase):
             try:
                 for _ in range(20):
                     bucket.reduce_rate(0.8)
-                    time.sleep(0.003)
             except Exception as e:
                 errors.append(e)
 
@@ -427,7 +426,6 @@ class TestTokenBucketConcurrent(unittest.TestCase):
             try:
                 for i in range(10):
                     bucket.reconfigure(rate=5.0 + i)
-                    time.sleep(0.005)
             except Exception as e:
                 errors.append(e)
 
@@ -435,7 +433,6 @@ class TestTokenBucketConcurrent(unittest.TestCase):
             try:
                 for _ in range(10):
                     bucket.consume(1)
-                    time.sleep(0.005)
             except Exception as e:
                 errors.append(e)
 
@@ -478,15 +475,17 @@ class TestTokenBucketAdaptiveEdgeCases(unittest.TestCase):
 
     def test_on_success_recovery_interval_guard(self):
         """_RECOVERY_INTERVAL 内不重复恢复"""
-        bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
-        bucket.reduce_rate(0.5)
-        self.assertAlmostEqual(bucket.rate, 5.0, places=2)
+        clock = VirtualClock()
+        with patch("utils.rate_limiter.time.monotonic", clock.now):
+            bucket = TokenBucket(start_tokens=10, capacity=20, rate=10.0)
+            bucket.reduce_rate(0.5)
+            self.assertAlmostEqual(bucket.rate, 5.0, places=2)
 
-        bucket._consecutive_successes = 10
-        bucket._last_recovery_time = time.monotonic()
-        bucket.on_success()
+            bucket._consecutive_successes = 10
+            bucket._last_recovery_time = clock.now()
+            bucket.on_success()
 
-        self.assertAlmostEqual(bucket.rate, 5.0, places=2)
+            self.assertAlmostEqual(bucket.rate, 5.0, places=2)
 
     def test_on_success_no_recovery_above_original(self):
         """恢复速率不超过 original_rate"""

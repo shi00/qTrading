@@ -43,7 +43,6 @@ class MockFletPage:
         self.overlay = []
         self._client_storage = MockClientStorage()
         self._session = MockSession()
-        self._snack_bar = None
         self._dialog = None
         self._theme_mode = None
         self._theme = None
@@ -56,7 +55,6 @@ class MockFletPage:
         self.padding = 0
         self.spacing = 0
         self.bgcolor = None
-        self.splash = None
         self.data = None
         self.horizontal_alignment = None
         self.vertical_alignment = None
@@ -74,14 +72,6 @@ class MockFletPage:
     @property
     def session(self):
         return self._session
-
-    @property
-    def snack_bar(self):
-        return self._snack_bar
-
-    @snack_bar.setter
-    def snack_bar(self, value):
-        self._snack_bar = value
 
     @property
     def dialog(self):
@@ -166,12 +156,6 @@ class MockFletPage:
         pass
 
     def go(self, route):
-        pass
-
-    def can_pop(self):
-        return True
-
-    def pop(self):
         pass
 
     def open(self, control):

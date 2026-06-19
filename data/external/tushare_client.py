@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import threading
+import time
 import typing
 
 import pandas as pd
@@ -126,7 +127,7 @@ class TushareClient:
         "block_trade": "block_trade",
     }
 
-    def __new__(cls, token: str | None = None):
+    def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -165,11 +166,11 @@ class TushareClient:
         Returns:
             Effective rate limit (requests per minute), or 0 if not configured.
         """
-        tier = ConfigHandler.get_tushare_point_tier()
+        tier = self._get_tushare_point_tier()
         preset = self._POINT_TIER_PRESETS.get(tier)
         if preset is not None:
             return preset
-        return ConfigHandler.get_tushare_api_limit()
+        return self._get_tushare_api_limit()
 
     def reload_rate_limiters(self):
         """Rebuild rate limiters from current config. Call after tier/limit change in settings."""
@@ -228,7 +229,7 @@ class TushareClient:
 
         return rate_limiter, api_limiters
 
-    def __init__(self, token: str | None = None):
+    def __init__(self, token: str | None = None, *, config=None, clock=None):
         if self._initialized:
             if token and token != self.token:
                 self.set_token(token)
@@ -238,6 +239,9 @@ class TushareClient:
             if self._initialized:
                 return
 
+            self._config = config  # 若 None 则后续走 ConfigHandler
+            self._clock = clock or time.monotonic  # 默认走 time.monotonic
+
             self._trade_cal_cache: set[str] = set()
             self._loaded_years: set[str] = set()
             self._calendar_lock = threading.Lock()
@@ -246,9 +250,9 @@ class TushareClient:
             self._capability_cache_lock = threading.Lock()
             self._bg_tasks: set[asyncio.Task] = set()
 
-            self.token = token or ConfigHandler.get_token()
-            self.timeout = ConfigHandler.get_tushare_timeout()
-            self.max_retries = ConfigHandler.get_request_max_retries()
+            self.token = token or self._get_token()
+            self.timeout = self._get_tushare_timeout()
+            self.max_retries = self._get_request_max_retries()
 
             self._rate_limiter, self._api_limiters = self._build_rate_limiters()
 
@@ -263,6 +267,31 @@ class TushareClient:
                 self.pro = None
 
             self._initialized = True
+
+    def _get_token(self):
+        if self._config is not None:
+            return self._config.get_token()
+        return ConfigHandler.get_token()
+
+    def _get_tushare_timeout(self):
+        if self._config is not None:
+            return self._config.get_tushare_timeout()
+        return ConfigHandler.get_tushare_timeout()
+
+    def _get_request_max_retries(self):
+        if self._config is not None:
+            return self._config.get_request_max_retries()
+        return ConfigHandler.get_request_max_retries()
+
+    def _get_tushare_point_tier(self):
+        if self._config is not None:
+            return self._config.get_tushare_point_tier()
+        return ConfigHandler.get_tushare_point_tier()
+
+    def _get_tushare_api_limit(self):
+        if self._config is not None:
+            return self._config.get_tushare_api_limit()
+        return ConfigHandler.get_tushare_api_limit()
 
     def set_token(self, token: str | None) -> bool:
         """

@@ -42,6 +42,7 @@ async def test_wizard_renders_welcome(wizard_page):
     assert await wizard_page.has_text(db_title)
 
 
+@pytest.mark.mutates_config
 async def test_wizard_language_switch(wizard_page):
     """测试：语言切换（纯 UI，无后端依赖）。"""
     lang_label = I18n.get("settings_language")
@@ -59,19 +60,7 @@ async def test_wizard_language_switch(wizard_page):
 
     assert zh_disappeared, f"中文欢迎词 '{welcome_guide_zh}' 未能在切换语言后消失"
 
-    # 恢复中文，避免污染后续依赖中文 locale 的测试
-    # （wizard_app 是 session 级别 fixture，语言切换会持久化到内存缓存和配置文件）
-    lang_zh = I18n.get("settings_lang_zh")
-    await wizard_page.select_dropdown("language", lang_zh)
-
-    # 确认中文 UI 已恢复，避免后续测试读到中间状态
-    welcome_restored = False
-    for _ in range(25):
-        if await wizard_page.has_text(welcome_guide_zh):
-            welcome_restored = True
-            break
-        await wizard_page.page.wait_for_timeout(200)
-    assert welcome_restored, f"切换回中文后欢迎词 '{welcome_guide_zh}' 未出现"
+    # 配置还原由 pristine_config fixture 自动处理（见 tests/e2e/conftest.py）
 
 
 async def test_wizard_forward_then_back(wizard_page):
@@ -131,6 +120,7 @@ async def test_wizard_db_validation_success(wizard_page):
     await wizard_page.fill_textbox(I18n.get("db_password"), db["password"])
     await wizard_page.fill_textbox(I18n.get("db_name"), db["database"])
 
+    # 等待 Flet 处理所有输入并更新表单状态，防止验证按钮点击时表单尚未同步
     await wizard_page.page.wait_for_timeout(500)
 
     btn_verify = I18n.get("wizard_btn_verify_next")
