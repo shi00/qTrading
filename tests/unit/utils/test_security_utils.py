@@ -324,7 +324,7 @@ class TestPyInstallerSpecExcludesKeyFiles:
     def test_spec_has_key_exclusion_patterns(self):
         import os
 
-        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "AStockScreener.spec")
+        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "AStockScreener.spec")
         if not os.path.exists(spec_path):
             pytest.skip("AStockScreener.spec not found")
         with open(spec_path, encoding="utf-8") as f:
@@ -335,7 +335,7 @@ class TestPyInstallerSpecExcludesKeyFiles:
     def test_spec_datas_filtered(self):
         import os
 
-        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "AStockScreener.spec")
+        spec_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "AStockScreener.spec")
         if not os.path.exists(spec_path):
             pytest.skip("AStockScreener.spec not found")
         with open(spec_path, encoding="utf-8") as f:
