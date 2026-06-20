@@ -61,18 +61,25 @@ def _create_table_if_not_exists(table_name: str, *args, **kwargs) -> None:
     that may already have some tables from partial migrations.
 
     Uses a two-layer defense: first checks via ``_table_exists``, then
-    catches ``ProgrammingError`` / ``OperationalError`` in case the
-    inspector check fails in async contexts (same root cause as the
-    ``_index_exists`` bug — ``sa.inspect(conn)`` may not reliably
-    enumerate existing objects under asyncpg).
+    catches ``DuplicateTableError`` in case the inspector check fails in
+    async contexts (same root cause as the ``_index_exists`` bug —
+    ``sa.inspect(conn)`` may not reliably enumerate existing objects
+    under asyncpg).  Only ``DuplicateTableError`` is silenced — other
+    ``ProgrammingError`` subtypes (e.g. ``UndefinedFunctionError``) are
+    re-raised so real schema errors are not masked.
     """
     if _table_exists(table_name):
         return
     try:
         op.create_table(table_name, *args, **kwargs)
-    except sa.exc.ProgrammingError:
-        # Table already exists — safe to ignore for idempotent migrations.
-        pass
+    except sa.exc.ProgrammingError as exc:
+        # Only silence "table already exists" errors for idempotency.
+        orig = getattr(exc, "orig", None)
+        orig_cls_name = type(orig).__name__ if orig else ""
+        if orig_cls_name == "DuplicateTableError":
+            pass
+        else:
+            raise
 
 
 def _create_index_if_not_exists(
