@@ -204,14 +204,12 @@ more-itertools==11.1.0
     #   jaraco-functools
 mplfinance==0.12.10b0
     # via astockscreener (pyproject.toml)
-msgpack==1.2.1
+msgpack==1.1.2
     # via cachecontrol
 multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-nodeenv==1.10.0
-    # via pyright
 numpy==2.4.6
     # via
     #   astockscreener (pyproject.toml)
@@ -300,8 +298,6 @@ pyparsing==3.3.2
     # via
     #   matplotlib
     #   pip-requirements-parser
-pyright==1.1.410
-    # via astockscreener (pyproject.toml)
 pytest==9.0.3
     # via
     #   astockscreener (pyproject.toml)
@@ -419,7 +415,6 @@ typing-extensions==4.15.0
     #   openai
     #   pydantic
     #   pydantic-core
-    #   pyright
     #   readerwriterlock
     #   sqlalchemy
     #   typing-inspection
