@@ -29,6 +29,35 @@ _FREE_TEXT_MAX_LEN = 1000
 _FREE_TEXT_FIELDS = ("summary", "thinking", "ai_reason", "uncertainty_factors")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# === Task 6.8: 魔法数字提取为模块级常量 (ARCH-m1 / CQ-m1) ===
+# LiteLLM 全局配置
+LITELLM_SET_TIMEOUT = 30.0
+LITELLM_MAX_RETRIES = 2
+# HTTP 客户端
+DEFAULT_CLOUD_TIMEOUT = 30.0
+CONNECT_TIMEOUT = 5.0
+# 上下文长度限制
+GLOBAL_CONTEXT_MAX_LEN = 2000
+HISTORY_CONTEXT_MAX_LEN = 3000
+NEWS_TEXT_MAX_LEN = 500
+# Token 上下文窗口预警阈值（估算 token 数）
+TOKEN_CONTEXT_WARNING_THRESHOLD = 80000
+# 默认并发数
+DEFAULT_ANALYSIS_CONCURRENCY = 5
+DEFAULT_NEWS_CONCURRENCY = 1
+# 默认超时（秒）
+DEFAULT_ANALYSIS_TIMEOUT = 120.0
+DEFAULT_VERIFY_TIMEOUT = 10.0
+# 本地模型默认 max_tokens
+DEFAULT_LOCAL_MAX_TOKENS = 256
+# Prompt dump 文件保留时长（小时）
+PROMPT_DUMP_RETENTION_HOURS = 24
+# 错误消息截断长度
+ERROR_MESSAGE_TRUNCATE_LEN = 100
+# analyze_stock 中新闻/概念列表截断长度
+NEWS_LIST_LIMIT = 5
+CONCEPTS_LIMIT = 8
+
 _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_quote_snapshot",
     "ai_label_tech",
@@ -290,7 +319,7 @@ class AIService:
             dump_dir = self._get_prompt_dump_dir()
             if not os.path.isdir(dump_dir):
                 return
-            cutoff_ts = time.time() - 24 * 60 * 60
+            cutoff_ts = time.time() - PROMPT_DUMP_RETENTION_HOURS * 60 * 60
             for name in os.listdir(dump_dir):
                 file_path = os.path.join(dump_dir, name)
                 if os.path.isfile(file_path) and os.path.getmtime(file_path) < cutoff_ts:
@@ -306,8 +335,8 @@ class AIService:
 
         litellm.set_verbose = False  # type: ignore[reportPrivateImportUsage]  # LiteLLM private API usage for logging suppression
         litellm.drop_params = True
-        litellm.set_timeout = 30.0  # type: ignore[attr-defined]
-        litellm.max_retries = 2  # type: ignore[attr-defined]
+        litellm.set_timeout = LITELLM_SET_TIMEOUT  # type: ignore[attr-defined]
+        litellm.max_retries = LITELLM_MAX_RETRIES  # type: ignore[attr-defined]
         litellm.success_callback = []
         litellm.failure_callback = []
         litellm.modify_params = True
@@ -479,8 +508,8 @@ class AIService:
         if "response_format" in kwargs:
             request_params["response_format"] = kwargs["response_format"]
 
-        timeout_val = kwargs.get("timeout", 30.0)
-        request_params["timeout"] = httpx.Timeout(timeout_val, connect=5.0)
+        timeout_val = kwargs.get("timeout", DEFAULT_CLOUD_TIMEOUT)
+        request_params["timeout"] = httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT)
 
         return request_params
 
@@ -489,7 +518,7 @@ class AIService:
 
         def _factory():
             raw_val = ConfigHandler.get_ai_max_concurrent_analysis()
-            concurrency = max(1, int(raw_val)) if raw_val else 5
+            concurrency = max(1, int(raw_val)) if raw_val else DEFAULT_ANALYSIS_CONCURRENCY
             return asyncio.Semaphore(concurrency)
 
         return get_loop_local("ai_analysis_semaphore", _factory)
@@ -499,7 +528,7 @@ class AIService:
 
         def _factory():
             raw_val = ConfigHandler.get_ai_news_max_concurrent()
-            concurrency = max(1, int(raw_val)) if raw_val else 1
+            concurrency = max(1, int(raw_val)) if raw_val else DEFAULT_NEWS_CONCURRENCY
             return asyncio.Semaphore(concurrency)
 
         return get_loop_local("ai_news_semaphore", _factory)
@@ -552,7 +581,7 @@ class AIService:
 
         total_chars = sum(len(m.get("content", "")) for m in messages)
         estimated_tokens = total_chars // 3
-        if estimated_tokens > 80000:
+        if estimated_tokens > TOKEN_CONTEXT_WARNING_THRESHOLD:
             logger.warning(
                 "[AIService] Cloud | Prompt may exceed context window: ~%d tokens (%d chars)",
                 estimated_tokens,
@@ -679,11 +708,11 @@ class AIService:
         model: str | None = None,
         provider: str = "cloud",
         temperature: float = 0.3,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_CLOUD_TIMEOUT,
         json_mode: bool = True,
         on_chunk=None,
         purpose: str = "analysis",
-        local_max_tokens: int = 256,
+        local_max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS,
     ) -> dict:
         """
         Unified helper for Chat Completions (Cloud or Local).
@@ -777,7 +806,7 @@ class AIService:
     async def _chat_completion_with_failover(
         self,
         messages: list,
-        timeout: float = 120.0,
+        timeout: float = DEFAULT_ANALYSIS_TIMEOUT,
         json_mode: bool = True,
         on_chunk=None,
     ) -> dict:
@@ -886,7 +915,9 @@ class AIService:
                 if is_transient:
                     # Truncate before sanitizing to avoid breaking sanitization markers
                     raw_msg = str(e)
-                    truncated_raw = raw_msg[:100] if len(raw_msg) > 100 else raw_msg
+                    truncated_raw = (
+                        raw_msg[:ERROR_MESSAGE_TRUNCATE_LEN] if len(raw_msg) > ERROR_MESSAGE_TRUNCATE_LEN else raw_msg
+                    )
                     logger.warning(
                         "[AIService] Failover | ⚠️ %s failed (%s: %s)",
                         model,
@@ -950,7 +981,10 @@ class AIService:
 
         # Format news
         news_text = "\n".join(
-            [f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}" for n in news_list[:5]],
+            [
+                f"- [{n.get('source', '')}] {n.get('publish_time', '')[:10]} {n.get('title', '')}"
+                for n in news_list[:NEWS_LIST_LIMIT]
+            ],
         )
         if not news_list:
             news_text = "No recent news found."
@@ -962,7 +996,7 @@ class AIService:
 
             if injected_concepts and isinstance(injected_concepts, list) and len(injected_concepts) > 0:
                 # Use injected
-                concepts_str = ", ".join(injected_concepts[:8])
+                concepts_str = ", ".join(injected_concepts[:CONCEPTS_LIMIT])
                 stock_info["concepts"] = concepts_str
             elif isinstance(injected_concepts, list) and len(injected_concepts) == 0:
                 # If it's literally an empty list `[]`, nuke the key entirely so it doesn't appear in XML
@@ -1018,7 +1052,7 @@ class AIService:
             history_context = ""
 
         # Load System Prompt
-        from strategies.strategy_prompts import _UNIVERSAL_RULES, get_base_prompt
+        from core.prompt_base import _UNIVERSAL_RULES, get_base_prompt
         from utils.prompt_guard import neutralize_external_text, sanitize_prompt, validate_prompt
 
         if ui_prompt_override and ui_prompt_override.strip():
@@ -1028,16 +1062,22 @@ class AIService:
                 logger.warning("[AIService] Prompt override rejected: %s", warning)
                 sanitized_override = None
                 if strategy_key:
-                    base_prompt = get_base_prompt(strategy_key)
+                    base_prompt = get_base_prompt(
+                        strategy_key, ConfigHandler.get_strategy_prompt, ConfigHandler.get_ai_system_prompt
+                    )
                 else:
                     base_prompt = ConfigHandler.get_ai_system_prompt() or ""
             else:
                 sanitized_override = sanitize_prompt(raw_prompt)
                 base_prompt = (
-                    get_base_prompt(strategy_key) if strategy_key else ConfigHandler.get_ai_system_prompt() or ""
+                    get_base_prompt(strategy_key, ConfigHandler.get_strategy_prompt, ConfigHandler.get_ai_system_prompt)
+                    if strategy_key
+                    else ConfigHandler.get_ai_system_prompt() or ""
                 )
         elif strategy_key:
-            base_prompt = get_base_prompt(strategy_key)
+            base_prompt = get_base_prompt(
+                strategy_key, ConfigHandler.get_strategy_prompt, ConfigHandler.get_ai_system_prompt
+            )
             sanitized_override = None
         else:
             base_prompt = ConfigHandler.get_ai_system_prompt() or ""
@@ -1087,7 +1127,7 @@ class AIService:
         if global_context and include_global_context:
             # SEC-001: global_context 为不可信外部行情文本，中和后入 Prompt
             user_prompt_parts.append(
-                f"<global_context>\n{neutralize_external_text(global_context, 2000)}\n</global_context>"
+                f"<global_context>\n{neutralize_external_text(global_context, GLOBAL_CONTEXT_MAX_LEN)}\n</global_context>"
             )
         if news_text and news_text != "No recent news found.":
             # SEC-001: news_text 含外部新闻标题等不可信文本，中和后入 Prompt
@@ -1106,7 +1146,7 @@ class AIService:
 
         # 5. Few-Shot 学习样例
         if history_context and include_learning_context:
-            user_prompt_parts.append(self._safe_truncate(history_context, 3000))
+            user_prompt_parts.append(self._safe_truncate(history_context, HISTORY_CONTEXT_MAX_LEN))
             labels.append("ai_label_learning")
 
         # 6. 绝对核心：策略指令与提问 (Absolute Bottom - 紧贴生成区触发思考)
@@ -1203,7 +1243,7 @@ class AIService:
             # P1-12: Analyze Stock uses Cloud with failover by default
             res = await self._chat_completion_with_failover(
                 messages,
-                timeout=120.0,
+                timeout=DEFAULT_ANALYSIS_TIMEOUT,
                 json_mode=True,
                 on_chunk=on_chunk,
             )
@@ -1292,7 +1332,7 @@ class AIService:
         system_instruction = ConfigHandler.get_ai_news_prompt()
         messages = [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": text[:500]},
+            {"role": "user", "content": text[:NEWS_TEXT_MAX_LEN]},
         ]
 
         # 1. Try Local Model
@@ -1358,7 +1398,7 @@ class AIService:
             await self._chat_completion_litellm(
                 messages=[{"role": "user", "content": "Hi"}],
                 max_tokens=1,
-                timeout=10.0,
+                timeout=DEFAULT_VERIFY_TIMEOUT,
             )
             return True
         except Exception as e:
@@ -1412,7 +1452,7 @@ class AIService:
                 test_config,
                 [{"role": "user", "content": "Hi"}],
                 max_tokens=1,
-                timeout=10.0,
+                timeout=DEFAULT_VERIFY_TIMEOUT,
             )
 
             from utils.proxy_manager import ProxyManager

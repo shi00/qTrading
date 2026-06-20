@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, AsyncMock, PropertyMock, patch
 import pandas as pd
 
 from data.sync.historical import HistoricalSyncStrategy
-from data.sync.base import SyncResult
+from data.sync.base import SyncResult, SyncStatus
 
 
 def make_ctx():
@@ -632,6 +632,101 @@ class TestHistoricalSyncDailySnapshotExtended:
             datetime.date(2024, 6, 14), force=True, sync_result=SyncResult()
         )
         assert result is True
+
+    @pytest.mark.asyncio
+    async def test_verify_data_integrity_strict_loss_above_threshold_marks_partial(self):
+        """strict=True with data loss > 5% must flag status as PARTIAL."""
+        ctx = make_ctx()
+        # fetched=20 rows, saved=18 rows → 10% loss (> 5%) → PARTIAL
+        ctx.api.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": [f"{i:06d}.SZ" for i in range(20)],
+                    "trade_date": ["20240614"] * 20,
+                    "close": [10.0] * 20,
+                    "pct_chg": [1.0] * 20,
+                    "vol": [1000] * 20,
+                }
+            )
+        )
+        ctx.cache.save_daily_quotes = AsyncMock(return_value=18)
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert sr.status == SyncStatus.PARTIAL.value
+
+    @pytest.mark.asyncio
+    async def test_verify_data_integrity_strict_loss_below_threshold_stays_success(self):
+        """strict=True with data loss < 5% must keep status as SUCCESS."""
+        ctx = make_ctx()
+        # fetched=100 rows, saved=96 rows → 4% loss (< 5%) → SUCCESS
+        ctx.api.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": [f"{i:06d}.SZ" for i in range(100)],
+                    "trade_date": ["20240614"] * 100,
+                    "close": [10.0] * 100,
+                    "pct_chg": [1.0] * 100,
+                    "vol": [1000] * 100,
+                }
+            )
+        )
+        ctx.cache.save_daily_quotes = AsyncMock(return_value=96)
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert sr.status == SyncStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_verify_data_integrity_strict_boundary_exactly_five_percent_stays_success(self):
+        """Boundary case: exactly 5% loss (saved = fetched * 0.95) must stay SUCCESS.
+
+        Uses fetched=20, saved=19 so that 20 * 0.95 == 19.0 exactly (no
+        floating-point drift), verifying the strict-less-than comparison.
+        """
+        ctx = make_ctx()
+        ctx.api.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": [f"{i:06d}.SZ" for i in range(20)],
+                    "trade_date": ["20240614"] * 20,
+                    "close": [10.0] * 20,
+                    "pct_chg": [1.0] * 20,
+                    "vol": [1000] * 20,
+                }
+            )
+        )
+        ctx.cache.save_daily_quotes = AsyncMock(return_value=19)
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert sr.status == SyncStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_verify_data_integrity_non_strict_loss_above_threshold_stays_success(self):
+        """strict=False (non-critical table) with data loss > 5% must stay SUCCESS.
+
+        Backward-compatibility: non-critical tables only warn, never flag PARTIAL.
+        Uses moneyflow (strict=False by default) with 10% data loss.
+        """
+        ctx = make_ctx()
+        # daily_quotes: default make_ctx has fetched=1, saved=10 (gain, not loss) → no PARTIAL
+        # moneyflow: fetched=20, saved=18 → 10% loss, but strict=False → only warn
+        ctx.api.get_moneyflow = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": [f"{i:06d}.SZ" for i in range(20)],
+                    "trade_date": ["20240614"] * 20,
+                }
+            )
+        )
+        ctx.cache.save_moneyflow = AsyncMock(return_value=18)
+        strategy = HistoricalSyncStrategy(ctx)
+        sr = SyncResult()
+        await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True, sync_result=sr)
+        assert sr.status == SyncStatus.SUCCESS.value
+        # Warning should still be recorded for the mismatch
+        assert any("mf" in w for w in sr.warnings)
 
     @pytest.mark.asyncio
     async def test_missing_quote_columns(self):

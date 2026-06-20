@@ -1,10 +1,18 @@
 import logging
+import re
 import typing
 from typing import Any
 
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+_EXPR_WHITELIST = re.compile(r"^[a-zA-Z0-9_\s+\-*/().]+$")
+
+
+def _validate_expr(expr: str) -> None:
+    if not _EXPR_WHITELIST.match(expr):
+        raise ValueError("Invalid expression: contains forbidden characters")
 
 
 class DataQualityService:
@@ -154,6 +162,7 @@ class DataQualityService:
 
         for name, expr, tolerance in rules:
             try:
+                _validate_expr(expr)
                 # CC-06: Implement actual cross-validation logic
                 # Calculate difference based on expression
                 diff = df.eval(expr)
@@ -167,7 +176,10 @@ class DataQualityService:
                     issues.append(
                         f"Rule '{name}' failed: {fail_count} rows exceed tolerance {tolerance} (e.g. index {sample})",
                     )
+            except (KeyError, ValueError, TypeError) as e:
+                raise type(e)(f"Data quality check failed due to schema/type error: {e}") from e
             except Exception as e:
                 issues.append(f"Rule '{name}' execution error: {e!s}")
+                logger.warning("Data quality check warning: %s", e, exc_info=True)
 
         return issues

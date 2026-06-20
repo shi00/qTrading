@@ -1120,7 +1120,7 @@ class TestUniversalRulesSeparateSystemMessage:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy"})
-        with patch("strategies.strategy_prompts.get_base_prompt", return_value="Strategy prompt"):
+        with patch("core.prompt_base.get_base_prompt", return_value="Strategy prompt"):
             await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "name": "test"},
                 tech_info={},
@@ -1190,7 +1190,7 @@ class TestUniversalRulesSeparateSystemMessage:
         svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
-            patch("strategies.strategy_prompts.get_base_prompt", return_value="Fallback prompt"),
+            patch("core.prompt_base.get_base_prompt", return_value="Fallback prompt"),
         ):
             await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
@@ -1247,7 +1247,7 @@ class TestAIServiceAnalyzeStockSuccess:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 80, "recommendation": "buy", "reason": "Good stock"})
         with (
-            patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve,
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
             patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
             patch("utils.prompt_guard.sanitize_prompt", return_value="safe prompt"),
         ):
@@ -1281,7 +1281,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve:
+        with patch("core.prompt_base.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "concepts": []},
@@ -1307,7 +1307,7 @@ class TestAIServiceAnalyzeStockSuccess:
         mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve:
+        with patch("core.prompt_base.get_base_prompt") as mock_resolve:
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ", "concepts": None},
@@ -1362,7 +1362,7 @@ class TestAIServiceAnalyzeStockSuccess:
         svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
             patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
-            patch("strategies.strategy_prompts.get_base_prompt") as mock_resolve,
+            patch("core.prompt_base.get_base_prompt") as mock_resolve,
         ):
             mock_resolve.return_value = "Fallback prompt"
             result = await svc.analyze_stock(
@@ -1941,7 +1941,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
                     raise Exception("concepts error")
                 return super().get(key, default)
 
-        with patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"):
+        with patch("core.prompt_base.get_base_prompt", return_value="prompt"):
             result = await svc.analyze_stock(
                 stock_info=BadDict({"ts_code": "000001.SZ"}),
                 tech_info={},
@@ -1956,7 +1956,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         svc = _make_svc_with_cloud()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with (
-            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch("data.persistence.review_manager.ReviewManager", side_effect=Exception("rm error")),
         ):
             result = await svc.analyze_stock(
@@ -1973,7 +1973,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         """include_learning_context=False skips learning context fetch entirely."""
         svc = _make_svc_with_cloud()
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
-        with patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"):
+        with patch("core.prompt_base.get_base_prompt", return_value="prompt"):
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
                 tech_info={},
@@ -1993,7 +1993,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
 
         with (
-            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
         ):
             result = await svc.analyze_stock(
@@ -2032,7 +2032,7 @@ class TestAIServiceAnalyzeStockDeepBranches:
         mock_rm.get_learning_context = AsyncMock(return_value="<learning>test</learning>")
 
         with (
-            patch("strategies.strategy_prompts.get_base_prompt", return_value="prompt"),
+            patch("core.prompt_base.get_base_prompt", return_value="prompt"),
             patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
         ):
             result = await svc.analyze_stock(

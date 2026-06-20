@@ -1,3 +1,4 @@
+import logging
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -5,6 +6,8 @@ from typing import Any
 import flet as ft
 
 from ui.theme import AppColors, AppStyles
+
+logger = logging.getLogger(__name__)
 
 ROW_HEIGHT = 30
 HEADER_HEIGHT = 35
@@ -100,8 +103,8 @@ class PaginatedTable(ft.Column):
             try:
                 self.header_container.update()
                 self._canvas.update()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("UI render error: %s", e, exc_info=True)
 
     def set_rows(self, data_rows, sort_col=None, sort_asc=True):
         """Store full page rows and render the first visible window.
@@ -125,8 +128,8 @@ class PaginatedTable(ft.Column):
             try:
                 self._canvas.update()
                 self.list_view.scroll_to(offset=0, duration=0)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("UI render error: %s", e, exc_info=True)
 
     def clear(self):
         """Detach all row controls and reset window state.

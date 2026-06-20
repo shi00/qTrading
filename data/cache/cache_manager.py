@@ -3,7 +3,6 @@ import datetime
 import logging
 import re
 import threading
-import typing
 from contextlib import asynccontextmanager
 
 import pandas as pd
@@ -71,8 +70,8 @@ class CacheManager:
                 if hasattr(inst, "engine") and inst.engine is not None:
                     inst.engine.sync_engine.dispose()
                     inst._disposed = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Cache operation failed: %s", e, exc_info=True)
 
     def __init__(self):
         with self._lock:
@@ -237,7 +236,7 @@ class CacheManager:
         return BaseDao._prepare_data_params(df, cols, table_name)
 
     @staticmethod
-    def normalize_news_item(item: dict, default_source: typing.Any = "CLS"):
+    def normalize_news_item(item: dict, default_source: str = "CLS"):
         """Normalize news item dictionary for DB Insertion"""
         publish_time = item.get("time", item.get("publish_time"))
         if publish_time is None:
@@ -257,7 +256,7 @@ class CacheManager:
         }
 
     # Backward compatibility for direct SQL usage if any
-    async def write_db(self, sql: typing.Any, params: typing.Any = None, is_many: typing.Any = False):
+    async def write_db(self, sql: str, params: tuple | list | None = None, is_many: bool = False):
         if is_many:
             import warnings
 
@@ -269,7 +268,7 @@ class CacheManager:
         dao = BaseDao(self.engine)
         return await dao._write_db(sql, params, is_many, suppress_errors=True)
 
-    async def read_db(self, sql: typing.Any, params: typing.Any = None):
+    async def read_db(self, sql: str, params: tuple | list | None = None):
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params, suppress_errors=True)
 
@@ -523,7 +522,7 @@ class CacheManager:
         self,
         limit: int | None = 50,
         offset: int = 0,
-        min_publish_time: typing.Any = None,
+        min_publish_time: datetime.date | str | None = None,
     ):
         return await self.market_dao.get_market_news(limit, offset, min_publish_time)
 

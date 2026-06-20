@@ -47,7 +47,7 @@ class TestSyncIntegrityConfig:
 class TestAppConfig:
     def test_default_values(self):
         cfg = AppConfig()
-        assert cfg.db_host == "127.0.0.1"
+        assert cfg.db_host == ""
         assert cfg.db_port == 5432
         assert cfg.llm_provider == "deepseek"
         assert cfg.theme_name == "dark"
@@ -124,7 +124,7 @@ class TestGetDefaultConfig:
         result = get_default_config()
         assert isinstance(result, dict)
         assert "db_host" in result
-        assert result["db_host"] == "127.0.0.1"
+        assert result["db_host"] == ""
 
     def test_contains_all_expected_keys(self):
         result = get_default_config()

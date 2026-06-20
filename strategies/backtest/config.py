@@ -140,3 +140,27 @@ class BacktestResult:
             executed_at=self.executed_at,
             duration_ms=self.duration_ms,
         )
+
+    def to_persist_dict(self) -> dict:
+        """生成持久化所需的字典（不含 app_version，由调用方补充）。
+
+        将 BacktestResult 与 BacktestConfig 中需要落库的字段平铺为单层 dict，
+        供 BacktestService._persist_result 调用，避免在服务层散落字段映射逻辑。
+        """
+        return {
+            "run_id": self.run_id,
+            "strategy_name": self.strategy_name,
+            "params_snapshot": self.params_snapshot,
+            "start_date": self.config.start_date,
+            "end_date": self.config.end_date,
+            "initial_capital": self.config.initial_capital,
+            "metrics": self.metrics,
+            "nav_curve": self.nav_curve,
+            "trades": self.trades,
+            "period_stats": self.period_stats,
+            "duration_ms": self.duration_ms,
+            "execution_price": self.config.execution_price,
+            "allow_limit_up_buy": self.config.allow_limit_up_buy,
+            "allow_limit_down_sell": self.config.allow_limit_down_sell,
+            "slippage_model": self.config.slippage_model,
+        }

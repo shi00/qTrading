@@ -1,9 +1,11 @@
 from datetime import date, datetime
+import dataclasses
 
 import polars as pl
 import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
+from strategies.backtest.metrics import PROFIT_THRESHOLD
 from strategies.backtest.report import BacktestReport
 
 
@@ -144,6 +146,41 @@ class TestBacktestReport:
         report = BacktestReport()
         trade_summary = report.format_trade_summary(empty_result)
         assert "无交易记录" in trade_summary
+
+    def test_format_trade_summary_zero_pnl_not_counted_as_loss(self, backtest_result: BacktestResult) -> None:
+        """realized_pnl == 0 归入 DRAW，不计入亏损次数。
+
+        backtest_result 的 realized_pnl = [0.0, 800.0]：
+        - 800.0 为盈利
+        - 0.0 为平局（DRAW），不再计入亏损
+        """
+        report = BacktestReport()
+        summary = report.format_trade_summary(backtest_result)
+        assert "盈利次数: 1" in summary
+        assert "亏损次数: 0" in summary
+
+    def test_format_trade_summary_draw_excluded_from_loss(self, backtest_result: BacktestResult) -> None:
+        """混合盈亏中 0 归入 DRAW，仅负值计入亏损。"""
+        trades_with_draw = pl.DataFrame(
+            {
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ"],
+                "action": ["buy", "sell", "sell"],
+                "price": [10.0, 11.0, 9.0],
+                "volume": [1000, 1000, 1000],
+                "realized_pnl": [0.0, 800.0, -500.0],
+            }
+        )
+        result = dataclasses.replace(backtest_result, trades=trades_with_draw)
+        report = BacktestReport()
+        summary = report.format_trade_summary(result)
+        assert "总交易: 3" in summary
+        assert "盈利次数: 1" in summary
+        assert "亏损次数: 1" in summary
+
+    def test_profit_threshold_shared_constant(self) -> None:
+        """PROFIT_THRESHOLD 常量在 report 与 metrics 间共享，值为 0.0"""
+        assert PROFIT_THRESHOLD == 0.0
 
     def test_to_markdown(self, backtest_result: BacktestResult) -> None:
         report = BacktestReport()

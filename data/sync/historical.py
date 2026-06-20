@@ -22,7 +22,7 @@ from data.constants import (
     SYNC_RESULT_SAVE_FAILED,
     SYNC_RESULT_SKIPPED_PERMISSION,
 )
-from data.sync.base import ISyncStrategy, SyncResult
+from data.sync.base import ISyncStrategy, SyncResult, SyncStatus
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import I18n
@@ -774,7 +774,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     f"[HistoricalSync] Recorded {'save_failed' if is_save_failed else 'fetch_failed'} for {table_name}"
                 )
 
-        def verify_data_integrity(key: str, result_data: typing.Any):
+        def verify_data_integrity(key: str, result_data: typing.Any, strict: bool = False):
             if not isinstance(result_data, dict):
                 return
             saved = result_data.get("saved")
@@ -787,9 +787,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(warning_msg)
                 if sync_result is not None:
                     sync_result.warnings.append(warning_msg)
+                    # strict mode: data loss > 5% on critical tables must flag PARTIAL
+                    # instead of just warning, so downstream consumers can react.
+                    if strict and saved < fetched * 0.95:
+                        sync_result.status = SyncStatus.PARTIAL.value
+                        logger.warning(
+                            f"[HistoricalSync] DaySync | ⚠️ Strict mode: {key} data loss > 5% "
+                            f"(saved={saved}, fetched={fetched}), marking sync_result as PARTIAL"
+                        )
 
         await safe_update_status("daily_quotes", quotes_rows, trade_date)
-        verify_data_integrity("quotes", quotes_rows)
+        verify_data_integrity("quotes", quotes_rows, strict=True)
         await safe_update_status("daily_indicators", basic_rows, trade_date)
         verify_data_integrity("basic", basic_rows)
         await safe_update_status("moneyflow_daily", mf_result, trade_date)

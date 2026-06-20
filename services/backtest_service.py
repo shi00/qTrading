@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from data.cache.cache_manager import CacheManager
-from strategies.backtest.config import BacktestConfig, BacktestResult
-from strategies.backtest.engine import VectorBacktestEngine
-from strategies.base_strategy import BaseStrategy, get_strategy_registry
+
+if TYPE_CHECKING:
+    from strategies.backtest.config import BacktestConfig, BacktestResult
+    from strategies.base_strategy import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +32,12 @@ class BacktestService:
 
     def __init__(
         self,
-        cache: CacheManager | None = None,
+        cache: CacheManager,
         data_processor=None,
     ):
-        self.cache = cache or CacheManager()
+        if cache is None:
+            raise ValueError("BacktestService requires a CacheManager instance (dependency injection).")
+        self.cache = cache
         self.data_processor = data_processor
 
     async def run_backtest(
@@ -48,6 +52,8 @@ class BacktestService:
         strategy = self._get_strategy(strategy_key)
         if strategy is None:
             raise ValueError(f"Strategy not found: {strategy_key}")
+
+        from strategies.backtest.engine import VectorBacktestEngine
 
         engine = VectorBacktestEngine(self.cache, config, data_processor=self.data_processor)
 
@@ -72,6 +78,8 @@ class BacktestService:
         persist: bool = True,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
+        from strategies.backtest.engine import VectorBacktestEngine
+
         engine = VectorBacktestEngine(self.cache, config, data_processor=self.data_processor)
 
         result = await engine.run(
@@ -88,24 +96,8 @@ class BacktestService:
 
     async def _persist_result(self, result: BacktestResult) -> BacktestResult:
         try:
-            result_dict = {
-                "run_id": result.run_id,
-                "strategy_name": result.strategy_name,
-                "params_snapshot": result.params_snapshot,
-                "start_date": result.config.start_date,
-                "end_date": result.config.end_date,
-                "initial_capital": result.config.initial_capital,
-                "metrics": result.metrics,
-                "nav_curve": result.nav_curve,
-                "trades": result.trades,
-                "period_stats": result.period_stats,
-                "duration_ms": result.duration_ms,
-                "execution_price": result.config.execution_price,
-                "allow_limit_up_buy": result.config.allow_limit_up_buy,
-                "allow_limit_down_sell": result.config.allow_limit_down_sell,
-                "slippage_model": result.config.slippage_model,
-                "app_version": self._get_app_version(),
-            }
+            result_dict = result.to_persist_dict()
+            result_dict["app_version"] = self._get_app_version()
 
             await self.cache.backtest_dao.save_result(result_dict)
             logger.info(
@@ -123,6 +115,8 @@ class BacktestService:
             return result.with_warnings(new_warnings)
 
     def _get_strategy(self, strategy_key: str) -> BaseStrategy | None:
+        from strategies.base_strategy import get_strategy_registry
+
         registry = get_strategy_registry()
         strategy_class = registry.get(strategy_key)
         if strategy_class is None:

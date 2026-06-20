@@ -433,6 +433,11 @@ class TestLargePEStrategy(unittest.TestCase):
         mv_values = result["total_mv"].to_list()
         self.assertEqual(mv_values, sorted(mv_values, reverse=True))
 
+    def test_large_pe_strategy_declares_dependencies(self):
+        """LargePEStrategy 显式声明 required_context_keys 与 required_tables"""
+        self.assertEqual(self.strategy.required_context_keys, ("screening_data",))
+        self.assertEqual(self.strategy.required_tables, ("daily_quotes",))
+
 
 if __name__ == "__main__":
     unittest.main()

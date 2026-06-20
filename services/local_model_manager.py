@@ -189,7 +189,7 @@ class LocalModelManager:
         if self._initialized:
             return
         self._model_path: str = ""
-        self._model_md5: str = ""
+        self._model_sha256: str = ""
         self._model_stat: tuple = (0, 0)
         self._last_config: dict = {}
         self._is_loading: bool = False
@@ -352,25 +352,34 @@ class LocalModelManager:
         """Return the path of the currently loaded model, or empty string if none."""
         return self._model_path
 
+    def get_loaded_model_sha256(self) -> str:
+        """Return the SHA-256 hash of the currently loaded model, or empty string if none."""
+        return self._model_sha256
+
     def get_loaded_model_md5(self) -> str:
-        """Return the MD5 hash of the currently loaded model, or empty string if none."""
-        return self._model_md5
+        """Backward-compatible alias for get_loaded_model_sha256."""
+        return self.get_loaded_model_sha256()
 
     @staticmethod
-    def calculate_file_md5(file_path: str) -> str:
+    def calculate_file_sha256(file_path: str) -> str:
         """
-        Calculate MD5 hash of a file. Runs synchronously, should be called from thread pool.
+        Calculate SHA-256 hash of a file. Runs synchronously, should be called from thread pool.
         Uses chunked reading to handle large files efficiently.
         """
-        hash_md5 = hashlib.md5()
+        hash_sha256 = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
                 for chunk in iter(lambda: f.read(8192 * 1024), b""):
-                    hash_md5.update(chunk)
-            return hash_md5.hexdigest()
+                    hash_sha256.update(chunk)
+            return hash_sha256.hexdigest()
         except Exception as e:
-            logger.error("[LocalModel] Failed to calculate MD5: %s", DataSanitizer.sanitize_error(e))
+            logger.error("[LocalModel] Failed to calculate SHA-256: %s", DataSanitizer.sanitize_error(e))
             return ""
+
+    @staticmethod
+    def calculate_file_md5(file_path: str) -> str:
+        """Backward-compatible alias for calculate_file_sha256."""
+        return LocalModelManager.calculate_file_sha256(file_path)
 
     async def load_model(self, model_path: str, config: dict[str, Any] | None = None) -> bool:
         """
@@ -431,12 +440,25 @@ class LocalModelManager:
             start_time = asyncio.get_running_loop().time()
 
             try:
-                logger.info("[LocalModel] Verifying file integrity (MD5)...")
-                target_md5 = await ThreadPoolManager().run_async(
+                logger.info("[LocalModel] Verifying file integrity (SHA-256)...")
+                target_sha256 = await ThreadPoolManager().run_async(
                     TaskType.IO,
-                    self.calculate_file_md5,
+                    self.calculate_file_sha256,
                     model_path,
                 )
+
+                # Integrity check: compare with stored SHA-256 if available for this path
+                try:
+                    stored_path = ConfigHandler.get_typed("local_model_sha256_path", str, "")
+                    stored_sha256 = ConfigHandler.get_typed("local_model_sha256", str, "")
+                except (ValueError, OSError, RuntimeError):
+                    stored_path = ""
+                    stored_sha256 = ""
+
+                if stored_path == model_path and stored_sha256 and target_sha256 and stored_sha256 != target_sha256:
+                    raise RuntimeError(
+                        f"Model file integrity check failed: SHA-256 mismatch for {model_path}",
+                    )
 
                 logger.info("[LocalModel] Starting persistent subprocess worker...")
                 if not self._ensure_worker(model_path, core_config):
@@ -445,9 +467,21 @@ class LocalModelManager:
                     return False
 
                 self._model_path = model_path
-                self._model_md5 = target_md5
+                self._model_sha256 = target_sha256
                 self._model_stat = current_stat
                 self._last_config = core_config
+
+                # Persist SHA-256 for future integrity verification
+                if target_sha256:
+                    try:
+                        ConfigHandler.save_config(
+                            {
+                                "local_model_sha256": target_sha256,
+                                "local_model_sha256_path": model_path,
+                            }
+                        )
+                    except (ValueError, OSError, RuntimeError) as e:
+                        logger.warning(f"[LocalModel] Failed to persist model SHA-256: {e}")
 
                 elapsed = asyncio.get_running_loop().time() - start_time
                 logger.info(
@@ -605,7 +639,7 @@ class LocalModelManager:
         self._cancel_event.set()
         self._shutdown_worker()
         self._model_path = ""
-        self._model_md5 = ""
+        self._model_sha256 = ""
         self._model_stat = (0, 0)
         self._last_config = {}
         logger.info("[LocalModel] Model unloaded (worker terminated).")

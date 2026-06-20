@@ -104,6 +104,12 @@ class SecurityError(Exception):
         super().__init__(message)
 
 
+class EncryptionError(SecurityError):
+    """Raised when data cannot be encrypted (key unavailable or encryption failure)"""
+
+    pass
+
+
 class SecurityManager:
     """
     Manages AES-GCM encryption for sensitive data.
@@ -375,7 +381,7 @@ class SecurityManager:
             return base64.b64encode(nonce + ciphertext).decode("utf-8")
         except Exception as e:
             logger.error(f"Encryption error: {e}")
-            raise DecryptionError(f"Encryption failed: {e}") from e
+            raise EncryptionError(f"Encryption failed: {e}") from e
 
     @classmethod
     def decrypt_data(cls, encrypted_text):

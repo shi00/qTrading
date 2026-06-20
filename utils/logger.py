@@ -153,8 +153,8 @@ def setup_logging(name="astock_screener"):
             error_handler.setFormatter(formatter)
             error_handler.addFilter(correlation_filter)
             logger.addHandler(error_handler)
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"Failed to setup error logging: {e}\n")
 
     # 6. Suppress noisy third-party logs
     noisy_libs = [

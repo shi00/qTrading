@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 
 from strategies.backtest.config import BacktestResult
+from strategies.backtest.metrics import PROFIT_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,8 @@ class BacktestReport:
             return "无交易记录"
         pnl_col = result.trades["realized_pnl"]
         profits = [float(v) for v in pnl_col if v is not None]
-        winning = [p for p in profits if p > 0]
-        losing = [p for p in profits if p <= 0]
+        winning = [p for p in profits if p > PROFIT_THRESHOLD]
+        losing = [p for p in profits if p < PROFIT_THRESHOLD]
         avg_profit = sum(profits) / len(profits) if profits else 0.0
         avg_win = sum(winning) / len(winning) if winning else 0.0
         avg_loss = sum(losing) / len(losing) if losing else 0.0

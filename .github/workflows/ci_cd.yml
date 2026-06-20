@@ -38,7 +38,7 @@ permissions:
   contents: read
 
 env:
-  CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD || 'ci_astock_default_pwd' }}
+  CI_PG_PASSWORD: ${{ secrets.CI_PG_PASSWORD }}
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -105,6 +105,15 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Verify CI_PG_PASSWORD secret
+        env:
+          CI_PG_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+        run: |
+          if [ -z "$CI_PG_PASSWORD" ]; then
+            echo "::error::CI_PG_PASSWORD secret is not configured. Please add it in repository settings (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
@@ -254,6 +263,16 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Verify CI_PG_PASSWORD secret
+        env:
+          CI_PG_PASSWORD: ${{ env.CI_PG_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -z "$CI_PG_PASSWORD" ]; then
+            echo "::error::CI_PG_PASSWORD secret is not configured. Please add it in repository settings (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0

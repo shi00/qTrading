@@ -234,7 +234,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
         total_mainbz_rows = 0
         total_audit_rows = 0
-        _counter_lock = asyncio.Lock()
+        _counter_lock = get_loop_local("financial_counter_lock", asyncio.Lock)
 
         # Force Logic: Reset sync status for resume
         if force:

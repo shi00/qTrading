@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 from logging.config import fileConfig
@@ -21,6 +22,8 @@ from alembic import context
 from data.persistence.models import Base
 
 alembic_config = context.config
+
+logger = logging.getLogger(__name__)
 
 
 def get_database_url() -> str:
@@ -45,8 +48,8 @@ def get_database_url() -> str:
         url = ConfigHandler.get_db_url()
         if url:
             return url
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Alembic env setup failed: %s", e, exc_info=True)
 
     if config.DB_URL:
         return config.DB_URL

@@ -1062,8 +1062,8 @@ class OnboardingWizard(ft.Container):
                 if old_panel and hasattr(old_panel, "will_unmount"):
                     try:
                         old_panel.will_unmount()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Onboarding operation failed: %s", e, exc_info=True)
 
             self._init_database_controls()
             self._init_token_controls()

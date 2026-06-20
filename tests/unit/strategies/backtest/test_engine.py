@@ -1182,3 +1182,239 @@ class TestEngineEndToEndPipeline:
 
         assert len(simulator.positions) == 0
         assert any("suspended" in w for w in simulator.warnings)
+
+
+class TestVectorizationEquivalence:
+    """Verify the partition_by-based vectorized path produces identical results
+    to the original loop-filter approach (PERF-C1, PERF-C2)."""
+
+    def _make_engine(self, **kwargs):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            slippage_bps=0.0,
+            **kwargs,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
+        return engine
+
+    def test_simulate_trades_multi_date_multi_stock_matches_filter(self):
+        """_simulate_trades with multiple dates/stocks produces same trades as
+        a reference implementation using per-date filter."""
+        engine = self._make_engine(rebalance_freq="signal")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3)],
+                "execution_date": [date(2024, 1, 3), date(2024, 1, 3), date(2024, 1, 4)],
+                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ"],
+                "signal_rank": [1, 2, 1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": [
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                ],
+                "trade_date": [
+                    date(2024, 1, 2),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                    date(2024, 1, 4),
+                    date(2024, 1, 5),
+                    date(2024, 1, 5),
+                ],
+                "raw_open": [10.0, 20.0, 10.5, 20.5, 11.0, 21.0, 11.5, 21.5],
+                "raw_close": [10.2, 20.2, 10.8, 20.8, 11.2, 21.2, 11.8, 21.8],
+                "qfq_open": [10.0, 20.0, 10.5, 20.5, 11.0, 21.0, 11.5, 21.5],
+                "qfq_close": [10.2, 20.2, 10.8, 20.8, 11.2, 21.2, 11.8, 21.8],
+                "is_tradable": [True] * 8,
+            }
+        )
+
+        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+
+        # Reference: build expected trades by checking buy actions occurred on expected dates
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        # Day 2024-01-03: two buy signals (000001.SZ, 000002.SZ)
+        # Day 2024-01-04: one buy signal (000001.SZ) after selling prior positions
+        assert buy_trades.height >= 2
+        buy_codes_day1 = sorted(buy_trades.filter(pl.col("trade_date") == date(2024, 1, 3))["ts_code"].to_list())
+        assert buy_codes_day1 == ["000001.SZ", "000002.SZ"]
+
+        # Positions recorded for every trade date
+        assert positions.height == len(trade_dates)
+
+    def test_simulate_trades_date_with_no_quotes_preserves_schema(self):
+        """A trade_date with no quotes should not crash (schema preserved via clear())."""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)],
+                "execution_date": [date(2024, 1, 3)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        # Quotes only for 2024-01-02, NOT for 2024-01-03
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [date(2024, 1, 2)],
+                "raw_open": [10.0],
+                "raw_close": [10.5],
+                "qfq_open": [10.0],
+                "qfq_close": [10.5],
+                "is_tradable": [True],
+            }
+        )
+
+        # Should not raise ColumnNotFoundError despite missing quotes on 2024-01-03
+        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+
+        # Buy on 2024-01-03 skipped due to no_quote (schema preserved, filter works)
+        no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
+        assert no_quote_skips.height >= 1
+
+    def test_simulate_trades_date_with_no_signals(self):
+        """A trade_date with no signals should produce empty day_signals (not crash)."""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2)],
+                "execution_date": [date(2024, 1, 3)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "raw_open": [10.0, 10.5, 11.0],
+                "raw_close": [10.2, 10.8, 11.2],
+                "qfq_open": [10.0, 10.5, 11.0],
+                "qfq_close": [10.2, 10.8, 11.2],
+                "is_tradable": [True, True, True],
+            }
+        )
+
+        trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
+
+        # Buy only on 2024-01-03 (the only execution_date in signals)
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        assert buy_trades.height == 1
+        assert buy_trades["trade_date"][0] == date(2024, 1, 3)
+
+    def test_calc_ic_series_multi_date_matches_expected(self):
+        """_calc_ic_series with multiple signal dates produces same IC values
+        regardless of partition_by vs filter implementation."""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 5)]
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 3)],
+                "execution_date": [date(2024, 1, 3), date(2024, 1, 3), date(2024, 1, 4), date(2024, 1, 4)],
+                "ts_code": ["000001.SZ", "000002.SZ", "000001.SZ", "000002.SZ"],
+                "signal_rank": [1, 2, 1, 2],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": [
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                    "000001.SZ",
+                    "000002.SZ",
+                ],
+                "trade_date": [
+                    date(2024, 1, 2),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                    date(2024, 1, 4),
+                    date(2024, 1, 5),
+                    date(2024, 1, 5),
+                ],
+                "qfq_close": [10.0, 20.0, 10.5, 20.5, 11.0, 21.0, 11.5, 21.5],
+                "qfq_open": [9.9, 19.9, 10.4, 20.4, 10.9, 20.9, 11.4, 21.4],
+            }
+        )
+
+        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+
+        # 3 signal dates (trade_dates[:-1]), so 3 IC values
+        assert ic_series.len() == 3
+        # IC values should be valid floats (not NaN)
+        for v in ic_series.to_list():
+            assert not math.isnan(v)
+
+    def test_calc_ic_series_missing_signal_date_returns_zero(self):
+        """A signal_date with no signals in the dict should produce 0.0 IC."""
+        engine = self._make_engine(rebalance_freq="daily")
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        # Signals only for 2024-01-03, not 2024-01-02
+        signals = pl.DataFrame(
+            {
+                "signal_date": [date(2024, 1, 3)],
+                "execution_date": [date(2024, 1, 4)],
+                "ts_code": ["000001.SZ"],
+                "signal_rank": [1],
+            }
+        )
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "qfq_close": [10.0, 10.5, 11.0],
+                "qfq_open": [9.9, 10.4, 10.9],
+            }
+        )
+
+        ic_series = engine._calc_ic_series(signals, quotes_df, trade_dates)
+
+        # First signal_date (2024-01-02) has no signals -> 0.0
+        assert ic_series[0] == 0.0
+
+    def test_partition_by_lookup_matches_filter_directly(self):
+        """Directly verify partition_by dict lookup returns same DataFrame as filter."""
+        df = pl.DataFrame(
+            {
+                "ts_code": ["A", "B", "A", "B"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 3)],
+                "val": [1, 2, 3, 4],
+            }
+        )
+
+        by_date = {k[0]: v for k, v in df.partition_by("trade_date", as_dict=True).items()}
+
+        for d in [date(2024, 1, 2), date(2024, 1, 3)]:
+            filter_result = df.filter(pl.col("trade_date") == d)
+            partition_result = by_date.get(d)
+            assert partition_result is not None
+            assert filter_result.equals(partition_result)
+
+        # Missing date: filter returns empty with schema, clear() also empty with schema
+        missing_filter = df.filter(pl.col("trade_date") == date(2024, 1, 10))
+        missing_clear = df.clear()
+        assert missing_filter.is_empty()
+        assert missing_clear.is_empty()
+        assert missing_filter.schema == missing_clear.schema

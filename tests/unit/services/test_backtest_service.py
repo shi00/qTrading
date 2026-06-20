@@ -106,7 +106,7 @@ class TestBacktestService:
         backtest_config: BacktestConfig,
     ) -> None:
         with patch(
-            "services.backtest_service.get_strategy_registry",
+            "strategies.base_strategy.get_strategy_registry",
             return_value={"mock_strategy": MockStrategy},
         ):
             service = BacktestService(cache=mock_cache)
@@ -128,7 +128,7 @@ class TestBacktestService:
         backtest_config: BacktestConfig,
     ) -> None:
         with patch(
-            "services.backtest_service.get_strategy_registry",
+            "strategies.base_strategy.get_strategy_registry",
             return_value={},
         ):
             service = BacktestService(cache=mock_cache)
@@ -146,7 +146,7 @@ class TestBacktestService:
         backtest_config: BacktestConfig,
     ) -> None:
         with patch(
-            "services.backtest_service.get_strategy_registry",
+            "strategies.base_strategy.get_strategy_registry",
             return_value={"mock_strategy": MockStrategy},
         ):
             service = BacktestService(cache=mock_cache)
@@ -226,7 +226,7 @@ class TestBacktestService:
     def test_get_strategy_sets_key_attribute(self):
         """_get_strategy 应设置 instance.key = strategy_key"""
         with patch(
-            "services.backtest_service.get_strategy_registry",
+            "strategies.base_strategy.get_strategy_registry",
             return_value={"mock_strategy": MockStrategy},
         ):
             service = BacktestService(cache=MagicMock())
@@ -238,10 +238,66 @@ class TestBacktestService:
     def test_get_strategy_returns_none_for_unknown(self):
         """_get_strategy 对未知策略返回 None"""
         with patch(
-            "services.backtest_service.get_strategy_registry",
+            "strategies.base_strategy.get_strategy_registry",
             return_value={},
         ):
             service = BacktestService(cache=MagicMock())
             strategy = service._get_strategy("nonexistent")
 
             assert strategy is None
+
+    def test_init_requires_cache_manager(self):
+        """Task 6.7: BacktestService 必须注入 CacheManager，传 None 应 fail-fast。"""
+        with pytest.raises(ValueError, match="CacheManager"):
+            BacktestService(cache=None)
+
+    @pytest.mark.asyncio
+    async def test_persist_result_uses_to_persist_dict_and_adds_app_version(
+        self,
+        mock_cache: MagicMock,
+    ) -> None:
+        """Task 6.10: _persist_result 应调用 to_persist_dict() 并补充 app_version。"""
+        from datetime import datetime
+
+        import polars as pl
+
+        from strategies.backtest.config import BacktestConfig
+
+        service = BacktestService(cache=mock_cache)
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            initial_capital=1_000_000.0,
+        )
+        result = BacktestResult(
+            config=config,
+            strategy_name="mock_strategy",
+            params_snapshot={"p": 1},
+            nav_curve=pl.DataFrame({"trade_date": [date(2024, 1, 2)], "nav": [1_000_000.0]}),
+            daily_returns=pl.Series([0.0]),
+            benchmark_returns=pl.Series([0.0]),
+            trades=pl.DataFrame(),
+            positions=pl.DataFrame(),
+            skipped_orders=pl.DataFrame(),
+            metrics={"total_return": 0.0},
+            ic_series=pl.Series([0.0]),
+            period_stats=pl.DataFrame(),
+            data_warnings=(),
+            failed_signal_dates=(),
+            run_id="run_001",
+            executed_at=datetime(2024, 1, 4, 12, 0, 0),
+            duration_ms=100,
+        )
+
+        await service._persist_result(result)
+
+        mock_cache.backtest_dao.save_result.assert_called_once()
+        saved_dict = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert saved_dict["run_id"] == "run_001"
+        assert saved_dict["strategy_name"] == "mock_strategy"
+        assert saved_dict["start_date"] == config.start_date
+        assert saved_dict["initial_capital"] == config.initial_capital
+        assert saved_dict["execution_price"] == config.execution_price
+        assert "app_version" in saved_dict
+        assert saved_dict["metrics"] == result.metrics

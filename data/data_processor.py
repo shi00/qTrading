@@ -72,8 +72,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 evt = get_loop_local("processor_cancel_evt", lambda: None, strict=False)
                 if evt is not None and hasattr(evt, "set"):
                     evt.set()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("DataProcessor initialization failed: %s", e, exc_info=True)
 
     def __init__(self):
         # Double-check initialization state with lock to prevent race conditions

@@ -93,11 +93,17 @@ class TestHealthReportDialog:
         dlg.close_dialog = MagicMock()
         mock_scan = MagicMock()
         mock_scan.start_scan = AsyncMock()
-        with patch("ui.components.health_report_dialog.HealthScanDialog", return_value=mock_scan):
+        with (
+            patch("data.data_processor.DataProcessor") as mock_dp_cls,
+            patch("ui.components.health_report_dialog.HealthScanDialog", return_value=mock_scan) as mock_scan_cls,
+        ):
             await dlg.run_deep_scan(None)
         dlg.close_dialog.assert_called_once_with(None)
         assert mock_scan in mock_page.overlay
         mock_scan.start_scan.assert_awaited_once()
+        # UI-C2: DataProcessor is instantiated by caller and injected into HealthScanDialog
+        mock_dp_cls.assert_called_once()
+        mock_scan_cls.assert_called_once_with(mock_page, mock_dp_cls.return_value)
 
     def test_build_content_green_status(self, mock_page):
         dlg = self._make_dialog(mock_page, self._make_report("green"))
@@ -244,3 +250,123 @@ class TestCoverageDetailTable:
         row = table._create_row("daily_quotes", {"ratio": 0.3, "fresh_ratio": 0.20, "type": "stock"})
         progress_bar = row.content.controls[1]
         assert progress_bar.color == self.mock_ac.ERROR
+
+
+class TestHealthScanDialog:
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        with contextlib.ExitStack() as stack:
+            for p in _apply_patches(mock_i18n, mock_app_colors):
+                stack.enter_context(p)
+            yield
+
+    def _make_scan_dialog(self, mock_page, data_processor=None):
+        from ui.components.health_report_dialog import HealthScanDialog
+
+        return HealthScanDialog(
+            page=mock_page,
+            data_processor=data_processor or MagicMock(),
+        )
+
+    def test_constructor_stores_data_processor(self, mock_page):
+        # UI-C2: DataProcessor is injected via constructor, not hardcoded
+        mock_dp = MagicMock()
+        dlg = self._make_scan_dialog(mock_page, mock_dp)
+        assert dlg._data_processor is mock_dp
+
+    @pytest.mark.asyncio
+    async def test_start_scan_uses_injected_data_processor(self, mock_page):
+        # UI-C2: start_scan uses the injected DataProcessor instance
+        mock_dp = MagicMock()
+        mock_dp.run_quality_scan = AsyncMock(return_value={"score": 90, "tier": 3})
+        dlg = self._make_scan_dialog(mock_page, mock_dp)
+        dlg.show_results = MagicMock()
+        await dlg.start_scan()
+        mock_dp.run_quality_scan.assert_awaited_once()
+        dlg.show_results.assert_called_once_with({"score": 90, "tier": 3})
+
+    @pytest.mark.asyncio
+    async def test_start_scan_does_not_instantiate_data_processor(self, mock_page):
+        # UI-C2: start_scan must NOT instantiate DataProcessor internally
+        with patch("data.data_processor.DataProcessor") as mock_dp_cls:
+            mock_dp = MagicMock()
+            mock_dp.run_quality_scan = AsyncMock(return_value={"score": 90, "tier": 3})
+            dlg = self._make_scan_dialog(mock_page, mock_dp)
+            dlg.show_results = MagicMock()
+            await dlg.start_scan()
+            mock_dp_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_progress_schedules_via_run_coroutine_threadsafe(self, mock_page):
+        # UI-C1: on_progress must schedule UI updates via asyncio.run_coroutine_threadsafe
+        # instead of directly calling page_ref.update() from a worker thread
+        import asyncio
+
+        mock_dp = MagicMock()
+        mock_dp.run_quality_scan = AsyncMock(return_value={"score": 90, "tier": 3})
+        dlg = self._make_scan_dialog(mock_page, mock_dp)
+        dlg.show_results = MagicMock()
+
+        # Capture the progress_callback to invoke it manually
+        captured = {}
+
+        async def fake_scan(sample_size=50, progress_callback=None):
+            captured["cb"] = progress_callback
+            if progress_callback:
+                progress_callback(10, 100, "step 1")
+                progress_callback(50, 100, "step 2")
+            return {"score": 90, "tier": 3}
+
+        mock_dp.run_quality_scan = fake_scan
+
+        def schedule_side_effect(coro, loop):
+            coro.close()  # Avoid "coroutine never awaited" warning
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=schedule_side_effect) as mock_schedule:
+            await dlg.start_scan()
+
+        # Verify run_coroutine_threadsafe was called for each progress update
+        assert mock_schedule.call_count == 2
+        # Verify the loop (second positional arg) is the running event loop
+        expected_loop = asyncio.get_event_loop()
+        for call in mock_schedule.call_args_list:
+            assert call.args[1] is expected_loop
+
+    @pytest.mark.asyncio
+    async def test_on_progress_does_not_call_page_update_directly(self, mock_page):
+        # UI-C1: on_progress must NOT directly call page_ref.update()
+        mock_page.update = MagicMock()
+        mock_dp = MagicMock()
+
+        async def fake_scan(sample_size=50, progress_callback=None):
+            if progress_callback:
+                progress_callback(10, 100, "step 1")
+            return {"score": 90, "tier": 3}
+
+        mock_dp.run_quality_scan = fake_scan
+        dlg = self._make_scan_dialog(mock_page, mock_dp)
+        dlg.show_results = MagicMock()
+
+        def schedule_side_effect(coro, loop):
+            coro.close()  # Avoid "coroutine never awaited" warning
+            return MagicMock()
+
+        with patch("asyncio.run_coroutine_threadsafe", side_effect=schedule_side_effect):
+            await dlg.start_scan()
+
+        # page_ref.update should NOT be called during progress updates
+        # (only show_results or error handling may call it)
+        mock_page.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_progress_updates_ui(self, mock_page):
+        # UI-C1: _update_progress coroutine updates the progress bar and status text
+        mock_page.update = MagicMock()
+        dlg = self._make_scan_dialog(mock_page)
+        await dlg._update_progress(25, 100, "quarter done")
+        assert dlg.progress_bar.value == 0.25
+        assert dlg.status_text.value == "quarter done"
+        mock_page.update.assert_called_once()

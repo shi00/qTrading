@@ -1,4 +1,8 @@
+from __future__ import annotations
+
+import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import flet as ft
 
@@ -12,6 +16,9 @@ from data.constants import (
 )
 from ui.i18n import I18n
 from ui.theme import AppColors
+
+if TYPE_CHECKING:
+    from data.data_processor import DataProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -541,9 +548,11 @@ class HealthReportDialog(ft.AlertDialog):
 
     async def run_deep_scan(self, e):
         """Open Deep Scan Dialog"""
+        from data.data_processor import DataProcessor
+
         self.close_dialog(e)
 
-        dialog = HealthScanDialog(self.page_ref)
+        dialog = HealthScanDialog(self.page_ref, DataProcessor())
         if hasattr(self.page_ref, "open"):
             self.page_ref.open(dialog)
         else:
@@ -561,8 +570,9 @@ class HealthScanDialog(ft.AlertDialog):
     Shows progress then results.
     """
 
-    def __init__(self, page):  # pragma: no cover
+    def __init__(self, page, data_processor: DataProcessor):  # pragma: no cover
         self.page_ref = page
+        self._data_processor = data_processor
         self.progress_bar = ft.ProgressBar(
             width=400,
             color=AppColors.PRIMARY,
@@ -605,18 +615,15 @@ class HealthScanDialog(ft.AlertDialog):
 
     async def start_scan(self):
         """Start async scan"""
-        from data.data_processor import DataProcessor
-
-        dp = DataProcessor()
+        loop = asyncio.get_running_loop()
 
         try:
 
             def on_progress(current, total, msg):
-                self.progress_bar.value = current / total
-                self.status_text.value = msg
-                self.page_ref.update()
+                # Schedule UI update on main event loop instead of direct cross-thread call
+                asyncio.run_coroutine_threadsafe(self._update_progress(current, total, msg), loop)
 
-            result = await dp.run_quality_scan(
+            result = await self._data_processor.run_quality_scan(
                 sample_size=50,
                 progress_callback=on_progress,
             )
@@ -624,6 +631,12 @@ class HealthScanDialog(ft.AlertDialog):
         except Exception as e:
             self.status_text.value = I18n.get("db_err_format").format(error=e)
             self.page_ref.update()
+
+    async def _update_progress(self, current, total, msg):
+        """Update progress UI on the main event loop (thread-safe)."""
+        self.progress_bar.value = current / total
+        self.status_text.value = msg
+        self.page_ref.update()
 
     def show_results(self, result):  # pragma: no cover
         """Display results."""

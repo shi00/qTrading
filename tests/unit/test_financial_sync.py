@@ -988,3 +988,39 @@ class TestFinancialSyncClassifyError:
         result = await strategy.run(force=True)
         assert result.status == "failed"
         assert len(result.errors) > 0
+
+
+class TestFinancialSyncCounterLockLoopLocal:
+    """Verify _counter_lock uses get_loop_local (R11 red line) so the sync
+    works across different event loops without raising
+    'RuntimeError: ... bound to a different event loop'."""
+
+    def test_counter_lock_works_across_event_loops(self):
+        def _run_sync_in_fresh_loop():
+            ctx = make_ctx()
+            strategy = FinancialSyncStrategy(ctx)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(strategy.run(force=True))
+            finally:
+                loop.close()
+                asyncio.set_event_loop(None)
+
+        # First run in a fresh loop - binds a lock instance to that loop
+        # via get_loop_local("financial_counter_lock", ...).
+        result1 = _run_sync_in_fresh_loop()
+        assert result1 is not None
+
+        # Second run in a brand-new event loop. A direct asyncio.Lock() bound
+        # to the first loop would raise RuntimeError here; get_loop_local
+        # gives each loop its own instance.
+        try:
+            result2 = _run_sync_in_fresh_loop()
+        except RuntimeError as exc:
+            if "bound" in str(exc) or "event loop" in str(exc):
+                pytest.fail(f"_counter_lock not loop-local: {exc}")
+            raise
+
+        assert result2 is not None
+        assert isinstance(result2, SyncResult)

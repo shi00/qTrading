@@ -228,8 +228,8 @@ class AIStrategyMixin:
                 as_of = parse_date(str(trade_date_raw))
                 if isinstance(as_of, datetime.datetime):
                     as_of = as_of.date()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("AI context error: %s", e, exc_info=True)
         if as_of is None and is_backtest:
             raise ValueError(
                 f"Cannot compute learning as_of for backtest: trade_date is {trade_date_raw!r}. "
@@ -328,8 +328,8 @@ class AIStrategyMixin:
                     news_as_of = parsed.date()
                 elif isinstance(parsed, date):
                     news_as_of = parsed
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("AI context error: %s", e, exc_info=True)
 
         # --- Fetch Global Context ONCE ---
         # --- Pre-fetch Learning Context ONCE for the entire batch ---

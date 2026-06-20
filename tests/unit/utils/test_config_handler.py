@@ -113,8 +113,9 @@ class TestConfigHandlerGetLocalAiConfig:
 class TestDbUrlPasswordMasking:
     """get_db_url() 从组件重建 URL，正确 URL-encode 密码"""
 
-    def test_get_db_url_rebuilds_from_components(self):
+    def test_get_db_url_rebuilds_from_components(self, monkeypatch):
         """当 db_host 已配置时，从组件重建 URL 而非读取 db_url 字段"""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         with (
             patch.object(
                 cfg_mod.ConfigHandler,
@@ -137,8 +138,9 @@ class TestDbUrlPasswordMasking:
             assert "testdb" in url
             assert "+asyncpg" in url
 
-    def test_get_db_url_encodes_special_chars(self):
+    def test_get_db_url_encodes_special_chars(self, monkeypatch):
         """密码含特殊字符时正确 URL-encode"""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         with (
             patch.object(
                 cfg_mod.ConfigHandler,
@@ -158,8 +160,9 @@ class TestDbUrlPasswordMasking:
             assert "p%40ss%3Aword%2F123" in url
             assert "@localhost" in url  # @ before host, not in password
 
-    def test_get_db_url_falls_back_to_config_when_no_host(self):
+    def test_get_db_url_falls_back_to_config_when_no_host(self, monkeypatch):
         """当 db_host 未配置时（pre-onboarding），回退到 config.DB_URL"""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
         with (
             patch.object(
                 cfg_mod.ConfigHandler,
@@ -175,6 +178,71 @@ class TestDbUrlPasswordMasking:
         ):
             url = cfg_mod.ConfigHandler.get_db_url()
             assert url == "postgresql+asyncpg://env:pass@envhost/db"
+
+
+class TestGetDbUrlPriority:
+    """CONF-C1: get_db_url() resolution priority —
+    DATABASE_URL env > component rebuild > config.DB_URL fallback."""
+
+    def test_database_url_env_takes_priority_over_components(self, monkeypatch):
+        """DATABASE_URL 环境变量设置时，即使 db_host 已配置也必须返回环境变量值"""
+        env_url = "postgresql+asyncpg://envuser:envpass@envhost:5432/envdb"
+        monkeypatch.setenv("DATABASE_URL", env_url)
+        with (
+            patch.object(
+                cfg_mod.ConfigHandler,
+                "get_typed",
+                side_effect=lambda key, typ, default: {
+                    "db_host": "myhost",
+                    "db_port": 5433,
+                    "db_user": "admin",
+                    "db_name": "testdb",
+                }.get(key, default),
+            ),
+            patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="secret123"),
+        ):
+            url = cfg_mod.ConfigHandler.get_db_url()
+            assert url == env_url
+
+    def test_database_url_empty_env_falls_through_to_components(self, monkeypatch):
+        """DATABASE_URL 设为空字符串时（falsy），应回退到组件重建路径"""
+        monkeypatch.setenv("DATABASE_URL", "")
+        with (
+            patch.object(
+                cfg_mod.ConfigHandler,
+                "get_typed",
+                side_effect=lambda key, typ, default: {
+                    "db_host": "myhost",
+                    "db_port": 5432,
+                    "db_user": "postgres",
+                    "db_name": "astock",
+                }.get(key, default),
+            ),
+            patch.object(cfg_mod.ConfigHandler, "get_db_password", return_value="pw"),
+        ):
+            url = cfg_mod.ConfigHandler.get_db_url()
+            assert url is not None
+            assert "myhost" in url
+            assert "+asyncpg" in url
+
+    def test_database_url_unset_and_host_empty_falls_back_to_config(self, monkeypatch):
+        """DATABASE_URL 未设置且 db_host 为空时，回退到 config.DB_URL"""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        with (
+            patch.object(
+                cfg_mod.ConfigHandler,
+                "get_typed",
+                side_effect=lambda key, typ, default: {
+                    "db_host": "",
+                    "db_port": 5432,
+                    "db_user": "postgres",
+                    "db_name": "astock",
+                }.get(key, default),
+            ),
+            patch.object(cfg_mod.config, "DB_URL", "postgresql+asyncpg://fallback:pw@fbhost/fbdb"),
+        ):
+            url = cfg_mod.ConfigHandler.get_db_url()
+            assert url == "postgresql+asyncpg://fallback:pw@fbhost/fbdb"
 
 
 class TestSaveDbPasswordEncryptFallback:
@@ -541,8 +609,8 @@ class TestGetDbConfigUsesDefaultConfig:
         result = cfg_mod.ConfigHandler.get_db_config()
         assert result["host"] == "10.0.0.1"
 
-    def test_default_config_host_is_127_0_0_1(self):
-        assert cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_host"] == "127.0.0.1"
+    def test_default_config_host_is_empty(self):
+        assert cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_host"] == ""
 
 
 class TestSaveTokenKeyringDeleteLogsDebug:

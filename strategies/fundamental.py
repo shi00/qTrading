@@ -261,6 +261,8 @@ class CashFlowStrategy(PolarsBaseStrategy):
 @register_strategy("large_pe")
 class LargePEStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.SILVER
+    required_context_keys: tuple[str, ...] = ("screening_data",)
+    required_tables: tuple[str, ...] = ("daily_quotes",)
 
     def __init__(self):
         super().__init__("strategy_large_pe_name", "strategy_large_pe_desc")

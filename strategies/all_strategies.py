@@ -71,26 +71,22 @@ class StrategyManager:
         if self._initialized:
             return
 
-        with self._lock:
-            if self._initialized:
-                return
+        _import_all_strategies()
+        self.strategies = {}
+        registry = get_strategy_registry()
+        for k, cls in registry.items():
+            instance = cls()
+            instance.key = k
+            self.strategies[k] = instance
 
-            _import_all_strategies()
-            self.strategies = {}
-            registry = get_strategy_registry()
-            for k, cls in registry.items():
-                instance = cls()
-                instance.key = k
-                self.strategies[k] = instance
+        logger.info(
+            f"[StrategyManager] Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}",
+        )
+        self._validate_i18n()
 
-            logger.info(
-                f"[StrategyManager] Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}",
-            )
-            self._validate_i18n()
+        self._dependency_cache: dict[str, dict] | None = None
 
-            self._dependency_cache: dict[str, dict] | None = None
-
-            self._initialized = True
+        self._initialized = True
 
     def _validate_i18n(self):
         """Startup validation — warn if any strategy is missing i18n keys."""

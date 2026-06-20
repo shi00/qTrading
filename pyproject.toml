@@ -15,6 +15,12 @@ classifiers = [
 # urllib3>=2.7.0: Fix Brotli decode error for requests; must be >= 2.6.2
 # brotlicffi: Fast Brotli compression support for urllib3 (optional dep, must be explicit)
 # playwright: Browser automation for E2E tests and scraping helpers
+#
+# Version constraint policy (DEP-M1):
+# - All dependencies use >= for forward compatibility.
+# - Exceptions pinned with == (breaking changes / tight coupling):
+#   * flet / flet-desktop: UI framework with breaking layout/behavior changes across minor versions.
+#   * tushare: API methods and data formats vary between versions; client code is tightly coupled.
 dependencies = [
     "flet==0.28.3",
     "flet-desktop==0.28.3",

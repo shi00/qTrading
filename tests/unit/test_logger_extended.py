@@ -223,6 +223,27 @@ class TestSetupLoggingDegradation:
         assert "old log content" in content
         assert "--- Log Session Started" in content
 
+    def test_error_log_failure_writes_to_stderr(self, tmp_path, capsys):
+        """ERR-M2 / SEC-L2: error.log handler failure must write to stderr, not silently pass."""
+        log_dir = str(tmp_path / "test_logs")
+
+        class FailingRotatingFileHandler(RotatingFileHandler):
+            def __init__(self, *args, **kwargs):
+                raise OSError("permission denied")
+
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch("utils.logger.RotatingFileHandler", FailingRotatingFileHandler),
+        ):
+            setup_logging("error_log_stderr_test")
+
+        captured = capsys.readouterr()
+        assert "Failed to setup error logging" in captured.err
+        assert "permission denied" in captured.err
+
 
 class TestJSONFormatter:
     def test_json_formatter_basic(self):

@@ -2250,3 +2250,152 @@ class TestChunkedInQueryMultipleChunks:
         )
         assert len(result) == 6
         assert call_count == 3
+
+
+class TestChunkedExecute:
+    """Task 6.11 (ARCH-M5 / CQ-M4): _chunked_execute 公共分块方法。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_values_returns_empty_list(self):
+        db_fn = AsyncMock()
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            [],
+        )
+        assert results == []
+        db_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_single_chunk_returns_one_result(self):
+        db_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A", "B"]}))
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            ["A", "B"],
+            chunk_size=500,
+        )
+        assert len(results) == 1
+        assert len(results[0]) == 2
+        db_fn.assert_called_once()
+        sql = db_fn.call_args[0][0]
+        assert "$1" in sql and "$2" in sql
+
+    @pytest.mark.asyncio
+    async def test_multiple_chunks_preserve_order(self):
+        codes = [f"{i:06d}.SH" for i in range(6)]
+        db_fn = AsyncMock(
+            side_effect=[
+                pd.DataFrame({"ts_code": codes[:2]}),
+                pd.DataFrame({"ts_code": codes[2:4]}),
+                pd.DataFrame({"ts_code": codes[4:]}),
+            ]
+        )
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=2,
+        )
+        assert db_fn.call_count == 3
+        assert len(results) == 3
+        assert len(results[0]) == 2
+        assert len(results[1]) == 2
+        assert len(results[2]) == 2
+
+    @pytest.mark.asyncio
+    async def test_none_results_preserved_not_filtered(self):
+        """_chunked_execute 不负责过滤，None 结果应原样保留在列表中。"""
+        db_fn = AsyncMock(side_effect=[pd.DataFrame({"id": ["A"]}), None])
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            ["A", "B"],
+            chunk_size=1,
+        )
+        assert len(results) == 2
+        assert results[0] is not None
+        assert results[1] is None
+
+    @pytest.mark.asyncio
+    async def test_callable_sql_template_with_start_idx(self):
+        db_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A"]}))
+        passed_start_idx = None
+
+        def sql_template_3(placeholders, chunk_len, start_idx):
+            nonlocal passed_start_idx
+            passed_start_idx = start_idx
+            return f"SELECT * FROM t WHERE id IN ({placeholders}) LIMIT ${start_idx + chunk_len}"
+
+        await BaseDao._chunked_execute(
+            db_fn,
+            sql_template_3,
+            ["A"],
+            extra_params=["prefix1"],
+        )
+        assert passed_start_idx == 2
+        called_sql = db_fn.call_args[0][0]
+        assert called_sql == "SELECT * FROM t WHERE id IN ($2) LIMIT $3"
+
+    @pytest.mark.asyncio
+    async def test_extra_params_and_params_fn_assembled(self):
+        db_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A"]}))
+
+        def params_fn(chunk):
+            return ["extra_suffix"]
+
+        await BaseDao._chunked_execute(
+            db_fn,
+            "UPDATE t SET x=1 WHERE id IN ({placeholders}) AND status = $1",
+            ["A"],
+            extra_params=["status_val"],
+            params_fn=params_fn,
+        )
+        call_params = db_fn.call_args[0][1]
+        assert call_params[0] == "status_val"
+        assert call_params[1] == "A"
+        assert call_params[2] == "extra_suffix"
+
+    @pytest.mark.asyncio
+    async def test_db_kwargs_forwarded(self):
+        db_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A"]}))
+        await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            ["A"],
+            suppress_errors=True,
+        )
+        assert db_fn.call_args[1].get("suppress_errors") is True
+
+    @pytest.mark.asyncio
+    async def test_boundary_exactly_chunk_size_single_call(self):
+        """恰好 chunk_size 个值应只触发一次调用。"""
+        values = [f"{i:06d}.SH" for i in range(500)]
+        db_fn = AsyncMock(return_value=pd.DataFrame({"ts_code": values}))
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            values,
+            chunk_size=500,
+        )
+        assert db_fn.call_count == 1
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_boundary_one_over_chunk_size_two_calls(self):
+        """chunk_size+1 个值应触发两次调用。"""
+        values = [f"{i:06d}.SH" for i in range(501)]
+        db_fn = AsyncMock(
+            side_effect=[
+                pd.DataFrame({"ts_code": values[:500]}),
+                pd.DataFrame({"ts_code": values[500:]}),
+            ]
+        )
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            values,
+            chunk_size=500,
+        )
+        assert db_fn.call_count == 2
+        assert len(results) == 2

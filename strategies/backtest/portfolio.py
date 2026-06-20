@@ -75,10 +75,17 @@ class PortfolioSimulator:
         exec_date: date,
         day_quotes: pl.DataFrame,
     ) -> None:
-        for ts_code, pos in list(self.positions.items()):
-            quote = day_quotes.filter(pl.col("ts_code") == ts_code)
+        # PERF-C3: Pre-group by ts_code via partition_by to avoid O(N*M) loop filters.
+        quotes_by_code = (
+            {k[0]: v for k, v in day_quotes.partition_by("ts_code", as_dict=True).items()}
+            if not day_quotes.is_empty()
+            else {}
+        )
 
-            if quote.is_empty():
+        for ts_code, pos in list(self.positions.items()):
+            quote = quotes_by_code.get(ts_code)
+
+            if quote is None or quote.is_empty():
                 # BT-002: 区分退市与临时停牌
                 # 退市标的（exec_date >= delist_date）按最后已知价强制清算；
                 # 临时停牌保留持仓，由 _record_daily_positions 用最后已知价估算市值。
@@ -249,13 +256,20 @@ class PortfolioSimulator:
             return
 
         # 第一遍：基于快照计算所有买单的目标金额和股数
+        # PERF-C3: Pre-group by ts_code via partition_by to avoid O(N*M) loop filters.
+        quotes_by_code = (
+            {k[0]: v for k, v in day_quotes.partition_by("ts_code", as_dict=True).items()}
+            if not day_quotes.is_empty()
+            else {}
+        )
+
         buy_plans: list[dict] = []
         for row in weights_df.iter_rows(named=True):
             ts_code = row["ts_code"]
             weight = float(row["weight"])
-            quote = day_quotes.filter(pl.col("ts_code") == ts_code)
+            quote = quotes_by_code.get(ts_code)
 
-            if quote.is_empty():
+            if quote is None or quote.is_empty():
                 self.skipped_list.append(
                     {
                         "trade_date": exec_date,
@@ -440,9 +454,15 @@ class PortfolioSimulator:
         """
         total_value = self.cash
         positions_detail: dict[str, dict] = {}
+        # PERF-C3: Pre-group by ts_code via partition_by to avoid O(N*M) loop filters.
+        quotes_by_code = (
+            {k[0]: v for k, v in day_quotes.partition_by("ts_code", as_dict=True).items()}
+            if not day_quotes.is_empty()
+            else {}
+        )
         for ts_code, pos in self.positions.items():
-            quote = day_quotes.filter(pl.col("ts_code") == ts_code)
-            if not quote.is_empty():
+            quote = quotes_by_code.get(ts_code)
+            if quote is not None and not quote.is_empty():
                 qfq_close = float(quote.select("qfq_close").item())
                 self._last_known_prices[ts_code] = qfq_close
                 qfq_market_value = pos["volume"] * qfq_close

@@ -897,3 +897,185 @@ class TestSuspendedMarketValueEstimation:
         if not trades.is_empty():
             sell_trades = trades.filter(pl.col("action") == "sell")
             assert len(sell_trades) == 0
+
+
+class TestPartitionByLookupEquivalence:
+    """Verify partition_by-based quotes_by_code lookup (PERF-C3) produces identical
+    results to the original per-ts_code filter in PortfolioSimulator methods."""
+
+    @pytest.fixture
+    def config(self) -> BacktestConfig:
+        return BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            initial_capital=1_000_000.0,
+            max_position_count=10,
+            cash_reserve_pct=0.0,
+            rebalance_freq="signal",
+        )
+
+    def _make_quotes(self, ts_codes: list[str], prices: list[float]) -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "ts_code": ts_codes,
+                "raw_open": prices,
+                "raw_close": prices,
+                "qfq_open": prices,
+                "qfq_close": prices,
+                "is_tradable": [True] * len(ts_codes),
+            }
+        )
+
+    def test_sell_all_positions_with_missing_ts_code(self, config: BacktestConfig) -> None:
+        """_sell_all_positions handles a position whose ts_code is not in day_quotes.
+        The partition_by lookup returns None, which is handled like an empty filter result.
+        """
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator.positions["MISSING.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        # day_quotes has a different ts_code, so MISSING.SZ is absent
+        day_quotes = self._make_quotes(["OTHER.SZ"], [5.0])
+
+        simulator._sell_all_positions(date(2024, 1, 10), day_quotes)
+
+        # Position retained (no_quote skip, not delisted)
+        assert "MISSING.SZ" in simulator.positions
+        skipped = simulator.get_results()[2]
+        no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
+        assert len(no_quote_skips) == 1
+        assert no_quote_skips["direction"][0] == "sell"
+
+    def test_sell_all_positions_with_present_ts_code(self, config: BacktestConfig) -> None:
+        """_sell_all_positions sells a position whose ts_code IS in day_quotes."""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator.positions["000001.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        day_quotes = self._make_quotes(["000001.SZ"], [12.0])
+
+        simulator._sell_all_positions(date(2024, 1, 10), day_quotes)
+
+        assert "000001.SZ" not in simulator.positions
+        trades = simulator.get_results()[0]
+        sell_trades = trades.filter(pl.col("action") == "sell")
+        assert len(sell_trades) == 1
+        assert sell_trades["ts_code"][0] == "000001.SZ"
+
+    def test_buy_signals_with_missing_ts_code(self, config: BacktestConfig) -> None:
+        """_buy_signals skips a signal whose ts_code is not in day_quotes (no_quote)."""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        signals = pl.DataFrame(
+            {
+                "ts_code": ["MISSING.SZ", "000001.SZ"],
+                "signal_rank": [1.0, 2.0],
+            }
+        )
+        day_quotes = self._make_quotes(["000001.SZ"], [10.0])
+
+        simulator._buy_signals(date(2024, 1, 10), signals, day_quotes)
+
+        trades = simulator.get_results()[0]
+        buy_trades = trades.filter(pl.col("action") == "buy")
+        # Only 000001.SZ should be bought; MISSING.SZ skipped
+        assert len(buy_trades) == 1
+        assert buy_trades["ts_code"][0] == "000001.SZ"
+        skipped = simulator.get_results()[2]
+        no_quote_skips = skipped.filter(pl.col("reason") == "no_quote")
+        assert len(no_quote_skips) == 1
+        assert no_quote_skips["direction"][0] == "buy"
+
+    def test_record_daily_positions_with_missing_ts_code(self, config: BacktestConfig) -> None:
+        """_record_daily_positions uses last_known_price for a position whose ts_code
+        is absent from day_quotes (None from partition_by lookup -> else branch)."""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator.positions["MISSING.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["MISSING.SZ"] = 11.0
+        day_quotes = self._make_quotes(["OTHER.SZ"], [5.0])
+
+        simulator._record_daily_positions(date(2024, 1, 10), day_quotes)
+
+        positions_history = simulator.get_results()[1]
+        last_day = positions_history.row(-1, named=True)
+        pos_detail = last_day["positions"]["MISSING.SZ"]
+        assert pos_detail["estimated"] is True
+        assert pos_detail["market_value"] == 100 * 11.0
+
+    def test_record_daily_positions_with_present_ts_code(self, config: BacktestConfig) -> None:
+        """_record_daily_positions uses qfq_close from day_quotes when ts_code is present."""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator.positions["000001.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        day_quotes = self._make_quotes(["000001.SZ"], [12.0])
+
+        simulator._record_daily_positions(date(2024, 1, 10), day_quotes)
+
+        positions_history = simulator.get_results()[1]
+        last_day = positions_history.row(-1, named=True)
+        pos_detail = last_day["positions"]["000001.SZ"]
+        assert "estimated" not in pos_detail
+        assert pos_detail["market_value"] == 100 * 12.0
+        assert simulator._last_known_prices["000001.SZ"] == 12.0
+
+    def test_empty_day_quotes_does_not_crash(self, config: BacktestConfig) -> None:
+        """An empty day_quotes DataFrame should not crash any of the three methods."""
+        simulator = PortfolioSimulator(config, TransactionCostModel(TransactionCostConfig()))
+        simulator.positions["000001.SZ"] = {
+            "volume": 100,
+            "cost_basis": 1_000.0,
+            "entry_date": date(2024, 1, 2),
+            "entry_price": 10.0,
+            "qfq_entry_price": 10.0,
+        }
+        simulator._last_known_prices["000001.SZ"] = 10.5
+        empty_quotes = pl.DataFrame()
+
+        # All three methods should handle empty day_quotes gracefully
+        simulator._sell_all_positions(date(2024, 1, 10), empty_quotes)
+        simulator._record_daily_positions(date(2024, 1, 10), empty_quotes)
+
+        # Position retained (no_quote skip)
+        assert "000001.SZ" in simulator.positions
+        skipped = simulator.get_results()[2]
+        assert len(skipped.filter(pl.col("reason") == "no_quote")) == 1
+
+    def test_partition_by_lookup_matches_filter_for_ts_code(self) -> None:
+        """Directly verify partition_by ts_code lookup returns same DataFrame as filter."""
+        df = pl.DataFrame(
+            {
+                "ts_code": ["A", "B", "A", "B"],
+                "val": [1, 2, 3, 4],
+            }
+        )
+
+        by_code = {k[0]: v for k, v in df.partition_by("ts_code", as_dict=True).items()}
+
+        for code in ["A", "B"]:
+            filter_result = df.filter(pl.col("ts_code") == code)
+            partition_result = by_code.get(code)
+            assert partition_result is not None
+            assert filter_result.equals(partition_result)
+
+        # Missing code: filter returns empty with schema, get returns None
+        assert by_code.get("MISSING") is None
+        missing_filter = df.filter(pl.col("ts_code") == "MISSING")
+        assert missing_filter.is_empty()

@@ -523,19 +523,24 @@ class ConfigHandler:
 
     @staticmethod
     def get_db_url():
-        """Get PostgreSQL connection URL by rebuilding from components.
+        """Get PostgreSQL connection URL.
 
-        Reconstructs the URL from stored host/port/user/database + password
-        via DatabaseConfigService.build_url(), which properly URL-encodes
-        credentials. Falls back to config.DB_URL (from DATABASE_URL env var)
-        only when no db_host is configured (pre-onboarding).
-
-        WARNING: Due to AppConfig defining a default `db_host` ("127.0.0.1"),
-        `get_typed("db_host")` will rarely return empty unless explicitly set
-        to `""`. This means the DATABASE_URL environment variable will be
-        completely ignored in most runtime scenarios, as the URL will be
-        rebuilt using defaults instead.
+        Resolution priority (12-factor app compliance):
+        1. ``DATABASE_URL`` environment variable — always wins when set, so
+           deployments can override the persisted config without editing JSON.
+        2. Rebuild from stored host/port/user/database + password via
+           ``DatabaseConfigService.build_url()``, which properly URL-encodes
+           credentials. Used once the user completes onboarding and ``db_host``
+           is populated.
+        3. Fall back to ``config.DB_URL`` (snapshot of ``DATABASE_URL`` taken
+           at import time) for pre-onboarding scenarios.
         """
+        # Priority 1: DATABASE_URL environment variable
+        env_url = os.environ.get("DATABASE_URL")
+        if env_url:
+            return env_url
+
+        # Priority 2: reconstruct from components
         host = ConfigHandler.get_typed("db_host", str, "")
         if host:
             from data.persistence.db_config_service import DatabaseConfigService
@@ -549,6 +554,8 @@ class ConfigHandler:
                 database=ConfigHandler.get_typed("db_name", str, "astock"),
                 async_driver=True,
             )
+
+        # Priority 3: fallback to config.DB_URL
         return config.DB_URL
 
     @staticmethod
@@ -651,7 +658,7 @@ class ConfigHandler:
         """Get database configuration components."""
         password = ConfigHandler.get_db_password()
         return {
-            "host": ConfigHandler.get_typed("db_host", str, "127.0.0.1"),
+            "host": ConfigHandler.get_typed("db_host", str, ""),
             "port": ConfigHandler.get_typed("db_port", int, 5432),
             "user": ConfigHandler.get_typed("db_user", str, "postgres"),
             "password": password,
@@ -1011,8 +1018,12 @@ class ConfigHandler:
                     keyring.delete_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
                 except keyring.errors.PasswordDeleteError:  # type: ignore[reportAttributeAccessIssue]  # keyring.errors is available at runtime
                     pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(
+                        "keyring operation failed: %s",
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
                 if "api_key_encrypted" in cred:
                     del cred["api_key_encrypted"]
                     provider_credentials[provider] = cred
@@ -1048,22 +1059,34 @@ class ConfigHandler:
 
         try:
             api_key = keyring.get_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(
+                "keyring operation failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
         if not api_key and cred.get("api_key_encrypted"):
             try:
                 api_key = SecurityManager.decrypt_data(cred["api_key_encrypted"])
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "keyring operation failed: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
         # Fallback to global api_key if provider-specific key not found
         if fallback_to_global and not api_key:
             # Try keyring global key first
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    "keyring operation failed: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
             # Then try encrypted global key in config
             if not api_key:
@@ -1071,8 +1094,12 @@ class ConfigHandler:
                 if global_encrypted:
                     try:
                         api_key = SecurityManager.decrypt_data(global_encrypted)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(
+                            "keyring operation failed: %s",
+                            DataSanitizer.sanitize_error(e),
+                            exc_info=True,
+                        )
 
         base_url = cred.get("base_url", "")
         if not base_url:

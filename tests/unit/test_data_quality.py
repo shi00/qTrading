@@ -152,6 +152,41 @@ class TestDataQualityServiceCheckCrossValidation:
         assert "BadRule" in result[0]
         assert "error" in result[0].lower()
 
+    def test_valid_expression(self):
+        df = pd.DataFrame({"close": [10], "open": [10]})
+        rules = [("DiffCheck", "close - open", 0.05)]
+        result = DataQualityService.check_cross_validation(df, rules)
+        assert result == []
+
+    def test_invalid_expression_semicolon_raises(self):
+        df = pd.DataFrame({"close": [10], "open": [8]})
+        rules = [("Injection", "close; import os", 0.05)]
+        with pytest.raises(ValueError, match="Invalid expression"):
+            DataQualityService.check_cross_validation(df, rules)
+
+    def test_invalid_expression_quotes_raises(self):
+        df = pd.DataFrame({"close": [10]})
+        rules = [("Injection", "__import__('os')", 0.05)]
+        with pytest.raises(ValueError, match="Invalid expression"):
+            DataQualityService.check_cross_validation(df, rules)
+
+    def test_unrecoverable_exception_propagates(self):
+        # ValueError is unrecoverable: re-raised with schema/type error message
+        df = pd.DataFrame({"a": [1]})
+        rules = [("BadRule", "a; rm -rf /", 0.1)]
+        with pytest.raises(ValueError, match="Data quality check failed"):
+            DataQualityService.check_cross_validation(df, rules)
+
+    def test_recoverable_exception_logged(self, caplog):
+        # NameError (UndefinedVariableError) is recoverable: logged and continues
+        df = pd.DataFrame({"a": [1]})
+        rules = [("BadRule", "nonexistent_col * 2", 0.1)]
+        with caplog.at_level("WARNING"):
+            result = DataQualityService.check_cross_validation(df, rules)
+        assert len(result) == 1
+        assert "BadRule" in result[0]
+        assert any("Data quality check warning" in r.getMessage() for r in caplog.records)
+
 
 class TestDataQualityServiceCheckContinuityExtended:
     def test_all_nan_dates(self):

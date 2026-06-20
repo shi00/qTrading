@@ -11,6 +11,12 @@ if TYPE_CHECKING:
     pass
 
 
+# 盈亏分类阈值：realized_pnl > PROFIT_THRESHOLD 为盈利（WIN），
+# < PROFIT_THRESHOLD 为亏损（LOSS），== PROFIT_THRESHOLD 为平局（DRAW）。
+# report.py 与 calc_win_rate 共享此常量，确保 0 归类一致。
+PROFIT_THRESHOLD: float = 0.0
+
+
 class BacktestMetrics:
     """回测指标计算器"""
 
@@ -132,13 +138,14 @@ class BacktestMetrics:
         """计算胜率，仅统计卖出/平仓交易。
 
         买入交易 realized_pnl=0.0 不计入分母，避免系统性压低胜率。
+        盈亏阈值由 PROFIT_THRESHOLD 共享常量定义，与 report.py 保持一致。
         """
         if len(trades) == 0:
             return 0.0
         sell_trades = trades.filter(pl.col("action") == "sell")
         if len(sell_trades) == 0:
             return 0.0
-        profitable = sell_trades.filter(pl.col("realized_pnl") > 0)
+        profitable = sell_trades.filter(pl.col("realized_pnl") > PROFIT_THRESHOLD)
         return len(profitable) / len(sell_trades)
 
     @staticmethod

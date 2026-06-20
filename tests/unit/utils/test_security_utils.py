@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 from utils.security_utils import (
     SecurityManager,
     DecryptionError,
+    EncryptionError,
     _derive_key_from_machine,
     _get_machine_fingerprint,
     _hide_file_windows,
@@ -203,10 +204,10 @@ class TestSecurityManagerEncryptDecrypt:
         with pytest.raises(DecryptionError, match="too short"):
             SecurityManager.decrypt_data(short_data)
 
-    def test_encrypt_failure_raises_decryption_error(self):
+    def test_encrypt_failure_raises_encryption_error(self):
         SecurityManager._key = b"x" * 32
         with patch.object(SecurityManager, "get_key", side_effect=Exception("key error")):
-            with pytest.raises(DecryptionError, match="Encryption failed"):
+            with pytest.raises(EncryptionError, match="Encryption failed"):
                 SecurityManager.encrypt_data("test")
 
 
@@ -249,6 +250,20 @@ class TestDecryptionError:
         err = DecryptionError("test")
         assert isinstance(err, Exception)
         assert str(err) == "test"
+
+
+class TestEncryptionError:
+    def test_is_exception(self):
+        err = EncryptionError("test")
+        assert isinstance(err, Exception)
+        assert str(err) == "test"
+
+    def test_is_security_error(self):
+        """EncryptionError must be a subclass of SecurityError so existing except SecurityError blocks still catch it"""
+        from utils.security_utils import SecurityError
+
+        err = EncryptionError("test")
+        assert isinstance(err, SecurityError)
 
 
 class TestLegacyMarker:
@@ -396,14 +411,14 @@ class TestSecurityManagerNoFallback:
             SecurityManager.get_key()
 
     @patch("utils.security_utils.os.path.exists")
-    def test_encrypt_without_key_raises_decryption_error(self, mock_exists):
-        """无密钥时 encrypt_data 抛出 DecryptionError（包装 SecurityError）"""
-        from utils.security_utils import DecryptionError
+    def test_encrypt_without_key_raises_encryption_error(self, mock_exists):
+        """无密钥时 encrypt_data 抛出 EncryptionError（包装 SecurityError）"""
+        from utils.security_utils import EncryptionError
 
         mock_exists.return_value = False
         SecurityManager._key = None
 
-        with pytest.raises(DecryptionError, match="Encryption failed"):
+        with pytest.raises(EncryptionError, match="Encryption failed"):
             SecurityManager.encrypt_data("secret_data")
 
     @patch("utils.security_utils.os.path.exists")

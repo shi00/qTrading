@@ -29,18 +29,37 @@ class TestSanitizeToken:
         assert DataSanitizer.sanitize_token("abc") == "***"
 
     def test_short_token_boundary_15(self):
-        """长度 15（< 16）的 token 应全部隐藏"""
+        """长度 15（< 32）的 token 应全部隐藏"""
         assert DataSanitizer.sanitize_token("a" * 15) == "***"
 
     def test_token_boundary_16(self):
-        """长度 16（>= 16）的 token 应部分脱敏"""
+        """长度 16（< 32）的 token 应全部隐藏"""
         token = "a" * 16
+        result = DataSanitizer.sanitize_token(token)
+        assert result == "***"
+
+    def test_token_boundary_31(self):
+        """长度 31（< 32）的 token 应全部隐藏"""
+        token = "a" * 31
+        result = DataSanitizer.sanitize_token(token)
+        assert result == "***"
+
+    def test_token_boundary_32(self):
+        """长度 32（>= 32）的 token 应部分脱敏（边界情况）"""
+        token = "a" * 32
+        result = DataSanitizer.sanitize_token(token)
+        assert result == "aaa***aaaa"
+        assert "***" in result
+
+    def test_token_boundary_64(self):
+        """长度 64 的 token 应部分脱敏"""
+        token = "a" * 64
         result = DataSanitizer.sanitize_token(token)
         assert result == "aaa***aaaa"
         assert "***" in result
 
     def test_long_token(self):
-        result = DataSanitizer.sanitize_token("tushare_abc123xyz789")
+        result = DataSanitizer.sanitize_token("tushare_abc123xyz78901234567890123456789")
         assert result.startswith("tus")
         assert result.endswith("789")
         assert "***" in result
@@ -171,6 +190,37 @@ class TestSanitizeError:
         assert "the token is valid" in result
         assert "the secret is out" in result
 
+    def test_error_with_credential_key(self):
+        """credential=xxx should be sanitized"""
+        err = ValueError("Failed: credential=my_credential_value")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_credential_value" not in result
+
+    def test_error_with_credentials_key(self):
+        """credentials=xxx should be sanitized"""
+        err = ValueError("Failed: credentials=my_credentials_value")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_credentials_value" not in result
+
+    def test_error_with_passphrase_key(self):
+        """passphrase=xxx should be sanitized"""
+        err = ValueError("Failed: passphrase=my_passphrase_value")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_passphrase_value" not in result
+
+    def test_error_with_private_key(self):
+        """private_key=xxx should be sanitized"""
+        err = ValueError("Failed: private_key=my_private_key_value")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_private_key_value" not in result
+
+    def test_error_with_apikey_hyphen_url(self):
+        """?api-key=xxx in URL should be sanitized"""
+        err = ValueError("Request failed: https://api.example.com/v1?api-key=sk-abc123xyz789")
+        result = DataSanitizer.sanitize_error(err)
+        assert "sk-abc123xyz789" not in result
+        assert "***" in result
+
 
 class TestRegisterSecret:
     """SEC-007: register_secret + sanitize_error 精确替换"""
@@ -290,7 +340,7 @@ class TestSanitizeDict:
         data = {
             "name": "test",
             "sensitive_field": {
-                "token": "test_token_abc123456",
+                "token": "test_token_abc123456789012345678",
                 "nested_non_sensitive": "hello",
             },
             "nested_config_group": {
@@ -308,7 +358,7 @@ class TestSanitizeDict:
         data["sensitive_secret_group"] = {"nested_val": "secret_val"}
         result = DataSanitizer.sanitize_dict(data)
         assert result["sensitive_secret_group"] == "***"
-        assert result["sensitive_field"]["token"] == "tes***3456"
+        assert result["sensitive_field"]["token"] == "tes***5678"
 
         # 2. nested_config_group contains sensitive inner keys, so password should be masked, normal_field kept
         assert result["nested_config_group"]["password"] == "***"
@@ -316,6 +366,31 @@ class TestSanitizeDict:
         # 3. list_field has inner dicts, secret should be masked, normal kept
         assert result["list_field"][0]["secret"] == "***"
         assert result["list_field"][1]["normal"] == "ok"
+
+    def test_additional_sensitive_keys(self):
+        """SEC-M4: Additional sensitive keys should be masked"""
+        keys = [
+            "apikey",
+            "api-key",
+            "credential",
+            "credentials",
+            "access_token",
+            "refresh_token",
+            "private_key",
+            "passphrase",
+        ]
+        for key in keys:
+            data = {key: "short"}
+            result = DataSanitizer.sanitize_dict(data)
+            assert result[key] == "***", f"Key '{key}' should be masked"
+
+    def test_sensitive_keys_case_insensitive(self):
+        """SEC-M4: Sensitive key matching should be case-insensitive"""
+        data = {"API_KEY": "short", "Token": "short", "PASSWORD": "short"}
+        result = DataSanitizer.sanitize_dict(data)
+        assert result["API_KEY"] == "***"
+        assert result["Token"] == "***"
+        assert result["PASSWORD"] == "***"
 
 
 class TestSanitizeArgs:

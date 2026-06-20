@@ -79,8 +79,8 @@ class SchedulerService:
             try:
                 if inst.scheduler.running:
                     inst.scheduler.shutdown(wait=False)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Scheduler initialization failed: %s", e, exc_info=True)
 
     def __init__(self):
         if self._initialized:

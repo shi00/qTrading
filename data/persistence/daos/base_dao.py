@@ -93,6 +93,78 @@ class BaseDao:
             raise
 
     @staticmethod
+    async def _chunked_execute(
+        db_fn,
+        sql_template,
+        values,
+        *,
+        chunk_size=_IN_CHUNK_SIZE,
+        params_fn=None,
+        start_idx=1,
+        extra_params=None,
+        **db_kwargs,
+    ):
+        """IN 子句分块执行的公共逻辑（ARCH-M5 / CQ-M4 代码去重）。
+
+        处理：分块分割、占位符生成、SQL 模板调用、参数组装，对每个分块调用
+        ``db_fn(sql, params, **db_kwargs)`` 并收集返回值。
+
+        Args:
+            db_fn: async 函数 ``(sql, params, **kwargs) -> result``
+            sql_template: 含 ``{placeholders}`` 标记的 SQL 字符串，或
+                ``callable(placeholders, chunk_len[, start_idx]) -> sql_string``
+            values: IN 子句的值列表
+            chunk_size: 每块最大值数（默认 500）
+            params_fn: ``callable(values_chunk) -> extra params list``，追加到值之后
+            start_idx: 占位符起始索引（默认 1）
+            extra_params: 前缀参数列表，前置到查询参数
+            **db_kwargs: 透传给 db_fn 的额外关键字参数
+
+        Returns:
+            list：每个分块对应 db_fn 的返回值（保持顺序）。values 为空时返回 ``[]``。
+        """
+        if not values:
+            return []
+
+        extra_prefix = extra_params or []
+        prefix_len = len(extra_prefix)
+        actual_start_idx = start_idx if extra_params is None else prefix_len + 1
+
+        import inspect
+
+        template_takes_start_idx = False
+        if callable(sql_template):
+            try:
+                sig = inspect.signature(sql_template)
+                params_list = list(sig.parameters.values())
+                pos_count = 0
+                has_var_positional = False
+                for p in params_list:
+                    if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                        pos_count += 1
+                    elif p.kind == inspect.Parameter.VAR_POSITIONAL:
+                        has_var_positional = True
+                template_takes_start_idx = (pos_count >= 3) or has_var_positional
+            except (ValueError, TypeError):
+                template_takes_start_idx = False
+
+        results = []
+        for i in range(0, len(values), chunk_size):
+            chunk = values[i : i + chunk_size]
+            placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
+            extra_suffix = params_fn(chunk) if params_fn else []
+            if callable(sql_template):
+                if template_takes_start_idx:
+                    sql = sql_template(placeholders, len(chunk), actual_start_idx)
+                else:
+                    sql = sql_template(placeholders, len(chunk))
+            else:
+                sql = sql_template.format(placeholders=placeholders)
+            result = await db_fn(sql, extra_prefix + chunk + extra_suffix, **db_kwargs)
+            results.append(result)
+        return results
+
+    @staticmethod
     async def chunked_in_query(
         read_db_fn,
         sql_template,
@@ -117,60 +189,17 @@ class BaseDao:
             extra_params: prefix parameters list to prepend to query arguments
             **read_db_kwargs: extra kwargs to pass to read_db_fn (e.g., suppress_errors=True)
         """
-        if not values:
-            return pd.DataFrame()
-
-        extra_prefix = extra_params or []
-        prefix_len = len(extra_prefix)
-        actual_start_idx = start_idx if extra_params is None else prefix_len + 1
-
-        import inspect
-
-        template_takes_start_idx = False
-        if callable(sql_template):
-            try:
-                sig = inspect.signature(sql_template)
-                params_list = list(sig.parameters.values())
-                pos_count = 0
-                has_var_positional = False
-                for p in params_list:
-                    if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                        pos_count += 1
-                    elif p.kind == inspect.Parameter.VAR_POSITIONAL:
-                        has_var_positional = True
-                template_takes_start_idx = (pos_count >= 3) or has_var_positional
-            except (ValueError, TypeError):
-                template_takes_start_idx = False
-
-        if len(values) <= chunk_size:
-            placeholders = ",".join([f"${actual_start_idx + i}" for i in range(len(values))])
-            extra_suffix = params_fn(values) if params_fn else []
-            if callable(sql_template):
-                if template_takes_start_idx:
-                    sql = sql_template(placeholders, len(values), actual_start_idx)
-                else:
-                    sql = sql_template(placeholders, len(values))
-            else:
-                sql = sql_template.format(placeholders=placeholders)
-            df = await read_db_fn(sql, extra_prefix + values + extra_suffix, **read_db_kwargs)
-            return df if df is not None else pd.DataFrame()
-
-        all_results = []
-        for i in range(0, len(values), chunk_size):
-            chunk = values[i : i + chunk_size]
-            placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
-            extra_suffix = params_fn(chunk) if params_fn else []
-            if callable(sql_template):
-                if template_takes_start_idx:
-                    sql = sql_template(placeholders, len(chunk), actual_start_idx)
-                else:
-                    sql = sql_template(placeholders, len(chunk))
-            else:
-                sql = sql_template.format(placeholders=placeholders)
-            df = await read_db_fn(sql, extra_prefix + chunk + extra_suffix, **read_db_kwargs)
-            if df is not None and not df.empty:
-                all_results.append(df)
-
+        results = await BaseDao._chunked_execute(
+            read_db_fn,
+            sql_template,
+            values,
+            chunk_size=chunk_size,
+            params_fn=params_fn,
+            start_idx=start_idx,
+            extra_params=extra_params,
+            **read_db_kwargs,
+        )
+        all_results = [df for df in results if df is not None and not df.empty]
         if all_results:
             return pd.concat(all_results, ignore_index=True)
         return pd.DataFrame()
@@ -203,44 +232,18 @@ class BaseDao:
             extra_params: prefix parameters list to prepend to query arguments
             **write_db_kwargs: extra kwargs to pass to write_db_fn
         """
-        if not values:
-            return 0
-
-        extra_prefix = extra_params or []
-        prefix_len = len(extra_prefix)
-        actual_start_idx = start_idx if extra_params is None else prefix_len + 1
-
-        import inspect
-
-        template_takes_start_idx = False
-        if callable(sql_template):
-            try:
-                sig = inspect.signature(sql_template)
-                params_list = list(sig.parameters.values())
-                pos_count = 0
-                has_var_positional = False
-                for p in params_list:
-                    if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                        pos_count += 1
-                    elif p.kind == inspect.Parameter.VAR_POSITIONAL:
-                        has_var_positional = True
-                template_takes_start_idx = (pos_count >= 3) or has_var_positional
-            except (ValueError, TypeError):
-                template_takes_start_idx = False
-
+        results = await BaseDao._chunked_execute(
+            write_db_fn,
+            sql_template,
+            values,
+            chunk_size=chunk_size,
+            params_fn=params_fn,
+            start_idx=start_idx,
+            extra_params=extra_params,
+            **write_db_kwargs,
+        )
         total = 0
-        for i in range(0, len(values), chunk_size):
-            chunk = values[i : i + chunk_size]
-            placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
-            extra_suffix = params_fn(chunk) if params_fn else []
-            if callable(sql_template):
-                if template_takes_start_idx:
-                    sql = sql_template(placeholders, len(chunk), actual_start_idx)
-                else:
-                    sql = sql_template(placeholders, len(chunk))
-            else:
-                sql = sql_template.format(placeholders=placeholders)
-            result = await write_db_fn(sql, extra_prefix + chunk + extra_suffix, **write_db_kwargs)
+        for result in results:
             if isinstance(result, int):
                 total += result
         return total

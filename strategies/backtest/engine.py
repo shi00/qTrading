@@ -526,9 +526,15 @@ class VectorBacktestEngine:
 
         simulator = PortfolioSimulator(self.config, self.cost_model, stock_meta=stock_meta)
 
+        # PERF-C1: Pre-group by date via partition_by to avoid O(N*M) loop filters.
+        # partition_by(as_dict=True) returns tuple keys like (date,), so we look up with (exec_date,).
+        # Use df.clear() as default to preserve schema (matches original filter behavior on no match).
+        signals_by_date = dict(signals.partition_by("execution_date", as_dict=True)) if not signals.is_empty() else {}
+        quotes_by_date = dict(quotes_df.partition_by("trade_date", as_dict=True)) if not quotes_df.is_empty() else {}
+
         for exec_date in trade_dates:
-            day_signals = signals.filter(pl.col("execution_date") == exec_date)
-            day_quotes = quotes_df.filter(pl.col("trade_date") == exec_date)
+            day_signals = signals_by_date.get((exec_date,), signals.clear())
+            day_quotes = quotes_by_date.get((exec_date,), quotes_df.clear())
             is_rebalance = self._is_rebalance_day(
                 exec_date,
                 trade_dates,
@@ -556,18 +562,25 @@ class VectorBacktestEngine:
         if signals.is_empty():
             return pl.Series([], dtype=pl.Float64)
 
-        quotes_by_date: dict[date, pl.DataFrame] = {}
-        for d in trade_dates:
-            subset = quotes_df.filter(pl.col("trade_date") == d)
-            if not subset.is_empty():
-                quotes_by_date[d] = subset
+        # PERF-C2: Pre-group by date via partition_by to avoid O(N*M) loop filters.
+        # Unpack tuple keys (k[0]) to plain date values for direct .get(date) lookup.
+        quotes_by_date = (
+            {k[0]: v for k, v in quotes_df.partition_by("trade_date", as_dict=True).items()}
+            if not quotes_df.is_empty()
+            else {}
+        )
+        signals_by_date = (
+            {k[0]: v for k, v in signals.partition_by("signal_date", as_dict=True).items()}
+            if not signals.is_empty()
+            else {}
+        )
 
         ic_values = []
 
         for i, signal_date in enumerate(trade_dates[:-1]):
             execution_date = trade_dates[i + 1]
 
-            day_signals = signals.filter(pl.col("signal_date") == signal_date)
+            day_signals = signals_by_date.get(signal_date, pl.DataFrame())
 
             if day_signals.is_empty():
                 ic_values.append(0.0)

@@ -60,7 +60,7 @@ class DataSanitizer:
             return "***"
 
         # 短token直接全部隐藏
-        if len(token) < 16:
+        if len(token) < 32:
             return "***"
 
         # 标准格式: 前3位 + *** + 后4位
@@ -105,30 +105,30 @@ class DataSanitizer:
     _PATTERN_UNIX_PATH = re.compile(r"/(?:[\w\.\-]+/)+[\w\.\-]+")
 
     _PATTERN_URL_QUERY_KEY = re.compile(
-        r"([?&])(api_key|key|token|secret|password|apikey|access_token|refresh_token)=[^\s&\"']+",
+        r"([?&])(api_key|api-key|key|token|secret|password|apikey|access_token|refresh_token|credentials|credential|private_key|passphrase)=[^\s&\"']+",
         re.IGNORECASE,
     )
 
     _PATTERN_STANDALONE_KEY_VALUE = re.compile(
-        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)\s*=\s*[^\s,;\"']+",
+        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token|credentials|credential|private_key|passphrase)\s*=\s*[^\s,;\"']+",
         re.IGNORECASE,
     )
 
     _PATTERN_BEARER = re.compile(r"Bearer\s+[^\s\"']+", re.IGNORECASE)
 
     _PATTERN_COLON_KEY_VALUE = re.compile(
-        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)\s*[:：]\s*[^\s,;\"']+",
+        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token|credentials|credential|private_key|passphrase)\s*[:：]\s*[^\s,;\"']+",
         re.IGNORECASE,
     )
 
     _PATTERN_JSON_KEY_VALUE = re.compile(
-        r"""["']?(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)["']?\s*:\s*["'][^"']+["']""",
+        r"""["']?(api_key|apikey|api-key|secret|token|password|access_token|refresh_token|credentials|credential|private_key|passphrase)["']?\s*:\s*["'][^"']+["']""",
         re.IGNORECASE,
     )
 
     # Space-separated key-value with known secret prefixes (sk-, pk-, key-, eyJ for JWT)
     _PATTERN_SPACE_KEY_VALUE = re.compile(
-        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token)\s+(sk-|pk-|key-|eyJ)[^\s,;\"']+",
+        r"\b(api_key|apikey|api-key|secret|token|password|access_token|refresh_token|credentials|credential|private_key|passphrase)\s+(sk-|pk-|key-|eyJ)[^\s,;\"']+",
         re.IGNORECASE,
     )
 
@@ -220,7 +220,21 @@ class DataSanitizer:
             脱敏后的字典副本
         """
         if sensitive_keys is None:
-            sensitive_keys = ["token", "password", "api_key", "secret", "key"]
+            sensitive_keys = [
+                "token",
+                "password",
+                "api_key",
+                "secret",
+                "key",
+                "apikey",
+                "api-key",
+                "credential",
+                "credentials",
+                "access_token",
+                "refresh_token",
+                "private_key",
+                "passphrase",
+            ]
 
         result = {}
         for k, v in data.items():

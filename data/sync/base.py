@@ -11,6 +11,7 @@ import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from collections.abc import Callable
+from enum import StrEnum
 from typing import Any
 
 from utils.correlation import ensure_correlation_id
@@ -21,6 +22,22 @@ from utils.correlation import ensure_correlation_id
 # from data.cache.cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
+
+
+class SyncStatus(StrEnum):
+    """
+    Standardized status values for SyncResult.
+
+    Used as the canonical set of sync outcome states. ``SyncResult.status``
+    remains a plain ``str`` for backward compatibility; callers should compare
+    against ``SyncStatus.X.value`` (or rely on the ``str, Enum`` mixin which
+    makes ``SyncStatus.PARTIAL == "partial"`` evaluate to ``True``).
+    """
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass

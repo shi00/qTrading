@@ -17,20 +17,20 @@ class TestLocalModelManagerGetLoadedModelPath:
         assert mgr.get_loaded_model_path() == "/path/to/model.gguf"
 
 
-class TestLocalModelManagerGetLoadedModelMd5:
+class TestLocalModelManagerGetLoadedModelSha256:
     def test_no_model_loaded(self):
         mgr = LocalModelManager()
-        assert mgr.get_loaded_model_md5() == ""
+        assert mgr.get_loaded_model_sha256() == ""
 
-    def test_with_md5(self):
+    def test_with_sha256(self):
         mgr = LocalModelManager()
-        mgr._model_md5 = "abc123"
-        assert mgr.get_loaded_model_md5() == "abc123"
+        mgr._model_sha256 = "abc123"
+        assert mgr.get_loaded_model_sha256() == "abc123"
 
 
-class TestLocalModelManagerCalculateFileMd5:
+class TestLocalModelManagerCalculateFileSha256:
     def test_nonexistent_file(self):
-        result = LocalModelManager.calculate_file_md5("/nonexistent/file.gguf")
+        result = LocalModelManager.calculate_file_sha256("/nonexistent/file.gguf")
         assert result == ""
 
 
@@ -55,7 +55,7 @@ class TestLocalModelManagerUnloadModel:
         with patch.object(mgr, "_shutdown_worker"):
             mgr.unload_model()
         assert mgr._model_path == ""
-        assert mgr._model_md5 == ""
+        assert mgr._model_sha256 == ""
         assert mgr._model_stat == (0, 0)
         assert mgr._last_config == {}
 
@@ -344,9 +344,9 @@ class TestLocalModelManagerRunInference:
                     await mgr.run_inference("test prompt")
 
 
-class TestLocalModelManagerCalculateMd5:
+class TestLocalModelManagerCalculateSha256:
     def test_nonexistent_file(self):
-        result = LocalModelManager.calculate_file_md5("/nonexistent/file.gguf")
+        result = LocalModelManager.calculate_file_sha256("/nonexistent/file.gguf")
         assert result == ""
 
 
@@ -361,10 +361,10 @@ class TestLocalModelManagerGetModelInfo:
         mgr._model_path = ""
         assert mgr.get_loaded_model_path() == ""
 
-    def test_get_loaded_model_md5_empty(self):
+    def test_get_loaded_model_sha256_empty(self):
         mgr = LocalModelManager.__new__(LocalModelManager)
-        mgr._model_md5 = ""
-        assert mgr.get_loaded_model_md5() == ""
+        mgr._model_sha256 = ""
+        assert mgr.get_loaded_model_sha256() == ""
 
     def test_get_loaded_model_path_set(self):
         mgr = LocalModelManager.__new__(LocalModelManager)
@@ -377,9 +377,9 @@ class TestLocalModelManagerGetters:
         LocalModelManager._model_path = ""
         assert LocalModelManager._model_path == ""
 
-    def test_get_loaded_model_md5_empty(self):
-        LocalModelManager._model_md5 = ""
-        assert LocalModelManager._model_md5 == ""
+    def test_get_loaded_model_sha256_empty(self):
+        LocalModelManager._model_sha256 = ""
+        assert LocalModelManager._model_sha256 == ""
 
 
 class TestLocalModelManagerReset:
@@ -389,11 +389,11 @@ class TestLocalModelManagerReset:
         assert LocalModelManager._instance is None
 
 
-class TestLocalModelManagerCalculateFileMd5Success:
+class TestLocalModelManagerCalculateFileSha256Success:
     def test_with_real_file(self, tmp_path):
         p = tmp_path / "model.gguf"
         p.write_bytes(b"hello world")
-        result = LocalModelManager.calculate_file_md5(str(p))
+        result = LocalModelManager.calculate_file_sha256(str(p))
         assert result != ""
 
 
@@ -407,14 +407,16 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
+                mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is True
                 assert mgr._model_path == "/path/to/model.gguf"
-                assert mgr._model_md5 == "abc123"
+                assert mgr._model_sha256 == "abc123"
 
     @pytest.mark.asyncio
     async def test_load_model_failure(self):
@@ -445,7 +447,8 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
                 mock_ch.get_local_ai_config.return_value = {"n_threads": 4}
-                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="sha256val")
                 result = await mgr.load_model("/path/to/model.gguf")
                 assert result is True
 
@@ -458,8 +461,10 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=False),
             ):
+                mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is False
@@ -473,9 +478,11 @@ class TestLocalModelManagerLoadModelWithLlama:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", return_value=False),
             ):
+                mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is False
@@ -651,10 +658,12 @@ class TestLocalModelManagerLoadModelTimeout:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
             ):
-                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="sha256val")
                 result = await mgr.load_model("/path/to/model.gguf", config={"timeout": 60, "n_threads": 4})
                 assert result is True
                 mock_await.assert_called_once_with(timeout=60.0)
@@ -668,10 +677,12 @@ class TestLocalModelManagerLoadModelTimeout:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
             ):
-                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="sha256val")
                 result = await mgr.load_model(
                     "/path/to/model.gguf",
                     config={"local_model_timeout": 120, "n_threads": 4},
@@ -688,10 +699,12 @@ class TestLocalModelManagerLoadModelTimeout:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", return_value=True) as mock_await,
             ):
-                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="sha256val")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 4})
                 assert result is True
                 mock_await.assert_called_once_with(timeout=180.0)
@@ -718,10 +731,12 @@ class TestLocalModelManagerLoadModelClearsCancel:
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", side_effect=_assert_cancel_cleared_then_return),
             ):
-                mock_tpm.return_value.run_async = AsyncMock(return_value="md5val")
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="sha256val")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 4})
                 assert result is True
 
@@ -879,18 +894,30 @@ class TestLoadModelClearsCancelEvent:
             mgr = LocalModelManager()
             mgr._cancel_event.set()
 
-            with patch(
-                "services.local_model_manager.ConfigHandler.get_local_ai_config",
-                return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
+            async def _assert_cancel_cleared_then_return(*args, **kwargs):
+                assert not mgr._cancel_event.is_set(), (
+                    "cancel_event should be cleared before _await_worker_ready is called"
+                )
+                return True
+
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", side_effect=_assert_cancel_cleared_then_return),
             ):
-                with patch.object(mgr, "_ensure_worker", return_value=True):
-                    with patch.object(mgr, "_await_worker_ready", return_value=True):
-                        with patch.object(mgr, "calculate_file_md5", return_value="abc123"):
-                            with patch("os.path.exists", return_value=True):
-                                with patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)):
-                                    result = await mgr.load_model("/fake/model.gguf")
-                                    assert result is True
-                                    assert not mgr._cancel_event.is_set()
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/fake/model.gguf",
+                    "local_model_timeout": 90,
+                }
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model("/fake/model.gguf")
+                assert result is True
+                assert not mgr._cancel_event.is_set()
 
 
 class TestShutdownWorkerLockedNoDeadlock:
@@ -1201,9 +1228,11 @@ class TestLoadModelOSError:
                 patch("os.stat", side_effect=OSError("permission denied")),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
                 patch.object(mgr, "_await_worker_ready", return_value=True),
             ):
+                mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
                 result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
                 assert result is True
@@ -1508,3 +1537,98 @@ class TestRunInferenceDeadlineReached:
 
                 result = await mgr.run_inference("test prompt")
                 assert result == "late result"
+
+
+class TestModelIntegritySha256:
+    """SEC-H1: SHA-256 model file integrity verification tests."""
+
+    @pytest.mark.asyncio
+    async def test_first_load_records_sha256(self):
+        """First load (no stored hash) calculates and records SHA-256 to config."""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+                assert result is True
+                assert mgr._model_sha256 == "abc123"
+                mock_ch.save_config.assert_called_once_with(
+                    {
+                        "local_model_sha256": "abc123",
+                        "local_model_sha256_path": "/path/to/model.gguf",
+                    }
+                )
+
+    @pytest.mark.asyncio
+    async def test_subsequent_load_verifies_sha256_success(self):
+        """Subsequent load with matching SHA-256 loads successfully."""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                stored_values = {
+                    "local_model_sha256_path": "/path/to/model.gguf",
+                    "local_model_sha256": "abc123",
+                }
+                mock_ch.get_typed.side_effect = lambda key, *args, **kwargs: stored_values.get(key, "")
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+                assert result is True
+                assert mgr._model_sha256 == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_tampered_file_refuses_load(self):
+        """Tampered file (SHA-256 mismatch) refuses to load and returns False."""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True) as mock_ensure,
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                stored_values = {
+                    "local_model_sha256_path": "/path/to/model.gguf",
+                    "local_model_sha256": "original_hash",
+                }
+                mock_ch.get_typed.side_effect = lambda key, *args, **kwargs: stored_values.get(key, "")
+                mock_tpm.return_value.run_async = AsyncMock(return_value="tampered_hash")
+                result = await mgr.load_model("/path/to/model.gguf", config={"n_threads": 2})
+                assert result is False
+                assert mgr._model_path == ""
+                mock_ensure.assert_not_called()
+
+    def test_calculate_file_md5_alias_returns_sha256(self, tmp_path):
+        """Backward-compatible calculate_file_md5 alias delegates to calculate_file_sha256."""
+        p = tmp_path / "model.gguf"
+        p.write_bytes(b"hello world")
+        md5_result = LocalModelManager.calculate_file_md5(str(p))
+        sha256_result = LocalModelManager.calculate_file_sha256(str(p))
+        assert md5_result == sha256_result
+        assert md5_result != ""
+
+    def test_get_loaded_model_md5_alias_delegates_to_sha256(self):
+        """Backward-compatible get_loaded_model_md5 alias delegates to get_loaded_model_sha256."""
+        mgr = LocalModelManager.__new__(LocalModelManager)
+        mgr._model_sha256 = "abc123"
+        assert mgr.get_loaded_model_md5() == "abc123"
+        assert mgr.get_loaded_model_sha256() == "abc123"
