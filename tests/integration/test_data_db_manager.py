@@ -1,8 +1,6 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-import config
-from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 from data.persistence.database_manager import DatabaseManager
 from tests.integration.test_infra_base import TEST_DB_URL, TestDatabaseBase
 
@@ -13,10 +11,6 @@ class TestDatabaseManager(TestDatabaseBase):
     async def asyncSetUp(self):
         await super().asyncSetUp()
 
-        self._orig_db_url_sync = config.DB_URL_SYNC
-        config.DB_URL_SYNC = (
-            f"postgresql://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
-        )
         self.db_manager = DatabaseManager()
 
         self._ddl_engine = create_async_engine(TEST_DB_URL, echo=False)
@@ -45,8 +39,6 @@ class TestDatabaseManager(TestDatabaseBase):
             self.db_manager.close()
         if hasattr(self, "_ddl_engine"):
             await self._ddl_engine.dispose()
-        if hasattr(self, "_orig_db_url_sync"):
-            config.DB_URL_SYNC = self._orig_db_url_sync
         await super().asyncTearDown()
 
     def test_get_all_tables(self):

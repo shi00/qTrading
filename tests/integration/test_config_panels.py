@@ -11,9 +11,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
 from data.persistence.db_url_override import override_db_url
+from tests._helpers import build_db_urls, get_pg_connection_params
+from tests.integration.test_data_db_migrator import _create_isolated_db, _drop_isolated_db
 
 
 @pytest.fixture
@@ -595,41 +597,35 @@ class TestDatabaseConfigServiceMigrations:
     pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
 
     @pytest_asyncio.fixture(autouse=True)
-    async def _patch_db_url(self):
-        """统一使用 override_db_url 覆盖 DB URL（P2-4）。"""
-        from tests.integration.conftest import TEST_DB_URL
-
-        with override_db_url(TEST_DB_URL):
-            yield
-
-    @pytest_asyncio.fixture(autouse=True)
-    async def _restore_tables(self, test_engine):
-        """确保每个 DDL 测试后无条件恢复表结构（即使测试断言失败）"""
-        yield
-        from data.persistence.models import Base
-        from data.persistence.db_migrator import DatabaseMigrator
-        import sqlalchemy as sa
-
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE"))
-        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+    async def isolated_db(self):
+        """每个 DDL 测试使用隔离数据库，避免污染共享 test_engine（INT-V2-1）。"""
+        params = get_pg_connection_params()
+        db_name = f"test_config_panels_{uuid.uuid4().hex[:8]}"
+        await _create_isolated_db(params, db_name)
+        _, async_url = build_db_urls(params, db_name)
+        engine = create_async_engine(async_url)
+        with override_db_url(async_url):
+            yield engine, db_name, params
+        await engine.dispose()
+        await _drop_isolated_db(params, db_name)
 
     @pytest.mark.asyncio
-    async def test_run_migrations_creates_tables(self, test_engine):
+    async def test_run_migrations_creates_tables(self, isolated_db):
         """Test run_migrations creates all required tables"""
         from data.persistence.db_config_service import DatabaseConfigService
         from data.persistence.models import Base
 
-        async with test_engine.begin() as conn:
+        engine, db_name, params = isolated_db
+
+        async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
 
         success, msg = await DatabaseConfigService.run_migrations(
-            host=TEST_DB_HOST,
-            port=TEST_DB_PORT,
-            user=TEST_DB_USER,
-            password=TEST_DB_PASSWORD,
-            database=TEST_DB_NAME,
+            host=params["host"],
+            port=params["port"],
+            user=params["user"],
+            password=params["password"],
+            database=db_name,
         )
 
         assert success is True
@@ -659,39 +655,43 @@ class TestDatabaseConfigServiceMigrations:
         assert "Failed" in msg or "失败" in msg or "error" in msg.lower() or "exception" in msg.lower()
 
     @pytest.mark.asyncio
-    async def test_ensure_tables_exist_empty_database(self, test_engine):
+    async def test_ensure_tables_exist_empty_database(self, isolated_db):
         """Test ensure_tables_exist creates tables for empty database"""
         from data.persistence.db_config_service import DatabaseConfigService
         from data.persistence.models import Base
 
-        async with test_engine.begin() as conn:
+        engine, db_name, params = isolated_db
+
+        async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
 
         success, msg = await DatabaseConfigService.ensure_tables_exist(
-            host=TEST_DB_HOST,
-            port=TEST_DB_PORT,
-            user=TEST_DB_USER,
-            password=TEST_DB_PASSWORD,
-            database=TEST_DB_NAME,
+            host=params["host"],
+            port=params["port"],
+            user=params["user"],
+            password=params["password"],
+            database=db_name,
         )
 
         assert success is True
 
     @pytest.mark.asyncio
-    async def test_ensure_tables_exist_existing_tables(self, test_engine):
+    async def test_ensure_tables_exist_existing_tables(self, isolated_db):
         """Test ensure_tables_exist skips creation when tables exist"""
         from data.persistence.db_config_service import DatabaseConfigService
         from data.persistence.models import Base
 
-        async with test_engine.begin() as conn:
+        engine, db_name, params = isolated_db
+
+        async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
         success, msg = await DatabaseConfigService.ensure_tables_exist(
-            host=TEST_DB_HOST,
-            port=TEST_DB_PORT,
-            user=TEST_DB_USER,
-            password=TEST_DB_PASSWORD,
-            database=TEST_DB_NAME,
+            host=params["host"],
+            port=params["port"],
+            user=params["user"],
+            password=params["password"],
+            database=db_name,
         )
 
         assert success is True
@@ -719,28 +719,20 @@ class TestDatabaseConfigPanelSaveConfig:
     pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
 
     @pytest_asyncio.fixture(autouse=True)
-    async def _patch_db_url(self):
-        """统一使用 override_db_url 覆盖 DB URL（P2-4）。"""
-        from tests.integration.conftest import TEST_DB_URL
-
-        with override_db_url(TEST_DB_URL):
-            yield
-
-    @pytest_asyncio.fixture(autouse=True)
-    async def _restore_tables(self, test_engine):
-        """确保每个 DDL 测试后无条件恢复表结构"""
-        yield
-        from data.persistence.models import Base
-        from data.persistence.db_migrator import DatabaseMigrator
-        import sqlalchemy as sa
-
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE"))
-        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+    async def isolated_db(self):
+        """每个 DDL 测试使用隔离数据库，避免污染共享 test_engine（INT-V2-1）。"""
+        params = get_pg_connection_params()
+        db_name = f"test_config_panels_{uuid.uuid4().hex[:8]}"
+        await _create_isolated_db(params, db_name)
+        _, async_url = build_db_urls(params, db_name)
+        engine = create_async_engine(async_url)
+        with override_db_url(async_url):
+            yield engine, db_name, params
+        await engine.dispose()
+        await _drop_isolated_db(params, db_name)
 
     @pytest.mark.asyncio
-    async def test_save_config_calls_ensure_tables_exist(self, mock_page, isolated_config, test_engine):
+    async def test_save_config_calls_ensure_tables_exist(self, mock_page, isolated_config, isolated_db):
         """Test save_config calls ensure_tables_exist"""
         from data.persistence.db_config_service import DatabaseConfigService
         from data.persistence.models import Base
@@ -748,21 +740,23 @@ class TestDatabaseConfigPanelSaveConfig:
             DatabaseConfigPanel,
         )
 
-        async with test_engine.begin() as conn:
+        engine, db_name, params = isolated_db
+
+        async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.drop_all)
 
         panel = DatabaseConfigPanel(show_save_button=True)
         panel.page = mock_page
         panel.db_host_input = MagicMock()
-        panel.db_host_input.value = TEST_DB_HOST
+        panel.db_host_input.value = params["host"]
         panel.db_port_input = MagicMock()
-        panel.db_port_input.value = str(TEST_DB_PORT)
+        panel.db_port_input.value = str(params["port"])
         panel.db_user_input = MagicMock()
-        panel.db_user_input.value = TEST_DB_USER
+        panel.db_user_input.value = params["user"]
         panel.db_password_input = MagicMock()
-        panel.db_password_input.value = TEST_DB_PASSWORD
+        panel.db_password_input.value = params["password"]
         panel.db_name_input = MagicMock()
-        panel.db_name_input.value = TEST_DB_NAME
+        panel.db_name_input.value = db_name
         panel.db_create_checkbox = MagicMock()
         panel.db_create_checkbox.value = False
         panel.status_text = MagicMock()
@@ -850,28 +844,20 @@ class TestOnboardingWizardDatabaseValidation:
     pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
 
     @pytest_asyncio.fixture(autouse=True)
-    async def _patch_db_url(self):
-        """统一使用 override_db_url 覆盖 DB URL（P2-4）。"""
-        from tests.integration.conftest import TEST_DB_URL
-
-        with override_db_url(TEST_DB_URL):
-            yield
-
-    @pytest_asyncio.fixture(autouse=True)
-    async def _restore_tables(self, test_engine):
-        """确保每个 DDL 测试后无条件恢复表结构"""
-        yield
-        from data.persistence.models import Base
-        from data.persistence.db_migrator import DatabaseMigrator
-        import sqlalchemy as sa
-
-        async with test_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version CASCADE"))
-        await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+    async def isolated_db(self):
+        """每个 DDL 测试使用隔离数据库，避免污染共享 test_engine（INT-V2-1）。"""
+        params = get_pg_connection_params()
+        db_name = f"test_config_panels_{uuid.uuid4().hex[:8]}"
+        await _create_isolated_db(params, db_name)
+        _, async_url = build_db_urls(params, db_name)
+        engine = create_async_engine(async_url)
+        with override_db_url(async_url):
+            yield engine, db_name, params
+        await engine.dispose()
+        await _drop_isolated_db(params, db_name)
 
     @pytest.mark.asyncio
-    async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, test_engine):
+    async def test_validate_and_save_database_calls_ensure_tables(self, mock_page, isolated_config, isolated_db):
         """Test fn_validate_database delegates to database_panel.save_config"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
