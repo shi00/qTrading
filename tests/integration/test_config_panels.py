@@ -679,12 +679,21 @@ class TestDatabaseConfigServiceMigrations:
     async def test_ensure_tables_exist_existing_tables(self, isolated_db):
         """Test ensure_tables_exist skips creation when tables exist"""
         from data.persistence.db_config_service import DatabaseConfigService
-        from data.persistence.models import Base
 
         engine, db_name, params = isolated_db
 
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # Run migrations first so alembic_version table exists — this is the
+        # authoritative marker that the database is already managed by Alembic.
+        # Using Base.metadata.create_all alone does NOT create alembic_version,
+        # so ensure_tables_exist would re-run migrations rather than skip.
+        success1, _ = await DatabaseConfigService.run_migrations(
+            host=params["host"],
+            port=params["port"],
+            user=params["user"],
+            password=params["password"],
+            database=db_name,
+        )
+        assert success1 is True
 
         success, msg = await DatabaseConfigService.ensure_tables_exist(
             host=params["host"],
