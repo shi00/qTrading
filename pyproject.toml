@@ -57,11 +57,13 @@ dev = [
     "pytest-xdist>=3.5.0",
     "pytest-rerunfailures>=14.0",
     "ruff>=0.15.0",
+    "pyright>=1.1.410",
     "pandas-stubs>=3.0.0.250204",
     "uv>=0.7.0",
     "pip-audit>=2.10.0",
     "hypothesis>=6.0",
     "syrupy>=4.0",
+    "msgpack>=1.2.1",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
 ]
 optional = [
     "brotlicffi>=1.2.0.0",
