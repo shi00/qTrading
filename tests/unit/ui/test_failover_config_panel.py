@@ -208,7 +208,7 @@ class TestFailoverConfigPanelLoadAndRender:
             "llm_provider": "deepseek",
         }
         mock_config_handler.get_provider_credential.side_effect = lambda p: (
-            {"api_key": "test_token_deepseek_mock", "base_url": ""}
+            {"api_key": "test_token_deepseek_mock_padding_1234", "base_url": ""}
             if p == "deepseek"
             else {"api_key": "", "base_url": ""}
         )
@@ -224,7 +224,7 @@ class TestFailoverConfigPanelLoadAndRender:
         assert len(panel._failover_items) == 2
         assert panel._failover_items[0].provider == "deepseek"
         assert panel._failover_items[0].has_credential is True
-        assert panel._failover_items[0].api_key_masked == "tes***mock"
+        assert panel._failover_items[0].api_key_masked == "tes***1234"
         assert panel._failover_items[1].provider == "openai"
         assert panel._failover_items[1].has_credential is False
 

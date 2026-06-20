@@ -229,12 +229,12 @@ class TestGetTypedSetTyped:
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
         ConfigHandler._config_cache = None
-        secret_value = "sk_super_secret_api_key_12345"
+        secret_value = "sk_super_secret_api_key_1234567890ab"
         with caplog.at_level(logging.WARNING):
             result = ConfigHandler.set_typed("ai_api_key", secret_value, validator=lambda v: False)
         assert result is False
         assert secret_value not in caplog.text
-        assert "sk_***2345" in caplog.text
+        assert "sk_***90ab" in caplog.text
 
     def test_set_typed_sanitizes_db_password_encrypted(self, monkeypatch, tmp_path, caplog):
         config_file = str(tmp_path / "test_settings.json")

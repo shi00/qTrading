@@ -340,7 +340,7 @@ class TestSanitizeDict:
         data = {
             "name": "test",
             "sensitive_field": {
-                "token": "test_token_abc123456789012345678",
+                "token": "test_token_abc1234567890123456789012",
                 "nested_non_sensitive": "hello",
             },
             "nested_config_group": {
@@ -358,7 +358,7 @@ class TestSanitizeDict:
         data["sensitive_secret_group"] = {"nested_val": "secret_val"}
         result = DataSanitizer.sanitize_dict(data)
         assert result["sensitive_secret_group"] == "***"
-        assert result["sensitive_field"]["token"] == "tes***5678"
+        assert result["sensitive_field"]["token"] == "tes***9012"
 
         # 2. nested_config_group contains sensitive inner keys, so password should be masked, normal_field kept
         assert result["nested_config_group"]["password"] == "***"

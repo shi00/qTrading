@@ -47,8 +47,10 @@ class DataSanitizer:
         """
         Token脱敏处理
 
-        输入: "tushare_abc123xyz789"
-        输出: "tus***789"
+        长度 < 32 的 token 全部隐藏为 "***"；长度 >= 32 的部分脱敏。
+
+        输入: "tushare_abc123xyz78901234567890123456789"  (40字符)
+        输出: "tus***6789"
 
         Args:
             token: 原始token字符串

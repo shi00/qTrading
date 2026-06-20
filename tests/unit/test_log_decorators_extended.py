@@ -67,9 +67,9 @@ class TestDataSanitizer:
     """测试数据脱敏工具"""
 
     def test_sanitize_token_normal(self):
-        result = DataSanitizer.sanitize_token("tushare_abc123xyz789")
-        assert result == "tus***z789"
-        assert "tushare_abc123xyz789" not in result
+        result = DataSanitizer.sanitize_token("tushare_abc123xyz789012345678901234")
+        assert result == "tus***1234"
+        assert "tushare_abc123xyz789012345678901234" not in result
 
     def test_sanitize_token_short(self):
         assert DataSanitizer.sanitize_token("short") == "***"

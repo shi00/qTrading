@@ -157,7 +157,10 @@ class LocalModelManager:
         with cls._lock:
             inst = cls._instance
             if inst is not None:
-                inst._shutdown_worker()
+                try:
+                    inst._shutdown_worker()
+                except Exception as e:
+                    logger.warning(f"[LocalModel] Error during reset shutdown: {e}")
             cls._instance = None
             cls._initialized = False
 
@@ -166,7 +169,10 @@ class LocalModelManager:
         """Release subprocess and queues on process exit. Called by singleton_registry."""
         inst = cls._instance
         if inst is not None:
-            inst._shutdown_worker()
+            try:
+                inst._shutdown_worker()
+            except Exception as e:
+                logger.warning(f"[LocalModel] Error during atexit shutdown: {e}")
 
     @classmethod
     def _get_load_lock(cls):
