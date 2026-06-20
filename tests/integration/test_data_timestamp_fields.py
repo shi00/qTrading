@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from datetime import date, datetime
 
 import pytest
@@ -6,7 +7,10 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from data.persistence.db_url_override import override_db_url
 from data.persistence.models import Base
+from tests._helpers import build_db_urls, get_pg_connection_params
+from tests.integration.test_data_db_migrator import _create_isolated_db, _drop_isolated_db
 
 
 class TestCreatedAtSchema:
@@ -65,27 +69,21 @@ class TestCreatedAtSchema:
 
 @pytest_asyncio.fixture
 async def db_engine():
-    """创建独立 test_astock 数据库引擎，测试后清理"""
-    from tests.integration.conftest import TEST_DB_HOST, TEST_DB_NAME, TEST_DB_PASSWORD, TEST_DB_PORT, TEST_DB_USER
-
-    test_db_url = f"postgresql+asyncpg://{TEST_DB_USER}:{TEST_DB_PASSWORD}@{TEST_DB_HOST}:{TEST_DB_PORT}/{TEST_DB_NAME}"
-    engine = create_async_engine(test_db_url, echo=False)
-
+    """每个测试使用隔离数据库，避免污染共享 test_astock（INT-V2-2）。"""
     from data.persistence.db_migrator import DatabaseMigrator
-    import sqlalchemy as sa
 
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-        await conn.execute(sa.text("DROP TABLE IF EXISTS alembic_version"))
-    await DatabaseMigrator.init_db(engine, auto_migrate=True)
+    params = get_pg_connection_params()
+    db_name = f"test_timestamp_{uuid.uuid4().hex[:8]}"
+    await _create_isolated_db(params, db_name)
+    _, async_url = build_db_urls(params, db_name)
+    engine = create_async_engine(async_url)
 
-    yield engine
+    with override_db_url(async_url):
+        await DatabaseMigrator.init_db(engine, auto_migrate=True)
+        yield engine
 
-    # Teardown: 清理测试数据
-    async with engine.begin() as conn:
-        await conn.execute(text("DELETE FROM sync_status WHERE table_name LIKE 'test_created_at_%'"))
-        await conn.execute(text("DELETE FROM daily_indicators WHERE ts_code LIKE 'test_created_at_%'"))
     await engine.dispose()
+    await _drop_isolated_db(params, db_name)
 
 
 async def test_created_at_equals_updated_at_on_insert(db_engine):
