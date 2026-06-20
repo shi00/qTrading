@@ -154,3 +154,45 @@ async def test_settings_language_switch(e2e_page):
         except Exception:
             # 还原失败时不抛出，避免掩盖原始测试失败；下游测试会显式失败暴露问题
             pass
+
+
+@pytest.mark.mutates_config
+async def test_settings_log_level_switch(e2e_page):
+    """测试：System Tab 日志级别切换 — 切换到 DEBUG 后 snackbar 提示出现。
+
+    on_change 即保存并调用 update_log_level（in-memory 副作用），
+    需 try/finally 通过 UI 切换回 INFO 还原 logger 级别。
+    """
+    settings_label = I18n.get("nav_settings")
+    await e2e_page.click_text(settings_label, timeout_ms=15000)
+
+    settings_title = I18n.get("settings_title")
+    await e2e_page.expect_text(settings_title, timeout_ms=10000)
+
+    tab_system = I18n.get("settings_tab_system")
+    await e2e_page.click_text(tab_system, timeout_ms=8000)
+
+    # 等待日志级别 Dropdown label 出现
+    log_level_label = I18n.get("settings_log_level")
+    await e2e_page.expect_text(log_level_label, timeout_ms=10000)
+
+    # 等待前一个测试的 Snackbar 动画完成
+    await e2e_page.page.wait_for_timeout(1000)
+
+    log_level_debug = I18n.get("sys_opt_debug")
+    log_level_info = I18n.get("sys_opt_info")
+    # snackbar 文本格式: "控制系统日志详细程度: DEBUG"
+    snack_prefix = I18n.get("sys_log_label")
+
+    try:
+        await e2e_page.select_dropdown(log_level_label, log_level_debug, timeout_ms=10000)
+        # 验证 snackbar 出现（含日志级别名）
+        await e2e_page.expect_text(f"{snack_prefix}: DEBUG", timeout_ms=5000)
+    finally:
+        # [PITFALL FIX] 还原 flet_app 内存中的 logger 级别
+        # on_change 调用了 update_log_level(level) 修改 in-memory logger，
+        # pristine_config 只还原磁盘配置，不调用 update_log_level，需通过 UI 切换回 INFO。
+        try:
+            await e2e_page.select_dropdown(log_level_label, log_level_info, timeout_ms=10000)
+        except Exception:
+            pass

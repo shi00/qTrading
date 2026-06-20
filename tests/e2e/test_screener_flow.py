@@ -60,3 +60,19 @@ async def test_screener_strategy_switch(e2e_page):
     # 验证超跌反弹策略描述出现（动态描述，需 format 参数）
     os_desc = I18n.get("strategy_oversold_dynamic_desc").format(period=14, threshold=30)
     await screener.expect_text(os_desc, timeout_ms=TIMEOUTS.FAST)
+
+
+async def test_screener_pagination_info(e2e_page):
+    """测试：选股结果分页信息文本 — 运行策略后验证页码信息可见。
+
+    种子数据仅平安银行满足放量突破阈值，结果 1 行，页码为"第 1 页 / 共 1 页"。
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # 验证页码信息文本（结果加载完成后渲染）
+    page_info = I18n.get("screener_page_info").format(current=1, total=1)
+    await screener.expect_text(page_info, timeout_ms=TIMEOUTS.INTERACTION)
