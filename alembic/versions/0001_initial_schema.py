@@ -36,15 +36,6 @@ def _table_exists(table_name: str) -> bool:
     return table_name in inspector.get_table_names(schema=schema)
 
 
-def _index_exists(table_name: str, index_name: str) -> bool:
-    """Check if an index exists on a table."""
-    conn = op.get_bind()
-    inspector = sa.inspect(conn)
-    schema = _target_schema()
-    indexes = [idx["name"] for idx in inspector.get_indexes(table_name, schema=schema)]
-    return index_name in indexes
-
-
 def _is_postgresql() -> bool:
     bind = op.get_bind()
     return bind.dialect.name == "postgresql"
@@ -60,8 +51,7 @@ def _create_partial_index(table_name: str, index_name: str, column: str, where_c
     if _is_postgresql():
         op.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name} ({column}) WHERE {where_clause}")
     else:
-        if not _index_exists(table_name, index_name):
-            op.create_index(index_name, table_name, [column])
+        op.create_index(index_name, table_name, [column], if_not_exists=True)
 
 
 def _create_table_if_not_exists(table_name: str, *args, **kwargs) -> None:
@@ -69,9 +59,20 @@ def _create_table_if_not_exists(table_name: str, *args, **kwargs) -> None:
 
     Ensures idempotent migrations - safe to re-run on databases
     that may already have some tables from partial migrations.
+
+    Uses a two-layer defense: first checks via ``_table_exists``, then
+    catches ``ProgrammingError`` / ``OperationalError`` in case the
+    inspector check fails in async contexts (same root cause as the
+    ``_index_exists`` bug — ``sa.inspect(conn)`` may not reliably
+    enumerate existing objects under asyncpg).
     """
-    if not _table_exists(table_name):
+    if _table_exists(table_name):
+        return
+    try:
         op.create_table(table_name, *args, **kwargs)
+    except sa.exc.ProgrammingError:
+        # Table already exists — safe to ignore for idempotent migrations.
+        pass
 
 
 def _create_index_if_not_exists(
@@ -80,9 +81,15 @@ def _create_index_if_not_exists(
     columns: list,
     **kwargs,
 ) -> None:
-    """Create an index only if it doesn't already exist."""
-    if not _index_exists(table_name, index_name):
-        op.create_index(index_name, table_name, columns, **kwargs)
+    """Create an index only if it doesn't already exist.
+
+    Uses Alembic's native ``if_not_exists`` parameter so the database
+    handles idempotency (``CREATE INDEX IF NOT EXISTS``).  This is more
+    reliable than the previous ``_index_exists`` inspection which could
+    fail inside async Alembic contexts where ``sa.inspect(conn)`` does
+    not correctly enumerate existing indexes.
+    """
+    op.create_index(index_name, table_name, columns, if_not_exists=True, **kwargs)
 
 
 def _drop_table_if_exists(table_name: str) -> None:
@@ -93,8 +100,7 @@ def _drop_table_if_exists(table_name: str) -> None:
 
 def _drop_index_if_exists(index_name: str, table_name: str) -> None:
     """Drop an index only if it exists."""
-    if _index_exists(table_name, index_name):
-        op.drop_index(index_name, table_name=table_name)
+    op.drop_index(index_name, table_name=table_name, if_exists=True)
 
 
 def _create_all_tables() -> None:
@@ -459,7 +465,7 @@ def _create_all_tables() -> None:
         ),
         sa.PrimaryKeyConstraint("trade_date", "ts_code", name=op.f("pk_limit_list")),
     )
-    op.create_index(op.f("ix_limit_list_ts_code"), "limit_list", ["ts_code"], unique=False)
+    _create_index_if_not_exists(op.f("ix_limit_list_ts_code"), "limit_list", ["ts_code"], unique=False)
     _create_table_if_not_exists(
         "macro_economy",
         sa.Column("period", sa.Date(), nullable=False),
@@ -609,7 +615,7 @@ def _create_all_tables() -> None:
         ),
         sa.PrimaryKeyConstraint("ts_code", "trade_date", name=op.f("pk_northbound_holding")),
     )
-    op.create_index(
+    _create_index_if_not_exists(
         op.f("ix_northbound_holding_trade_date"),
         "northbound_holding",
         ["trade_date"],

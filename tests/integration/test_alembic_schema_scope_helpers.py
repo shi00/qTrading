@@ -33,17 +33,15 @@ class _FakeInspector:
         return [{"name": "trade_date"}, {"name": "close"}]
 
 
-def test_table_index_column_helpers_use_version_table_schema(monkeypatch):
+def test_table_helpers_use_version_table_schema(monkeypatch):
     fake_inspector = _FakeInspector()
     monkeypatch.setattr(mig.op, "get_bind", lambda: MagicMock())
     monkeypatch.setattr(mig.op, "get_context", lambda: SimpleNamespace(version_table_schema="tenant_a"))
     monkeypatch.setattr(mig.sa, "inspect", lambda _bind: fake_inspector)
 
     assert mig._table_exists("daily_quotes") is True
-    assert mig._index_exists("screening_history", "idx_sh_pending") is True
 
     assert ("tables", "tenant_a") in fake_inspector.schemas
-    assert ("indexes", "tenant_a", "screening_history") in fake_inspector.schemas
 
 
 def test_target_schema_none_when_context_unavailable(monkeypatch):
