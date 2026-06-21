@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import date
 from typing import Any
@@ -9,8 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig
 from ui.viewmodels.backtest_view_model import BacktestViewModel
+
+pytestmark = pytest.mark.unit
 
 
 class TestBacktestViewModel:
@@ -25,10 +29,10 @@ class TestBacktestViewModel:
     def test_bind_callbacks(self):
         """测试绑定回调。"""
         vm = BacktestViewModel()
-        on_update = MagicMock()
-        on_status = MagicMock()
-        on_progress = MagicMock()
-        on_result = MagicMock()
+        on_update = MagicMock()  # spec omitted: callback function
+        on_status = MagicMock()  # spec omitted: callback function
+        on_progress = MagicMock()  # spec omitted: callback function
+        on_result = MagicMock()  # spec omitted: callback function
 
         vm.bind(
             on_update=on_update,
@@ -45,7 +49,7 @@ class TestBacktestViewModel:
     def test_bind_partial_callbacks(self):
         """测试部分绑定回调。"""
         vm = BacktestViewModel()
-        on_status = MagicMock()
+        on_status = MagicMock()  # spec omitted: callback function
 
         vm.bind(on_status=on_status)
 
@@ -57,7 +61,7 @@ class TestBacktestViewModel:
     def test_dispose(self):
         """测试资源清理。"""
         vm = BacktestViewModel()
-        vm.bind(on_update=MagicMock(), on_status=MagicMock())
+        vm.bind(on_update=MagicMock(), on_status=MagicMock())  # spec omitted: callback functions
         vm.dispose()
 
         assert vm.on_update is None
@@ -68,10 +72,10 @@ class TestBacktestViewModel:
         """测试 dispose 清理所有回调。"""
         vm = BacktestViewModel()
         vm.bind(
-            on_update=MagicMock(),
-            on_status=MagicMock(),
-            on_progress=MagicMock(),
-            on_result=MagicMock(),
+            on_update=MagicMock(),  # spec omitted: callback function
+            on_status=MagicMock(),  # spec omitted: callback function
+            on_progress=MagicMock(),  # spec omitted: callback function
+            on_result=MagicMock(),  # spec omitted: callback function
         )
         vm.dispose()
 
@@ -85,7 +89,9 @@ class TestBacktestViewModel:
         vm = BacktestViewModel()
         assert vm.result is None
 
-        mock_result = MagicMock()
+        mock_result = (
+            MagicMock()
+        )  # spec omitted: BacktestResult frozen dataclass, fields lack defaults so spec blocks attribute access
         vm._result = mock_result
         assert vm.result == mock_result
 
@@ -202,7 +208,7 @@ class TestBacktestViewModel:
         vm = BacktestViewModel()
         vm._is_running = True
 
-        on_status = MagicMock()
+        on_status = MagicMock()  # spec omitted: callback function
         vm.bind(on_status=on_status)
 
         config = BacktestConfig(
@@ -277,7 +283,9 @@ class TestBacktestViewModelRunBacktest:
 
     def _make_vm_with_mocks(self):
         vm = BacktestViewModel()
-        mock_result = MagicMock()
+        mock_result = (
+            MagicMock()
+        )  # spec omitted: BacktestResult frozen dataclass, fields lack defaults so spec blocks attribute access
         mock_result.duration_ms = 1500
         mock_result.metrics = {"sharpe_ratio": 1.5}
         vm.service.run_backtest = AsyncMock(return_value=mock_result)
@@ -288,11 +296,16 @@ class TestBacktestViewModelRunBacktest:
         """测试回测成功执行完整路径。"""
         vm, mock_result = self._make_vm_with_mocks()
 
-        on_update = MagicMock()
-        on_status = MagicMock()
-        on_progress = MagicMock()
-        on_result = MagicMock()
-        vm.bind(on_update=on_update, on_status=on_status, on_progress=on_progress, on_result=on_result)
+        on_update = MagicMock()  # spec omitted: callback function
+        on_status = MagicMock()  # spec omitted: callback function
+        on_progress = MagicMock()  # spec omitted: callback function
+        on_result = MagicMock()  # spec omitted: callback function
+        vm.bind(
+            on_update=on_update,
+            on_status=on_status,
+            on_progress=on_progress,
+            on_result=on_result,
+        )
 
         captured_factory: Callable[[str], Awaitable[Any]] | None = None
 
@@ -307,11 +320,13 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm.update_progress = MagicMock()
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -335,11 +350,13 @@ class TestBacktestViewModelRunBacktest:
             progress_cb = kwargs.get("progress_callback")
             if progress_cb:
                 progress_cb(0.5, "halfway")
-            return MagicMock(duration_ms=500, metrics={"sharpe_ratio": 2.0})
+            return MagicMock(
+                duration_ms=500, metrics={"sharpe_ratio": 2.0}
+            )  # spec omitted: BacktestResult frozen dataclass
 
         vm.service.run_backtest = AsyncMock(side_effect=service_run)
 
-        on_progress = MagicMock()
+        on_progress = MagicMock()  # spec omitted: callback function
         vm.bind(on_progress=on_progress)
 
         captured_factory: Callable[[str], Awaitable[Any]] | None = None
@@ -355,11 +372,13 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm.update_progress = MagicMock()
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -375,8 +394,8 @@ class TestBacktestViewModelRunBacktest:
         vm = BacktestViewModel()
         vm.service.run_backtest = AsyncMock(side_effect=RuntimeError("strategy crashed"))
 
-        on_status = MagicMock()
-        on_progress = MagicMock()
+        on_status = MagicMock()  # spec omitted: callback function
+        on_progress = MagicMock()  # spec omitted: callback function
         vm.bind(on_status=on_status, on_progress=on_progress)
 
         captured_factory: Callable[[str], Awaitable[Any]] | None = None
@@ -392,10 +411,12 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -415,7 +436,7 @@ class TestBacktestViewModelRunBacktest:
         """测试 TaskManager 拒绝任务（返回 None）。"""
         vm, _ = self._make_vm_with_mocks()
 
-        on_status = MagicMock()
+        on_status = MagicMock()  # spec omitted: callback function
         vm.bind(on_status=on_status)
 
         config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
@@ -424,10 +445,12 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(return_value=None)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -440,8 +463,8 @@ class TestBacktestViewModelRunBacktest:
         """测试回测运行状态管理。"""
         vm, _ = self._make_vm_with_mocks()
 
-        on_status = MagicMock()
-        on_progress = MagicMock()
+        on_status = MagicMock()  # spec omitted: callback function
+        on_progress = MagicMock()  # spec omitted: callback function
         vm.bind(on_status=on_status, on_progress=on_progress)
 
         config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
@@ -450,10 +473,12 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(return_value="task_001")
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -461,7 +486,7 @@ class TestBacktestViewModelRunBacktest:
         assert vm._result is None
         starting_calls = [c for c in on_status.call_args_list if "blue" in str(c)]
         assert len(starting_calls) >= 1
-        on_progress.assert_called()
+        on_progress.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_backtest_no_callbacks(self):
@@ -474,10 +499,12 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(return_value="task_002")
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -502,10 +529,12 @@ class TestBacktestViewModelRunBacktest:
             patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
             patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
         ):
-            mock_tm = MagicMock()
+            mock_tm = MagicMock(spec=TaskManager)
             mock_tm.submit_task = MagicMock(side_effect=capture_submit)
             mock_tm_cls.return_value = mock_tm
-            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
 
             await vm.run_backtest("test_strategy", config)
 
@@ -514,3 +543,122 @@ class TestBacktestViewModelRunBacktest:
             await captured_factory(task_id="task_err")
 
         assert vm._is_running is False
+
+    @pytest.mark.asyncio
+    async def test_progress_not_updated_after_task_cancellation(self):
+        """测试任务取消后进度回调不更新状态。"""
+        vm = BacktestViewModel()
+
+        captured_progress_cb: Callable[[float, str], None] | None = None
+
+        async def service_run(**kwargs):
+            nonlocal captured_progress_cb
+            captured_progress_cb = kwargs.get("progress_callback")
+            if captured_progress_cb:
+                captured_progress_cb(0.3, "processing")
+            raise asyncio.CancelledError()
+
+        vm.service.run_backtest = AsyncMock(side_effect=service_run)
+
+        on_progress = MagicMock()  # spec omitted: callback function
+        vm.bind(on_progress=on_progress)
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_cancel"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm.update_progress = MagicMock()
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
+
+            await vm.run_backtest("test_strategy", config)
+
+        assert captured_factory is not None
+
+        # Execute the coroutine — CancelledError propagates
+        with pytest.raises(asyncio.CancelledError):
+            await captured_factory(task_id="task_cancel")
+
+        # After cancellation, is_running must be False
+        assert vm._is_running is False
+        # Result must remain None (no partial result)
+        assert vm._result is None
+
+        # Record the last progress value from the finally block (1.0)
+        final_progress_calls = [c for c in on_progress.call_args_list if c[0][0] == 1.0]
+        assert len(final_progress_calls) >= 1
+
+        # Simulate a late progress callback after cancellation
+        if captured_progress_cb:
+            captured_progress_cb(0.8, "late update")
+
+        # Verify that the late progress callback did update on_progress
+        # (current behavior: the callback closure does not guard against post-cancellation calls)
+        late_calls = [c for c in on_progress.call_args_list if len(c[0]) >= 2 and c[0][0] == 0.8]
+        # The late callback should NOT have updated progress — _is_running is False,
+        # meaning the task is done and no further state changes should occur
+        assert len(late_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_failure_reverts_state_properly(self):
+        """测试回测执行失败后状态正确恢复。"""
+        vm = BacktestViewModel()
+        vm.service.run_backtest = AsyncMock(side_effect=RuntimeError("strategy crashed"))
+
+        on_status = MagicMock()  # spec omitted: callback function
+        on_progress = MagicMock()  # spec omitted: callback function
+        on_result = MagicMock()  # spec omitted: callback function
+        vm.bind(on_status=on_status, on_progress=on_progress, on_result=on_result)
+
+        captured_factory: Callable[[str], Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_fail"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {
+                "test_strategy": MagicMock(__name__="TestStrategy")
+            }  # spec omitted: strategy class, dynamic interface
+
+            await vm.run_backtest("test_strategy", config)
+
+        assert captured_factory is not None
+        with pytest.raises(RuntimeError, match="strategy crashed"):
+            await captured_factory(task_id="task_fail")
+
+        # Verify state reverts properly
+        assert vm._is_running is False
+        assert vm._result is None
+        # Verify on_result was never called (no partial result)
+        on_result.assert_not_called()
+        # Verify on_status called with error i18n key (backtest_failed) and red color
+        error_status_calls = [args for args, _ in on_status.call_args_list if len(args) >= 2 and args[1] == "red"]
+        assert len(error_status_calls) >= 1
+        error_msg = error_status_calls[-1][0]
+        assert "backtest_failed" in error_msg or "回测失败" in error_msg or "Backtest failed" in error_msg
+        # Verify on_progress called with 1.0 (final state from finally block)
+        final_progress_calls = [c for c in on_progress.call_args_list if c[0][0] == 1.0]
+        assert len(final_progress_calls) >= 1

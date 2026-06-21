@@ -27,6 +27,8 @@ from data.constants import (
     get_health_depth_full_trade_days,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestAttachColumnUnits:
     def test_none_df(self):
@@ -202,8 +204,20 @@ class TestConstantsValues:
         assert set(HEALTH_CHECK_TABLES.keys()) == (
             set(FINANCIAL_BATCH_TABLES.keys())
             | set(FINANCIAL_STOCK_TABLES.keys())
-            | {"financial_reports", "daily_indicators", "moneyflow_daily", "margin_daily", "suspend_d"}
-            | {"stk_holdernumber", "top10_holders", "macro_economy", "shibor_daily", "moneyflow_hsgt"}
+            | {
+                "financial_reports",
+                "daily_indicators",
+                "moneyflow_daily",
+                "margin_daily",
+                "suspend_d",
+            }
+            | {
+                "stk_holdernumber",
+                "top10_holders",
+                "macro_economy",
+                "shibor_daily",
+                "moneyflow_hsgt",
+            }
         )
 
     def test_health_report_order_covers_all(self):

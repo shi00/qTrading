@@ -12,6 +12,8 @@ import pytest
 
 from tests.unit.ui.mock_flet import MockFletPage
 
+pytestmark = pytest.mark.unit
+
 # 项目扩展方法/属性：由 main.py 动态挂载到 Page 实例，不在 flet 0.28.3 原生 Page 类上
 # - show_toast: main.py 动态挂载（page.show_toast = show_toast）
 # - dialog: main.py:106 兜底赋值（page.dialog = dialog，仅在 page.open 不存在时触发）

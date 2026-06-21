@@ -13,7 +13,7 @@ from data.external.news_fetcher import (
     _SINA_EMPTY_THRESHOLD,
 )
 
-pytestmark = pytest.mark.no_auto_mock
+pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +64,10 @@ class TestGetStockNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_cninfo_success(self, mock_ak, mock_run, mock_tpm):
         mock_tpm_instance = MagicMock()
@@ -82,15 +85,24 @@ class TestGetStockNews:
 
         future = MagicMock()
         future.result.return_value = [
-            {"title": "2024年半年度报告", "publish_time": "2024-08-30 00:00:00", "source": "巨潮公告"}
+            {
+                "title": "2024年半年度报告",
+                "publish_time": "2024-08-30 00:00:00",
+                "source": "巨潮公告",
+            }
         ]
         mock_tpm_instance.run_async = AsyncMock(return_value=future)
 
         with patch(
-            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), []][1],
         ) as mock_wait:
             mock_wait.return_value = [
-                {"title": "2024年半年度报告", "publish_time": "2024-08-30 00:00:00", "source": "巨潮公告"}
+                {
+                    "title": "2024年半年度报告",
+                    "publish_time": "2024-08-30 00:00:00",
+                    "source": "巨潮公告",
+                }
             ]
             result = await NewsFetcher.get_stock_news("000001.SZ", limit=5)
             assert isinstance(result, list)
@@ -104,7 +116,10 @@ class TestGetStockNews:
 
         with patch(
             "data.external.news_fetcher.asyncio.wait_for",
-            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError()),
+            ][1],
         ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
@@ -118,7 +133,10 @@ class TestGetStockNews:
 
         with patch(
             "data.external.news_fetcher.asyncio.wait_for",
-            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError()),
+            ][1],
         ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
@@ -132,14 +150,20 @@ class TestGetStockNews:
 
         with patch(
             "data.external.news_fetcher.asyncio.wait_for",
-            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(Exception("dispatch error"))][1],
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(Exception("dispatch error")),
+            ][1],
         ):
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert result == []
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_cninfo_fails_em_fallback(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
@@ -157,17 +181,25 @@ class TestGetStockNews:
         mock_tpm.return_value = mock_tpm_instance
 
         with patch(
-            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), []][1],
         ) as mock_wait:
             mock_wait.return_value = [
-                {"title": "银行股上涨", "publish_time": "2024-06-14 10:00:00", "source": "东财新闻"}
+                {
+                    "title": "银行股上涨",
+                    "publish_time": "2024-06-14 10:00:00",
+                    "source": "东财新闻",
+                }
             ]
             result = await NewsFetcher.get_stock_news("000001.SZ")
             assert isinstance(result, list)
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_both_fail_returns_empty(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_zh_a_disclosure_report_cninfo.side_effect = Exception("cninfo error")
@@ -177,7 +209,8 @@ class TestGetStockNews:
         mock_tpm.return_value = mock_tpm_instance
 
         with patch(
-            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), []][1],
         ) as mock_wait:
             mock_wait.return_value = []
             result = await NewsFetcher.get_stock_news("000001.SZ")
@@ -192,7 +225,8 @@ class TestGetStockNews:
         mock_tpm.return_value = mock_tpm_instance
 
         with patch(
-            "data.external.news_fetcher.asyncio.wait_for", side_effect=lambda coro, *a, **kw: [coro.close(), []][1]
+            "data.external.news_fetcher.asyncio.wait_for",
+            side_effect=lambda coro, *a, **kw: [coro.close(), []][1],
         ) as mock_wait:
             mock_wait.return_value = []
             result = await NewsFetcher.get_stock_news("000001.SZ")
@@ -202,7 +236,10 @@ class TestGetStockNews:
 class TestGetLatestGlobalNews:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_success_with_data(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -232,7 +269,10 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_empty_df(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_info_global_cls.return_value = pd.DataFrame()
@@ -245,7 +285,10 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_none_df(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_info_global_cls.return_value = None
@@ -258,7 +301,10 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_time_only_string(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -279,7 +325,10 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_time_column_variants(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -299,7 +348,10 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_title_column_variant(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -319,7 +371,10 @@ class TestGetLatestGlobalNews:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_general_exception(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_info_global_cls.side_effect = Exception("api error")
@@ -349,8 +404,20 @@ class TestGetUsMajorMoves:
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
             return_value=[
-                {"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"},
-                {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"},
+                {
+                    "name": "NVDA",
+                    "cname": "英伟达",
+                    "price": "135.2",
+                    "diff": "3.2",
+                    "chg": "2.45",
+                },
+                {
+                    "name": "TSLA",
+                    "cname": "特斯拉",
+                    "price": "200.0",
+                    "diff": "-2.0",
+                    "chg": "-1.0",
+                },
             ]
         )
 
@@ -397,7 +464,13 @@ class TestGetUsMajorMoves:
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
             return_value=[
-                {"name": "UNKNOWN", "cname": "未知", "price": "10.0", "diff": "0.5", "chg": "5.0"},
+                {
+                    "name": "UNKNOWN",
+                    "cname": "未知",
+                    "price": "10.0",
+                    "diff": "0.5",
+                    "chg": "5.0",
+                },
             ]
         )
 
@@ -439,7 +512,13 @@ class TestGetUsMajorMoves:
         mock_tpm.return_value = mock_tpm_instance
         mock_tpm_instance.run_async = AsyncMock(
             return_value=[
-                {"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "invalid"},
+                {
+                    "name": "NVDA",
+                    "cname": "英伟达",
+                    "price": "135.2",
+                    "diff": "3.2",
+                    "chg": "invalid",
+                },
             ]
         )
 
@@ -478,7 +557,10 @@ class TestGetUsMajorMoves:
 class TestGetHotConcepts:
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_success(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -501,7 +583,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_empty_df(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_sector_spot.return_value = pd.DataFrame()
@@ -525,7 +610,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_nan_change(self, mock_ak, mock_run, mock_tpm):
         import numpy as np
@@ -548,7 +636,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_zero_change(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -567,7 +658,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_invalid_change_value(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -586,7 +680,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_no_name_column(self, mock_ak, mock_run, mock_tpm):
         df = pd.DataFrame(
@@ -606,7 +703,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_sina_exception_returns_empty(self, mock_ak, mock_run, mock_tpm):
         mock_ak.stock_sector_spot.side_effect = Exception("sina error")
@@ -619,7 +719,10 @@ class TestGetHotConcepts:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch("data.external.news_fetcher._run_with_python_string_storage", side_effect=lambda f: f())
+    @patch(
+        "data.external.news_fetcher._run_with_python_string_storage",
+        side_effect=lambda f: f(),
+    )
     @patch("data.external.news_fetcher.ak")
     async def test_general_exception_returns_empty(self, mock_ak, mock_run, mock_tpm):
         mock_tpm_instance = MagicMock()
@@ -1136,7 +1239,10 @@ class TestGetUsMajorMovesDirectExecution:
             mock_tpm.return_value = mock_tpm_instance
             mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-            with patch("data.external.news_fetcher.json.loads", side_effect=Exception("parse error")):
+            with patch(
+                "data.external.news_fetcher.json.loads",
+                side_effect=Exception("parse error"),
+            ):
                 result = await NewsFetcher.get_us_major_moves()
         assert isinstance(result, str)
 

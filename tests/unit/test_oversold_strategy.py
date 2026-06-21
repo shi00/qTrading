@@ -9,6 +9,8 @@ from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_mixin import PreFetchedContext
 from strategies.oversold_strategy import OversoldStrategy
 
+pytestmark = pytest.mark.unit
+
 
 class TestOversoldRequiredHistoryDays(unittest.TestCase):
     def test_required_history_days(self):
@@ -32,7 +34,11 @@ async def test_filter_unready_dependencies():
     with patch.object(
         s,
         "check_dependencies",
-        return_value={"status": "unready", "missing_keys": ["screening_data"], "missing_tables": []},
+        return_value={
+            "status": "unready",
+            "missing_keys": ["screening_data"],
+            "missing_tables": [],
+        },
     ):
         result = await s.filter(context)
         assert result.empty
@@ -87,7 +93,12 @@ async def test_trade_date_string_parse():
     dp = _make_dp_for_math_filter()
     dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-    context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "20240614", "params": {}}
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": "20240614",
+        "params": {},
+    }
     await s._math_filter(context, 14, 30, 1.5)
     dp.trade_calendar.get_latest_trade_date.assert_not_called()
 
@@ -97,7 +108,12 @@ async def test_trade_date_dash_format():
     dp = _make_dp_for_math_filter()
     dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-    context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "2024-06-14", "params": {}}
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": "2024-06-14",
+        "params": {},
+    }
     await s._math_filter(context, 14, 30, 1.5)
 
 
@@ -105,7 +121,12 @@ async def test_trade_date_invalid_string():
     s = OversoldStrategy()
     dp = _make_dp_for_math_filter()
     snapshot = pd.DataFrame({"ts_code": ["000001.SZ"]})
-    context = {"screening_data": snapshot, "data_processor": dp, "trade_date": "invalid", "params": {}}
+    context = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "trade_date": "invalid",
+        "params": {},
+    }
     result = await s._math_filter(context, 14, 30, 1.5)
     assert result.empty
 
@@ -331,8 +352,22 @@ async def test_prefetch_market_data():
     dp = _make_dp_for_prefetch()
     idx_df = pd.DataFrame(
         {
-            "ts_code": ["000001.SH", "000001.SH", "399001.SZ", "399001.SZ", "399006.SZ", "399006.SZ"],
-            "trade_date": ["20240613", "20240614", "20240613", "20240614", "20240613", "20240614"],
+            "ts_code": [
+                "000001.SH",
+                "000001.SH",
+                "399001.SZ",
+                "399001.SZ",
+                "399006.SZ",
+                "399006.SZ",
+            ],
+            "trade_date": [
+                "20240613",
+                "20240614",
+                "20240613",
+                "20240614",
+                "20240613",
+                "20240614",
+            ],
             "close": [3100.0, 3120.0, 9500.0, 9520.0, 2100.0, 2110.0],
             "pct_chg": [0.5, 0.6, -0.3, 0.2, 1.0, 0.5],
         }
@@ -394,7 +429,12 @@ async def test_prefetch_market_trend_bullish():
     idx_data = []
     for i in range(25):
         idx_data.append(
-            {"ts_code": "000001.SH", "trade_date": f"202406{10 + i:02d}", "close": 3000.0 + i * 5, "pct_chg": 0.3}
+            {
+                "ts_code": "000001.SH",
+                "trade_date": f"202406{10 + i:02d}",
+                "close": 3000.0 + i * 5,
+                "pct_chg": 0.3,
+            }
         )
     idx_df = pd.DataFrame(idx_data)
     dp.cache.get_index_daily_range = AsyncMock(return_value=idx_df)
@@ -404,7 +444,12 @@ async def test_prefetch_market_trend_bullish():
     context = {"data_processor": dp}
     result = await s._prefetch_strategy_specific(candidates, context, prefetched)
     if result.market_context and "000001.SH" in result.market_context:
-        assert result.market_context["000001.SH"]["trend"] in ["多头趋势", "空头趋势", "震荡整理", "未知"]
+        assert result.market_context["000001.SH"]["trend"] in [
+            "多头趋势",
+            "空头趋势",
+            "震荡整理",
+            "未知",
+        ]
 
 
 async def test_prefetch_no_trade_date():

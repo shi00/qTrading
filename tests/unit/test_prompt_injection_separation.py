@@ -12,6 +12,8 @@ import pytest
 
 from strategies.strategy_prompts import _UNIVERSAL_RULES, get_base_prompt
 
+pytestmark = pytest.mark.unit
+
 
 def _make_mock_service():
     from services.ai_service import AIService
@@ -128,7 +130,10 @@ class TestUniversalRulesSeparateSystemMessage:
                 with patch("data.persistence.review_manager.ReviewManager") as mock_rm:
                     mock_rm.return_value.get_learning_context = AsyncMock(return_value="")
                     with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
-                        with patch("utils.prompt_guard.sanitize_prompt", side_effect=lambda x: x):
+                        with patch(
+                            "utils.prompt_guard.sanitize_prompt",
+                            side_effect=lambda x: x,
+                        ):
                             with contextlib.suppress(RuntimeError, ValueError, TypeError):
                                 await svc.analyze_stock(
                                     stock_info={"ts_code": "000001.SZ", "name": "test"},

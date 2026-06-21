@@ -8,7 +8,13 @@ import numpy as np
 import sqlalchemy as sa
 from sqlalchemy import Date
 
-from data.persistence.daos.base_dao import BaseDao, EngineDisposedError, DatabaseQueryError
+from data.persistence.daos.base_dao import (
+    BaseDao,
+    EngineDisposedError,
+    DatabaseQueryError,
+)
+
+pytestmark = pytest.mark.unit
 
 
 def _setup_mock_engine_connect(mock_conn):
@@ -567,7 +573,10 @@ class TestBaseDaoWriteDbExtended:
             params = [(1, "a"), (2, "b")]
             with pytest.warns(DeprecationWarning):
                 result = await dao._write_db(
-                    "INSERT INTO t VALUES ($1, $2)", params=params, is_many=True, conn=mock_conn
+                    "INSERT INTO t VALUES ($1, $2)",
+                    params=params,
+                    is_many=True,
+                    conn=mock_conn,
                 )
             assert result == 2
 
@@ -1170,7 +1179,13 @@ class TestBaseDaoSaveUpsertExtended:
             mock_pg.return_value = mock_stmt
             mock_stmt.excluded = MagicMock()
             mock_stmt.on_conflict_do_update.return_value = mock_stmt
-            result = await dao._save_upsert(pd.DataFrame({"a": [1]}), "test_table", ["a", "b"], ["a"], conn=mock_conn)
+            result = await dao._save_upsert(
+                pd.DataFrame({"a": [1]}),
+                "test_table",
+                ["a", "b"],
+                ["a"],
+                conn=mock_conn,
+            )
             assert result == 1
 
     @pytest.mark.asyncio
@@ -1200,7 +1215,12 @@ class TestBaseDaoSaveUpsertExtended:
             mock_stmt.excluded = MagicMock()
             mock_stmt.on_conflict_do_update.return_value = mock_stmt
             result = await dao._save_upsert(
-                pd.DataFrame({"a": [1]}), "test_table", ["a"], ["a"], suppress_errors=True, conn=mock_conn
+                pd.DataFrame({"a": [1]}),
+                "test_table",
+                ["a"],
+                ["a"],
+                suppress_errors=True,
+                conn=mock_conn,
             )
             assert result == -1
 
@@ -2399,3 +2419,157 @@ class TestChunkedExecute:
         )
         assert db_fn.call_count == 2
         assert len(results) == 2
+
+
+class TestChunkedExecuteParallel:
+    """Task 5.1 (PERF-M1 / DATA-D5): Verify parallel chunked execution produces
+    correct results and limits concurrency to avoid connection pool exhaustion."""
+
+    @pytest.mark.asyncio
+    async def test_parallel_results_match_serial_order(self):
+        """Parallel execution must return results in the same order as chunks were created."""
+        codes = [f"{i:06d}.SH" for i in range(6)]
+        # Each chunk returns a DataFrame with its chunk index for verification
+        call_order: list[int] = []
+
+        async def mock_db_fn(sql, params, **kwargs):
+            # Determine which chunk this is by checking the params
+            chunk_idx = int(params[0].split(".")[0])
+            call_order.append(chunk_idx)
+            return pd.DataFrame({"ts_code": params, "chunk_idx": [chunk_idx] * len(params)})
+
+        results = await BaseDao._chunked_execute(
+            mock_db_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=2,
+        )
+        # Results must be in chunk order (0,2,4) regardless of execution order
+        assert len(results) == 3
+        assert results[0]["chunk_idx"].iloc[0] == 0
+        assert results[1]["chunk_idx"].iloc[0] == 2
+        assert results[2]["chunk_idx"].iloc[0] == 4
+
+    @pytest.mark.asyncio
+    async def test_parallel_concurrent_execution(self):
+        """Verify chunks execute concurrently (not serially) by measuring overlap."""
+        import asyncio
+
+        active_count = 0
+        max_active = 0
+        lock = asyncio.Lock()
+
+        async def mock_db_fn(sql, params, **kwargs):
+            nonlocal active_count, max_active
+            async with lock:
+                active_count += 1
+                max_active = max(max_active, active_count)
+            await asyncio.sleep(0.01)  # Simulate I/O
+            async with lock:
+                active_count -= 1
+            return pd.DataFrame({"id": params})
+
+        values = list(range(20))
+        await BaseDao._chunked_execute(
+            mock_db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            values,
+            chunk_size=2,
+        )
+        # With 10 chunks and pool_size-2=8 max concurrent, we expect some parallelism
+        assert max_active > 1, f"Expected concurrent execution, max_active={max_active}"
+
+    @pytest.mark.asyncio
+    async def test_parallel_semaphore_limits_concurrency(self):
+        """Verify semaphore limits concurrency to avoid pool exhaustion."""
+        import asyncio
+
+        from unittest.mock import patch
+
+        active_count = 0
+        max_active = 0
+        lock = asyncio.Lock()
+
+        async def mock_db_fn(sql, params, **kwargs):
+            nonlocal active_count, max_active
+            async with lock:
+                active_count += 1
+                max_active = max(max_active, active_count)
+            await asyncio.sleep(0.01)
+            async with lock:
+                active_count -= 1
+            return pd.DataFrame({"id": params})
+
+        # Mock pool_size=5, so max_concurrent should be 5-2=3
+        with patch(
+            "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
+            return_value=5,
+        ):
+            values = list(range(20))
+            await BaseDao._chunked_execute(
+                mock_db_fn,
+                "SELECT * FROM t WHERE id IN ({placeholders})",
+                values,
+                chunk_size=2,
+            )
+        # max_concurrent = min(10, 5-2) = 3
+        assert max_active <= 3, f"Concurrency exceeded semaphore limit, max_active={max_active}"
+
+    @pytest.mark.asyncio
+    async def test_parallel_empty_values_returns_empty_list(self):
+        """Empty values should return empty list without calling db_fn."""
+        db_fn = AsyncMock()
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            [],
+        )
+        assert results == []
+        db_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_parallel_single_chunk_no_semaphore_overhead(self):
+        """Single chunk should still work correctly with parallel infrastructure."""
+        db_fn = AsyncMock(return_value=pd.DataFrame({"id": ["A", "B"]}))
+        results = await BaseDao._chunked_execute(
+            db_fn,
+            "SELECT * FROM t WHERE id IN ({placeholders})",
+            ["A", "B"],
+            chunk_size=500,
+        )
+        assert len(results) == 1
+        assert len(results[0]) == 2
+        db_fn.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_parallel_chunked_in_query_concatenates_correctly(self):
+        """chunked_in_query should correctly concatenate parallel chunk results."""
+        codes = [f"{i:06d}.SH" for i in range(6)]
+
+        async def mock_read_fn(sql, params):
+            return pd.DataFrame({"ts_code": params})
+
+        result = await BaseDao.chunked_in_query(
+            mock_read_fn,
+            "SELECT * FROM t WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=2,
+        )
+        assert len(result) == 6
+        assert set(result["ts_code"]) == set(codes)
+
+    @pytest.mark.asyncio
+    async def test_parallel_chunked_in_write_sums_correctly(self):
+        """chunked_in_write should correctly sum parallel chunk results."""
+        codes = [f"{i:06d}.SH" for i in range(6)]
+
+        async def mock_write_fn(sql, params, **kwargs):
+            return len(params)
+
+        result = await BaseDao.chunked_in_write(
+            mock_write_fn,
+            "UPDATE t SET x=1 WHERE ts_code IN ({placeholders})",
+            codes,
+            chunk_size=2,
+        )
+        assert result == 6

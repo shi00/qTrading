@@ -3,12 +3,10 @@
 TDD RED phase: these tests define the expected ViewModel contract.
 They will fail until DataSourceViewModel is implemented.
 
-P2-3: 本文件含若干纯 assert_called/assert_called_once 断言，保留理由：
-- on_health_checking/result/finished.assert_called_once(): 回调通知，参数为运行时数据
-- on_show_snack.assert_called(): toast 通知，参数为 i18n key + color
+P2-3 已修复：所有弱断言已升级为 assert_called_once / assert_called_once_with。
+- on_health_finished.assert_called_once(): 回调通知，无参数
+- on_show_snack.assert_called_once_with(msg, color): toast 通知，验证 i18n 消息 + 颜色
 - on_cache_cleared.assert_called_once(): 缓存清除通知，无参数
-这些断言验证"回调被触发"而非"参数正确"，副作用状态由配套 assert 验证
-（如 assert bound_vm.is_syncing is False）。
 """
 
 import asyncio
@@ -16,9 +14,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.i18n import I18n
 from services.task_manager import TaskStatus
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
 
+pytestmark = pytest.mark.unit
 
 # --- Fixtures ---
 
@@ -162,7 +162,7 @@ class TestDataSourceViewModelCheckHealth:
         bound_vm.on_health_result.assert_called_once()
         result = bound_vm.on_health_result.call_args[0][0]
         assert result["status"] == "green"
-        bound_vm.on_health_finished.assert_called()
+        bound_vm.on_health_finished.assert_called_once()
 
     async def test_check_health_error(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.check_data_health = AsyncMock(side_effect=RuntimeError("DB down"))
@@ -174,7 +174,10 @@ class TestDataSourceViewModelCheckHealth:
             patch("ui.viewmodels.data_source_view_model.classify_error") as mock_classify,
             patch("ui.viewmodels.data_source_view_model.get_error_message") as mock_get_msg,
         ):
-            mock_classify.return_value = {"code": "runtime", "message_key": "common_op_fail"}
+            mock_classify.return_value = {
+                "code": "runtime",
+                "message_key": "common_op_fail",
+            }
             mock_get_msg.return_value = "Sanitized error"
 
             with pytest.raises(RuntimeError, match="DB down"):
@@ -184,7 +187,7 @@ class TestDataSourceViewModelCheckHealth:
             mock_get_msg.assert_called_once()
             bound_vm.on_health_error.assert_called_once_with("Sanitized error")
 
-        bound_vm.on_health_finished.assert_called()
+        bound_vm.on_health_finished.assert_called_once()
 
     async def test_check_health_cancelled(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.check_data_health = AsyncMock(side_effect=asyncio.CancelledError())
@@ -196,13 +199,13 @@ class TestDataSourceViewModelCheckHealth:
             await factory(task_id="task_123")
 
         bound_vm.on_health_cancelled.assert_called_once()
-        bound_vm.on_health_finished.assert_called()
+        bound_vm.on_health_finished.assert_called_once()
 
     async def test_check_health_task_rejected(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
 
         await bound_vm.check_health()
-        bound_vm.on_health_finished.assert_called()
+        bound_vm.on_health_finished.assert_called_once()
 
 
 class TestDataSourceViewModelFullDailySync:
@@ -216,7 +219,7 @@ class TestDataSourceViewModelFullDailySync:
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
 
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_full_sync_done_simple"), "success")
         assert "daily_sync" in bound_vm._active_task_ids
 
     async def test_daily_sync_cancelled(self, bound_vm, mock_processor, mock_task_manager):
@@ -228,7 +231,7 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(asyncio.CancelledError):
             await factory(task_id="task_123")
 
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("settings_msg_sync_cancelled"), "warning")
         assert bound_vm.is_syncing is False
         bound_vm.on_sync_busy_changed.assert_called_with(False, None)
 
@@ -241,7 +244,10 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(RuntimeError):
             await factory(task_id="task_123")
 
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(
+            I18n.get("common_op_fail").format(error=I18n.get("common_err_network")),
+            "error",
+        )
         assert bound_vm.is_syncing is False
         bound_vm.on_sync_busy_changed.assert_called_with(False, None)
 
@@ -267,7 +273,7 @@ class TestDataSourceViewModelDoubaoRebuild:
         bound_vm.execute_doubao_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_doubao_done"), "success")
 
     async def test_rebuild_cancelled_propagates(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.run_doubao_tagging = AsyncMock(side_effect=asyncio.CancelledError())
@@ -305,7 +311,7 @@ class TestDataSourceViewModelClearCache:
         await factory(task_id="task_123")
 
         mock_cache.clear_all_cache.assert_awaited_once()
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("ds_cache_cleared"), "success")
         bound_vm.on_cache_cleared.assert_called_once()
 
     async def test_clear_cache_error(self, bound_vm, mock_cache, mock_task_manager):
@@ -317,7 +323,10 @@ class TestDataSourceViewModelClearCache:
         with pytest.raises(RuntimeError):
             await factory(task_id="task_123")
 
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(
+            I18n.get("ds_clean_fail").format(error=I18n.get("common_err_unknown")),
+            "error",
+        )
 
     def test_clear_cache_resets_busy_on_reject(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
@@ -339,7 +348,7 @@ class TestDataSourceViewModelInitHistorical:
         await factory(task_id="task_123")
 
         bound_vm.on_init_sync_reset.assert_called_with(TaskStatus.COMPLETED)
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("settings_init_done"), "success")
 
     async def test_init_cancelled(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.initialize_system = AsyncMock(side_effect=asyncio.CancelledError())
@@ -362,7 +371,10 @@ class TestDataSourceViewModelInitHistorical:
             await factory(task_id="task_123")
 
         bound_vm.on_init_sync_reset.assert_called_with(TaskStatus.FAILED)
-        bound_vm.on_show_snack.assert_called()
+        bound_vm.on_show_snack.assert_called_once_with(
+            I18n.get("ds_init_fail_fmt", error=I18n.get("ds_internal_error")),
+            "error",
+        )
 
     async def test_init_none_report_raises(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.initialize_system = AsyncMock(return_value=None)

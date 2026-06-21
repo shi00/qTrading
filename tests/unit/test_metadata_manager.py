@@ -2,6 +2,10 @@ from unittest.mock import patch
 
 from data.persistence.metadata_manager import MetaDataManager
 from data.data_dictionary import TABLE_DEFINITIONS
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestGetTableAlias:

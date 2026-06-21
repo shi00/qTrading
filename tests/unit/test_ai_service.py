@@ -13,6 +13,8 @@ from services.ai_service import (
     validate_ai_analysis_response,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _make_svc_with_cloud():
     """Factory: create AIService with cloud provider pre-configured.
@@ -218,7 +220,11 @@ class TestJsonParsingNoRfindFallback:
     async def test_non_json_mode_returns_content_dict(self):
         """Non-json mode returns {"content": str} dict without parsing."""
         svc = _make_svc_with_cloud()
-        with patch.object(svc, "_chat_completion_litellm", AsyncMock(return_value={"content": "hello world"})):
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(return_value={"content": "hello world"}),
+        ):
             result = await svc._chat_completion(
                 messages=[{"role": "user", "content": "hello"}],
                 provider="cloud",
@@ -442,7 +448,10 @@ class TestAIServiceSetupClientAzure:
     @patch("services.ai_service.ConfigHandler")
     def test_no_api_key_disables_cloud(self, mock_ch):
         """When api_key is missing, _is_cloud_configured must be False."""
-        mock_ch.get_llm_config.return_value = {"provider": "deepseek", "base_url": "http://api.test.com"}
+        mock_ch.get_llm_config.return_value = {
+            "provider": "deepseek",
+            "base_url": "http://api.test.com",
+        }
         mock_ch.get_setting.return_value = False
         svc = AIService()
         assert svc._is_cloud_configured is False
@@ -684,7 +693,11 @@ class TestAIServiceVerifyConnection:
     async def test_verify_exception_raises(self):
         """verify_connection re-raises when _chat_completion_litellm raises."""
         svc = _make_svc_with_cloud()
-        with patch.object(svc, "_chat_completion_litellm", AsyncMock(side_effect=Exception("conn err"))):
+        with patch.object(
+            svc,
+            "_chat_completion_litellm",
+            AsyncMock(side_effect=Exception("conn err")),
+        ):
             with pytest.raises(Exception, match="conn err"):
                 await svc.verify_connection()
 
@@ -760,7 +773,10 @@ class TestAIServiceTestConnection:
     async def test_exception_returns_error(self):
         """Connection failure returns structured error with error_code."""
         with (
-            patch("services.ai_service.acompletion", AsyncMock(side_effect=Exception("conn fail"))),
+            patch(
+                "services.ai_service.acompletion",
+                AsyncMock(side_effect=Exception("conn fail")),
+            ),
             patch("services.ai_service._check_reasoning_support", return_value=False),
             patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
         ):
@@ -942,18 +958,24 @@ class TestTestConnectionBoundaryConditions:
 class TestReasoningModelFallbackList:
     def test_fallback_list_contains_current_models(self):
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
-            with patch("services.ai_service.litellm.utils.supports_reasoning", side_effect=Exception("test")):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
                 assert _check_reasoning_support("deepseek-v4-pro") is True
                 assert _check_reasoning_support("o3-pro") is True
                 assert _check_reasoning_support("o4-mini") is True
                 assert _check_reasoning_support("claude-opus-4-7") is True
                 assert _check_reasoning_support("magistral-medium-latest") is True
-                assert _check_reasoning_support("qwen3.6-max") is True
+                assert _check_reasoning_support("qwen3.6-max-preview") is True
                 assert _check_reasoning_support("glm-5") is True
 
     def test_fallback_list_excludes_non_reasoning(self):
         with patch("services.ai_service.LITELLM_AVAILABLE", True):
-            with patch("services.ai_service.litellm.utils.supports_reasoning", side_effect=Exception("test")):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
                 assert _check_reasoning_support("gpt-5.4") is False
                 assert _check_reasoning_support("gpt-5.5") is False
                 assert _check_reasoning_support("deepseek-v4-flash") is False
@@ -963,9 +985,83 @@ class TestReasoningModelFallbackList:
         """Positive branch: litellm.utils.supports_reasoning returns True directly (no fallback)."""
         with (
             patch("services.ai_service.LITELLM_AVAILABLE", True),
-            patch("services.ai_service.litellm.utils.supports_reasoning", return_value=True),
+            patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                return_value=True,
+            ),
         ):
             assert _check_reasoning_support("deepseek-v4-pro") is True
+
+
+class TestReasoningModelExactMatch:
+    """Verify exact match prevents false positives from substring matching (AI-M1)."""
+
+    def test_short_name_does_not_match_longer_model_id(self):
+        """ "qwen3.6-max" should NOT match "qwen3.6-max-preview" (substring but not exact)."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("qwen3.6-max") is False
+
+    def test_o3_does_not_match_o3_pro(self):
+        """ "o3" should NOT match "o3-pro" (substring but not exact)."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("o3") is False
+
+    def test_o4_does_not_match_o4_mini(self):
+        """ "o4" should NOT match "o4-mini" (substring but not exact)."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("o4") is False
+
+    def test_qwen_does_not_match_qwen3_variants(self):
+        """ "qwen" should NOT match any qwen3.x reasoning model (substring but not exact)."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("qwen") is False
+
+    def test_glm_does_not_match_glm5(self):
+        """ "glm" should NOT match "glm-5" (substring but not exact)."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("glm") is False
+
+    def test_exact_match_is_case_insensitive(self):
+        """Exact match should be case-insensitive."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("DeepSeek-V4-Pro") is True
+                assert _check_reasoning_support("O3-PRO") is True
+                assert _check_reasoning_support("GLM-5") is True
+
+    def test_o1_does_not_match_o1_mini(self):
+        """ "o1" should NOT match any reasoning model (no o1-mini in providers, but
+        verifies that a short prefix doesn't substring-match existing models)."""
+        with patch("services.ai_service.LITELLM_AVAILABLE", True):
+            with patch(
+                "services.ai_service.litellm.utils.supports_reasoning",
+                side_effect=Exception("test"),
+            ):
+                assert _check_reasoning_support("o1") is False
+                assert _check_reasoning_support("o1-mini") is False
 
 
 class TestAIServiceAnalyzeTimeoutHandling:
@@ -1189,7 +1285,10 @@ class TestUniversalRulesSeparateSystemMessage:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
-            patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
+            patch(
+                "utils.prompt_guard.validate_prompt",
+                return_value=(False, "Injection detected"),
+            ),
             patch("core.prompt_base.get_base_prompt", return_value="Fallback prompt"),
         ):
             await svc.analyze_stock(
@@ -1253,7 +1352,11 @@ class TestAIServiceAnalyzeStockSuccess:
         ):
             mock_resolve.return_value = "Strategy prompt"
             result = await svc.analyze_stock(
-                stock_info={"ts_code": "000001.SZ", "name": "test", "concepts": ["AI", "芯片"]},
+                stock_info={
+                    "ts_code": "000001.SZ",
+                    "name": "test",
+                    "concepts": ["AI", "芯片"],
+                },
                 tech_info={"rsi_14": 25},
                 news_list=[{"source": "CLS", "publish_time": "2026-05-09", "title": "利好消息"}],
                 global_context="大盘上涨",
@@ -1361,7 +1464,10 @@ class TestAIServiceAnalyzeStockSuccess:
         svc = AIService()
         svc._chat_completion = AsyncMock(return_value={"score": 40, "recommendation": "sell"})
         with (
-            patch("utils.prompt_guard.validate_prompt", return_value=(False, "Injection detected")),
+            patch(
+                "utils.prompt_guard.validate_prompt",
+                return_value=(False, "Injection detected"),
+            ),
             patch("core.prompt_base.get_base_prompt") as mock_resolve,
         ):
             mock_resolve.return_value = "Fallback prompt"
@@ -1421,7 +1527,12 @@ class TestAIServiceClassifyNewsFallback:
             call_count[0] += 1
             if kwargs.get("provider") == "local":
                 raise Exception("Local model not configured")
-            return {"category_L1": "finance", "category_L2": "banking", "emoji": "📊", "sentiment": "Positive"}
+            return {
+                "category_L1": "finance",
+                "category_L2": "banking",
+                "emoji": "📊",
+                "sentiment": "Positive",
+            }
 
         svc._chat_completion = AsyncMock(side_effect=mock_chat_completion)
         with patch("core.i18n.I18n.get", return_value="金融"):
@@ -1484,8 +1595,14 @@ class TestAIServiceClassifyNewsFallback:
 
         svc._chat_completion = AsyncMock(side_effect=mock_chat)
         with (
-            patch("services.ai_service.ConfigHandler.get_ai_news_prompt", return_value="Classify news"),
-            patch("core.i18n.I18n.get", side_effect=lambda k, d=None: d if d is not None else k),
+            patch(
+                "services.ai_service.ConfigHandler.get_ai_news_prompt",
+                return_value="Classify news",
+            ),
+            patch(
+                "core.i18n.I18n.get",
+                side_effect=lambda k, d=None: d if d is not None else k,
+            ),
         ):
             result = await svc.classify_news("Tech news")
         assert "category" in result
@@ -1538,8 +1655,14 @@ class TestAIServiceSetupLocalModel:
         mock_manager.get_loaded_model_path.return_value = None
         mock_manager.load_model = AsyncMock()
         with (
-            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
-            patch("services.ai_service.ConfigHandler.get_setting", return_value="/path/to/model"),
+            patch(
+                "services.ai_service.LocalModelManager.get_instance",
+                AsyncMock(return_value=mock_manager),
+            ),
+            patch(
+                "services.ai_service.ConfigHandler.get_setting",
+                return_value="/path/to/model",
+            ),
         ):
             await svc._setup_local_model()
             mock_manager.load_model.assert_called_once_with("/path/to/model")
@@ -1551,8 +1674,14 @@ class TestAIServiceSetupLocalModel:
         mock_manager = MagicMock()
         mock_manager.get_loaded_model_path.return_value = "/already/loaded"
         with (
-            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
-            patch("services.ai_service.ConfigHandler.get_setting", return_value="/path/to/model"),
+            patch(
+                "services.ai_service.LocalModelManager.get_instance",
+                AsyncMock(return_value=mock_manager),
+            ),
+            patch(
+                "services.ai_service.ConfigHandler.get_setting",
+                return_value="/path/to/model",
+            ),
         ):
             await svc._setup_local_model()
             mock_manager.load_model.assert_not_called()
@@ -1564,7 +1693,10 @@ class TestAIServiceSetupLocalModel:
         mock_manager = MagicMock()
         mock_manager.get_loaded_model_path.return_value = None
         with (
-            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch(
+                "services.ai_service.LocalModelManager.get_instance",
+                AsyncMock(return_value=mock_manager),
+            ),
             patch("services.ai_service.ConfigHandler.get_setting", return_value=None),
         ):
             await svc._setup_local_model()
@@ -1749,12 +1881,18 @@ class TestAIServiceChatCompletionLocal:
         mock_manager = MagicMock()
         mock_manager.get_loaded_model_path.return_value = None
         with (
-            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch(
+                "services.ai_service.LocalModelManager.get_instance",
+                AsyncMock(return_value=mock_manager),
+            ),
             patch.object(svc, "_setup_local_model", AsyncMock()),
         ):
             with pytest.raises(ValueError, match="Local model not loaded"):
                 await svc._chat_completion(
-                    messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}],
+                    messages=[
+                        {"role": "system", "content": "sys"},
+                        {"role": "user", "content": "hello"},
+                    ],
                     provider="local",
                     json_mode=False,
                 )
@@ -1767,11 +1905,17 @@ class TestAIServiceChatCompletionLocal:
         mock_manager.get_loaded_model_path.return_value = "/path/to/model"
         mock_manager.run_inference = AsyncMock(return_value='{"category": "tech"}')
         with (
-            patch("services.ai_service.LocalModelManager.get_instance", AsyncMock(return_value=mock_manager)),
+            patch(
+                "services.ai_service.LocalModelManager.get_instance",
+                AsyncMock(return_value=mock_manager),
+            ),
             patch.object(svc, "_setup_local_model", AsyncMock()),
         ):
             result = await svc._chat_completion(
-                messages=[{"role": "system", "content": "sys"}, {"role": "user", "content": "hello"}],
+                messages=[
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hello"},
+                ],
                 provider="local",
                 json_mode=True,
             )
@@ -1957,7 +2101,10 @@ class TestAIServiceAnalyzeStockDeepBranches:
         svc._chat_completion = AsyncMock(return_value={"score": 50, "recommendation": "hold"})
         with (
             patch("core.prompt_base.get_base_prompt", return_value="prompt"),
-            patch("data.persistence.review_manager.ReviewManager", side_effect=Exception("rm error")),
+            patch(
+                "data.persistence.review_manager.ReviewManager",
+                side_effect=Exception("rm error"),
+            ),
         ):
             result = await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
@@ -2013,7 +2160,10 @@ class TestAIServiceAnalyzeStockDeepBranches:
     async def test_analyze_stock_fallback_raises_in_backtest_mode(self):
         """Backtest mode with history_context=None raises ValueError (lookahead bias guard)."""
         svc = _make_svc_with_cloud()
-        with pytest.raises(ValueError, match="analyze_stock called with history_context=None in backtest mode"):
+        with pytest.raises(
+            ValueError,
+            match="analyze_stock called with history_context=None in backtest mode",
+        ):
             await svc.analyze_stock(
                 stock_info={"ts_code": "000001.SZ"},
                 tech_info={},

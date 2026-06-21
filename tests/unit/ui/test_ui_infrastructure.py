@@ -1,3 +1,9 @@
+import pytest
+
+
+pytestmark = pytest.mark.unit
+
+
 def test_flet_mock_page(mock_page):
     assert mock_page is not None
     assert hasattr(mock_page, "add")

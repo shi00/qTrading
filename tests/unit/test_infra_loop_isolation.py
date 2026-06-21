@@ -18,6 +18,8 @@ import pytest
 
 from utils.loop_local import get_loop_local, clear_all_loop_locals, _fallback_store
 
+pytestmark = pytest.mark.unit
+
 
 def test_clear_all_loop_locals_clears_fallback_store():
     """clear_all_loop_locals 应清理 fallback_store（同步调用路径）。

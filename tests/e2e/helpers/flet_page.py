@@ -21,7 +21,9 @@ class FletPage:
     def bind_context(self, pw_tuple: tuple[Playwright, Browser, BrowserContext, Page, Any]) -> None:
         self._pw_context = pw_tuple
 
-    def get_context(self) -> tuple[Playwright, Browser, BrowserContext, Page, Any] | None:
+    def get_context(
+        self,
+    ) -> tuple[Playwright, Browser, BrowserContext, Page, Any] | None:
         return self._pw_context
 
     async def open(self, url: str, timeout_ms: int = TIMEOUTS.PAGE_OPEN) -> None:
@@ -51,22 +53,22 @@ class FletPage:
         loc_combined = btn.or_(by_label).or_(text_loc).first
         try:
             await loc_combined.wait_for(state="attached", timeout=scaled)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("Combined click target not found for '%s' (role: %s): %s", name, role, e)
 
         if await btn.count() > 0:
             try:
                 await btn.first.click(timeout=self._tm(3000))
                 return
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("btn.click('%s') failed, trying next fallback: %s", name, exc)
 
         if await by_label.count() > 0:
             try:
                 await by_label.first.click(timeout=self._tm(3000))
                 return
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("by_label.click('%s') failed, trying next fallback: %s", name, exc)
 
         if await text_loc.count() > 0:
             target = text_loc.first
@@ -78,13 +80,13 @@ class FletPage:
                         box["y"] + box["height"] / 2,
                     )
                     return
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("mouse.click('%s') via bounding_box failed: %s", name, exc)
             try:
                 await target.click(force=True, timeout=self._tm(3000))
                 return
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("force click('%s') failed: %s", name, exc)
 
         # If everything fails, try clicking the combined locator to trigger standard playwright error
         await loc_combined.click(timeout=self._tm(3000))
@@ -118,7 +120,12 @@ class FletPage:
             try:
                 await loc_combined.wait_for(state="visible", timeout=scaled)
                 el = loc_combined
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "fill_textbox: loc_combined wait_for visible failed for '%s': %s",
+                    label,
+                    exc,
+                )
                 # Fallback: check if there's exactly 1 textbox on the page
                 try:
                     loc3 = self.page.get_by_role("textbox")
@@ -127,16 +134,26 @@ class FletPage:
                         el = loc3.first
                     else:
                         el = loc1.first
-                except Exception:
+                except Exception as exc2:  # noqa: BLE001
+                    logger.debug(
+                        "fill_textbox: single textbox fallback failed for '%s': %s",
+                        label,
+                        exc2,
+                    )
                     el = loc1.first
 
             await el.click(timeout=scaled)
             try:
                 await el.fill(value, timeout=scaled)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "fill_textbox: el.fill failed for '%s', falling back to clear+type: %s",
+                    label,
+                    exc,
+                )
                 await el.clear()
                 await el.type(value, delay=30)
-        except Exception:
+        except Exception:  # noqa: BLE001
             try:
                 # [PITFALL_WARNING] Flet TextField 元素定位黑洞
                 # 坑点：在 Flet Web 中，get_by_role("textbox", name="xxx") 几乎永远找不到输入框。
@@ -164,12 +181,15 @@ class FletPage:
                 await self.page.keyboard.press("Backspace")
                 await self.page.keyboard.type(value, delay=50)
                 return
-            except Exception as fallback_exc:
+            except Exception as fallback_exc:  # noqa: BLE001
                 logger.error(f"fill_textbox fallback failed for label '{label}': {fallback_exc}")
                 raise
 
     async def select_dropdown(
-        self, current_or_label: str, option_text: str, timeout_ms: int = TIMEOUTS.INTERACTION
+        self,
+        current_or_label: str,
+        option_text: str,
+        timeout_ms: int = TIMEOUTS.INTERACTION,
     ) -> None:
         norm_label = current_or_label.lower()
         match_keys = [current_or_label, norm_label]
@@ -187,7 +207,18 @@ class FletPage:
                 ]
             )
         elif "主题" in norm_label or "theme" in norm_label:
-            match_keys.extend(["theme", "主题", "浅色", "深色", "light", "dark", "浅色 / 深色", "light / dark"])
+            match_keys.extend(
+                [
+                    "theme",
+                    "主题",
+                    "浅色",
+                    "深色",
+                    "light",
+                    "dark",
+                    "浅色 / 深色",
+                    "light / dark",
+                ]
+            )
 
         match_keys = list(set(match_keys))
 
@@ -218,8 +249,8 @@ class FletPage:
                 try:
                     if await loc.count() > 0 and await loc.is_visible():
                         return True
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("check_option_visible: locator check failed: %s", exc)
             return False
 
         async def click_option() -> bool:
@@ -246,7 +277,7 @@ class FletPage:
                         await loc.click(timeout=self._tm(3000), force=True)
                         logger.debug("选项候选[%d]点击成功", idx)
                         return True
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001
                     logger.debug("选项候选[%d]点击抛出异常: %s", idx, ex)
             return False
 
@@ -299,7 +330,7 @@ class FletPage:
                         last_clicked_target = target
                         logger.debug("触发器候选[%d]点击成功", idx)
                         break
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001
                     logger.debug("触发器候选[%d]点击失败: %s", idx, ex)
                     continue
 
@@ -321,7 +352,7 @@ class FletPage:
                 logger.debug("下拉选项未出现，重试点击触发器...")
                 try:
                     await last_clicked_target.click(timeout=self._tm(3000), force=True)
-                except Exception as ex:
+                except Exception as ex:  # noqa: BLE001
                     logger.debug("重试点击触发器失败: %s", ex)
 
             await self.page.wait_for_timeout(200)
@@ -347,7 +378,7 @@ class FletPage:
         try:
             await loc_combined.wait_for(state="attached", timeout=scaled)
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("Combined locator wait_for failed for text '%s': %s", text, e)
 
         # Fallback: poll input field values
@@ -361,8 +392,8 @@ class FletPage:
                     val = await el.evaluate("e => e.value")
                     if text.lower() in val.lower():
                         return
-            except Exception:
-                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("expect_text: input polling failed for '%s': %s", text, exc)
             await self.page.wait_for_timeout(200)
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -418,7 +449,7 @@ class FletPage:
                             n["text"].strip()[:50],
                         )
                 logger.debug("==========================================")
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001
                 logger.debug("Failed to dump debug semantics: %s", ex)
 
         try:
@@ -445,7 +476,12 @@ class FletPage:
                 logger.debug("=== E2E DEBUG: ALL INPUT ELEMENTS ===")
                 for idx, ip in enumerate(inputs):
                     logger.debug(
-                        "[%d] tag=%s value='%s' aria='%s' id=%s", idx, ip["tag"], ip["value"], ip["aria"], ip["id"]
+                        "[%d] tag=%s value='%s' aria='%s' id=%s",
+                        idx,
+                        ip["tag"],
+                        ip["value"],
+                        ip["aria"],
+                        ip["id"],
                     )
 
                 nodes = await self.page.eval_on_selector_all(
@@ -458,7 +494,10 @@ class FletPage:
                         text: e.textContent || ''
                     }))""",
                 )
-                logger.debug("=== E2E DEBUG: CURRENT SEMANTICS NODES (expect_text '%s') ===", text)
+                logger.debug(
+                    "=== E2E DEBUG: CURRENT SEMANTICS NODES (expect_text '%s') ===",
+                    text,
+                )
                 for i, n in enumerate(nodes):
                     if n["role"] or n["aria"] or n["text"].strip():
                         logger.debug(
@@ -471,7 +510,7 @@ class FletPage:
                             n["text"].strip()[:60],
                         )
                 logger.debug("==========================================")
-            except Exception as ex:
+            except Exception as ex:  # noqa: BLE001
                 logger.debug("Failed to dump debug DOM in expect_text: %s", ex)
 
         try:

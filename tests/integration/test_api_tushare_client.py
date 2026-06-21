@@ -14,6 +14,8 @@ from data.constants import (
 from data.external.tushare_client import TushareClient
 from utils.config_handler import ConfigHandler
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(autouse=True)
 def _reset_tushare_client():
@@ -266,7 +268,7 @@ class TestSlowApiLimiters:
 
             await client.get_top10_holders(ts_code="000001.SZ", period="20231231")
 
-            api_limiter.consume_async.assert_called()
+            api_limiter.consume_async.assert_called_once()
             general_limiter.consume_async.assert_not_called()
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
@@ -303,7 +305,7 @@ class TestSlowApiLimiters:
 
             await client.get_daily_quotes(ts_code="000001.SZ")
 
-            api_limiter.consume_async.assert_called()
+            api_limiter.consume_async.assert_called_once()
             general_limiter.consume_async.assert_not_called()
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
@@ -331,7 +333,7 @@ class TestSlowApiLimiters:
 
             await client.get_income(ts_code="000001.SZ", period="20231231")
 
-            general_limiter.consume_async.assert_called()
+            general_limiter.consume_async.assert_called_once()
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")

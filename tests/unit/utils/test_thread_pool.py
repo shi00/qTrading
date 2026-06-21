@@ -5,6 +5,8 @@ from unittest.mock import patch, MagicMock
 
 from utils.thread_pool import ThreadPoolManager, TaskType, get_thread_pool_manager
 
+pytestmark = pytest.mark.unit
+
 
 class TestThreadPoolManagerInit:
     @patch("utils.thread_pool.ConfigHandler")
@@ -258,7 +260,11 @@ class TestThreadPoolManagerContextVarsPropagation:
 
     @pytest.mark.asyncio
     async def test_correlation_id_propagates_to_worker(self):
-        from utils.correlation import set_correlation_id, get_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            set_correlation_id,
+            get_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         set_correlation_id("test-ctx-01")
@@ -271,7 +277,11 @@ class TestThreadPoolManagerContextVarsPropagation:
 
     @pytest.mark.asyncio
     async def test_correlation_id_propagates_with_kwargs(self):
-        from utils.correlation import set_correlation_id, get_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            set_correlation_id,
+            get_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         set_correlation_id("test-ctx-02")

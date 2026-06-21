@@ -10,6 +10,8 @@ from strategies.backtest.config import BacktestConfig, BacktestResult
 from services.backtest_service import BacktestService
 from strategies.base_strategy import BaseStrategy
 
+pytestmark = pytest.mark.unit
+
 
 class MockStrategy(BaseStrategy):
     required_context_keys = ()

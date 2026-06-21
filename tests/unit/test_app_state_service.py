@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from data.persistence.app_state_service import get_app_state, set_app_state
 
+pytestmark = pytest.mark.unit
+
 
 def _make_connect_engine(mock_conn):
     engine = MagicMock()

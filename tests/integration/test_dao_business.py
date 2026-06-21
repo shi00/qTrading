@@ -29,6 +29,7 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.sync_dao import SyncDao
 from tests.integration.test_infra_base import make_clean_db_fixture
 
+pytestmark = pytest.mark.integration
 
 # 共享 clean_db fixture：表清单从 ORM metadata 动态生成（INT-P2-1）
 clean_db = make_clean_db_fixture()
@@ -839,7 +840,8 @@ class TestScreenerDao:
 
         cols_str = ", ".join(all_cols)
         result = await screener_dao._read_db(
-            f"SELECT {cols_str} FROM screening_history WHERE strategy_name=$1", ["oversold"]
+            f"SELECT {cols_str} FROM screening_history WHERE strategy_name=$1",
+            ["oversold"],
         )
         assert not result.empty
         assert result["name"].iloc[0] == "平安银行"
@@ -919,7 +921,12 @@ class TestHolderDao:
         """测试股东户数变化计算逻辑"""
         df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": "20230930",
+                    "ann_date": "20231025",
+                    "holder_num": 100000,
+                },
                 {
                     "ts_code": "000001.SZ",
                     "end_date": _RECENT_DATE_MINUS_90_STR,
@@ -955,14 +962,24 @@ class TestHolderDao:
         """测试多股票股东户数变化计算互不干扰"""
         df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": "20230930",
+                    "ann_date": "20231025",
+                    "holder_num": 100000,
+                },
                 {
                     "ts_code": "000001.SZ",
                     "end_date": _RECENT_DATE_MINUS_90_STR,
                     "ann_date": _RECENT_DATE_STR,
                     "holder_num": 90000,
                 },
-                {"ts_code": "000002.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 50000},
+                {
+                    "ts_code": "000002.SZ",
+                    "end_date": "20230930",
+                    "ann_date": "20231025",
+                    "holder_num": 50000,
+                },
                 {
                     "ts_code": "000002.SZ",
                     "end_date": _RECENT_DATE_MINUS_90_STR,
@@ -989,7 +1006,12 @@ class TestHolderDao:
         """测试增量更新时历史数据的变化率被正确重算"""
         df1 = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "end_date": "20230930", "ann_date": "20231025", "holder_num": 100000},
+                {
+                    "ts_code": "000001.SZ",
+                    "end_date": "20230930",
+                    "ann_date": "20231025",
+                    "holder_num": 100000,
+                },
             ]
         )
         await holder_dao.save_holder_number(df1)
@@ -1154,7 +1176,11 @@ class TestSyncDao:
         await sync_dao._write_db(
             'INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") '
             "VALUES ($1, $2, NULL, NULL, 'error', $3)",
-            ("daily_quotes", _RECENT_DATE_MINUS_2, datetime.datetime.combine(_RECENT_DATE_MINUS_2, datetime.time())),
+            (
+                "daily_quotes",
+                _RECENT_DATE_MINUS_2,
+                datetime.datetime.combine(_RECENT_DATE_MINUS_2, datetime.time()),
+            ),
         )
 
         result_before = await sync_dao.get_sync_status(table_name="daily_quotes")
@@ -1198,7 +1224,11 @@ class TestSyncDao:
         await sync_dao._write_db(
             'INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","updated_at") '
             "VALUES ($1, $2, NULL, NULL, 'error', $3)",
-            ("moneyflow_daily", _RECENT_DATE_MINUS_2, datetime.datetime.combine(_RECENT_DATE_MINUS_2, datetime.time())),
+            (
+                "moneyflow_daily",
+                _RECENT_DATE_MINUS_2,
+                datetime.datetime.combine(_RECENT_DATE_MINUS_2, datetime.time()),
+            ),
         )
 
         await sync_dao.update_sync_status(

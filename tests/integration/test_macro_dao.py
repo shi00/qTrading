@@ -14,6 +14,8 @@ import pytest
 
 from data.persistence.daos.macro_dao import MacroDao
 
+pytestmark = pytest.mark.integration
+
 
 class TestMacroDaoIntegrity:
     """测试宏观经济数据完整性检查方法"""

@@ -4,6 +4,10 @@ from unittest.mock import MagicMock
 import pandas as pd
 
 from data.sync.base import ISyncStrategy, SyncContext, SyncResult
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestSyncContext:

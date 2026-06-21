@@ -3,6 +3,10 @@ import os
 from unittest.mock import patch
 
 from utils.proxy_manager import ProxyManager
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestProxyManagerNoEnvironWrite:
@@ -40,7 +44,11 @@ class TestProxyManagerNoEnvironWrite:
     def test_existing_env_not_modified(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
             mock_ch.get_no_proxy_domains.return_value = ["api.tushare.pro"]
-            with patch.dict(os.environ, {"NO_PROXY": "original.domain", "no_proxy": "original.domain"}, clear=False):
+            with patch.dict(
+                os.environ,
+                {"NO_PROXY": "original.domain", "no_proxy": "original.domain"},
+                clear=False,
+            ):
                 ProxyManager.apply_smart_proxy_policy()
 
                 assert os.environ.get("NO_PROXY") == "original.domain"
@@ -86,7 +94,10 @@ class TestProxyManagerSnapshotOriginal:
 
     def test_reapply_removes_domain_deleted_from_config(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
-            mock_ch.get_no_proxy_domains.return_value = ["tushare.pro", "api.example.com"]
+            mock_ch.get_no_proxy_domains.return_value = [
+                "tushare.pro",
+                "api.example.com",
+            ]
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("NO_PROXY", None)
                 os.environ.pop("no_proxy", None)
@@ -208,7 +219,11 @@ class TestProxyManagerMergesExistingEnv:
 
 class TestProxyManagerLogSafety:
     def test_apply_does_not_log_full_domain_list(self):
-        with patch.object(ProxyManager, "apply_smart_proxy_policy", wraps=ProxyManager.apply_smart_proxy_policy):
+        with patch.object(
+            ProxyManager,
+            "apply_smart_proxy_policy",
+            wraps=ProxyManager.apply_smart_proxy_policy,
+        ):
             assert hasattr(ProxyManager, "apply_smart_proxy_policy")
 
     def test_log_only_shows_count(self):
@@ -253,7 +268,9 @@ class TestProxyManagerLitellmEnvContext:
 
     def test_preserves_existing_env_on_exit(self):
         with patch.dict(
-            os.environ, {"NO_PROXY": "pre-existing.domain", "no_proxy": "pre-existing.domain"}, clear=False
+            os.environ,
+            {"NO_PROXY": "pre-existing.domain", "no_proxy": "pre-existing.domain"},
+            clear=False,
         ):
             with ProxyManager.litellm_env_context():
                 assert "tushare.pro" in os.environ["NO_PROXY"]
@@ -293,7 +310,9 @@ class TestProxyManagerLitellmEnvContext:
     def test_with_proxy_env_vars(self):
         ProxyManager._no_proxy_domains = {"tushare.pro"}
         with patch.dict(
-            os.environ, {"HTTP_PROXY": "http://proxy:3128", "HTTPS_PROXY": "http://proxy:3128"}, clear=False
+            os.environ,
+            {"HTTP_PROXY": "http://proxy:3128", "HTTPS_PROXY": "http://proxy:3128"},
+            clear=False,
         ):
             with ProxyManager.litellm_env_context():
                 assert os.environ.get("HTTP_PROXY") == "http://proxy:3128"

@@ -2,6 +2,10 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 
 from ui.views.settings_view import SettingsView
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class _FakePage:

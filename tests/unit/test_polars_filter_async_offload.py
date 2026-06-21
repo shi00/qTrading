@@ -7,6 +7,10 @@ import pandas as pd
 from data.persistence.quality_gate import QualityTier
 from strategies.polars_base import PolarsBaseStrategy
 from utils.thread_pool import TaskType, ThreadPoolManager
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def _make_dp():
@@ -43,7 +47,11 @@ async def test_filter_calls_run_async_with_cpu_task_type():
     dp = _make_dp()
     context = {"screening_data": data, "data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
             mock_run_async.return_value = data
             await s.filter(context)
@@ -60,7 +68,11 @@ async def test_filter_run_async_receives_callable():
     dp = _make_dp()
     context = {"screening_data": data, "data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
             mock_run_async.return_value = data
             await s.filter(context)
@@ -77,7 +89,11 @@ async def test_filter_run_async_callable_produces_expected_dataframe():
     dp = _make_dp()
     context = {"screening_data": input_data, "data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
             mock_run_async.return_value = input_data
             await s.filter(context)
@@ -100,8 +116,17 @@ async def test_filter_returns_dataframe_from_run_async():
     dp = _make_dp()
     context = {"screening_data": input_data, "data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
-        with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock, return_value=expected):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
+        with patch.object(
+            ThreadPoolManager,
+            "run_async",
+            new_callable=AsyncMock,
+            return_value=expected,
+        ):
             result = await s.filter(context)
             assert not result.empty
             assert len(result) == 1
@@ -115,8 +140,17 @@ async def test_filter_returns_empty_when_run_async_returns_empty():
     dp = _make_dp()
     context = {"screening_data": input_data, "data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
-        with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock, return_value=pd.DataFrame()):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
+        with patch.object(
+            ThreadPoolManager,
+            "run_async",
+            new_callable=AsyncMock,
+            return_value=pd.DataFrame(),
+        ):
             result = await s.filter(context)
             assert result.empty
 
@@ -130,7 +164,11 @@ async def test_empty_screening_data_does_not_call_run_async():
     dp = _make_dp()
     context = {"screening_data": pd.DataFrame(), "data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
             result = await s.filter(context)
             assert result.empty
@@ -143,7 +181,11 @@ async def test_none_screening_data_does_not_call_run_async():
     dp = _make_dp()
     context = {"data_processor": dp, "params": {}}
 
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
             result = await s.filter(context)
             assert result.empty
@@ -159,7 +201,11 @@ async def test_unready_dependencies_does_not_call_run_async():
     with patch.object(
         s,
         "check_dependencies",
-        return_value={"status": "unready", "missing_keys": ["screening_data"], "missing_tables": []},
+        return_value={
+            "status": "unready",
+            "missing_keys": ["screening_data"],
+            "missing_tables": [],
+        },
     ):
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
             result = await s.filter(context)

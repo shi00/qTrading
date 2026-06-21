@@ -6,6 +6,8 @@ import pytest
 
 from utils.sanitizers import DataSanitizer
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _reset_known_secrets():

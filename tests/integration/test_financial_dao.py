@@ -14,6 +14,8 @@ import pytest
 
 from data.persistence.daos.financial_dao import FinancialDao
 
+pytestmark = pytest.mark.integration
+
 
 class TestFinancialDaoIntegrity:
     """测试财务数据完整性检查方法"""

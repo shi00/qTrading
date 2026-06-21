@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.financial_dao import FinancialDao
 
+pytestmark = pytest.mark.unit
+
 
 def _make_dao():
     dao = FinancialDao(MagicMock(spec=AsyncEngine))

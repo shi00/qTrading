@@ -14,6 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from data.cache.cache_manager import CacheManager
 from tests.conftest import singleton_state
 
+pytestmark = pytest.mark.integration
+
 logger = logging.getLogger(__name__)
 
 

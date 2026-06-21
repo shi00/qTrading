@@ -11,6 +11,7 @@ from ui.components.config_panels.failover_config_panel import (
     ProviderCredentialDialog,
 )
 
+pytestmark = pytest.mark.unit
 
 # ── 通用 Mock 数据 ──────────────────────────────────────────────────────────
 
@@ -76,7 +77,10 @@ def mock_i18n():
 
 @pytest.fixture
 def mock_llm_providers():
-    with patch("ui.components.config_panels.failover_config_panel.LLM_PROVIDERS", MOCK_LLM_PROVIDERS):
+    with patch(
+        "ui.components.config_panels.failover_config_panel.LLM_PROVIDERS",
+        MOCK_LLM_PROVIDERS,
+    ):
         yield MOCK_LLM_PROVIDERS
 
 
@@ -94,8 +98,8 @@ def mock_app_colors():
 @pytest.fixture
 def mock_app_styles():
     with patch("ui.components.config_panels.failover_config_panel.AppStyles") as m:
-        m.primary_button.return_value = MagicMock()
-        m.secondary_button.return_value = MagicMock()
+        m.primary_button.return_value = MagicMock(spec=ft.ButtonStyle)
+        m.secondary_button.return_value = MagicMock(spec=ft.ButtonStyle)
         yield m
 
 
@@ -110,10 +114,10 @@ def mock_section_header():
 def mock_page():
     page = MagicMock(spec=ft.Page)
     page.overlay = []
-    page.open = MagicMock()
-    page.close = MagicMock()
-    page.launch_url = MagicMock()
-    page.update = MagicMock()
+    page.open = MagicMock(spec=[])
+    page.close = MagicMock(spec=[])
+    page.launch_url = MagicMock(spec=[])
+    page.update = MagicMock(spec=[])
     return page
 
 
@@ -156,12 +160,22 @@ def _make_dialog(
 
 class TestFailoverItem:
     def test_to_config_string(self):
-        item = FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True)
+        item = FailoverItem(
+            provider="deepseek",
+            model="deepseek-chat",
+            display_name="DeepSeek",
+            has_credential=True,
+        )
         assert item.to_config_string() == "deepseek/deepseek-chat"
 
     def test_to_config_string_with_slash_in_model(self):
         """模型名含 '/' 时，split('/', 1) 保证只分割第一段"""
-        item = FailoverItem(provider="openai", model="gpt-4o/mini", display_name="OpenAI", has_credential=True)
+        item = FailoverItem(
+            provider="openai",
+            model="gpt-4o/mini",
+            display_name="OpenAI",
+            has_credential=True,
+        )
         assert item.to_config_string() == "openai/gpt-4o/mini"
 
 
@@ -181,7 +195,10 @@ class TestFailoverConfigPanelLoadAndRender:
         mock_section_header,
         mock_page,
     ):
-        mock_config_handler.load_config.return_value = {"llm_failover_models": [], "llm_provider": "deepseek"}
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": [],
+            "llm_provider": "deepseek",
+        }
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -265,7 +282,10 @@ class TestFailoverConfigPanelLoadAndRender:
         mock_section_header,
         mock_page,
     ):
-        mock_config_handler.load_config.return_value = {"llm_failover_models": [], "llm_provider": "deepseek"}
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": [],
+            "llm_provider": "deepseek",
+        }
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -329,7 +349,7 @@ class TestFailoverConfigPanelAddEditDelete:
             mock_section_header,
             mock_page,
         )
-        panel._on_add_click(MagicMock())
+        panel._on_add_click(MagicMock(spec=[]))
         mock_page.open.assert_called_once()
         dialog = mock_page.open.call_args[0][0]
         assert isinstance(dialog, ProviderCredentialDialog)
@@ -349,7 +369,10 @@ class TestFailoverConfigPanelAddEditDelete:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "openai",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_mock", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "test_token_mock",
+            "base_url": "",
+        }
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -359,7 +382,7 @@ class TestFailoverConfigPanelAddEditDelete:
             mock_section_header,
             mock_page,
         )
-        panel._on_add_click(MagicMock())
+        panel._on_add_click(MagicMock(spec=[]))
         dialog = mock_page.open.call_args[0][0]
         # deepseek 和 openai 都在 existing_providers 中，zhipu 不在
         assert "deepseek" in dialog._existing_providers
@@ -379,7 +402,10 @@ class TestFailoverConfigPanelAddEditDelete:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "deepseek",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_mock", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "test_token_mock",
+            "base_url": "",
+        }
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -410,7 +436,10 @@ class TestFailoverConfigPanelAddEditDelete:
             "llm_failover_models": ["deepseek/deepseek-chat", "openai/gpt-4o"],
             "llm_provider": "deepseek",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "",
+            "base_url": "",
+        }
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -443,7 +472,10 @@ class TestFailoverConfigPanelAddEditDelete:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "deepseek",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "",
+            "base_url": "",
+        }
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -455,7 +487,12 @@ class TestFailoverConfigPanelAddEditDelete:
         )
         # 手动修改 _failover_items 使其与配置不同步
         panel._failover_items.append(
-            FailoverItem(provider="zhipu", model="glm-4", display_name="智谱", has_credential=False)
+            FailoverItem(
+                provider="zhipu",
+                model="glm-4",
+                display_name="智谱",
+                has_credential=False,
+            )
         )
         # 重置 save_config 调用计数
         mock_config_handler.save_config.reset_mock()
@@ -482,10 +519,17 @@ class TestFailoverConfigPanelReorder:
         mock_page,
     ):
         mock_config_handler.load_config.return_value = {
-            "llm_failover_models": ["deepseek/deepseek-chat", "openai/gpt-4o", "zhipu/glm-4"],
+            "llm_failover_models": [
+                "deepseek/deepseek-chat",
+                "openai/gpt-4o",
+                "zhipu/glm-4",
+            ],
             "llm_provider": "deepseek",
         }
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "",
+            "base_url": "",
+        }
         return _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -614,7 +658,13 @@ class TestFailoverConfigPanelReorder:
         mock_config_handler.save_config.reset_mock()
         panel._persist_order()
         mock_config_handler.save_config.assert_called_once_with(
-            {"llm_failover_models": ["deepseek/deepseek-chat", "openai/gpt-4o", "zhipu/glm-4"]}
+            {
+                "llm_failover_models": [
+                    "deepseek/deepseek-chat",
+                    "openai/gpt-4o",
+                    "zhipu/glm-4",
+                ]
+            }
         )
 
 
@@ -644,7 +694,7 @@ class TestFailoverConfigPanelValidateAndSave:
             mock_section_header,
             mock_page,
         )
-        panel._on_validate_all(MagicMock())
+        panel._on_validate_all(MagicMock(spec=[]))
         # 无缺失时显示成功 SnackBar
         assert len(mock_page.overlay) == 1
 
@@ -658,7 +708,10 @@ class TestFailoverConfigPanelValidateAndSave:
         mock_section_header,
         mock_page,
     ):
-        mock_config_handler.validate_failover_credentials.return_value = ["openai", "zhipu"]
+        mock_config_handler.validate_failover_credentials.return_value = [
+            "openai",
+            "zhipu",
+        ]
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -668,7 +721,7 @@ class TestFailoverConfigPanelValidateAndSave:
             mock_section_header,
             mock_page,
         )
-        panel._on_validate_all(MagicMock())
+        panel._on_validate_all(MagicMock(spec=[]))
         # 有缺失时显示警告 SnackBar
         assert len(mock_page.overlay) == 1
 
@@ -682,7 +735,7 @@ class TestFailoverConfigPanelValidateAndSave:
         mock_section_header,
         mock_page,
     ):
-        on_save = MagicMock()
+        on_save = MagicMock(spec=lambda *a, **k: None)
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -693,7 +746,7 @@ class TestFailoverConfigPanelValidateAndSave:
             mock_page,
             on_save=on_save,
         )
-        panel._on_save_click(MagicMock())
+        panel._on_save_click(MagicMock(spec=[]))
         on_save.assert_called_once()
 
     def test_on_save_click_shows_snack(
@@ -715,7 +768,7 @@ class TestFailoverConfigPanelValidateAndSave:
             mock_section_header,
             mock_page,
         )
-        panel._on_save_click(MagicMock())
+        panel._on_save_click(MagicMock(spec=[]))
         assert len(mock_page.overlay) == 1
 
 
@@ -865,7 +918,10 @@ class TestProviderCredentialDialog:
             display_name="DeepSeek",
             has_credential=True,
         )
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_mock", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "test_token_mock",
+            "base_url": "",
+        }
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -927,7 +983,7 @@ class TestProviderCredentialDialog:
             mock_app_styles,
             mock_page,
         )
-        dialog._on_cancel(MagicMock())
+        dialog._on_cancel(MagicMock(spec=[]))
         mock_page.close.assert_called_once_with(dialog)
 
     def test_on_provider_change_updates_model_list(
@@ -947,7 +1003,8 @@ class TestProviderCredentialDialog:
             mock_app_styles,
             mock_page,
         )
-        e = MagicMock()
+        e = MagicMock(spec=[])
+        e.control = MagicMock(spec=[])
         e.control.value = "deepseek"
         dialog._on_provider_change(e)
         assert dialog.model_dropdown.options is not None
@@ -972,7 +1029,8 @@ class TestProviderCredentialDialog:
             mock_app_styles,
             mock_page,
         )
-        e = MagicMock()
+        e = MagicMock(spec=[])
+        e.control = MagicMock(spec=[])
         e.control.value = "deepseek"
         dialog._on_provider_change(e)
         assert dialog.base_url_input.value == "https://api.deepseek.com"
@@ -995,7 +1053,8 @@ class TestProviderCredentialDialog:
             mock_page,
         )
         dialog.custom_model_input.value = "my-custom-model"
-        e = MagicMock()
+        e = MagicMock(spec=[])
+        e.control = MagicMock(spec=[])
         e.control.value = "deepseek-chat"
         dialog._on_model_dropdown_change(e)
         assert dialog.custom_model_input.value == ""
@@ -1027,7 +1086,7 @@ class TestProviderCredentialDialog:
             "llm_failover_models": [],
             "llm_provider": "deepseek",
         }
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_called_once_with(
             provider="openai",
             api_key="test_token_openai_key",
@@ -1057,7 +1116,7 @@ class TestProviderCredentialDialog:
         dialog._provider = "openai"
         dialog.model_dropdown.value = "gpt-4o"
         dialog.api_key_input.value = ""
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_not_called()
         # 应显示警告 SnackBar
         assert len(mock_page.overlay) == 1
@@ -1087,7 +1146,7 @@ class TestProviderCredentialDialog:
             "llm_failover_models": [],
             "llm_provider": "deepseek",
         }
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_not_called()
         # 应显示警告 SnackBar
         assert len(mock_page.overlay) == 1
@@ -1108,7 +1167,10 @@ class TestProviderCredentialDialog:
             display_name="OpenAI",
             has_credential=True,
         )
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "test_token_old", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "test_token_old",
+            "base_url": "",
+        }
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -1127,7 +1189,7 @@ class TestProviderCredentialDialog:
             "llm_failover_models": ["openai/gpt-4o"],
             "llm_provider": "deepseek",
         }
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_config.assert_called_once_with({"llm_failover_models": ["openai/gpt-4o-mini"]})
 
     def test_on_confirm_click_missing_provider_or_model_returns(
@@ -1151,14 +1213,14 @@ class TestProviderCredentialDialog:
         dialog._provider = ""
         dialog.model_dropdown.value = "gpt-4o"
         dialog.api_key_input.value = "test_token_mock"
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_not_called()
 
         # model 为空
         dialog._provider = "openai"
         dialog.model_dropdown.value = None
         dialog.custom_model_input.value = ""
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_not_called()
 
 
@@ -1193,7 +1255,7 @@ class TestProviderCredentialDialogTestConnection:
         dialog.api_key_input.value = "test_token_mock"
         dialog.base_url_input.value = "https://api.deepseek.com"
 
-        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock())
+        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock(spec=[]))
 
         mock_callback.assert_called_once_with(
             provider="deepseek",
@@ -1229,7 +1291,7 @@ class TestProviderCredentialDialogTestConnection:
         dialog.api_key_input.value = "test_token_mock"
         dialog.base_url_input.value = "https://api.deepseek.com"
 
-        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock())
+        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock(spec=[]))
 
         mock_callback.assert_called_once()
         # 失败时显示 SnackBar
@@ -1261,7 +1323,7 @@ class TestProviderCredentialDialogTestConnection:
         dialog.api_key_input.value = ""  # 空 API Key
         dialog.base_url_input.value = ""
 
-        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock())
+        await ProviderCredentialDialog._on_test_connection(dialog, MagicMock(spec=[]))
 
         mock_callback.assert_not_called()
 
@@ -1305,7 +1367,7 @@ class TestProviderCredentialDialogEditModeClearApiKey:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "openai",
         }
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         # 应显示警告 SnackBar
         assert len(mock_page.overlay) == 1
         # 应仍然保存（不阻止操作）
@@ -1328,7 +1390,10 @@ class TestProviderCredentialDialogEditModeClearApiKey:
             has_credential=False,
         )
         # 原有凭证没有 API Key
-        mock_config_handler.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "",
+            "base_url": "",
+        }
         dialog = _make_dialog(
             mock_config_handler,
             mock_i18n,
@@ -1343,7 +1408,7 @@ class TestProviderCredentialDialogEditModeClearApiKey:
             "llm_failover_models": ["deepseek/deepseek-chat"],
             "llm_provider": "openai",
         }
-        dialog._on_confirm_click(MagicMock())
+        dialog._on_confirm_click(MagicMock(spec=[]))
         # 不显示警告（原有凭证本就为空）
         assert len(mock_page.overlay) == 0
 
@@ -1352,7 +1417,9 @@ class TestProviderCredentialDialogNormalizeBaseUrl:
     """测试 ProviderCredentialDialog._normalize_base_url"""
 
     def test_normalize_strips_chat_completions(self):
-        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+        from ui.components.config_panels.failover_config_panel import (
+            ProviderCredentialDialog,
+        )
 
         assert (
             ProviderCredentialDialog._normalize_base_url("https://api.deepseek.com/v1/chat/completions")
@@ -1360,7 +1427,9 @@ class TestProviderCredentialDialogNormalizeBaseUrl:
         )
 
     def test_normalize_strips_completions(self):
-        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+        from ui.components.config_panels.failover_config_panel import (
+            ProviderCredentialDialog,
+        )
 
         assert (
             ProviderCredentialDialog._normalize_base_url("https://api.example.com/completions")
@@ -1368,17 +1437,23 @@ class TestProviderCredentialDialogNormalizeBaseUrl:
         )
 
     def test_normalize_adds_https_prefix(self):
-        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+        from ui.components.config_panels.failover_config_panel import (
+            ProviderCredentialDialog,
+        )
 
         assert ProviderCredentialDialog._normalize_base_url("api.example.com/v1") == "https://api.example.com/v1"
 
     def test_normalize_empty_string(self):
-        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+        from ui.components.config_panels.failover_config_panel import (
+            ProviderCredentialDialog,
+        )
 
         assert ProviderCredentialDialog._normalize_base_url("") == ""
 
     def test_normalize_preserves_base_path(self):
-        from ui.components.config_panels.failover_config_panel import ProviderCredentialDialog
+        from ui.components.config_panels.failover_config_panel import (
+            ProviderCredentialDialog,
+        )
 
         assert (
             ProviderCredentialDialog._normalize_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1")

@@ -15,7 +15,10 @@ import polars as pl
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+from data.domain_services.transaction_cost import (
+    TransactionCostConfig,
+    TransactionCostModel,
+)
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.portfolio import PortfolioSimulator
 from strategies.fundamental import ValueStrategy

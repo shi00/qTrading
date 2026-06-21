@@ -3,8 +3,15 @@ import datetime
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
 
-from data.sync.holder import HolderSyncStrategy, _MAX_ERRORS, _PROGRESS_LOG_INTERVAL, _CHECKPOINT_INTERVAL
+from data.sync.holder import (
+    HolderSyncStrategy,
+    _MAX_ERRORS,
+    _PROGRESS_LOG_INTERVAL,
+    _CHECKPOINT_INTERVAL,
+)
 from data.sync.base import SyncContext
+
+pytestmark = pytest.mark.unit
 
 
 class TestHolderSyncCancel:
@@ -768,7 +775,16 @@ class TestHolderSyncTop10ErrorPaths:
         ctx.cache = MagicMock()
         ctx.cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
-                {"ts_code": ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ", "000006.SZ"]}
+                {
+                    "ts_code": [
+                        "000001.SZ",
+                        "000002.SZ",
+                        "000003.SZ",
+                        "000004.SZ",
+                        "000005.SZ",
+                        "000006.SZ",
+                    ]
+                }
             )
         )
         ctx.cache.save_top10_holders = AsyncMock()
@@ -815,7 +831,12 @@ class TestHolderSyncTop10ProgressAndCheckpoint:
         ctx.cache.get_stock_basic = AsyncMock(return_value=pd.DataFrame({"ts_code": codes}))
         ctx.cache.save_top10_holders = AsyncMock()
         ctx.api = MagicMock()
-        big_df = pd.DataFrame({"ts_code": [f"{i:06d}.SZ" for i in range(1000)], "holder_name": ["Test"] * 1000})
+        big_df = pd.DataFrame(
+            {
+                "ts_code": [f"{i:06d}.SZ" for i in range(1000)],
+                "holder_name": ["Test"] * 1000,
+            }
+        )
         ctx.api.get_top10_holders = AsyncMock(return_value=big_df)
         ctx.api._api_limiters = {}
         strategy = HolderSyncStrategy(ctx)

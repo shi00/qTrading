@@ -12,6 +12,8 @@ from strategies.strategy_prompts import (
     resolve_prompt,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestStrategyPromptsConstants:
     def test_universal_rules_not_empty(self):
@@ -76,8 +78,14 @@ class TestDataBoundary:
 class TestCleanRules:
     def test_clean_rules_with_empty_text(self):
         with (
-            patch("utils.config_handler.ConfigHandler.get_strategy_prompt", return_value=None),
-            patch("utils.config_handler.ConfigHandler.get_ai_system_prompt", return_value=""),
+            patch(
+                "utils.config_handler.ConfigHandler.get_strategy_prompt",
+                return_value=None,
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_ai_system_prompt",
+                return_value="",
+            ),
         ):
             result = get_base_prompt("unknown_strategy")
             assert result == ""
@@ -85,7 +93,10 @@ class TestCleanRules:
     def test_clean_rules_exact_match_removal(self):
         text_with_rules = "Some prompt content\n\n" + _UNIVERSAL_RULES
 
-        with patch("utils.config_handler.ConfigHandler.get_strategy_prompt", return_value=text_with_rules):
+        with patch(
+            "utils.config_handler.ConfigHandler.get_strategy_prompt",
+            return_value=text_with_rules,
+        ):
             result = get_base_prompt("value")
             assert _UNIVERSAL_RULES not in result
             assert "Some prompt content" in result
@@ -95,7 +106,10 @@ class TestCleanRules:
             "Some prompt content\n\n【输出格式】你必须只返回一个合法 JSON 对象，包含 conclusion_label 字段..."
         )
 
-        with patch("utils.config_handler.ConfigHandler.get_strategy_prompt", return_value=text_with_marker):
+        with patch(
+            "utils.config_handler.ConfigHandler.get_strategy_prompt",
+            return_value=text_with_marker,
+        ):
             result = get_base_prompt("value")
             assert "【输出格式】" not in result
 
@@ -104,7 +118,10 @@ class TestGetBasePrompt:
     def test_user_prompt_takes_priority(self):
         user_prompt = "Custom user prompt for testing"
 
-        with patch("utils.config_handler.ConfigHandler.get_strategy_prompt", return_value=user_prompt):
+        with patch(
+            "utils.config_handler.ConfigHandler.get_strategy_prompt",
+            return_value=user_prompt,
+        ):
             result = get_base_prompt("value")
             assert result == user_prompt.strip()
 
@@ -118,8 +135,14 @@ class TestGetBasePrompt:
         global_prompt = "Global fallback prompt"
 
         with (
-            patch("utils.config_handler.ConfigHandler.get_strategy_prompt", return_value=None),
-            patch("utils.config_handler.ConfigHandler.get_ai_system_prompt", return_value=global_prompt),
+            patch(
+                "utils.config_handler.ConfigHandler.get_strategy_prompt",
+                return_value=None,
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_ai_system_prompt",
+                return_value=global_prompt,
+            ),
         ):
             result = get_base_prompt("unknown_strategy")
             assert result == global_prompt.strip()

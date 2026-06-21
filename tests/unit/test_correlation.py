@@ -5,6 +5,10 @@ S5-3: Correlation ID support for cross-module log tracing.
 """
 
 import logging
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestCorrelationId:
@@ -12,7 +16,11 @@ class TestCorrelationId:
 
     def test_set_and_get_correlation_id(self):
         """set_correlation_id and get_correlation_id should work"""
-        from utils.correlation import set_correlation_id, get_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            set_correlation_id,
+            get_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         assert get_correlation_id() is None
@@ -45,7 +53,11 @@ class TestCorrelationId:
 
     def test_correlation_scope(self):
         """correlation_scope should set and restore correlation_id"""
-        from utils.correlation import correlation_scope, get_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            correlation_scope,
+            get_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
 
@@ -57,7 +69,12 @@ class TestCorrelationId:
 
     def test_correlation_scope_restores_previous(self):
         """correlation_scope should restore previous correlation_id on exit"""
-        from utils.correlation import correlation_scope, get_correlation_id, set_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            correlation_scope,
+            get_correlation_id,
+            set_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         set_correlation_id("outer")
@@ -71,7 +88,11 @@ class TestCorrelationId:
 
     def test_correlation_filter_adds_to_record(self):
         """CorrelationFilter should add correlation_id to log records"""
-        from utils.correlation import CorrelationFilter, set_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            CorrelationFilter,
+            set_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         filt = CorrelationFilter()
@@ -90,7 +111,11 @@ class TestCorrelationId:
 
     def test_ensure_correlation_id_generates_when_none(self):
         """ensure_correlation_id should generate a new ID when none exists"""
-        from utils.correlation import ensure_correlation_id, get_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            ensure_correlation_id,
+            get_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         cid = ensure_correlation_id()
@@ -102,7 +127,11 @@ class TestCorrelationId:
 
     def test_ensure_correlation_id_returns_existing(self):
         """ensure_correlation_id should return existing ID when set"""
-        from utils.correlation import ensure_correlation_id, set_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            ensure_correlation_id,
+            set_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         set_correlation_id("existing")
@@ -141,7 +170,11 @@ class TestLoggerCorrelationIntegration:
 
     def test_correlation_filter_on_new_handler(self):
         """Adding a new handler with CorrelationFilter should inject correlation_id."""
-        from utils.correlation import CorrelationFilter, set_correlation_id, clear_correlation_id
+        from utils.correlation import (
+            CorrelationFilter,
+            set_correlation_id,
+            clear_correlation_id,
+        )
 
         clear_correlation_id()
         filt = CorrelationFilter()

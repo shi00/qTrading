@@ -1,6 +1,8 @@
 import pytest
 import data.domain_services as domain_services
 
+pytestmark = pytest.mark.unit
+
 
 def test_domain_services_lazy_imports():
     """Test that all exported symbols are lazily importable."""

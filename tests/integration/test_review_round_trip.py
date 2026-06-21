@@ -3,7 +3,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 
-from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
+from data.constants import (
+    REVIEW_STATUS_COMPLETED,
+    REVIEW_STATUS_PENDING,
+    REVIEW_STATUS_T1_DONE,
+)
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestReviewStatusLifecycle(unittest.TestCase):
@@ -13,7 +21,10 @@ class TestReviewStatusLifecycle(unittest.TestCase):
         self.assertEqual(REVIEW_STATUS_COMPLETED, "COMPLETED")
 
     def test_t1_done_is_intermediate(self):
-        valid_transitions_from_pending = {REVIEW_STATUS_T1_DONE, REVIEW_STATUS_COMPLETED}
+        valid_transitions_from_pending = {
+            REVIEW_STATUS_T1_DONE,
+            REVIEW_STATUS_COMPLETED,
+        }
         self.assertIn(REVIEW_STATUS_T1_DONE, valid_transitions_from_pending)
         self.assertIn(REVIEW_STATUS_COMPLETED, valid_transitions_from_pending)
 

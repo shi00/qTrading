@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
 from data.persistence.db_migrator import DatabaseMigrationNeeded
 
+pytestmark = pytest.mark.unit
+
 
 class TestMaskSensitive:
     def test_long_value_masked(self):

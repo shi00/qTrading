@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from data.mixins.calendar_mixin import CalendarMixin
 
+pytestmark = pytest.mark.unit
+
 
 class Host(CalendarMixin):
     def __init__(self):

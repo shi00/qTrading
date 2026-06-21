@@ -23,6 +23,10 @@ from data.persistence.models import (
 )
 
 from tests._helpers import extract_fields_from_api_method, get_model_columns
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def get_data_dict_columns(table_name: str) -> set:

@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 class TestFinancialSyncIntegrity:
     """测试财务数据同步完整性"""

@@ -9,6 +9,10 @@ from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
 from utils.time_utils import get_now
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestDataProcessor(unittest.TestCase):
@@ -409,7 +413,12 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.get_sync_status = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "table_name": ["daily_quotes", "financial_reports", "daily_indicators", "moneyflow_daily"],
+                    "table_name": [
+                        "daily_quotes",
+                        "financial_reports",
+                        "daily_indicators",
+                        "moneyflow_daily",
+                    ],
                     "last_data_date": [today, today, today, today],
                     "record_count": [1000, 500, 800, 600],
                     "last_result_status": ["ok", "ok", "ok", "ok"],
@@ -563,8 +572,16 @@ class TestDataProcessor(unittest.TestCase):
             return_value={
                 "global_trade_days": 500,
                 "tables": {
-                    "daily_quotes": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.67},
-                    "daily_indicators": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.67},
+                    "daily_quotes": {
+                        "ratio": 1.0,
+                        "type": "stock",
+                        "depth_ratio": 0.67,
+                    },
+                    "daily_indicators": {
+                        "ratio": 1.0,
+                        "type": "stock",
+                        "depth_ratio": 0.67,
+                    },
                     "financial_reports": {"ratio": 0.95, "type": "stock"},
                     "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
                     "stock_basic": {"ratio": 1.0, "type": "global"},
@@ -607,8 +624,16 @@ class TestDataProcessor(unittest.TestCase):
             return_value={
                 "global_trade_days": 730,
                 "tables": {
-                    "daily_quotes": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.97},
-                    "daily_indicators": {"ratio": 1.0, "type": "stock", "depth_ratio": 0.97},
+                    "daily_quotes": {
+                        "ratio": 1.0,
+                        "type": "stock",
+                        "depth_ratio": 0.97,
+                    },
+                    "daily_indicators": {
+                        "ratio": 1.0,
+                        "type": "stock",
+                        "depth_ratio": 0.97,
+                    },
                     "financial_reports": {"ratio": 0.95, "type": "stock"},
                     "moneyflow_daily": {"ratio": 1.0, "type": "stock"},
                     "stock_basic": {"ratio": 1.0, "type": "global"},
@@ -731,7 +756,7 @@ class TestDataProcessor(unittest.TestCase):
         count = await self.processor.sync_stock_basic()
 
         self.assertEqual(count, 1)
-        self.mock_cache.save_stock_basic.assert_called()
+        self.mock_cache.save_stock_basic.assert_called_once_with(mock_df)
 
     def test_sync_stock_basic(self):
         asyncio.run(self.async_test_sync_stock_basic())
@@ -927,7 +952,9 @@ class TestDataProcessor(unittest.TestCase):
     def test_prepare_screening_context_resolves_trade_date_from_data(self):
         asyncio.run(self.async_test_prepare_screening_context_resolves_trade_date_from_data())
 
-    async def async_test_prepare_screening_context_prefers_latest_closed_trade_date(self):
+    async def async_test_prepare_screening_context_prefers_latest_closed_trade_date(
+        self,
+    ):
         """无显式 trade_date 时，应优先使用交易日服务的最近闭市日而不是库里最大日期。"""
         self.processor._quality_tier = 3
         self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
@@ -1429,7 +1456,12 @@ class TestDataProcessor(unittest.TestCase):
         self.mock_cache.get_sync_status = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "table_name": ["daily_quotes", "daily_indicators", "moneyflow_daily", "financial_reports"],
+                    "table_name": [
+                        "daily_quotes",
+                        "daily_indicators",
+                        "moneyflow_daily",
+                        "financial_reports",
+                    ],
                     "last_data_date": [today, today, today, today],
                     "record_count": [1000, 800, 600, 500],
                     "last_result_status": ["ok", "ok", "ok", "ok"],

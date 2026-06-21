@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.macro_dao import MacroDao
 
+pytestmark = pytest.mark.unit
+
 
 class TestMacroDaoSaveMacroEconomy:
     @pytest.mark.asyncio

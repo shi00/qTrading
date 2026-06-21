@@ -5,6 +5,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from tests.unit.ui.conftest import set_page, wrap_mock_page
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_page():
@@ -34,8 +36,14 @@ def _apply_patches(mock_i18n, mock_ac):
                 "macro_economy",
             ],
         ),
-        patch("ui.components.health_report_dialog.HEALTH_THRESHOLD_FINANCIAL_EXCELLENT", 0.9),
-        patch("ui.components.health_report_dialog.HEALTH_THRESHOLD_FINANCIAL_COVERAGE", 0.7),
+        patch(
+            "ui.components.health_report_dialog.HEALTH_THRESHOLD_FINANCIAL_EXCELLENT",
+            0.9,
+        ),
+        patch(
+            "ui.components.health_report_dialog.HEALTH_THRESHOLD_FINANCIAL_COVERAGE",
+            0.7,
+        ),
         patch("ui.components.health_report_dialog.HEALTH_DEPTH_WARNING_RATIO", 0.5),
         patch("ui.components.health_report_dialog.HEALTH_THRESHOLD_BREADTH", 0.6),
     ]
@@ -59,7 +67,11 @@ class TestHealthReportDialog:
                 "gap_count": 0,
                 "sanity_errors": 0,
                 "tables": {
-                    "daily_quotes": {"ratio": 0.95, "fresh_ratio": 0.90, "type": "stock"},
+                    "daily_quotes": {
+                        "ratio": 0.95,
+                        "fresh_ratio": 0.90,
+                        "type": "stock",
+                    },
                 },
             },
             "reasons": [],
@@ -95,7 +107,10 @@ class TestHealthReportDialog:
         mock_scan.start_scan = AsyncMock()
         with (
             patch("data.data_processor.DataProcessor") as mock_dp_cls,
-            patch("ui.components.health_report_dialog.HealthScanDialog", return_value=mock_scan) as mock_scan_cls,
+            patch(
+                "ui.components.health_report_dialog.HealthScanDialog",
+                return_value=mock_scan,
+            ) as mock_scan_cls,
         ):
             await dlg.run_deep_scan(None)
         dlg.close_dialog.assert_called_once_with(None)

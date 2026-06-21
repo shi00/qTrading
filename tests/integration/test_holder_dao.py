@@ -13,6 +13,8 @@ import pytest
 
 from data.persistence.daos.holder_dao import HolderDao
 
+pytestmark = pytest.mark.integration
+
 
 class TestHolderDaoIntegrity:
     """测试股东数据完整性检查方法"""

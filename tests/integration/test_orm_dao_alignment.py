@@ -45,6 +45,10 @@ from data.persistence.models import (
 )
 
 from tests._helpers import extract_cols_from_method, get_model_columns
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestOrmDaoAlignment:

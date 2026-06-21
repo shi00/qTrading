@@ -14,6 +14,10 @@ from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.quote_dao import QuoteDao
 
 from tests._helpers import extract_cols_from_method, extract_fields_from_api_method
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestTushareApiFieldNames:

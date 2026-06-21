@@ -10,6 +10,8 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.market_dao import MarketDao
 
+pytestmark = pytest.mark.integration
+
 
 class TestDaoRangeQueriesIntegration:
     @pytest.fixture

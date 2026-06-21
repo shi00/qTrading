@@ -4,6 +4,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from data.domain_services.market_data_service import MarketDataService
 
+pytestmark = pytest.mark.unit
+
 
 class TestMarketDataServiceInit:
     @patch("data.domain_services.market_data_service.CacheManager")
@@ -550,7 +552,12 @@ class TestMarketDataServiceFetchMarketDataIntegration:
         svc._get_indices_batch = AsyncMock(side_effect=fake_get_indices_batch)
 
         # Mock _get_hsgt: return empty for today, valid for yesterday
-        hsgt_yesterday = {"name": "HSGT", "value": "1.50亿", "sub": "inflow", "color": "red"}
+        hsgt_yesterday = {
+            "name": "HSGT",
+            "value": "1.50亿",
+            "sub": "inflow",
+            "color": "red",
+        }
         hsgt_today = {"name": "HSGT", "value": "-", "sub": "-", "color": "grey"}
 
         async def fake_get_hsgt(date_str):
@@ -603,7 +610,12 @@ class TestMarketDataServiceFetchMarketDataIntegration:
         svc.trade_calendar = mock_cal
 
         indices_yesterday = [{"name": "SH", "value": "3000.00", "change": "+1.00%", "color": "red"}]
-        hsgt_yesterday = {"name": "HSGT", "value": "1.50亿", "sub": "inflow", "color": "red"}
+        hsgt_yesterday = {
+            "name": "HSGT",
+            "value": "1.50亿",
+            "sub": "inflow",
+            "color": "red",
+        }
 
         async def fake_get_indices_batch(codes, date_str):
             if date_str == "20260613":
@@ -729,7 +741,10 @@ class TestMarketDataServiceGetHsgt:
         df.iloc[0].get = lambda k: 500.0 if k == "north_money" else 0
         mock_cache.get_moneyflow_hsgt = AsyncMock(return_value=df)
 
-        with patch("data.domain_services.market_data_service.get_column_unit", return_value="yuan"):
+        with patch(
+            "data.domain_services.market_data_service.get_column_unit",
+            return_value="yuan",
+        ):
             svc = MarketDataService()
             with patch("data.domain_services.market_data_service.logger") as mock_logger:
                 result = await svc._get_hsgt("20240614")

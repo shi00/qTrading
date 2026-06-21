@@ -16,6 +16,8 @@ from strategies.strategy_prompts import (
     resolve_prompt,
 )
 
+pytestmark = pytest.mark.unit
+
 # 所有策略 key，按字母序排列以保证 parametrize ID 稳定
 STRATEGY_KEYS = sorted(STRATEGY_PROMPTS.keys())
 

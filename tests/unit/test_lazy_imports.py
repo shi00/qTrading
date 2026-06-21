@@ -1,5 +1,7 @@
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 class TestDataInit:
     def test_getattr_cache_manager(self):

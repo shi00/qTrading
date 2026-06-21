@@ -20,6 +20,8 @@ from data.persistence.db_migrator import DatabaseMigrator
 from data.persistence.db_url_override import override_db_url
 from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
 
+pytestmark = pytest.mark.integration
+
 
 def _reflect_schema(sync_db_url: str) -> dict[str, dict[str, str]]:
     """反射数据库 Schema，返回 {表名: {列名: 类型字符串}} 的嵌套字典。"""

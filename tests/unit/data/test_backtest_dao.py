@@ -12,6 +12,8 @@ from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import EngineDisposedError
 from strategies.backtest.config import BacktestConfig, BacktestResult
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_engine() -> MagicMock:

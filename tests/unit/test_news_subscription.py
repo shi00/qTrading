@@ -8,7 +8,7 @@ from services.news_subscription_service import NewsSubscriptionService, NewsUpda
 
 # P2-5: 文件含真实 asyncio.sleep（含 60s/100s 长睡眠），标注 slow 以便 CI 分轨运行
 # 同时声明 no_auto_mock（测试 NewsSubscriptionService 自身）
-pytestmark = [pytest.mark.no_auto_mock, pytest.mark.slow]
+pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock, pytest.mark.slow]
 
 
 class TestNewsUpdateType:
@@ -184,7 +184,10 @@ class TestNewsSubscriptionServiceNotifyListeners:
         svc._listeners.add(cb)
         with patch(
             "services.news_subscription_service.asyncio.wait_for",
-            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError()),
+            ][1],
         ):
             await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM)
 
@@ -246,7 +249,7 @@ class TestNewsSubscriptionServiceFetchAndNotify:
             )
             svc._notify_listeners = AsyncMock()
             await svc._fetch_and_notify()
-            svc._notify_listeners.assert_called()
+            svc._notify_listeners.assert_called_once()
 
 
 class TestNewsSubscriptionServiceSeenHashes:
@@ -459,7 +462,7 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()
-            alert_cb.assert_called()
+            alert_cb.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("services.news_subscription_service.AIService")
@@ -482,7 +485,10 @@ class TestNewsSubscriptionServiceFetchWithAlerts:
             patch("services.news_subscription_service.ConfigHandler") as mock_ch,
             patch(
                 "services.news_subscription_service.asyncio.wait_for",
-                side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+                side_effect=lambda coro, *a, **kw: [
+                    coro.close(),
+                    (_ for _ in ()).throw(TimeoutError()),
+                ][1],
             ),
         ):
             mock_ch.get_config.return_value = True
@@ -562,7 +568,7 @@ class TestNewsSubscriptionServiceProcessingLoop:
         loop_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await loop_task
-        svc.cache.save_market_news.assert_called()
+        svc.cache.save_market_news.assert_called_once()
 
     @pytest.mark.asyncio
     @patch("services.news_subscription_service.AIService")
@@ -622,7 +628,10 @@ class TestNewsSubscriptionServiceNotifyListenerErrors:
         svc._listeners.add(slow_cb)
         with patch(
             "services.news_subscription_service.asyncio.wait_for",
-            side_effect=lambda coro, *a, **kw: [coro.close(), (_ for _ in ()).throw(TimeoutError())][1],
+            side_effect=lambda coro, *a, **kw: [
+                coro.close(),
+                (_ for _ in ()).throw(TimeoutError()),
+            ][1],
         ):
             await svc._notify_listeners(update_type=NewsUpdateType.NEW_ITEM)
 
@@ -988,7 +997,7 @@ class TestNewsSubscriptionServiceFetchNewItemsNotify:
             svc._notify_listeners = AsyncMock()
             svc._safe_queue_put = AsyncMock()
             await svc._fetch_and_notify()
-            svc._notify_listeners.assert_called()
+            svc._notify_listeners.assert_called_once()
 
 
 class TestNewsSubscriptionServiceSafeQueuePutTimeout:
@@ -1004,7 +1013,10 @@ class TestNewsSubscriptionServiceSafeQueuePutTimeout:
             coro.close()
             raise TimeoutError()
 
-        with patch("services.news_subscription_service.asyncio.wait_for", side_effect=_raise_timeout):
+        with patch(
+            "services.news_subscription_service.asyncio.wait_for",
+            side_effect=_raise_timeout,
+        ):
             await svc._safe_queue_put({"id": "new"})
 
         assert svc.processing_queue.qsize() == 1
@@ -1028,7 +1040,10 @@ class TestNewsSubscriptionServiceSafeQueuePutTimeout:
             # On subsequent calls (within lock), succeed
             return None
 
-        with patch("services.news_subscription_service.asyncio.wait_for", side_effect=_raise_timeout_and_fill):
+        with patch(
+            "services.news_subscription_service.asyncio.wait_for",
+            side_effect=_raise_timeout_and_fill,
+        ):
             await svc._safe_queue_put({"id": "new"})
 
 

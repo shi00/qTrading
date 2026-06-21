@@ -2,6 +2,10 @@
 
 import datetime
 from unittest.mock import MagicMock, patch
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestOfflineCalendarGetInstance:
@@ -23,7 +27,10 @@ class TestOfflineCalendarGetInstance:
 
         OfflineCalendar._calendar = None
 
-        with patch("data.domain_services.offline_calendar.get_calendar", side_effect=Exception("load error")):
+        with patch(
+            "data.domain_services.offline_calendar.get_calendar",
+            side_effect=Exception("load error"),
+        ):
             result = OfflineCalendar.get_instance()
             assert result is None
 
@@ -96,7 +103,10 @@ class TestOfflineCalendarIsTradingDay:
 
         OfflineCalendar._calendar = None
 
-        with patch("data.domain_services.offline_calendar.get_calendar", side_effect=Exception("no calendar")):
+        with patch(
+            "data.domain_services.offline_calendar.get_calendar",
+            side_effect=Exception("no calendar"),
+        ):
             result = OfflineCalendar.is_trading_day("2024-01-02")
             assert result is False
 
@@ -133,7 +143,10 @@ class TestOfflineCalendarGetTradeDates:
 
         OfflineCalendar._calendar = None
 
-        with patch("data.domain_services.offline_calendar.get_calendar", side_effect=Exception("no calendar")):
+        with patch(
+            "data.domain_services.offline_calendar.get_calendar",
+            side_effect=Exception("no calendar"),
+        ):
             result = OfflineCalendar.get_trade_dates("2024-01-01", "2024-01-05")
             assert result == []
 

@@ -3,13 +3,13 @@ import re
 
 import pytest
 
-pytestmark = pytest.mark.e2e
-
 from ui.i18n import I18n
 from tests.e2e.timeouts import TIMEOUTS
 
 
 from urllib.parse import unquote_plus
+
+pytestmark = pytest.mark.e2e
 
 
 def _parse_db_url(url: str) -> dict[str, str]:

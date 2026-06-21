@@ -11,6 +11,8 @@ import pytest
 
 from ui.theme import AppColors, AppStyles
 
+pytestmark = pytest.mark.unit
+
 
 def _public_attrs(cls):
     """获取类自身定义的公开属性名（不含继承自 object 的成员）。"""

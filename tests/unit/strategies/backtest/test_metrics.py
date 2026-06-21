@@ -7,6 +7,8 @@ import pytest
 
 from strategies.backtest.metrics import BacktestMetrics
 
+pytestmark = pytest.mark.unit
+
 
 class TestBacktestMetrics:
     @pytest.fixture

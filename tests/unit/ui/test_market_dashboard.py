@@ -4,6 +4,10 @@ from unittest.mock import MagicMock, patch
 
 
 from ui.components.market_dashboard import MarketDashboard
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestMarketDashboardInit:

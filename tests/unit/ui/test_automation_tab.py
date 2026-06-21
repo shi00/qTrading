@@ -1,6 +1,10 @@
 from unittest.mock import MagicMock, patch
 
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class _FakePage:

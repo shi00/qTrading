@@ -12,6 +12,8 @@ from strategies.prompt_validator import (
     check_table_has_data,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestDataDeclaration:
     def test_init(self):

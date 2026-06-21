@@ -5,6 +5,8 @@ import pandas as pd
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.constants import REVIEW_STATUS_COMPLETED
 
+pytestmark = pytest.mark.unit
+
 
 class TestScreenerDaoGetScreeningHistory:
     @pytest.mark.asyncio
@@ -333,7 +335,14 @@ class TestScreenerDaoSaveScreeningResults:
     async def test_with_dict_records(self):
         dao = ScreenerDao(MagicMock())
         dao._save_upsert = AsyncMock(return_value=1)
-        records = [{"run_id": "r1", "ts_code": "000001.SZ", "name": "Test", "trade_date": "20240615"}]
+        records = [
+            {
+                "run_id": "r1",
+                "ts_code": "000001.SZ",
+                "name": "Test",
+                "trade_date": "20240615",
+            }
+        ]
         await dao.save_screening_results(records)
         dao._save_upsert.assert_called_once()
 
@@ -460,7 +469,7 @@ class TestScreenerDaoUpdatePredictionResultEdgeCases:
         with patch("data.persistence.daos.screener_dao.Base") as mock_base:
             mock_base.metadata.tables.get.return_value = None
             await dao.update_prediction_result(record_id=1, pct=5.0, label="WIN")
-        mock_base.metadata.tables.get.assert_called()
+        mock_base.metadata.tables.get.assert_called_once_with("screening_history")
 
     @pytest.mark.asyncio
     async def test_engine_not_initialized(self):
@@ -535,3 +544,97 @@ class TestScreenerDaoSaveThinking:
         thinking_records = [{"run_id": "r1", "ts_code": "000001.SZ", "thinking": "analysis"}]
         await dao._save_thinking(thinking_records)
         dao._save_upsert.assert_not_called()
+
+
+class TestScreenerDaoBuildScreeningSqlRange:
+    def test_build_sql_with_close_requirement(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range(require_close=True)
+        assert "q.close IS NOT NULL" in sql
+        assert "b.list_status = 'L'" in sql
+        assert "trade_cal" in sql
+
+    def test_build_sql_without_close_requirement(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range(require_close=False)
+        assert "q.close IS NOT NULL" not in sql
+        assert "b.list_status = 'L'" in sql
+
+    def test_build_sql_contains_lateral_join(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        assert "LATERAL" in sql
+
+    def test_build_sql_contains_date_range_params(self):
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        assert "cal_date >= $1" in sql
+        assert "cal_date <= $2" in sql
+
+
+class TestScreenerDaoGetScreeningDataRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_screening_data_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_screening_data_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestScreenerDaoGetFundamentalScreeningDataRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_fundamental_screening_data_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_fundamental_screening_data_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestScreenerDaoGetPendingReviewsNone:
+    @pytest.mark.asyncio
+    async def test_none_result(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(return_value=None)
+        result = await dao.get_pending_reviews()
+        assert result == []
+
+
+class TestScreenerDaoGetHistoryTreeNoneLimit:
+    @pytest.mark.asyncio
+    async def test_none_limit_defaults_to_30(self):
+        dao = ScreenerDao(MagicMock())
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "run_id": ["r1"],
+                    "trade_date": ["20240615"],
+                    "strategy_name": ["test"],
+                    "cnt": [5],
+                }
+            )
+        )
+        result = await dao.get_history_tree(offset=0, limit=None)
+        assert isinstance(result, pd.DataFrame)
+        call_args = dao._read_db.call_args
+        params = call_args[0][1]
+        assert params[0] == 30  # effective_limit defaults to 30 when limit is None

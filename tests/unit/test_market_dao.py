@@ -5,6 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.daos.market_dao import MarketDao
 
+pytestmark = pytest.mark.unit
+
 
 class TestMarketDaoSaveMarketNews:
     @pytest.mark.asyncio
@@ -229,3 +231,93 @@ class TestMarketDaoGetMoneyflowHsgt:
         result = await dao.get_moneyflow_hsgt(limit=10)
         assert result is not None
         assert result.attrs["column_units"]["north_money"] == "million_cny"
+
+
+class TestMarketDaoGetMoneyflowHsgtRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame({"trade_date": ["20240615", "20240614"], "north_money": [100.0, 200.0]})
+        )
+        result = await dao.get_moneyflow_hsgt_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "trade_date" in result.columns
+        assert result.attrs["column_units"]["north_money"] == "million_cny"
+        dao._read_db.assert_called_once()
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date >= $1" in sql
+        assert "trade_date <= $2" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_moneyflow_hsgt_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_none_result(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=None)
+        result = await dao.get_moneyflow_hsgt_range("20240601", "20240615")
+        assert result is None
+
+
+class TestMarketDaoSaveMoneyflowHsgtStringCoercion:
+    @pytest.mark.asyncio
+    async def test_numeric_string_coercion(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._save_upsert = AsyncMock(return_value=1)
+        df = pd.DataFrame(
+            {
+                "trade_date": ["20240615"],
+                "north_money": ["100.5"],
+                "south_money": ["200.3"],
+            }
+        )
+        result = await dao.save_moneyflow_hsgt(df)
+        assert result == 1
+        call_args = dao._save_upsert.call_args
+        saved_df = call_args[0][0]
+        assert saved_df["north_money"].dtype in ["float64", "float32", "int64"]
+
+
+class TestMarketDaoGetDailyIndicatorsNoParams:
+    @pytest.mark.asyncio
+    async def test_no_params(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_daily_indicators()
+        assert isinstance(result, pd.DataFrame)
+        dao._read_db.assert_called_once()
+
+
+class TestMarketDaoGetMarketNewsNoMinTime:
+    @pytest.mark.asyncio
+    async def test_no_min_time(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"id": [1]}))
+        result = await dao.get_market_news()
+        assert result is not None
+        dao._read_db.assert_called_once()
+
+
+class TestMarketDaoGetLatestIndexWeightDateEmpty:
+    @pytest.mark.asyncio
+    async def test_empty_dataframe(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_latest_index_weight_date()
+        assert result is None
+
+
+class TestMarketDaoSaveMarketNewsNoneContent:
+    @pytest.mark.asyncio
+    async def test_none_content(self):
+        dao = MarketDao(MagicMock(spec=AsyncEngine))
+        dao._write_db = AsyncMock(return_value=1)
+        result = await dao.save_market_news({"content": None})
+        assert result == 1

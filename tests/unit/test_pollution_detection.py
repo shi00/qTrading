@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # 核心子集：AI 服务/任务管理器/数据处理器相关测试

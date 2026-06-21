@@ -2,6 +2,10 @@
 
 import ast
 from pathlib import Path
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def test_mock_keyring_covers_all_used_apis():

@@ -1,7 +1,13 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from data.external.tushare_client import TushareClient
-from utils.correlation import set_correlation_id, get_correlation_id, clear_correlation_id
+from utils.correlation import (
+    set_correlation_id,
+    get_correlation_id,
+    clear_correlation_id,
+)
+
+pytestmark = pytest.mark.unit
 
 
 class TestTushareFixes:

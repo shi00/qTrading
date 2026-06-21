@@ -9,6 +9,8 @@ from data.sync.base import SyncContext, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 
+pytestmark = pytest.mark.unit
+
 
 class TestParsePeriod:
     def test_valid_yyyymm(self):

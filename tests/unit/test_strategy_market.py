@@ -19,6 +19,10 @@ from strategies.market import (
     NorthboundHoldingStrategy,
     VolumeBreakoutStrategy,
 )
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestVolumeBreakoutStrategy(unittest.TestCase):
@@ -72,6 +76,8 @@ class TestVolumeBreakoutStrategy(unittest.TestCase):
         self.assertIn("000002.SZ", ts_codes)
         self.assertNotIn("000003.SZ", ts_codes)
         self.assertNotIn("000004.SZ", ts_codes)
+        # No parameter conflict: data_warnings should be empty
+        self.assertEqual(self.strategy._data_warnings, [])
 
     def test_breakout_pct_chg_range(self):
         """涨跌幅范围过滤"""
@@ -113,9 +119,24 @@ class TestVolumeBreakoutStrategy(unittest.TestCase):
         """pct_chg_min > pct_chg_max 时自动调整"""
         sample_df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "涨幅8.3", "pct_chg": 8.3, "turnover_rate": 8.0},
-                {"ts_code": "000002.SZ", "name": "涨幅9.0", "pct_chg": 9.0, "turnover_rate": 5.0},
-                {"ts_code": "000003.SZ", "name": "涨幅5.0", "pct_chg": 5.0, "turnover_rate": 4.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "涨幅8.3",
+                    "pct_chg": 8.3,
+                    "turnover_rate": 8.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "涨幅9.0",
+                    "pct_chg": 9.0,
+                    "turnover_rate": 5.0,
+                },
+                {
+                    "ts_code": "000003.SZ",
+                    "name": "涨幅5.0",
+                    "pct_chg": 5.0,
+                    "turnover_rate": 4.0,
+                },
             ]
         )
         lf = pl.from_pandas(sample_df).lazy()
@@ -127,14 +148,32 @@ class TestVolumeBreakoutStrategy(unittest.TestCase):
         self.assertIn("000001.SZ", ts_codes)
         self.assertNotIn("000002.SZ", ts_codes)
         self.assertNotIn("000003.SZ", ts_codes)
+        # Verify data_warnings is populated when parameter conflict occurs
+        self.assertTrue(len(self.strategy._data_warnings) > 0)
+        self.assertIn("pct_chg_min", self.strategy._data_warnings[0])
 
     def test_breakout_min_equals_max_auto_adjusts(self):
         """pct_chg_min == pct_chg_max 时自动调整"""
         sample_df = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "涨幅5.3", "pct_chg": 5.3, "turnover_rate": 8.0},
-                {"ts_code": "000002.SZ", "name": "涨幅5.0", "pct_chg": 5.0, "turnover_rate": 5.0},
-                {"ts_code": "000003.SZ", "name": "涨幅3.0", "pct_chg": 3.0, "turnover_rate": 4.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "涨幅5.3",
+                    "pct_chg": 5.3,
+                    "turnover_rate": 8.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "涨幅5.0",
+                    "pct_chg": 5.0,
+                    "turnover_rate": 5.0,
+                },
+                {
+                    "ts_code": "000003.SZ",
+                    "name": "涨幅3.0",
+                    "pct_chg": 3.0,
+                    "turnover_rate": 4.0,
+                },
             ]
         )
         lf = pl.from_pandas(sample_df).lazy()
@@ -145,6 +184,28 @@ class TestVolumeBreakoutStrategy(unittest.TestCase):
         ts_codes = result["ts_code"].to_list()
         self.assertIn("000001.SZ", ts_codes)
         self.assertNotIn("000003.SZ", ts_codes)
+        # Verify data_warnings is populated when parameter conflict occurs
+        self.assertTrue(len(self.strategy._data_warnings) > 0)
+
+    def test_data_warnings_cleared_on_non_conflict_call(self):
+        """data_warnings should be cleared when a subsequent call has no conflict"""
+        sample_df = pd.DataFrame(
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "涨幅5.0",
+                    "pct_chg": 5.0,
+                    "turnover_rate": 8.0,
+                }
+            ]
+        )
+        lf = pl.from_pandas(sample_df).lazy()
+        # First call with conflict
+        self.strategy._filter_logic(lf, {"params": {"pct_chg_min": 8, "pct_chg_max": 5, "turnover_min": 0}})
+        self.assertTrue(len(self.strategy._data_warnings) > 0)
+        # Second call without conflict
+        self.strategy._filter_logic(lf, {"params": {"pct_chg_min": 2, "pct_chg_max": 7, "turnover_min": 0}})
+        self.assertEqual(self.strategy._data_warnings, [])
 
 
 class TestNorthboundHoldingStrategy(unittest.TestCase):
@@ -456,9 +517,27 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         )
         base_lf = pl.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
-                {"ts_code": "600000.SH", "name": "浦发银行", "industry": "银行", "pe_ttm": 4.5, "total_mv": 3000.0},
-                {"ts_code": "000002.SZ", "name": "小盘股", "industry": "科技", "pe_ttm": 20.0, "total_mv": 50.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "平安银行",
+                    "industry": "银行",
+                    "pe_ttm": 5.5,
+                    "total_mv": 4000.0,
+                },
+                {
+                    "ts_code": "600000.SH",
+                    "name": "浦发银行",
+                    "industry": "银行",
+                    "pe_ttm": 4.5,
+                    "total_mv": 3000.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "小盘股",
+                    "industry": "科技",
+                    "pe_ttm": 20.0,
+                    "total_mv": 50.0,
+                },
             ]
         ).lazy()
 
@@ -482,7 +561,13 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         )
         screening_data = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "平安银行",
+                    "industry": "银行",
+                    "pe_ttm": 5.5,
+                    "total_mv": 4000.0,
+                },
             ]
         )
 
@@ -503,7 +588,13 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         )
         screening_data = pd.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "平安银行", "industry": "银行", "pe_ttm": 5.5, "total_mv": 4000.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "平安银行",
+                    "industry": "银行",
+                    "pe_ttm": 5.5,
+                    "total_mv": 4000.0,
+                },
             ]
         )
 
@@ -518,7 +609,15 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
 
     def test_filter_returns_empty_when_context_missing(self):
         base_lf = pl.DataFrame(
-            [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 1.0, "total_mv": 1.0}]
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "p",
+                    "industry": "x",
+                    "pe_ttm": 1.0,
+                    "total_mv": 1.0,
+                }
+            ]
         ).lazy()
         strat = NorthboundFlowStrategy()
         out = strat._filter_logic(base_lf, {"params": {}}).collect()
@@ -533,7 +632,15 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
             ]
         )
         base_lf = pl.DataFrame(
-            [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 5.0, "total_mv": 500.0}]
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "p",
+                    "industry": "x",
+                    "pe_ttm": 5.0,
+                    "total_mv": 500.0,
+                }
+            ]
         ).lazy()
         strat = NorthboundFlowStrategy()
         ctx = {
@@ -547,8 +654,20 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
         flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 120.0}])
         base_lf = pl.DataFrame(
             [
-                {"ts_code": "000001.SZ", "name": "亏损股", "industry": "科技", "pe_ttm": -5.0, "total_mv": 4000.0},
-                {"ts_code": "000002.SZ", "name": "盈利股", "industry": "科技", "pe_ttm": 10.0, "total_mv": 3000.0},
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "亏损股",
+                    "industry": "科技",
+                    "pe_ttm": -5.0,
+                    "total_mv": 4000.0,
+                },
+                {
+                    "ts_code": "000002.SZ",
+                    "name": "盈利股",
+                    "industry": "科技",
+                    "pe_ttm": 10.0,
+                    "total_mv": 3000.0,
+                },
             ]
         ).lazy()
         strat = NorthboundFlowStrategy()
@@ -564,7 +683,15 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
     def test_flow_equal_to_threshold_returns_empty(self):
         flow_df = pd.DataFrame([{"trade_date": "20240101", "north_money": 50.0}])
         screening_data = pd.DataFrame(
-            [{"ts_code": "000001.SZ", "name": "p", "industry": "x", "pe_ttm": 5.0, "total_mv": 500.0}]
+            [
+                {
+                    "ts_code": "000001.SZ",
+                    "name": "p",
+                    "industry": "x",
+                    "pe_ttm": 5.0,
+                    "total_mv": 500.0,
+                }
+            ]
         )
         strat = NorthboundFlowStrategy()
         ctx = {

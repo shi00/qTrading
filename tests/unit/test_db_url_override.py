@@ -5,6 +5,10 @@ import os
 
 import config
 from data.persistence.db_url_override import override_db_url
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestOverrideDbUrl:

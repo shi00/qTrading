@@ -6,6 +6,8 @@ import datetime
 from data.persistence.daos.sync_dao import SyncDao
 from data.constants import SYNC_RESULT_EMPTY, SYNC_RESULT_FETCH_FAILED
 
+pytestmark = pytest.mark.unit
+
 
 class TestSyncDaoGetSyncStatus:
     @pytest.mark.asyncio

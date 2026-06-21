@@ -2,6 +2,8 @@ import pytest
 import sys
 import unittest.mock
 
+pytestmark = pytest.mark.unit
+
 
 def test_persistence_init_getattr_database_manager():
     # Ensure it's not already imported
@@ -55,5 +57,8 @@ def test_persistence_init_getattr_unknown():
         del sys.modules["data.persistence"]
     import data.persistence
 
-    with pytest.raises(AttributeError, match="module 'data.persistence' has no attribute 'UnknownAttribute'"):
+    with pytest.raises(
+        AttributeError,
+        match="module 'data.persistence' has no attribute 'UnknownAttribute'",
+    ):
         _ = data.persistence.UnknownAttribute

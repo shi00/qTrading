@@ -2,11 +2,19 @@ import datetime
 from unittest.mock import patch, MagicMock
 
 from data.domain_services.offline_calendar import OfflineCalendar
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestOfflineCalendarIsTradingDayFallback:
     def test_exception_returns_false(self):
-        with patch.object(OfflineCalendar, "get_instance", side_effect=Exception("Calendar init failed")):
+        with patch.object(
+            OfflineCalendar,
+            "get_instance",
+            side_effect=Exception("Calendar init failed"),
+        ):
             result = OfflineCalendar.is_trading_day("2024-06-15")
             assert result is False
 

@@ -10,6 +10,8 @@ from strategies.prompt_validator import (
 )
 from strategies.strategy_prompts import STRATEGY_PROMPTS
 
+pytestmark = pytest.mark.integration
+
 _SKIP_NO_DATA = pytest.mark.skipif(
     os.environ.get("SKIP_DATA_CONSISTENCY") == "1",
     reason="SKIP_DATA_CONSISTENCY=1: CI has no pre-filled data",

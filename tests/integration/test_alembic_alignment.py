@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.models import Base
 
+pytestmark = pytest.mark.integration
+
 ALL_TABLES = [(name, table) for name, table in Base.metadata.tables.items() if name != "alembic_version"]
 
 

@@ -11,6 +11,8 @@ from strategies.backtest.config import BacktestConfig, BacktestResult
 from ui.components.backtest.backtest_result_panel import BacktestResultPanel
 from ui.theme import AppColors
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def backtest_config() -> BacktestConfig:

@@ -12,6 +12,8 @@ from strategies.ai_mixin import PreFetchedContext
 from strategies.oversold_strategy import OversoldStrategy
 from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADERS
 
+pytestmark = pytest.mark.unit
+
 
 def _build_test_ai_service():
     """构造一个纯本地测试用 AIService，避免依赖真实 provider 或外网。"""
@@ -75,7 +77,10 @@ async def test_strategy_context_truncation_limit_is_relaxed():
     """strategy_context 截断上限应高于旧的 1000 字，避免超跌策略上下文过早被截断。"""
     service = _build_test_ai_service()
 
-    with patch("services.ai_service.ConfigHandler.get_ai_system_prompt", return_value="test system prompt"):
+    with patch(
+        "services.ai_service.ConfigHandler.get_ai_system_prompt",
+        return_value="test system prompt",
+    ):
         long_context = "S" * (STRATEGY_CONTEXT_MAX_LEN + 100)
 
         await service.analyze_stock(
@@ -171,7 +176,10 @@ async def test_oversold_runtime_strategy_context_keeps_all_core_blocks():
 
     service = _build_test_ai_service()
 
-    with patch("services.ai_service.ConfigHandler.get_ai_system_prompt", return_value="test system prompt"):
+    with patch(
+        "services.ai_service.ConfigHandler.get_ai_system_prompt",
+        return_value="test system prompt",
+    ):
         await service.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "平安银行"},
             tech_info={"macd_signal": "BEARISH"},
@@ -261,14 +269,26 @@ async def test_strategy_manager_oversold_pipeline_forwards_shared_context_flags(
     with (
         patch.object(strategy, "_math_filter", AsyncMock(return_value=candidates.copy())),
         patch("strategies.ai_mixin.AIService", return_value=service),
-        patch("strategies.ai_mixin.NewsFetcher.get_stock_news", new=AsyncMock(return_value=[])),
         patch(
-            "strategies.ai_mixin.NewsFetcher.get_us_major_moves", new=AsyncMock(return_value="US market noise")
+            "strategies.ai_mixin.NewsFetcher.get_stock_news",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "strategies.ai_mixin.NewsFetcher.get_us_major_moves",
+            new=AsyncMock(return_value="US market noise"),
         ) as mock_global_context,
         patch("data.persistence.review_manager.ReviewManager") as mock_review_manager,
         patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=5),
-        patch.object(strategy, "_build_multi_period_financials", AsyncMock(return_value="财务数据不足")),
-        patch.object(strategy, "_build_auxiliary_data_text", AsyncMock(return_value="无辅助数据")),
+        patch.object(
+            strategy,
+            "_build_multi_period_financials",
+            AsyncMock(return_value="财务数据不足"),
+        ),
+        patch.object(
+            strategy,
+            "_build_auxiliary_data_text",
+            AsyncMock(return_value=("无辅助数据", False)),
+        ),
         patch.object(strategy, "_build_macro_context", AsyncMock(return_value="")),
         patch.object(strategy, "_build_history_text", return_value="近60日价格行为摘要"),
     ):
@@ -305,7 +325,10 @@ async def test_oversold_prompt_skips_shared_context_blocks():
     assert strategy.should_include_global_context() is False
     assert strategy.should_include_learning_context() is False
 
-    with patch("services.ai_service.ConfigHandler.get_ai_system_prompt", return_value="test system prompt"):
+    with patch(
+        "services.ai_service.ConfigHandler.get_ai_system_prompt",
+        return_value="test system prompt",
+    ):
         analyze_kwargs: dict[str, Any] = {
             "stock_info": {"ts_code": "000001.SZ", "name": "平安银行"},
             "tech_info": {"macd_signal": "BEARISH"},
@@ -337,7 +360,10 @@ async def test_strategy_key_alone_no_longer_disables_shared_context():
     """仅凭 strategy_key 不应再触发 shared context 屏蔽。"""
     service = _build_test_ai_service()
 
-    with patch("services.ai_service.ConfigHandler.get_ai_system_prompt", return_value="test system prompt"):
+    with patch(
+        "services.ai_service.ConfigHandler.get_ai_system_prompt",
+        return_value="test system prompt",
+    ):
         await service.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "平安银行"},
             tech_info={"macd_signal": "BEARISH"},
@@ -372,7 +398,10 @@ async def test_oversold_final_prompt_contains_dynamic_ui_params():
         }
     )
 
-    with patch("services.ai_service.ConfigHandler.get_ai_system_prompt", return_value="test system prompt"):
+    with patch(
+        "services.ai_service.ConfigHandler.get_ai_system_prompt",
+        return_value="test system prompt",
+    ):
         await service.analyze_stock(
             stock_info={"ts_code": "000001.SZ", "name": "平安银行"},
             tech_info={"macd_signal": "BEARISH"},

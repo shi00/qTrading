@@ -1,9 +1,12 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
 from ui.i18n import DEFAULT_LOCALE, LOCALE_MAP, SUPPORTED_LOCALES, I18n
+
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
@@ -482,3 +485,43 @@ class TestSchedulerI18nKeys:
         for key in keys:
             val = I18n.get(key)
             assert val != key, f"I18n key '{key}' should have an en_US translation"
+
+
+class TestI18nDebugModeStrictInit:
+    """Test DEBUG mode strict initialization (AI-M5)."""
+
+    def test_debug_mode_not_initialized_raises_runtime_error(self, monkeypatch):
+        monkeypatch.setenv("DEBUG", "1")
+        assert not I18n._initialized
+
+        with pytest.raises(RuntimeError, match="Not initialized in DEBUG mode"):
+            I18n.get("app_title")
+
+        assert not I18n._initialized
+
+    def test_debug_mode_initialized_works_normally(self, monkeypatch):
+        monkeypatch.setenv("DEBUG", "1")
+        I18n.initialize()
+
+        result = I18n.get("app_title")
+
+        assert result == "A股智能选股助手"
+
+    def test_production_mode_not_initialized_auto_initializes(self, monkeypatch, caplog):
+        monkeypatch.delenv("DEBUG", raising=False)
+        assert not I18n._initialized
+
+        with caplog.at_level(logging.WARNING, logger="core.i18n"):
+            result = I18n.get("app_title")
+
+        assert I18n._initialized
+        assert isinstance(result, str)
+        assert any("Auto-initializing with default locale" in record.message for record in caplog.records)
+
+    def test_production_mode_initialized_works_normally(self, monkeypatch):
+        monkeypatch.delenv("DEBUG", raising=False)
+        I18n.initialize()
+
+        result = I18n.get("app_title")
+
+        assert result == "A股智能选股助手"

@@ -25,6 +25,8 @@ from strategies.market import (
 from strategies.oversold_strategy import OversoldStrategy
 from strategies.utils import fmt_val, safe_float
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def strategies_ctx():
@@ -135,7 +137,15 @@ async def test_oversold(strategies_ctx):
     history_data = []
     for i, (d, p) in enumerate(zip(dates, c_prices, strict=True)):
         vol = 3000 if i == 29 else 1000
-        history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
+        history_data.append(
+            {
+                "ts_code": "000003.SZ",
+                "trade_date": d,
+                "close": p,
+                "adj_factor": 1.0,
+                "vol": vol,
+            }
+        )
     history_df = pd.DataFrame(history_data)
     cache_mock.get_daily_quotes = AsyncMock(return_value=history_df)
     dp_mock.cache = cache_mock
@@ -157,7 +167,15 @@ async def test_oversold_volume_threshold_filters_candidates(strategies_ctx):
     dates = pd.date_range(end="2023-01-30", periods=30).strftime("%Y%m%d").tolist()
     history_data = []
     for d, p, vol in zip(dates, range(40, 10, -1), [100] * 29 + [200], strict=True):
-        history_data.append({"ts_code": "000003.SZ", "trade_date": d, "close": p, "adj_factor": 1.0, "vol": vol})
+        history_data.append(
+            {
+                "ts_code": "000003.SZ",
+                "trade_date": d,
+                "close": p,
+                "adj_factor": 1.0,
+                "vol": vol,
+            }
+        )
     history_df = pd.DataFrame(history_data)
 
     cache_mock = MagicMock()
@@ -255,7 +273,11 @@ class TestAIIntegration(unittest.TestCase):
         for cls in self.STRATEGY_CLASSES:
             with self.subTest(strategy=cls.__name__):
                 instance = cls()
-                self.assertIsInstance(instance, AIStrategyMixin, f"{cls.__name__} should inherit AIStrategyMixin")
+                self.assertIsInstance(
+                    instance,
+                    AIStrategyMixin,
+                    f"{cls.__name__} should inherit AIStrategyMixin",
+                )
 
     def test_fundamental_strategies_have_get_ai_context(self):
         for cls in self.FUNDAMENTAL_STRATEGY_CLASSES:
@@ -267,7 +289,10 @@ class TestAIIntegration(unittest.TestCase):
                 )
                 ctx = instance.get_ai_context({"pe_ttm": 10, "pb": 1.5})
                 self.assertIsInstance(ctx, str)
-                self.assertTrue(len(ctx) > 0, f"{cls.__name__}.get_ai_context() should return non-empty string")
+                self.assertTrue(
+                    len(ctx) > 0,
+                    f"{cls.__name__}.get_ai_context() should return non-empty string",
+                )
 
     def test_market_strategies_use_default_get_ai_context(self):
         for cls in self.MARKET_STRATEGY_CLASSES:
@@ -287,8 +312,16 @@ class TestAIIntegration(unittest.TestCase):
         for cls in self.STRATEGY_CLASSES:
             with self.subTest(strategy=cls.__name__):
                 mro_names = [c.__name__ for c in cls.__mro__]
-                self.assertIn("AIStrategyMixin", mro_names, f"{cls.__name__} MRO missing AIStrategyMixin")
-                self.assertIn("PolarsBaseStrategy", mro_names, f"{cls.__name__} MRO missing PolarsBaseStrategy")
+                self.assertIn(
+                    "AIStrategyMixin",
+                    mro_names,
+                    f"{cls.__name__} MRO missing AIStrategyMixin",
+                )
+                self.assertIn(
+                    "PolarsBaseStrategy",
+                    mro_names,
+                    f"{cls.__name__} MRO missing PolarsBaseStrategy",
+                )
 
     def test_quality_tier_defaults(self):
         for cls in self.STRATEGY_CLASSES:
@@ -312,13 +345,19 @@ class TestAIIntegration(unittest.TestCase):
         for cls in self.MARKET_STRATEGY_CLASSES:
             with self.subTest(strategy=cls.__name__):
                 instance = cls()
-                self.assertFalse(instance.enable_ai_analysis, f"{cls.__name__} should have enable_ai_analysis=False")
+                self.assertFalse(
+                    instance.enable_ai_analysis,
+                    f"{cls.__name__} should have enable_ai_analysis=False",
+                )
 
     def test_fundamental_strategies_enable_ai(self):
         for cls in self.FUNDAMENTAL_STRATEGY_CLASSES:
             with self.subTest(strategy=cls.__name__):
                 instance = cls()
-                self.assertTrue(instance.enable_ai_analysis, f"{cls.__name__} should have enable_ai_analysis=True")
+                self.assertTrue(
+                    instance.enable_ai_analysis,
+                    f"{cls.__name__} should have enable_ai_analysis=True",
+                )
 
     def test_enable_ai_analysis_source_is_mixin(self):
         self.assertTrue(hasattr(AIStrategyMixin, "enable_ai_analysis"))
@@ -333,7 +372,13 @@ class TestAIIntegration(unittest.TestCase):
 
     def test_get_ai_context_nan_handling(self):
         s = ValueStrategy()
-        row_with_nan = {"pe_ttm": float("nan"), "pb": None, "dv_ttm": 3.0, "roe": float("nan"), "debt_to_assets": 40.0}
+        row_with_nan = {
+            "pe_ttm": float("nan"),
+            "pb": None,
+            "dv_ttm": 3.0,
+            "roe": float("nan"),
+            "debt_to_assets": 40.0,
+        }
         ctx = s.get_ai_context(row_with_nan)
         self.assertNotIn("nan", ctx.lower())
         self.assertIn("N/A", ctx)
@@ -342,7 +387,13 @@ class TestAIIntegration(unittest.TestCase):
 async def test_phase2_bypassed_when_ai_not_configured():
     s = ValueStrategy()
     candidates = pd.DataFrame(
-        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["Stock A"],
+            "pe_ttm": [10.0],
+            "pb": [1.0],
+            "dv_ttm": [3.0],
+        },
     )
     context = {"params": {}}
     with patch("strategies.ai_mixin.AIService") as mock_ai:
@@ -358,7 +409,13 @@ async def test_phase2_bypassed_when_ai_not_configured():
 async def test_phase2_triggered_when_ai_available():
     s = ValueStrategy()
     candidates = pd.DataFrame(
-        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["Stock A"],
+            "pe_ttm": [10.0],
+            "pb": [1.0],
+            "dv_ttm": [3.0],
+        },
     )
     dp_mock = MagicMock()
     dp_mock.is_cancelled.return_value = False
@@ -394,7 +451,12 @@ async def test_phase2_triggered_when_ai_available():
 async def test_market_strategy_skips_ai_analysis():
     s = VolumeBreakoutStrategy()
     data = pd.DataFrame(
-        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["Stock A"],
+            "pct_chg": [5.0],
+            "turnover_rate": [6.0],
+        },
     )
     dp_mock = MagicMock()
     dp_mock._quality_tier = QualityTier.GOLD
@@ -407,12 +469,22 @@ async def test_market_strategy_skips_ai_analysis():
 async def test_market_strategy_no_progress_callback():
     s = VolumeBreakoutStrategy()
     data = pd.DataFrame(
-        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pct_chg": [5.0], "turnover_rate": [6.0]},
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["Stock A"],
+            "pct_chg": [5.0],
+            "turnover_rate": [6.0],
+        },
     )
     dp_mock = MagicMock()
     dp_mock._quality_tier = QualityTier.GOLD
     progress_mock = MagicMock()
-    context = {"screening_data": data, "params": {}, "on_progress": progress_mock, "data_processor": dp_mock}
+    context = {
+        "screening_data": data,
+        "params": {},
+        "on_progress": progress_mock,
+        "data_processor": dp_mock,
+    }
     await s.filter(context)
     progress_mock.assert_not_called()
 
@@ -420,7 +492,13 @@ async def test_market_strategy_no_progress_callback():
 async def test_phase2_bypassed_when_dp_missing():
     s = ValueStrategy()
     candidates = pd.DataFrame(
-        {"ts_code": ["000001.SZ"], "name": ["Stock A"], "pe_ttm": [10.0], "pb": [1.0], "dv_ttm": [3.0]},
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["Stock A"],
+            "pe_ttm": [10.0],
+            "pb": [1.0],
+            "dv_ttm": [3.0],
+        },
     )
     context = {"params": {}}
     with patch("strategies.ai_mixin.AIService") as mock_ai:
@@ -614,7 +692,11 @@ async def test_fundamental_coverage_unavailable():
     s = _make_strategy(requires_fundamental_coverage=True)
     dp = _make_dp()
     context = {"data_processor": dp, "params": {}}
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         result = await s.filter(context)
         assert result.empty
 
@@ -624,7 +706,11 @@ async def test_fundamental_coverage_available():
     data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
     dp = _make_dp()
     context = {"fundamental_screening_data": data, "data_processor": dp, "params": {}}
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai.return_value.is_cloud_available.return_value = False
             result = await s.filter(context)
@@ -636,7 +722,11 @@ async def test_screening_data_fallback_to_data_key():
     data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
     dp = _make_dp()
     context = {"data": data, "data_processor": dp, "params": {}}
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai.return_value.is_cloud_available.return_value = False
             result = await s.filter(context)
@@ -659,7 +749,11 @@ async def test_filter_logic_exception_reraises():
     data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
     dp = _make_dp()
     context = {"screening_data": data, "data_processor": dp, "params": {}}
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         with pytest.raises(RuntimeError) as cm:
             await s.filter(context)
         assert "test error" in str(cm.value)
@@ -683,7 +777,11 @@ async def test_empty_candidates_returns_empty():
     data = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.0]})
     dp = _make_dp()
     context = {"screening_data": data, "data_processor": dp, "params": {}}
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         result = await s.filter(context)
         assert result.empty
 
@@ -692,7 +790,11 @@ async def test_no_screening_data_returns_empty():
     s = _make_strategy()
     dp = _make_dp()
     context = {"data_processor": dp, "params": {}}
-    with patch.object(s, "check_dependencies", return_value={"status": "ok", "missing_keys": [], "missing_tables": []}):
+    with patch.object(
+        s,
+        "check_dependencies",
+        return_value={"status": "ok", "missing_keys": [], "missing_tables": []},
+    ):
         result = await s.filter(context)
         assert result.empty
 

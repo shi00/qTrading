@@ -2,7 +2,15 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.database_manager import DatabaseManager
-from tests.integration.test_infra_base import TEST_DB_URL, _AssertionMixin, TestDatabaseBase
+from tests.integration.test_infra_base import (
+    TEST_DB_URL,
+    _AssertionMixin,
+    TestDatabaseBase,
+)
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestDatabaseManagerSecurity(TestDatabaseBase):

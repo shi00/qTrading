@@ -1,3 +1,4 @@
+import logging
 import os
 import socket
 import subprocess
@@ -10,6 +11,8 @@ from pathlib import Path
 import httpx
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+logger = logging.getLogger(__name__)
 
 
 def _free_port() -> int:
@@ -26,7 +29,7 @@ def wait_until_ready(url: str, timeout_s: float = 60.0) -> None:
             r = httpx.get(url, timeout=3.0)
             if r.status_code == 200:
                 return
-        except Exception as e:  # noqa: BLE001
+        except httpx.HTTPError as e:
             last_err = e
         time.sleep(0.5)
     raise RuntimeError(f"Flet app not ready at {url} within {timeout_s}s. Last error: {last_err}")
@@ -129,7 +132,8 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
     url = f"http://127.0.0.1:{port}"
     try:
         wait_until_ready(url)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[E2E] Flet app not ready at %s, terminating process: %s", url, exc)
         proc.terminate()
         raise
     # HTTP 200 only means the Flet web server is up; the app may still
@@ -137,7 +141,12 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
     # few seconds to catch such errors early.
     try:
         _check_startup_errors(log_path, log_offset)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[E2E] Startup error detected in log %s, terminating process: %s",
+            log_path,
+            exc,
+        )
         proc.terminate()
         raise
     return proc, url

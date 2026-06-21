@@ -7,12 +7,7 @@ import pytest
 
 from tests.unit.ui.conftest import set_page, wrap_mock_page
 
-# P2-3: 本文件含若干纯 assert_called/assert_called_once 断言，保留理由：
-# - snack.assert_called_once(): show_snack 参数为 i18n key，硬编码 key 反而脆弱
-# - page.update.assert_called(): UI 刷新通知，无参数
-# - vm.bind/dispose.assert_called_once(): 生命周期接线，参数为内部回调
-# - i18n.subscribe/unsubscribe.assert_called_once(): 订阅注册，参数为 listener 函数
-# 这些断言验证"接线正确"而非"参数正确"，符合 UI 测试分层策略（§6.8 MVVM）
+pytestmark = pytest.mark.unit
 
 
 class TestAutomationTab:
@@ -70,7 +65,7 @@ class TestAutomationTab:
         tab.show_snack = snack
         tab.schedule_enabled.value = True
         tab.on_schedule_toggle(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_auto_on")
 
     def test_on_schedule_time_change_saves_config(self, mock_page):
         tab = self._make_tab()
@@ -86,7 +81,7 @@ class TestAutomationTab:
         tab.show_snack = snack
         tab.schedule_time.value = "16:30"
         tab.on_schedule_time_change(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_time_set")
 
     def test_on_doubao_toggle_saves_config(self, mock_page):
         tab = self._make_tab()
@@ -218,7 +213,7 @@ class TestAutomationTab:
         page = MagicMock()
         set_page(tab, page)
         tab.update_theme()
-        page.update.assert_called()
+        page.update.assert_called_once()
 
     def test_will_unmount_clears_subscription(self, mock_page):
         tab = self._make_tab()
@@ -257,7 +252,7 @@ class TestAutomationTab:
         tab.show_snack = snack
         tab.doubao_enabled.value = True
         tab.on_doubao_toggle(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_auto_on")
 
     def test_on_doubao_time_change_calls_snack(self, mock_page):
         snack = MagicMock()
@@ -266,14 +261,14 @@ class TestAutomationTab:
         tab.show_snack = snack
         tab.doubao_time.value = "20:00"
         tab.on_doubao_time_change(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_time_set")
 
     def test_safe_update_with_page(self, mock_page):
         tab = self._make_tab()
         page = MagicMock()
         set_page(tab, page)
         tab._safe_update()
-        page.update.assert_called()
+        page.update.assert_called_once()
 
     def test_safe_update_without_page(self, mock_page):
         tab = self._make_tab()
@@ -470,8 +465,14 @@ class TestAIBrainTab:
             patch("services.ai_service.AIService"),
             patch("services.local_model_manager.LocalModelManager"),
             patch("ui.views.settings_tabs.ai_brain_tab.ThreadPoolManager"),
-            patch("ui.views.settings_tabs.ai_brain_tab.DEFAULT_AI_PROMPT", "default_prompt"),
-            patch("ui.views.settings_tabs.ai_brain_tab.DEFAULT_NEWS_PROMPT", "default_news"),
+            patch(
+                "ui.views.settings_tabs.ai_brain_tab.DEFAULT_AI_PROMPT",
+                "default_prompt",
+            ),
+            patch(
+                "ui.views.settings_tabs.ai_brain_tab.DEFAULT_NEWS_PROMPT",
+                "default_news",
+            ),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -494,7 +495,7 @@ class TestAIBrainTab:
         tab = self._make_tab()
         tab.show_snack = snack
         tab._reset_ai_prompt(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_prompt_reset")
 
     def test_reset_news_prompt(self, mock_page):
         tab = self._make_tab()
@@ -507,7 +508,7 @@ class TestAIBrainTab:
         tab = self._make_tab()
         tab.show_snack = snack
         tab._reset_news_prompt(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_prompt_reset")
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_empty_fields(self, mock_page):
@@ -519,7 +520,7 @@ class TestAIBrainTab:
         tab.llm_config_panel.get_current_config.return_value = {}
         tab.local_model_panel = MagicMock()
         await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once_with("ai_snack_fields_empty", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_invalid_max_candidates(self, mock_page):
@@ -535,7 +536,7 @@ class TestAIBrainTab:
         tab.local_model_panel = MagicMock()
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, ""), create=True):
             await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once_with("ai_snack_invalid_range", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_invalid_turnover(self, mock_page):
@@ -551,7 +552,7 @@ class TestAIBrainTab:
         tab.local_model_panel = MagicMock()
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, ""), create=True):
             await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once_with("ai_snack_invalid_range", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_invalid_concurrency(self, mock_page):
@@ -581,10 +582,14 @@ class TestAIBrainTab:
         tab.llm_config_panel = MagicMock()
         tab.llm_config_panel.get_current_config.return_value = {}
         tab.local_model_panel = MagicMock()
-        with patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_length"), create=True):
+        with patch(
+            "utils.prompt_guard.validate_prompt",
+            return_value=(False, "prompt_err_length"),
+            create=True,
+        ):
             with patch("utils.prompt_guard.MAX_PROMPT_LENGTH", 5000, create=True):
                 await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once()
 
     def test_did_mount_subscribes_i18n(self, mock_page):
         tab = self._make_tab()
@@ -600,7 +605,10 @@ class TestAIBrainTab:
         self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
 
     def test_init_exception_handled(self, mock_page):
-        with patch("ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel", side_effect=Exception("init error")):
+        with patch(
+            "ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel",
+            side_effect=Exception("init error"),
+        ):
             tab = self._make_tab()
             assert tab.content is not None
 
@@ -634,7 +642,7 @@ class TestAIBrainTab:
         self.mock_ch.set_ai_max_candidates.side_effect = Exception("save error")
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
             await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_with_local_model_not_found(self, mock_page):
@@ -654,7 +662,7 @@ class TestAIBrainTab:
                 with patch("services.ai_service.AIService") as mock_ai:
                     mock_ai.return_value.reload_config = AsyncMock()
                     await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_with_local_model_changed(self, mock_page):
@@ -683,7 +691,7 @@ class TestAIBrainTab:
                             mock_tpm_instance.run_async = AsyncMock(return_value="new_md5")
                             mock_tpm.return_value = mock_tpm_instance
                             await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_with_local_model_same_md5(self, mock_page):
@@ -712,7 +720,7 @@ class TestAIBrainTab:
                             mock_tpm_instance.run_async = AsyncMock(return_value="same_md5")
                             mock_tpm.return_value = mock_tpm_instance
                             await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once()
 
 
 class TestSystemTab:
@@ -761,7 +769,7 @@ class TestSystemTab:
         tab.theme_dropdown.value = "dark"
         with patch("ui.theme.apply_page_theme"):
             tab.on_theme_change(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_snack_theme_updated")
 
     def test_on_log_level_change_saves_config(self, mock_page):
         tab = self._make_tab()
@@ -784,7 +792,7 @@ class TestSystemTab:
         tab.show_snack = snack
         tab.concurrency_input.value = "0"
         tab.save_concurrency(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_concurrency_range", color=self.mock_ac.ERROR)
 
     def test_save_concurrency_too_high(self, mock_page):
         snack = MagicMock()
@@ -792,7 +800,7 @@ class TestSystemTab:
         tab.show_snack = snack
         tab.concurrency_input.value = "64"
         tab.save_concurrency(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_concurrency_range", color=self.mock_ac.ERROR)
 
     def test_save_concurrency_invalid_format(self, mock_page):
         snack = MagicMock()
@@ -800,7 +808,7 @@ class TestSystemTab:
         tab.show_snack = snack
         tab.concurrency_input.value = "abc"
         tab.save_concurrency(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
     def test_save_rate_limit_valid(self, mock_page):
         tab = self._make_tab()
@@ -829,7 +837,7 @@ class TestSystemTab:
         tab.show_snack = snack
         tab.rate_limit_input.value = "5"
         tab.save_rate_limit(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_limit_min")
 
     def test_save_rate_limit_invalid_format(self, mock_page):
         snack = MagicMock()
@@ -837,7 +845,7 @@ class TestSystemTab:
         tab.show_snack = snack
         tab.rate_limit_input.value = "abc"
         tab.save_rate_limit(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
     def test_save_no_proxy_domains(self, mock_page):
         tab = self._make_tab()
@@ -882,7 +890,7 @@ class TestSystemTab:
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
         tab.save_db_pool_settings(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_pool_range", color=self.mock_ac.ERROR)
 
     def test_on_theme_change_exception(self, mock_page):
         snack = MagicMock()
@@ -892,7 +900,7 @@ class TestSystemTab:
         tab.theme_dropdown.value = "dark"
         with patch("ui.theme.apply_page_theme", side_effect=Exception("theme error")):
             tab.on_theme_change(None)
-        snack.assert_called()
+        snack.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_valid(self, mock_page):
@@ -917,7 +925,7 @@ class TestSystemTab:
         tab.io_workers_input.value = ""
         tab.cpu_workers_input.value = "4"
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_threads_empty", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_io_too_low(self, mock_page):
@@ -928,7 +936,7 @@ class TestSystemTab:
         tab.io_workers_input.value = "2"
         tab.cpu_workers_input.value = "4"
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_io_range", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_io_too_high(self, mock_page):
@@ -939,7 +947,7 @@ class TestSystemTab:
         tab.io_workers_input.value = "999"
         tab.cpu_workers_input.value = "4"
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_io_range", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_cpu_too_low(self, mock_page):
@@ -950,7 +958,7 @@ class TestSystemTab:
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "0"
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_cpu_range", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_cpu_too_high(self, mock_page):
@@ -961,7 +969,7 @@ class TestSystemTab:
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "999"
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_cpu_range", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_invalid_format(self, mock_page):
@@ -972,7 +980,7 @@ class TestSystemTab:
         tab.io_workers_input.value = "abc"
         tab.cpu_workers_input.value = "4"
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_settings_exception(self, mock_page):
@@ -984,7 +992,7 @@ class TestSystemTab:
         tab.cpu_workers_input.value = "4"
         self.mock_ch.set_max_io_workers.side_effect = Exception("save error")
         await tab.save_thread_pool_settings(None)
-        snack.assert_called()
+        snack.assert_called_once_with("sys_snack_save_err", color=self.mock_ac.ERROR)
 
     def test_save_no_proxy_domains_exception(self, mock_page):
         snack = MagicMock()
@@ -994,7 +1002,7 @@ class TestSystemTab:
         tab.no_proxy_input.value = "localhost"
         self.mock_ch.set_no_proxy_domains.side_effect = Exception("save error")
         tab.save_no_proxy_domains(None)
-        snack.assert_called()
+        snack.assert_called_once()
 
     def test_save_db_pool_settings_overflow_too_high(self, mock_page):
         snack = MagicMock()
@@ -1004,7 +1012,7 @@ class TestSystemTab:
         tab.db_overflow_input.value = "100"
         tab.db_timeout_input.value = "30"
         tab.save_db_pool_settings(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_db_overflow: 0-50", color=self.mock_ac.ERROR)
 
     def test_save_db_pool_settings_timeout_too_low(self, mock_page):
         snack = MagicMock()
@@ -1014,7 +1022,7 @@ class TestSystemTab:
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "1"
         tab.save_db_pool_settings(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_db_timeout: 5-300", color=self.mock_ac.ERROR)
 
     def test_save_db_pool_settings_invalid_format(self, mock_page):
         snack = MagicMock()
@@ -1024,7 +1032,7 @@ class TestSystemTab:
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
         tab.save_db_pool_settings(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
     def test_on_language_change_calls_set_locale(self, mock_page):
         tab = self._make_tab()
@@ -1041,7 +1049,7 @@ class TestSystemTab:
         tab.show_snack = snack
         tab.language_dropdown.value = "en_US"
         tab.on_language_change(None)
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_language_changed")
 
     def test_on_language_change_exception_handled(self, mock_page):
         snack = MagicMock()
@@ -1051,7 +1059,7 @@ class TestSystemTab:
         self.mock_i18n.set_locale.side_effect = Exception("test error")
         tab.language_dropdown.value = "en_US"
         tab.on_language_change(None)
-        snack.assert_called()
+        snack.assert_called_once()
 
     def test_on_language_change_persist_failure_skips_i18n_set(self, mock_page):
         """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown，显示失败提示。"""
@@ -1068,13 +1076,13 @@ class TestSystemTab:
 
         self.mock_i18n.set_locale.assert_not_called()
         assert tab.language_dropdown.value == "zh_CN"
-        snack.assert_called_once()
+        snack.assert_called_once_with("settings_language_save_failed", color=self.mock_ac.ERROR)
 
     def test_did_mount_subscribes_i18n(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.did_mount()
-        self.mock_i18n.subscribe.assert_called()
+        self.mock_i18n.subscribe.assert_called_once()
 
     def test_will_unmount_unsubscribes_i18n(self, mock_page):
         tab = self._make_tab()

@@ -20,6 +20,8 @@ from utils.exception_hooks import (
     restore_global_exception_hooks,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestSysExcepthook:
     """测试 sys.excepthook 实现"""
@@ -77,7 +79,12 @@ class TestThreadingExcepthook:
     def test_cancelled_error_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         """CancelledError 应记录 WARNING 级别"""
         args = threading.ExceptHookArgs(
-            (asyncio.CancelledError, asyncio.CancelledError(), None, threading.current_thread())
+            (
+                asyncio.CancelledError,
+                asyncio.CancelledError(),
+                None,
+                threading.current_thread(),
+            )
         )
         with caplog.at_level(logging.DEBUG):
             _threading_excepthook(args)

@@ -2,9 +2,9 @@ import base64
 
 import pytest
 
-pytestmark = pytest.mark.e2e
-
 from ui.i18n import I18n
+
+pytestmark = pytest.mark.e2e
 
 
 async def test_settings_page_loads(e2e_page):

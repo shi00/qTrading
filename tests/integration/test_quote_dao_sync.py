@@ -4,6 +4,11 @@ Tests for QuoteDao sync behavior.
 P1-4: check_data_exists uses UNION ALL for multi-table queries.
 """
 
+import pytest
+
+
+pytestmark = pytest.mark.integration
+
 
 class TestQuoteDaoUnionAll:
     """P1-4: check_data_exists must use UNION ALL for multi-table queries"""

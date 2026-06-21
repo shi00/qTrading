@@ -8,6 +8,8 @@ from data.persistence.db_config_service import (
     ConnectionStatus,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _make_mock_conn(fetchval_return="PostgreSQL 16.2, compiled by gcc"):
     mock_conn = AsyncMock()
@@ -46,44 +48,65 @@ class TestTestConnection:
 
     @pytest.mark.asyncio
     async def test_invalid_password_returns_auth_error(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=asyncpg.InvalidPasswordError):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=asyncpg.InvalidPasswordError,
+        ):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "wrong")
         assert result.status == ConnectionStatus.AUTHENTICATION_ERROR
 
     @pytest.mark.asyncio
     async def test_database_not_found(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=asyncpg.InvalidCatalogNameError):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=asyncpg.InvalidCatalogNameError,
+        ):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass", "missing_db")
         assert result.status == ConnectionStatus.DATABASE_NOT_FOUND
         assert result.database_exists is False
 
     @pytest.mark.asyncio
     async def test_timeout(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=TimeoutError):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=TimeoutError,
+        ):
             result = await DatabaseConfigService.test_connection("192.168.1.1", 5432, "user", "pass")
         assert result.status == ConnectionStatus.TIMEOUT
 
     @pytest.mark.asyncio
     async def test_os_error_connection_refused(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("Connection refused")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=OSError("Connection refused"),
+        ):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
         assert result.status == ConnectionStatus.CONNECTION_ERROR
 
     @pytest.mark.asyncio
     async def test_os_error_no_route_to_host(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("No route to host")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=OSError("No route to host"),
+        ):
             result = await DatabaseConfigService.test_connection("10.0.0.1", 5432, "user", "pass")
         assert result.status == ConnectionStatus.CONNECTION_ERROR
 
     @pytest.mark.asyncio
     async def test_os_error_winerror_64(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("WinError 64")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=OSError("WinError 64"),
+        ):
             result = await DatabaseConfigService.test_connection("proxy.host", 5432, "user", "pass")
         assert result.status == ConnectionStatus.CONNECTION_ERROR
 
     @pytest.mark.asyncio
     async def test_os_error_other_network(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("Network unreachable")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=OSError("Network unreachable"),
+        ):
             result = await DatabaseConfigService.test_connection("host", 5432, "user", "pass")
         assert result.status == ConnectionStatus.CONNECTION_ERROR
 
@@ -179,19 +202,28 @@ class TestTestConnection:
 
     @pytest.mark.asyncio
     async def test_generic_exception_with_password_in_message(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=Exception("password required")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=Exception("password required"),
+        ):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
         assert result.status == ConnectionStatus.AUTHENTICATION_ERROR
 
     @pytest.mark.asyncio
     async def test_generic_exception_with_winerror_64(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=Exception("WinError 64")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=Exception("WinError 64"),
+        ):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
         assert result.status == ConnectionStatus.CONNECTION_ERROR
 
     @pytest.mark.asyncio
     async def test_generic_exception_unknown(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=RuntimeError("unexpected")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=RuntimeError("unexpected"),
+        ):
             result = await DatabaseConfigService.test_connection("localhost", 5432, "user", "pass")
         assert result.status == ConnectionStatus.UNKNOWN_ERROR
 
@@ -213,7 +245,10 @@ class TestDatabaseExists:
 
     @pytest.mark.asyncio
     async def test_connection_failure_returns_false(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("refused")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=OSError("refused"),
+        ):
             result = await DatabaseConfigService.database_exists("localhost", 5432, "user", "pass", "mydb")
         assert result is False
 
@@ -221,7 +256,10 @@ class TestDatabaseExists:
 class TestCreateDatabase:
     @pytest.mark.asyncio
     async def test_duplicate_database_error(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=asyncpg.DuplicateDatabaseError):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=asyncpg.DuplicateDatabaseError,
+        ):
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
         assert "mydb" in msg
@@ -229,7 +267,8 @@ class TestCreateDatabase:
     @pytest.mark.asyncio
     async def test_insufficient_privilege_error(self):
         with patch(
-            "data.persistence.db_config_service.asyncpg.connect", side_effect=asyncpg.InsufficientPrivilegeError
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=asyncpg.InsufficientPrivilegeError,
         ):
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
@@ -237,7 +276,10 @@ class TestCreateDatabase:
 
     @pytest.mark.asyncio
     async def test_generic_exception(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=RuntimeError("disk full")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=RuntimeError("disk full"),
+        ):
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
         assert "disk full" in msg
@@ -330,7 +372,10 @@ class TestRunMigrations:
     @pytest.mark.asyncio
     async def test_failure(self):
         with (
-            patch("sqlalchemy.ext.asyncio.create_async_engine", side_effect=RuntimeError("boom")),
+            patch(
+                "sqlalchemy.ext.asyncio.create_async_engine",
+                side_effect=RuntimeError("boom"),
+            ),
         ):
             ok, msg = await DatabaseConfigService.run_migrations("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
@@ -357,7 +402,10 @@ class TestEnsureTablesExist:
         """alembic_version 表存在 → 不运行迁移"""
         mock_conn = _make_mock_conn(fetchval_return=True)
         with (
-            patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn),
+            patch(
+                "data.persistence.db_config_service.asyncpg.connect",
+                return_value=mock_conn,
+            ),
             patch.object(DatabaseConfigService, "run_migrations") as mock_migrate,
         ):
             ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
@@ -370,7 +418,10 @@ class TestEnsureTablesExist:
         """alembic_version 表不存在 → 运行迁移"""
         mock_conn = _make_mock_conn(fetchval_return=False)
         with (
-            patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn),
+            patch(
+                "data.persistence.db_config_service.asyncpg.connect",
+                return_value=mock_conn,
+            ),
             patch.object(DatabaseConfigService, "run_migrations", return_value=(True, "ok")) as mock_migrate,
         ):
             ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
@@ -382,7 +433,10 @@ class TestEnsureTablesExist:
     async def test_connection_failure_returns_error(self):
         """连接失败 → 返回连接错误"""
         with (
-            patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("Connection refused")),
+            patch(
+                "data.persistence.db_config_service.asyncpg.connect",
+                side_effect=OSError("Connection refused"),
+            ),
             patch.object(DatabaseConfigService, "run_migrations") as mock_migrate,
         ):
             ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
@@ -394,8 +448,15 @@ class TestEnsureTablesExist:
         """alembic_version 不存在 + 迁移失败 → 返回失败"""
         mock_conn = _make_mock_conn(fetchval_return=False)
         with (
-            patch("data.persistence.db_config_service.asyncpg.connect", return_value=mock_conn),
-            patch.object(DatabaseConfigService, "run_migrations", return_value=(False, "migration error")),
+            patch(
+                "data.persistence.db_config_service.asyncpg.connect",
+                return_value=mock_conn,
+            ),
+            patch.object(
+                DatabaseConfigService,
+                "run_migrations",
+                return_value=(False, "migration error"),
+            ),
         ):
             ok, msg = await DatabaseConfigService.ensure_tables_exist("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
@@ -427,6 +488,9 @@ class TestGetDatabaseInfo:
 
     @pytest.mark.asyncio
     async def test_connection_failure_returns_none(self):
-        with patch("data.persistence.db_config_service.asyncpg.connect", side_effect=OSError("refused")):
+        with patch(
+            "data.persistence.db_config_service.asyncpg.connect",
+            side_effect=OSError("refused"),
+        ):
             info = await DatabaseConfigService.get_database_info("localhost", 5432, "user", "pass", "mydb")
         assert info is None

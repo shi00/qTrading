@@ -6,6 +6,8 @@ import pytest
 
 from tests.unit.ui.conftest import set_page, wrap_mock_page
 
+pytestmark = pytest.mark.unit
+
 
 class TestDataExplorerView:
     patches: list
@@ -91,7 +93,7 @@ class TestDataExplorerView:
         view.tabs.selected_index = 0
         view.table_tab = MagicMock()
         view._on_tab_changed(None)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_tab_changed_skips_if_not_built(self, mock_page):
         view = self._make_view()

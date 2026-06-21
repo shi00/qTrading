@@ -16,6 +16,8 @@ from ui.views.screener_view import (
 )
 from tests.unit.ui.conftest import set_page, wrap_mock_page
 
+pytestmark = pytest.mark.unit
+
 
 def _asyncio_dummy():
     fut = asyncio.Future()
@@ -285,21 +287,21 @@ class TestScreenerView:
         e = MagicMock()
         e.path = "/tmp/test.csv"
         view._on_save_file_result(e)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_mode_change_to_history(self, mock_page):
         view = self._make_view(mock_page)
         e = MagicMock()
         e.control.selected = {"HISTORY"}
         view._on_mode_change(e)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_mode_change_to_realtime(self, mock_page):
         view = self._make_view(mock_page)
         e = MagicMock()
         e.control.selected = {"REALTIME"}
         view._on_mode_change(e)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_mode_change_empty_selection(self, mock_page):
         view = self._make_view(mock_page)
@@ -351,12 +353,12 @@ class TestScreenerView:
     def test_toggle_progress_with_page(self, mock_page):
         view = self._make_view(mock_page)
         view._toggle_progress(True)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_virtual_sort(self, mock_page):
         view = self._make_view(mock_page)
         view._on_virtual_sort("close", True)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_did_mount_sets_flag(self, mock_page):
         view = self._make_view(mock_page)
@@ -424,7 +426,7 @@ class TestScreenerView:
         view.run_btn.disabled = True
         view.progress_ring.visible = True
         view._on_task_unlock()
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_task_unlock_no_action_without_page(self, mock_page):
         view = self._make_view(mock_page)
@@ -481,7 +483,10 @@ class TestScreenerView:
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]})
         view.vm.get_current_page_data.return_value = df
         with patch("ui.views.screener_view._build_table_data") as mock_build:
-            mock_build.return_value = ([{"id": "ts_code", "label": "Code", "width": 100}], [{"ts_code": "000001.SZ"}])
+            mock_build.return_value = (
+                [{"id": "ts_code", "label": "Code", "width": 100}],
+                [{"ts_code": "000001.SZ"}],
+            )
             view._render_table_sync()
         assert "000001.SZ" in view._raw_row_lookup
 
@@ -504,10 +509,19 @@ class TestScreenerView:
         view = self._make_view(mock_page)
         view.selected_strategy = "momentum"
         view.vm.get_strategy_params.return_value = [
-            {"name": "threshold", "type": "number", "default": 0.5, "group": "default", "label_key": "param_threshold"},
+            {
+                "name": "threshold",
+                "type": "number",
+                "default": 0.5,
+                "group": "default",
+                "label_key": "param_threshold",
+            },
         ]
         with patch("ui.theme.PARAM_GROUP_ORDER", ["default", "advanced"]):
-            with patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "Basic", "advanced": "Advanced"}):
+            with patch(
+                "ui.theme.DEFAULT_GROUP_LABELS",
+                {"default": "Basic", "advanced": "Advanced"},
+            ):
                 view._render_strategy_params()
         assert len(view.params_container.controls) > 0
 
@@ -524,7 +538,10 @@ class TestScreenerView:
             },
         ]
         with patch("ui.theme.PARAM_GROUP_ORDER", ["default", "advanced"]):
-            with patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "Basic", "advanced": "Advanced"}):
+            with patch(
+                "ui.theme.DEFAULT_GROUP_LABELS",
+                {"default": "Basic", "advanced": "Advanced"},
+            ):
                 view._render_strategy_params()
         assert len(view.params_container.controls) > 0
 
@@ -541,7 +558,10 @@ class TestScreenerView:
             },
         ]
         with patch("ui.theme.PARAM_GROUP_ORDER", ["default", "advanced"]):
-            with patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "Basic", "advanced": "Advanced"}):
+            with patch(
+                "ui.theme.DEFAULT_GROUP_LABELS",
+                {"default": "Basic", "advanced": "Advanced"},
+            ):
                 view._render_strategy_params()
         assert len(view.params_container.controls) > 0
 
@@ -561,7 +581,10 @@ class TestScreenerView:
             },
         ]
         with patch("ui.theme.PARAM_GROUP_ORDER", ["default", "advanced"]):
-            with patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "Basic", "advanced": "Advanced"}):
+            with patch(
+                "ui.theme.DEFAULT_GROUP_LABELS",
+                {"default": "Basic", "advanced": "Advanced"},
+            ):
                 view._render_strategy_params()
         assert len(view.params_container.controls) > 0
 
@@ -579,7 +602,10 @@ class TestScreenerView:
             },
         ]
         with patch("ui.theme.PARAM_GROUP_ORDER", ["default", "advanced"]):
-            with patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "Basic", "advanced": "Advanced"}):
+            with patch(
+                "ui.theme.DEFAULT_GROUP_LABELS",
+                {"default": "Basic", "advanced": "Advanced"},
+            ):
                 view._render_strategy_params()
         assert len(view.params_container.controls) > 0
 
@@ -594,15 +620,33 @@ class TestScreenerView:
                 "group": "core_signal",
                 "label_key": "param_signal",
             },
-            {"name": "risk_param", "type": "number", "default": 2, "group": "risk_control", "label_key": "param_risk"},
+            {
+                "name": "risk_param",
+                "type": "number",
+                "default": 2,
+                "group": "risk_control",
+                "label_key": "param_risk",
+            },
         ]
         with patch(
             "ui.theme.PARAM_GROUP_ORDER",
-            ["core_signal", "volume_confirm", "fundamental", "risk_control", "default", "advanced"],
+            [
+                "core_signal",
+                "volume_confirm",
+                "fundamental",
+                "risk_control",
+                "default",
+                "advanced",
+            ],
         ):
             with patch(
                 "ui.theme.DEFAULT_GROUP_LABELS",
-                {"core_signal": "Signal", "risk_control": "Risk", "default": "Basic", "advanced": "Advanced"},
+                {
+                    "core_signal": "Signal",
+                    "risk_control": "Risk",
+                    "default": "Basic",
+                    "advanced": "Advanced",
+                },
             ):
                 view._render_strategy_params()
         assert len(view.params_container.controls) >= 2
@@ -656,7 +700,7 @@ class TestScreenerView:
     def test_update_status_with_page(self, mock_page):
         view = self._make_view(mock_page)
         view._update_status("Running...", "blue")
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_update_status_without_page(self):
         view = self._make_view(MagicMock())
@@ -666,7 +710,7 @@ class TestScreenerView:
     def test_on_load_more_history(self, mock_page):
         view = self._make_view(mock_page)
         view._on_load_more_history(None)
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_load_more_history_without_page(self):
         view = self._make_view(MagicMock())
@@ -1041,7 +1085,7 @@ class TestScreenerView:
     def test_on_tree_item_click_with_page(self, mock_page):
         view = self._make_view(mock_page)
         view._on_tree_item_click("20240115", run_id="abc12345")
-        mock_page.run_task.assert_called()
+        mock_page.run_task.assert_called_once()
 
     def test_on_tree_item_click_without_page(self):
         view = self._make_view(MagicMock())

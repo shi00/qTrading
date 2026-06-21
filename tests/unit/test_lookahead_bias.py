@@ -2,6 +2,10 @@ import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def test_ai_mixin_uses_context_trade_date_first():

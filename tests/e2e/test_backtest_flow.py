@@ -1,10 +1,10 @@
 import pytest
 
-pytestmark = pytest.mark.e2e
-
 from ui.i18n import I18n
 from tests.e2e.labels import strategy_label
 from tests.e2e.pages import App
+
+pytestmark = pytest.mark.e2e
 
 
 async def test_backtest_flow(e2e_page):

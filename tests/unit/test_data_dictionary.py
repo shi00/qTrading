@@ -1,10 +1,14 @@
 import os
 from unittest.mock import patch, MagicMock
+import pytest
+
 from data.data_dictionary import (
     TABLE_DEFINITIONS,
     COMMON_COLUMNS,
     validate_schema_definitions,
 )
+
+pytestmark = pytest.mark.unit
 
 
 @patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
@@ -213,7 +217,10 @@ class TestValidateSchemaDefinitionsStrict:
 
         import pytest
 
-        with pytest.raises(ValueError, match="The following tables are in TABLE_DEFINITIONS but not in ORM:"):
+        with pytest.raises(
+            ValueError,
+            match="The following tables are in TABLE_DEFINITIONS but not in ORM:",
+        ):
             validate_schema_definitions(strict=True)
 
     @patch("data.persistence.models.Base")

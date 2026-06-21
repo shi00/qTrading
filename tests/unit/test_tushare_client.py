@@ -8,6 +8,8 @@ import requests
 
 from data.external.tushare_client import TushareClient
 
+pytestmark = pytest.mark.unit
+
 
 def _make_client(token="test_token", limit=120):
     """Helper for tests that need independent client creation (e.g. reinit scenarios)."""
@@ -137,7 +139,11 @@ class TestTushareClientHandleApiCall:
         client, mock_ts, mock_ch = tushare_client_mocks
         mock_func = MagicMock(return_value=pd.DataFrame({"a": [1]}))
         loop = asyncio.get_running_loop()
-        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
+        with patch.object(
+            loop,
+            "run_in_executor",
+            new=AsyncMock(return_value=pd.DataFrame({"a": [1]})),
+        ):
             result = await client._handle_api_call(mock_func)
             assert result is not None
 
@@ -541,7 +547,8 @@ class TestTushareClientExecutorTimeout:
         client, mock_ts, mock_ch = tushare_client_mocks
         mock_func = MagicMock(return_value=pd.DataFrame({"a": [1]}))
         with patch(
-            "data.external.tushare_client.asyncio.wait_for", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+            "data.external.tushare_client.asyncio.wait_for",
+            new=AsyncMock(return_value=pd.DataFrame({"a": [1]})),
         ) as mock_wait:
             result = await client._handle_api_call(mock_func)
             assert result is not None
@@ -864,39 +871,158 @@ class TestTushareClientSimpleApiMethods:
         test_cases = [
             ("get_stock_basic_all", {}, {"list_status": ""}, False),
             ("get_stock_list", {}, {"list_status": "L"}, False),
-            ("get_daily_basic", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
+            (
+                "get_daily_basic",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
             ("get_income", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
             ("get_cashflow", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_balancesheet", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_top_list", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_top_inst", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_hk_hold", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_moneyflow", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_block_trade", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_fina_indicator", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_disclosure_date", {"date": "20240614"}, {"actual_date": "20240614"}, False),
+            (
+                "get_balancesheet",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
+            (
+                "get_top_list",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_top_inst",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_hk_hold",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_moneyflow",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_block_trade",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_fina_indicator",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
+            (
+                "get_disclosure_date",
+                {"date": "20240614"},
+                {"actual_date": "20240614"},
+                False,
+            ),
             ("get_concept_list", {}, {"src": "ts"}, False),
             ("get_concept_detail_by_id", {"concept_id": "123"}, {"id": "123"}, False),
-            ("get_concept_detail", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_index_daily", {"ts_code": "000001.SH"}, {"ts_code": "000001.SH"}, False),
-            ("get_index_dailybasic", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_limit_list", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_suspend_d", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_margin_detail", {"trade_date": "20240614"}, {"trade_date": "20240614"}, False),
-            ("get_fina_audit", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
+            (
+                "get_concept_detail",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
+            (
+                "get_index_daily",
+                {"ts_code": "000001.SH"},
+                {"ts_code": "000001.SH"},
+                False,
+            ),
+            (
+                "get_index_dailybasic",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_limit_list",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_suspend_d",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_margin_detail",
+                {"trade_date": "20240614"},
+                {"trade_date": "20240614"},
+                False,
+            ),
+            (
+                "get_fina_audit",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
             ("get_forecast", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_fina_mainbz", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_pledge_stat", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, True),
-            ("get_repurchase", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
+            (
+                "get_fina_mainbz",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
+            (
+                "get_pledge_stat",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                True,
+            ),
+            (
+                "get_repurchase",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
             ("get_dividend", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_shibor", {"start_date": "20240601"}, {"start_date": "20240601"}, False),
-            ("get_top10_holders", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, False),
-            ("get_index_weight", {"index_code": "000001.SH"}, {"index_code": "000001.SH"}, False),
-            ("get_stk_holdernumber", {"ts_code": "000001.SZ"}, {"ts_code": "000001.SZ"}, True),
+            (
+                "get_shibor",
+                {"start_date": "20240601"},
+                {"start_date": "20240601"},
+                False,
+            ),
+            (
+                "get_top10_holders",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                False,
+            ),
+            (
+                "get_index_weight",
+                {"index_code": "000001.SH"},
+                {"index_code": "000001.SH"},
+                False,
+            ),
+            (
+                "get_stk_holdernumber",
+                {"ts_code": "000001.SZ"},
+                {"ts_code": "000001.SZ"},
+                True,
+            ),
         ]
         for method_name, call_kwargs, expected_kv, uses_paginated in test_cases:
             mock_attr = "_handle_api_call_paginated" if uses_paginated else "_handle_api_call"
-            setattr(client, mock_attr, AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+            setattr(
+                client,
+                mock_attr,
+                AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})),
+            )
             method = getattr(client, method_name)
             await method(**call_kwargs)
             mock = getattr(client, mock_attr)

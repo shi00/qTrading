@@ -1,7 +1,12 @@
 import pytest
 import asyncio
 
-from utils.async_utils import gather_return_exceptions_propagating_cancel, gather_for_shutdown_cleanup
+from utils.async_utils import (
+    gather_return_exceptions_propagating_cancel,
+    gather_for_shutdown_cleanup,
+)
+
+pytestmark = pytest.mark.unit
 
 
 class TestGatherReturnExceptionsPropagatingCancel:

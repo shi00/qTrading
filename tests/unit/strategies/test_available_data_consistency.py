@@ -6,9 +6,15 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 import pytest
 from core.i18n import I18n
-from services.ai_service import AIService, AVAILABLE_DATA_LABELS, build_available_data_block
+from services.ai_service import (
+    AIService,
+    AVAILABLE_DATA_LABELS,
+    build_available_data_block,
+)
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADERS
+
+pytestmark = pytest.mark.unit
 
 # v5→修订点5：命名常量，用于辅助扫描编号式/项目符号式数据枚举
 ENUMERATION_PATTERN = re.compile(
@@ -290,7 +296,13 @@ class TestInvariant3BuilderLabelEquivalence:
             pd.DataFrame({"ts_code": ["000001.SZ"], "bz_item": ["白酒"], "bz_sales": [1e9]})
         )
         mixin.cache.get_dividend = _async_return(
-            pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20231231"], "div_proc": ["实施"]})
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20231231"],
+                    "div_proc": ["实施"],
+                }
+            )
         )
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [15.0]}))
         mixin.cache.get_top10_holders = _async_return(
@@ -315,7 +327,7 @@ class TestInvariant3BuilderLabelEquivalence:
         )
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result, _ = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -363,12 +375,13 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result, valid = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
         )
         assert result == I18n.get("ai_no_auxiliary_data")
+        assert valid is False
         assert labels == []
 
     @pytest.mark.asyncio
@@ -378,12 +391,13 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_fina_audit = _async_raise(RuntimeError("DB error"))
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result, valid = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
         )
         assert result == I18n.get("ai_no_auxiliary_data")
+        assert valid is False
         assert labels == []
 
     @pytest.mark.asyncio
@@ -403,16 +417,23 @@ class TestInvariant3BuilderLabelEquivalence:
             pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": [None], "hold_ratio": [None]})
         )
         mixin.cache.get_stk_holdernumber = _async_return(
-            pd.DataFrame({"ts_code": ["000001.SZ"], "holder_num": [None], "holder_num_ratio": [None]})
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "holder_num": [None],
+                    "holder_num_ratio": [None],
+                }
+            )
         )
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result, valid = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
         )
         assert result == I18n.get("ai_no_auxiliary_data")
+        assert valid is False
         assert labels == []
 
     def test_capital_flow_has_data_registers_labels(self):
@@ -555,7 +576,10 @@ class TestInvariant3BuilderLabelEquivalence:
     def test_history_text_exception_clears_labels(self):
         """异常路径清空 labels_out。"""
         labels: list[str] = ["ai_label_kline"]  # 模拟部分注册后被异常清空
-        with patch("strategies.ai_mixin.TechnicalAnalysis._get_qfq_df", side_effect=RuntimeError("QFQ error")):
+        with patch(
+            "strategies.ai_mixin.TechnicalAnalysis._get_qfq_df",
+            side_effect=RuntimeError("QFQ error"),
+        ):
             result = AIStrategyMixin._build_history_text(
                 _make_minimal_history_df(),
                 ts_code="000001.SZ",
@@ -654,7 +678,14 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         mock_client.analyze_stock = AsyncMock(return_value={"recommendation": "neutral", "score": 50})
 
         await mixin._mixin_analyze_single(
-            {"ts_code": "000001.SZ", "pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6, "name": "测试"},
+            {
+                "ts_code": "000001.SZ",
+                "pe_ttm": 10,
+                "pb": 1,
+                "roe": 5,
+                "total_mv": 1e6,
+                "name": "测试",
+            },
             dp,
             mock_client,
             prefetched,
@@ -701,7 +732,14 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         mock_client.analyze_stock = AsyncMock(return_value={"recommendation": "neutral", "score": 50})
 
         await mixin._mixin_analyze_single(
-            {"ts_code": "000001.SZ", "pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6, "name": "测试"},
+            {
+                "ts_code": "000001.SZ",
+                "pe_ttm": 10,
+                "pb": 1,
+                "roe": 5,
+                "total_mv": 1e6,
+                "name": "测试",
+            },
             dp,
             mock_client,
             prefetched,
@@ -743,7 +781,13 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
             pd.DataFrame({"ts_code": ["000001.SZ"], "bz_item": ["白酒"], "bz_sales": [1e9]})
         )
         mixin.cache.get_dividend = _async_return(
-            pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20231231"], "div_proc": ["实施"]})
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20231231"],
+                    "div_proc": ["实施"],
+                }
+            )
         )
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [15.0]}))
         mixin.cache.get_top10_holders = _async_return(
@@ -779,7 +823,14 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         mock_client.analyze_stock = AsyncMock(return_value={"recommendation": "neutral", "score": 50})
 
         await mixin._mixin_analyze_single(
-            {"ts_code": "000001.SZ", "pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6, "name": "测试"},
+            {
+                "ts_code": "000001.SZ",
+                "pe_ttm": 10,
+                "pb": 1,
+                "roe": 5,
+                "total_mv": 1e6,
+                "name": "测试",
+            },
             dp,
             mock_client,
             prefetched,
@@ -812,7 +863,14 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         mock_client.analyze_stock = AsyncMock(return_value={"recommendation": "neutral", "score": 50})
 
         await mixin._mixin_analyze_single(
-            {"ts_code": "000001.SZ", "pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6, "name": "测试"},
+            {
+                "ts_code": "000001.SZ",
+                "pe_ttm": 10,
+                "pb": 1,
+                "roe": 5,
+                "total_mv": 1e6,
+                "name": "测试",
+            },
             dp,
             mock_client,
             prefetched,
@@ -854,7 +912,14 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
             }
         )
         await mixin._mixin_analyze_single(
-            {"ts_code": "000001.SZ", "pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6, "name": "测试"},
+            {
+                "ts_code": "000001.SZ",
+                "pe_ttm": 10,
+                "pb": 1,
+                "roe": 5,
+                "total_mv": 1e6,
+                "name": "测试",
+            },
             dp,
             mock_client,
             prefetched,
@@ -884,7 +949,14 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         mock_client.analyze_stock = AsyncMock(return_value={"recommendation": "neutral", "score": 50})
 
         await mixin._mixin_analyze_single(
-            {"ts_code": "000001.SZ", "pe_ttm": 10, "pb": 1, "roe": 5, "total_mv": 1e6, "name": "测试"},
+            {
+                "ts_code": "000001.SZ",
+                "pe_ttm": 10,
+                "pb": 1,
+                "roe": 5,
+                "total_mv": 1e6,
+                "name": "测试",
+            },
             dp,
             mock_client,
             prefetched,
@@ -905,7 +977,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -936,7 +1012,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -969,7 +1049,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -998,7 +1082,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1040,7 +1128,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "_chat_completion_with_failover", new_callable=AsyncMock) as mock_llm,
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1078,7 +1170,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1111,7 +1207,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1153,7 +1253,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
             mock_build.return_value = "<available_data>test</available_data>"
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1176,7 +1280,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "_chat_completion_with_failover", new_callable=AsyncMock) as mock_llm,
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1216,7 +1324,11 @@ class TestInvariant6AnalyzeStockLabelAssembly:
             patch.object(AIService, "_chat_completion_with_failover", new_callable=AsyncMock) as mock_llm,
             patch.object(AIService, "is_cloud_available", return_value=True),
         ):
-            mock_llm.return_value = {"recommendation": "neutral", "score": 50, "reasoning": "ok"}
+            mock_llm.return_value = {
+                "recommendation": "neutral",
+                "score": 50,
+                "reasoning": "ok",
+            }
 
             service = AIService.__new__(AIService)
             service._initialized = True
@@ -1246,7 +1358,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result, _ = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -1266,7 +1378,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result = await mixin._build_auxiliary_data_text(
+        result, _ = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,

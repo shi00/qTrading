@@ -9,6 +9,8 @@ from core.i18n import I18n
 from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import safe_float
 
+pytestmark = pytest.mark.unit
+
 
 class ConcreteStrategy(AIStrategyMixin):
     key = "test_strategy"
@@ -469,7 +471,11 @@ class TestRunAiAnalysis:
         dp.cache.get_concepts = AsyncMock(return_value={})
         context = {"data_processor": dp}
         candidates = pd.DataFrame(
-            {"ts_code": ["000001.SZ", "000002.SZ"], "name": ["平安银行", "万科A"], "close": [10.0, 15.0]}
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "name": ["平安银行", "万科A"],
+                "close": [10.0, 15.0],
+            }
         )
         with patch("strategies.ai_mixin.AIService") as mock_ai:
             mock_ai_instance = MagicMock()
@@ -501,7 +507,10 @@ class TestRunAiAnalysis:
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
             mock_ai.return_value = mock_ai_instance
-            with patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=2):
+            with patch(
+                "strategies.ai_mixin.ConfigHandler.get_ai_max_candidates",
+                return_value=2,
+            ):
                 with patch.object(s, "_prefetch_strategy_specific", new_callable=AsyncMock) as mock_prefetch:
                     mock_prefetch.return_value = PreFetchedContext()
                     result = await s.run_ai_analysis(candidates, context)
@@ -1001,8 +1010,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "无辅助数据" in result
+        assert valid is False
 
     @pytest.mark.asyncio
     async def test_with_audit(self):
@@ -1014,8 +1024,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "审计意见" in result
+        assert valid is True
 
     @pytest.mark.asyncio
     async def test_with_pledge_high(self):
@@ -1027,9 +1038,10 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"pledge_ratio": [45.0]}))
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "质押比例" in result
         assert "⚠️" in result
+        assert valid is True
 
     @pytest.mark.asyncio
     async def test_with_holdernumber(self):
@@ -1048,9 +1060,10 @@ class TestBuildAuxiliaryDataText:
                 }
             )
         )
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "股东人数" in result
         assert "筹码集中" in result
+        assert valid is True
 
     @pytest.mark.asyncio
     async def test_with_dividend(self):
@@ -1069,16 +1082,18 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "分红" in result
+        assert valid is True
 
     @pytest.mark.asyncio
     async def test_exception(self):
         s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(side_effect=Exception("DB error"))
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert isinstance(result, str)
+        assert valid is False
 
     @pytest.mark.asyncio
     async def test_empty_all_data(self):
@@ -1090,8 +1105,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame())
         cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result == "无辅助数据"
+        assert valid is False
 
     @pytest.mark.asyncio
     async def test_high_pledge_warning(self):
@@ -1103,8 +1119,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"pledge_ratio": [50.0]}))
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "质押比例较高" in result or result == "无辅助数据"
+        assert valid is True or valid is False
 
     @pytest.mark.asyncio
     async def test_holder_number_without_ratio(self):
@@ -1125,16 +1142,23 @@ class TestBuildAuxiliaryDataText:
                 }
             )
         )
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "股东人数" in result
         assert "500,000" in result
         assert "筹码集中" not in result
         assert "筹码分散" not in result
+        assert valid is True
 
     @pytest.mark.asyncio
     async def test_with_prefetched(self):
         s = ConcreteStrategy()
         cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(return_value=None)
+        cache.get_fina_mainbz = AsyncMock(return_value=None)
+        cache.get_dividend = AsyncMock(return_value=None)
+        cache.get_pledge_stat = AsyncMock(return_value=None)
+        cache.get_top10_holders = AsyncMock(return_value=None)
+        cache.get_stk_holdernumber = AsyncMock(return_value=None)
         prefetched = {
             "000001.SZ": {
                 "audit": pd.DataFrame({"audit_result": ["标准无保留意见"]}),
@@ -1149,8 +1173,9 @@ class TestBuildAuxiliaryDataText:
                 ),
             }
         }
-        result = await s._build_auxiliary_data_text("000001.SZ", cache, prefetched)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, prefetched)
         assert result is not None
+        assert valid is True
 
     @pytest.mark.asyncio
     async def test_passes_as_of_date_to_all_cache_calls(self):
@@ -1206,8 +1231,9 @@ class TestBuildAuxiliaryDataText:
             }
         )
         cache.get_top10_holders = AsyncMock(return_value=holders_df)
-        result = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "股东B" in result
+        assert valid is True
 
 
 class TestBuildMacroContext:
@@ -1488,8 +1514,14 @@ class TestRunAiAnalysisConcurrency:
 
         with (
             patch("strategies.ai_mixin.AIService") as mock_ai,
-            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=3),
-            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_candidates", return_value=100),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis",
+                return_value=3,
+            ),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_ai_max_candidates",
+                return_value=100,
+            ),
         ):
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
@@ -1515,7 +1547,10 @@ class TestRunAiAnalysisConcurrency:
 
         with (
             patch("strategies.ai_mixin.AIService") as mock_ai,
-            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis",
+                return_value=2,
+            ),
         ):
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
@@ -1536,7 +1571,10 @@ class TestRunAiAnalysisConcurrency:
 
         with (
             patch("strategies.ai_mixin.AIService") as mock_ai,
-            patch("strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis", return_value=2),
+            patch(
+                "strategies.ai_mixin.ConfigHandler.get_ai_max_concurrent_analysis",
+                return_value=2,
+            ),
         ):
             mock_ai_instance = MagicMock()
             mock_ai_instance.is_cloud_available.return_value = True
@@ -1613,22 +1651,39 @@ class TestBuilderLabelsOut:
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "bz_item": ["白酒"], "bz_sales": [1e9]})
         )
         cache.get_dividend = AsyncMock(
-            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20231231"], "div_proc": ["实施"]})
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20231231"],
+                    "div_proc": ["实施"],
+                }
+            )
         )
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [15.0]}))
         cache.get_top10_holders = AsyncMock(
             return_value=pd.DataFrame(
-                {"ts_code": ["000001.SZ"], "end_date": ["20231231"], "holder_name": ["某公司"], "hold_ratio": [30.0]}
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20231231"],
+                    "holder_name": ["某公司"],
+                    "hold_ratio": [30.0],
+                }
             )
         )
         cache.get_stk_holdernumber = AsyncMock(
             return_value=pd.DataFrame(
-                {"ts_code": ["000001.SZ"], "ann_date": ["20240101"], "holder_num": [100000], "holder_num_ratio": [-3.5]}
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": ["20240101"],
+                    "holder_num": [100000],
+                    "holder_num_ratio": [-3.5],
+                }
             )
         )
         labels: list[str] = []
-        result = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result  # 非空
+        assert valid is True
         assert len(labels) == 6  # 6 个子项全部注册
 
     @pytest.mark.asyncio
@@ -1642,8 +1697,9 @@ class TestBuilderLabelsOut:
         cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
-        await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert labels == []
+        assert valid is False
 
     @pytest.mark.asyncio
     async def test_auxiliary_data_labels_out_exception(self):
@@ -1651,8 +1707,9 @@ class TestBuilderLabelsOut:
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(side_effect=RuntimeError("DB error"))
         labels: list[str] = []
-        await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert labels == []
+        assert valid is False
 
     def test_capital_flow_labels_out_with_data(self):
         mf_df = pd.DataFrame(
@@ -1761,3 +1818,91 @@ class TestBuilderLabelsOut:
             result = AIStrategyMixin._build_financials_text({"pe_ttm": 10}, labels_out=labels)
         assert result == I18n.get("ai_financial_insufficient")
         assert labels == []
+
+
+class TestAuxiliaryDataLocaleIndependentSentinel:
+    """Verify sentinel detection works regardless of current locale (AI-C1)."""
+
+    @pytest.mark.asyncio
+    async def test_sentinel_detected_in_zh_cn(self):
+        original_locale = I18n.current_locale()
+        try:
+            I18n.set_locale("zh_CN")
+            s = ConcreteStrategy()
+            cache = MagicMock()
+            cache.get_fina_audit = AsyncMock(return_value=None)
+            cache.get_fina_mainbz = AsyncMock(return_value=None)
+            cache.get_dividend = AsyncMock(return_value=None)
+            cache.get_pledge_stat = AsyncMock(return_value=None)
+            cache.get_top10_holders = AsyncMock(return_value=None)
+            cache.get_stk_holdernumber = AsyncMock(return_value=None)
+            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert valid is False
+            assert result == I18n.get("ai_no_auxiliary_data")
+        finally:
+            I18n.set_locale(original_locale)
+
+    @pytest.mark.asyncio
+    async def test_sentinel_detected_in_en_us(self):
+        original_locale = I18n.current_locale()
+        try:
+            I18n.set_locale("en_US")
+            s = ConcreteStrategy()
+            cache = MagicMock()
+            cache.get_fina_audit = AsyncMock(return_value=None)
+            cache.get_fina_mainbz = AsyncMock(return_value=None)
+            cache.get_dividend = AsyncMock(return_value=None)
+            cache.get_pledge_stat = AsyncMock(return_value=None)
+            cache.get_top10_holders = AsyncMock(return_value=None)
+            cache.get_stk_holdernumber = AsyncMock(return_value=None)
+            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert valid is False
+            assert result == I18n.get("ai_no_auxiliary_data")
+        finally:
+            I18n.set_locale(original_locale)
+
+    @pytest.mark.asyncio
+    async def test_valid_data_detected_in_zh_cn(self):
+        original_locale = I18n.current_locale()
+        try:
+            I18n.set_locale("zh_CN")
+            s = ConcreteStrategy()
+            cache = MagicMock()
+            cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame({"audit_result": ["标准无保留意见"]}))
+            cache.get_fina_mainbz = AsyncMock(return_value=None)
+            cache.get_dividend = AsyncMock(return_value=None)
+            cache.get_pledge_stat = AsyncMock(return_value=None)
+            cache.get_top10_holders = AsyncMock(return_value=None)
+            cache.get_stk_holdernumber = AsyncMock(return_value=None)
+            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert valid is True
+            assert result != I18n.get("ai_no_auxiliary_data")
+        finally:
+            I18n.set_locale(original_locale)
+
+    @pytest.mark.asyncio
+    async def test_valid_data_detected_in_en_us(self):
+        original_locale = I18n.current_locale()
+        try:
+            I18n.set_locale("en_US")
+            s = ConcreteStrategy()
+            cache = MagicMock()
+            cache.get_fina_audit = AsyncMock(return_value=pd.DataFrame({"audit_result": ["Unqualified opinion"]}))
+            cache.get_fina_mainbz = AsyncMock(return_value=None)
+            cache.get_dividend = AsyncMock(return_value=None)
+            cache.get_pledge_stat = AsyncMock(return_value=None)
+            cache.get_top10_holders = AsyncMock(return_value=None)
+            cache.get_stk_holdernumber = AsyncMock(return_value=None)
+            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert valid is True
+            assert result != I18n.get("ai_no_auxiliary_data")
+        finally:
+            I18n.set_locale(original_locale)
+
+    @pytest.mark.asyncio
+    async def test_sentinel_text_differs_across_locales(self):
+        """Confirm the sentinel text itself changes with locale, proving the
+        old string-comparison approach would break on locale switch."""
+        zh_text = I18n.get("ai_no_auxiliary_data", locale="zh_CN")
+        en_text = I18n.get("ai_no_auxiliary_data", locale="en_US")
+        assert zh_text != en_text

@@ -7,6 +7,8 @@ import pytest
 from ui.viewmodels.home_view_model import HomeViewModel
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_processor():
@@ -569,7 +571,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
         self.mock_rm.save_results = AsyncMock()
 
@@ -586,7 +591,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", save_results=False, strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -628,7 +636,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -644,7 +655,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -659,7 +673,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -673,7 +690,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -689,7 +709,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -704,7 +727,10 @@ class TestScreenerViewModelRunStrategyExecution:
         captured_factory = await self._capture_and_execute("momentum", strategy=strategy)
 
         self.mock_dp.get_strategy_data = AsyncMock(
-            return_value={"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return_value={
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
         )
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -730,7 +756,10 @@ class TestScreenerViewModelRunStrategyExecution:
                 "trade_date": "2026-05-16",
                 "_diagnostics": {
                     "strategy_ready": False,
-                    "table_status": {"table_a": {"ready": False}, "table_b": {"ready": True}},
+                    "table_status": {
+                        "table_a": {"ready": False},
+                        "table_b": {"ready": True},
+                    },
                 },
             }
         )
@@ -752,7 +781,10 @@ class TestScreenerViewModelRunStrategyExecution:
             call_count += 1
             if call_count == 1:
                 return None
-            return {"screening_data": pd.DataFrame({"a": [1]}), "trade_date": "2026-05-16"}
+            return {
+                "screening_data": pd.DataFrame({"a": [1]}),
+                "trade_date": "2026-05-16",
+            }
 
         self.mock_dp.get_strategy_data = _get_data
         self.mock_dp.init_data = AsyncMock()
@@ -874,7 +906,10 @@ class TestScreenerViewModelFlushAiBuffer:
         screener_vm._ai_buffer = [{"name": "Stock1"}]
         screener_vm._flush_pending = True
 
-        with patch("ui.viewmodels.screener_view_model.pd.DataFrame", side_effect=Exception("boom")):
+        with patch(
+            "ui.viewmodels.screener_view_model.pd.DataFrame",
+            side_effect=Exception("boom"),
+        ):
             await screener_vm._flush_ai_buffer()
 
         assert screener_vm._flush_pending is False

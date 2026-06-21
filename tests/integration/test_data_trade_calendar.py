@@ -19,6 +19,10 @@ import pandas as pd
 
 from data.domain_services.trade_calendar_service import TradeCalendarService
 from tests.integration.test_infra_base import TestDatabaseBase
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestTradeCalendarService(TestDatabaseBase):

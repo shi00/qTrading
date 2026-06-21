@@ -1,5 +1,9 @@
 import sys
 from unittest.mock import MagicMock, patch
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def test_initialization_order():

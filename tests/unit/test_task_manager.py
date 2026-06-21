@@ -10,7 +10,7 @@ from services.task_manager import TaskManager, AppTask, TaskStatus, TERMINAL_STA
 from utils.time_utils import get_now
 
 # P2-5: 文件含真实 asyncio.sleep（含 10s/5s 长睡眠），标注 slow 以便 CI 分轨运行
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.unit, pytest.mark.slow]
 
 
 @pytest.fixture(autouse=True)
@@ -809,7 +809,10 @@ class TestTaskManagerInitDb:
         mock_cache.read_db = AsyncMock(return_value=pd.DataFrame())
         with (
             patch("services.task_manager.CacheManager", create=True) as mock_cm_cls,
-            patch.dict("sys.modules", {"data.cache.cache_manager": MagicMock(CacheManager=mock_cm_cls)}),
+            patch.dict(
+                "sys.modules",
+                {"data.cache.cache_manager": MagicMock(CacheManager=mock_cm_cls)},
+            ),
         ):
             mock_cm_cls.return_value = mock_cache
             mock_cm_cls._instance = mock_cache
@@ -966,7 +969,10 @@ class TestTaskManagerRegisterAndRun:
         mgr._tasks[t.id] = t
         with (
             patch.object(mgr, "_notify_subscribers"),
-            patch("asyncio.create_task", side_effect=lambda c, *args, **kwargs: [c.close(), MagicMock()][1]),
+            patch(
+                "asyncio.create_task",
+                side_effect=lambda c, *args, **kwargs: [c.close(), MagicMock()][1],
+            ),
         ):
             mgr._register_and_run(t)
         # _cancel_event is now created lazily in _task_runner, not in _register_and_run

@@ -6,6 +6,10 @@ from unittest.mock import patch
 from logging.handlers import RotatingFileHandler
 
 from utils.logger import get_logger, setup_logging, update_log_level
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestLogger(unittest.TestCase):
@@ -168,7 +172,10 @@ class TestSetupLoggingDegradation:
             patch("os.makedirs", side_effect=PermissionError("no access")),
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
         ):
             logger = setup_logging("degradation_test")
         assert logger is not None
@@ -179,9 +186,15 @@ class TestSetupLoggingDegradation:
         log_dir = str(tmp_path / "test_logs")
         with (
             patch("utils.logger.LOG_DIR", log_dir),
-            patch("utils.config_handler.ConfigHandler.get_log_level", side_effect=ValueError("bad config")),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_level",
+                side_effect=ValueError("bad config"),
+            ),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
         ):
             logger = setup_logging("level_fallback_test")
         assert logger.level == logging.INFO
@@ -191,8 +204,14 @@ class TestSetupLoggingDegradation:
         with (
             patch("utils.logger.LOG_DIR", log_dir),
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
-            patch("utils.config_handler.ConfigHandler.get_log_max_mb", side_effect=OSError("unreadable")),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", side_effect=OSError("unreadable")),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_max_mb",
+                side_effect=OSError("unreadable"),
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                side_effect=OSError("unreadable"),
+            ),
         ):
             logger = setup_logging("rotation_fallback_test")
         file_handlers = [
@@ -211,7 +230,10 @@ class TestSetupLoggingDegradation:
             patch("utils.logger.LOG_DIR", str(log_dir)),
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
         ):
             setup_logging("no_rollover_test")
 
@@ -235,7 +257,10 @@ class TestSetupLoggingDegradation:
             patch("utils.logger.LOG_DIR", log_dir),
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
             patch("utils.logger.RotatingFileHandler", FailingRotatingFileHandler),
         ):
             setup_logging("error_log_stderr_test")
@@ -357,7 +382,10 @@ class TestLogFormatSelection:
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
             patch("utils.config_handler.ConfigHandler.get_log_format", return_value="json"),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
         ):
             logger = setup_logging("json_format_test")
 
@@ -376,7 +404,10 @@ class TestLogFormatSelection:
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
             patch("utils.config_handler.ConfigHandler.get_log_format", return_value="text"),
             patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
-            patch("utils.config_handler.ConfigHandler.get_log_backup_count", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
         ):
             logger = setup_logging("text_format_test")
 

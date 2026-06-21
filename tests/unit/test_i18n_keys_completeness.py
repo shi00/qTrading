@@ -3,6 +3,10 @@ import json
 import re
 import unittest
 from pathlib import Path
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 _CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
@@ -108,7 +112,12 @@ class TestI18nKeysCompleteness(unittest.TestCase):
         zh_keys = self._load_keys("zh_CN")
         en_keys = self._load_keys("en_US")
 
-        deprecated_keys = {"col_qfq_open", "col_qfq_high", "col_qfq_low", "col_qfq_close"}
+        deprecated_keys = {
+            "col_qfq_open",
+            "col_qfq_high",
+            "col_qfq_low",
+            "col_qfq_close",
+        }
 
         remaining_zh = deprecated_keys & zh_keys
         remaining_en = deprecated_keys & en_keys

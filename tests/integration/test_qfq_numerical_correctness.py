@@ -4,6 +4,10 @@ import pandas as pd
 import numpy as np
 
 from utils.technical_analysis import TechnicalAnalysis
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestQfqNumericalCorrectness(unittest.TestCase):

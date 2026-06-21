@@ -12,13 +12,18 @@ import pytest
 
 from tests.conftest import singleton_state
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def task_manager():
     from services.task_manager import TaskManager
 
     TaskManager._reset_singleton()
-    with patch("services.task_manager.ConfigHandler") as mock_ch, patch("services.task_manager.ThreadPoolManager"):
+    with (
+        patch("services.task_manager.ConfigHandler") as mock_ch,
+        patch("services.task_manager.ThreadPoolManager"),
+    ):
         mock_ch.get_max_concurrent_tasks.return_value = 2
         tm = TaskManager()
         yield tm
@@ -78,7 +83,10 @@ class TestTaskManagerSemaphoreReset:
         from services.task_manager import TaskManager
 
         TaskManager._reset_singleton()
-        with patch("services.task_manager.ConfigHandler") as mock_ch, patch("services.task_manager.ThreadPoolManager"):
+        with (
+            patch("services.task_manager.ConfigHandler") as mock_ch,
+            patch("services.task_manager.ThreadPoolManager"),
+        ):
             mock_ch.get_max_concurrent_tasks.return_value = 3
             tm = TaskManager()
             sem = tm._get_semaphore()

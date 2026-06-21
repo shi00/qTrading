@@ -4,6 +4,10 @@ from unittest.mock import MagicMock, patch
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestHomeViewCleanup(unittest.TestCase):

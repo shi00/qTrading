@@ -33,6 +33,8 @@ from strategies.prompt_validator import (
     validate_prompt_declarations,
 )
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def mock_engine():
@@ -1639,7 +1641,10 @@ class TestConsecutiveFailuresCircuitBreaker:
         from data.sync.historical import HistoricalSyncStrategy
 
         # 串行执行，确保熔断在批次内触发
-        monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_max_concurrent_heavy", lambda: 1)
+        monkeypatch.setattr(
+            "data.sync.historical.ConfigHandler.get_sync_max_concurrent_heavy",
+            lambda: 1,
+        )
         # 禁用重试，避免 asyncio.sleep 拖慢测试
         monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_retry_count", lambda: 0)
 
@@ -1668,7 +1673,10 @@ class TestConsecutiveFailuresCircuitBreaker:
         """
         from data.sync.historical import HistoricalSyncStrategy
 
-        monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_max_concurrent_heavy", lambda: 1)
+        monkeypatch.setattr(
+            "data.sync.historical.ConfigHandler.get_sync_max_concurrent_heavy",
+            lambda: 1,
+        )
         # 禁用重试，避免 asyncio.sleep 拖慢测试
         monkeypatch.setattr("data.sync.historical.ConfigHandler.get_sync_retry_count", lambda: 0)
 

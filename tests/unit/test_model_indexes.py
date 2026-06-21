@@ -3,6 +3,8 @@ import sqlalchemy as sa
 
 from data.persistence.models import TaskHistory, MarketNews
 
+pytestmark = pytest.mark.unit
+
 
 class TestTaskHistoryIndexes:
     """DB-P1-7: Verify task_history has indexes on frequently queried columns."""

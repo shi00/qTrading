@@ -4,6 +4,10 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ui.views.screener_view import ScreenerView
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestDeepLinking(unittest.TestCase):

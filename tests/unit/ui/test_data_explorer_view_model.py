@@ -13,6 +13,7 @@ import pytest
 
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
 
+pytestmark = pytest.mark.unit
 
 # --- Fixtures ---
 
@@ -222,7 +223,14 @@ class TestLoadSchema:
         ]
         mock_db.get_table_schema.return_value = schema
         await vm.load_table_schema("stock_basic")
-        assert vm.numeric_cols == {"c_int", "c_real", "c_float", "c_double", "c_numeric", "c_decimal"}
+        assert vm.numeric_cols == {
+            "c_int",
+            "c_real",
+            "c_float",
+            "c_double",
+            "c_numeric",
+            "c_decimal",
+        }
 
     async def test_db_error_sets_error_message(self, vm, mock_db):
         mock_db.get_table_schema.side_effect = RuntimeError("Schema error")

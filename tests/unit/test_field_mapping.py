@@ -16,6 +16,10 @@ from data.persistence.models import (
     SuspendD,
     TopList,
 )
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestNoUnnecessaryFieldMappings:

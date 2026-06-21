@@ -2,6 +2,10 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 def _load_migration_module():

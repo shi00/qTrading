@@ -5,6 +5,8 @@ import sqlalchemy as sa
 
 from data.persistence.database_manager import DatabaseManager
 
+pytestmark = pytest.mark.unit
+
 
 def _make_dm():
     dm = DatabaseManager()
@@ -99,7 +101,10 @@ class TestGetAllTables:
 
     def test_exception(self):
         dm = _make_dm()
-        with patch("data.persistence.database_manager.sa.inspect", side_effect=Exception("error")):
+        with patch(
+            "data.persistence.database_manager.sa.inspect",
+            side_effect=Exception("error"),
+        ):
             result = dm.get_all_tables()
             assert result == []
 
@@ -130,7 +135,10 @@ class TestGetTableSchema:
         dm = _make_dm()
         with (
             patch.object(dm, "_validate_table_name"),
-            patch("data.persistence.database_manager.sa.inspect", side_effect=Exception("error")),
+            patch(
+                "data.persistence.database_manager.sa.inspect",
+                side_effect=Exception("error"),
+            ),
         ):
             result = dm.get_table_schema("stock_basic")
             assert result == []
@@ -437,7 +445,10 @@ class TestExecuteSql:
 
     def test_sql_parse_error(self):
         dm = _make_dm()
-        with patch("data.persistence.database_manager.sqlparse.parse", side_effect=Exception("parse error")):
+        with patch(
+            "data.persistence.database_manager.sqlparse.parse",
+            side_effect=Exception("parse error"),
+        ):
             result = dm.execute_sql("SELECT 1")
             assert result["success"] is False
             assert "Parse" in result["error"]

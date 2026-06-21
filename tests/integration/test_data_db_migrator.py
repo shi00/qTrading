@@ -22,6 +22,8 @@ from data.persistence.db_url_override import override_db_url
 from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
 from tests.conftest import singleton_state as _singleton_state_ctx
 
+pytestmark = pytest.mark.integration
+
 
 async def _create_isolated_db(params: dict, db_name: str) -> None:
     """Create an isolated PostgreSQL database."""

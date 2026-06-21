@@ -14,6 +14,8 @@ from data.persistence.review_manager import ReviewManager
 from strategies.ai_strategy import AISelectionStrategy
 from utils.time_utils import get_now
 
+pytestmark = pytest.mark.integration
+
 # ==============================================================================
 # FIXTURES
 # ==============================================================================
@@ -366,7 +368,8 @@ class TestBacktestIntegration:
             patch("services.ai_service.AIService.is_cloud_available", return_value=True),
             patch("services.ai_service.AIService.analyze_stock", new_callable=AsyncMock) as mock_analyze,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
             ) as mock_lc,
         ):
             mock_lc.return_value = "<learning>test</learning>"
@@ -396,8 +399,14 @@ class TestBacktestIntegration:
         with (
             patch("services.ai_service.AIService.is_cloud_available", return_value=True),
             patch("services.ai_service.AIService.analyze_stock", new_callable=AsyncMock) as mock_analyze,
-            patch("data.external.news_fetcher.NewsFetcher.get_stock_news", new_callable=AsyncMock) as mock_get_news,
-            patch("data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock),
+            patch(
+                "data.external.news_fetcher.NewsFetcher.get_stock_news",
+                new_callable=AsyncMock,
+            ) as mock_get_news,
+            patch(
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
+            ),
         ):
             mock_get_news.return_value = []
             mock_analyze.return_value = {"score": 70, "summary": "test"}

@@ -6,6 +6,8 @@ import pytest
 from utils.error_classifier import classify_error, classify_severity, get_error_message
 from utils.time_utils import get_now
 
+pytestmark = pytest.mark.unit
+
 
 class TestClassifyErrorTokenContext:
     def test_invalid_token(self):

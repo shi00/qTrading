@@ -5,10 +5,15 @@ from datetime import date
 import polars as pl
 import pytest
 
-from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+from data.domain_services.transaction_cost import (
+    TransactionCostConfig,
+    TransactionCostModel,
+)
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
 from strategies.backtest.portfolio import PortfolioSimulator
+
+pytestmark = pytest.mark.unit
 
 
 class TestTradeSimulation:
@@ -25,7 +30,10 @@ class TestTradeSimulation:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -63,7 +71,10 @@ class TestTradeSimulation:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -88,7 +99,12 @@ class TestTradeSimulation:
             }
         )
 
-        trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        trade_dates = [
+            date(2024, 1, 1),
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            date(2024, 1, 4),
+        ]
 
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
 
@@ -99,7 +115,10 @@ class TestTradeSimulation:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -136,7 +155,10 @@ class TestTradeSimulation:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -173,7 +195,10 @@ class TestTradeSimulation:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -219,7 +244,10 @@ class TestLotSizeRounding:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -264,7 +292,10 @@ class TestLotSizeRounding:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig())
 
@@ -311,7 +342,10 @@ class TestRealizedPnl:
         engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
         engine.config = config
 
-        from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+        from data.domain_services.transaction_cost import (
+            TransactionCostConfig,
+            TransactionCostModel,
+        )
 
         engine.cost_model = TransactionCostModel(TransactionCostConfig(slippage_bps=0.0))
 
@@ -335,7 +369,12 @@ class TestRealizedPnl:
             }
         )
 
-        trade_dates = [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+        trade_dates = [
+            date(2024, 1, 1),
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+            date(2024, 1, 4),
+        ]
 
         trades, positions, skipped, warnings = engine._simulate_trades(signals, quotes_df, trade_dates)
 
@@ -424,7 +463,8 @@ class TestCashScaling:
         with patch("strategies.backtest.position_sizer.get_sizer") as mock_get_sizer:
             mock_get_sizer.return_value.compute_weights.return_value = oversized_weights
             with patch(
-                "strategies.backtest.position_sizer.apply_max_weight_constraint", return_value=oversized_weights
+                "strategies.backtest.position_sizer.apply_max_weight_constraint",
+                return_value=oversized_weights,
             ):
                 signals = pl.DataFrame(
                     {
@@ -474,7 +514,8 @@ class TestCashScaling:
         with patch("strategies.backtest.position_sizer.get_sizer") as mock_get_sizer:
             mock_get_sizer.return_value.compute_weights.return_value = oversized_weights
             with patch(
-                "strategies.backtest.position_sizer.apply_max_weight_constraint", return_value=oversized_weights
+                "strategies.backtest.position_sizer.apply_max_weight_constraint",
+                return_value=oversized_weights,
             ):
                 signals = pl.DataFrame(
                     {
@@ -518,7 +559,8 @@ class TestCashScaling:
         with patch("strategies.backtest.position_sizer.get_sizer") as mock_get_sizer:
             mock_get_sizer.return_value.compute_weights.return_value = oversized_weights
             with patch(
-                "strategies.backtest.position_sizer.apply_max_weight_constraint", return_value=oversized_weights
+                "strategies.backtest.position_sizer.apply_max_weight_constraint",
+                return_value=oversized_weights,
             ):
                 signals = pl.DataFrame(
                     {

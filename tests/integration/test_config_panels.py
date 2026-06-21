@@ -15,7 +15,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.db_url_override import override_db_url
 from tests._helpers import build_db_urls, get_pg_connection_params
-from tests.integration.test_data_db_migrator import _create_isolated_db, _drop_isolated_db
+from tests.integration.test_data_db_migrator import (
+    _create_isolated_db,
+    _drop_isolated_db,
+)
+
+pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
@@ -323,7 +328,9 @@ class TestConfigPanelsIntegration:
             callback_called.append(True)
 
         panel = LocalModelConfigPanel(
-            on_verify_model=AsyncMock(return_value=True), on_change=on_change, show_save_button=False
+            on_verify_model=AsyncMock(return_value=True),
+            on_change=on_change,
+            show_save_button=False,
         )
 
         panel._on_input_change(None)
@@ -513,7 +520,10 @@ class TestTushareConfigPanel:
         def on_verify_success(token):
             success_tokens.append(token)
 
-        with patch("utils.config_handler.ConfigHandler.get_token", return_value="test_token_123"):
+        with patch(
+            "utils.config_handler.ConfigHandler.get_token",
+            return_value="test_token_123",
+        ):
             panel = TushareConfigPanel(on_verify_success=on_verify_success)
         panel._show_success = MagicMock()
         panel._set_loading_state = MagicMock()
@@ -556,7 +566,7 @@ class TestTushareConfigPanel:
             result = asyncio.run(panel.verify_token())
 
         assert result is False
-        panel._show_error.assert_called()
+        panel._show_error.assert_called_once()
 
     def test_double_verify_prevention(self, mock_page, isolated_config):
         """Test that double verification is prevented"""
@@ -582,7 +592,10 @@ class TestTushareConfigPanel:
         panel = TushareConfigPanel()
         panel._safe_update = MagicMock()
 
-        with patch("ui.components.config_panels.tushare_config_panel.I18n.get", return_value="Test Label"):
+        with patch(
+            "ui.components.config_panels.tushare_config_panel.I18n.get",
+            return_value="Test Label",
+        ):
             panel.refresh_locale()
 
         assert panel.token_input.label == "Test Label"
@@ -994,7 +1007,8 @@ class TestLocalModelConfigPanelVerificationState:
         )
 
         panel = LocalModelConfigPanel(
-            on_verify_model=AsyncMock(side_effect=Exception("Test error")), show_save_button=False
+            on_verify_model=AsyncMock(side_effect=Exception("Test error")),
+            show_save_button=False,
         )
         panel.page = mock_page
         panel.model_path_input = MagicMock()

@@ -15,13 +15,22 @@ from data.constants import (
     TIER_FUNDAMENTAL_LOW_THRESHOLD,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestComputeTier:
     def test_critical_missing_tables(self):
         assert _compute_tier(lag_days=0, fin_fresh_ratio=1.0, missing_critical=True) == 0
 
     def test_bronze_stale_quotes(self):
-        assert _compute_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS + 10, fin_fresh_ratio=1.0, missing_critical=False) == 1
+        assert (
+            _compute_tier(
+                lag_days=TIER_QUOTE_FRESHNESS_DAYS + 10,
+                fin_fresh_ratio=1.0,
+                missing_critical=False,
+            )
+            == 1
+        )
 
     def test_silver_low_fundamental(self):
         assert (
@@ -810,7 +819,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -839,7 +851,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -864,7 +879,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240610"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -894,7 +912,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240610"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -924,7 +945,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(side_effect=Exception("DB error"))
         proc.cache.get_sync_status = AsyncMock(
@@ -948,7 +972,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value=set())
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -972,7 +999,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240101"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -1025,7 +1055,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.5}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.5}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -1049,7 +1082,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9, "depth_ratio": 0.5}}, "global_trade_days": 10}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9, "depth_ratio": 0.5}},
+                "global_trade_days": 10,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -1064,7 +1100,10 @@ class TestCheckDataHealthDeepBranches:
         proc.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
-            with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=2):
+            with patch(
+                "utils.config_handler.ConfigHandler.get_init_history_years",
+                return_value=2,
+            ):
                 result = await proc.check_data_health()
                 assert "status" in result
 
@@ -1101,7 +1140,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -1125,7 +1167,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         proc.cache.get_sync_status = AsyncMock(
@@ -1149,7 +1194,10 @@ class TestCheckDataHealthDeepBranches:
         proc._health_cache = {"time": 0, "data": None}
         proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240614"})
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.9}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.9}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_concept_count = AsyncMock(return_value=100)
         sync_df = pd.DataFrame({"table_name": ["financial_reports"], "last_data_date": ["20240601"]})
@@ -1179,7 +1227,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1222,7 +1273,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1259,7 +1313,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(return_value=None)
         proc.cache.get_latest_trade_date = AsyncMock(return_value="20240614")
@@ -1287,7 +1344,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1322,7 +1382,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1363,7 +1426,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1404,7 +1470,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1442,7 +1511,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
@@ -1519,7 +1591,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(return_value=None)
         proc.cache.get_latest_trade_date = AsyncMock(return_value="20240614")
@@ -1547,7 +1622,10 @@ class TestRunQualityScanDeepBranches:
         )
         proc.cache.get_stock_basic = AsyncMock(return_value=basics)
         proc.cache.check_comprehensive_health = AsyncMock(
-            return_value={"tables": {"financial_reports": {"ratio": 0.8}}, "global_trade_days": 500}
+            return_value={
+                "tables": {"financial_reports": {"ratio": 0.8}},
+                "global_trade_days": 500,
+            }
         )
         proc.cache.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(

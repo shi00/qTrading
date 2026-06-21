@@ -5,6 +5,10 @@ import pandas as pd
 
 from data.data_processor import DataProcessor
 from tests.integration.test_infra_base import TestDatabaseBase
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestDataIntegrity(TestDatabaseBase):

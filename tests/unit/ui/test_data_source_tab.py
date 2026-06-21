@@ -17,10 +17,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from services.task_manager import TaskStatus
+from services.task_manager import AppTask, TaskManager, TaskStatus
+from ui.components.settings_widgets import MetricCard
 from ui.theme import AppColors
+from ui.viewmodels.data_source_view_model import DataSourceViewModel
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
+pytestmark = pytest.mark.unit
 
 # --- Fake ActionChip for isinstance checks ---
 
@@ -42,7 +45,7 @@ def _make_mock_action_chip():
 
 
 def _make_mock_button():
-    btn = MagicMock()
+    btn = MagicMock()  # spec omitted: Flet button, complex __init__ with many internal controls
     btn.disabled = False
     btn.text = ""
     btn.icon = None
@@ -51,22 +54,21 @@ def _make_mock_button():
 
 
 def _make_mock_metric_card():
-    card = MagicMock()
-    card.set_value = MagicMock()
-    card.update_theme = MagicMock()
+    card = MagicMock(spec=MetricCard)
+    # set_value / update_theme auto-mocked by spec; no manual assignment needed
     return card
 
 
 def _make_tab() -> DataSourceTab:
     """Create a DataSourceTab with mocked internals, skipping __init__."""
     with patch.object(DataSourceTab, "__init__", lambda self, show_snack_callback=None: None):
-        tab = DataSourceTab(show_snack_callback=MagicMock())
+        tab = DataSourceTab(show_snack_callback=MagicMock())  # spec omitted: callback function
 
     # Mock required attributes
-    tab.show_snack = MagicMock()
-    tab.page = MagicMock()
-    tab.vm = MagicMock()
-    tab._tm = MagicMock()
+    tab.show_snack = MagicMock()  # spec omitted: callback function
+    tab.page = MagicMock()  # spec omitted: Flet Page, complex __init__
+    tab.vm = MagicMock(spec=DataSourceViewModel)
+    tab._tm = MagicMock(spec=TaskManager)
 
     # Mock UI controls
     tab.btn_check_health = _make_mock_button()
@@ -80,33 +82,33 @@ def _make_tab() -> DataSourceTab:
     tab.metric_health = _make_mock_metric_card()
     tab.metric_storage = _make_mock_metric_card()
 
-    tab.health_summary_container = MagicMock()
+    tab.health_summary_container = MagicMock()  # spec omitted: Flet Container, complex __init__
     tab.health_summary_container.content = None
 
-    tab.progress_bar = MagicMock()
+    tab.progress_bar = MagicMock()  # spec omitted: Flet ProgressBar, complex __init__
     tab.progress_bar.visible = False
     tab.progress_bar.value = 0
 
-    tab.progress_text = MagicMock()
+    tab.progress_text = MagicMock()  # spec omitted: Flet Text, complex __init__
     tab.progress_text.value = ""
 
-    tab.tushare_panel = MagicMock()
-    tab.history_years_dropdown = MagicMock()
+    tab.tushare_panel = MagicMock()  # spec omitted: TushareConfigPanel, instance attrs set in __init__
+    tab.history_years_dropdown = MagicMock()  # spec omitted: Flet Dropdown, complex __init__
     tab.history_years_dropdown.value = "3"
 
-    tab.row_init = MagicMock()
-    tab.row_init.title_view = MagicMock()
+    tab.row_init = MagicMock()  # spec omitted: SettingRow, instance attrs set in __init__
+    tab.row_init.title_view = MagicMock()  # spec omitted: Flet Text child of SettingRow
     tab.row_init.title_view.value = ""
-    tab.row_init.subtitle_view = MagicMock()
+    tab.row_init.subtitle_view = MagicMock()  # spec omitted: Flet Text child of SettingRow
     tab.row_init.subtitle_view.value = ""
 
-    tab.row_token = MagicMock()
-    tab.header_health = MagicMock()
-    tab.header_console = MagicMock()
-    tab.header_api = MagicMock()
-    tab.header_init = MagicMock()
+    tab.row_token = MagicMock()  # spec omitted: SettingRow, instance attrs set in __init__
+    tab.header_health = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
+    tab.header_console = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
+    tab.header_api = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
+    tab.header_init = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
 
-    tab.update = MagicMock()
+    tab.update = MagicMock()  # spec omitted: method mock on DataSourceTab instance
     return tab
 
 
@@ -257,13 +259,13 @@ class TestUpdateSyncButtons:
 
 class TestOnTaskUpdate:
     def test_forwards_to_vm_when_page_exists(self, tab):
-        tasks = [MagicMock()]
+        tasks = [MagicMock(spec=AppTask)]
         tab._on_task_update(tasks)
         tab.vm.handle_task_update.assert_called_once_with(tasks)
 
     def test_skips_when_no_page(self, tab):
         tab.page = None
-        tab._on_task_update([MagicMock()])
+        tab._on_task_update([MagicMock(spec=AppTask)])
         tab.vm.handle_task_update.assert_not_called()
 
 
@@ -351,7 +353,12 @@ class TestOnVmHealthResult:
             {
                 "status": "green",
                 "market": {"latest_local": None, "lag_days": 0},
-                "details": {"financial_coverage": 0, "missing_critical": 0, "missing_depth": 0, "missing_breadth": 0},
+                "details": {
+                    "financial_coverage": 0,
+                    "missing_critical": 0,
+                    "missing_depth": 0,
+                    "missing_breadth": 0,
+                },
             }
         )
         # Should display "never sync" text
@@ -522,14 +529,14 @@ class TestOnVmCacheCleared:
 
 class TestOnHistoryYearsChange:
     def test_valid_change(self, tab):
-        e = MagicMock()
+        e = MagicMock()  # spec omitted: Flet control event, dynamic attribute access
         e.control.value = "5"
         tab.on_history_years_change(e)
         tab.vm.set_history_years.assert_called_once_with(5)
         tab.show_snack.assert_called_once()
 
     def test_invalid_value_logs_error(self, tab):
-        e = MagicMock()
+        e = MagicMock()  # spec omitted: Flet control event, dynamic attribute access
         e.control.value = "invalid"
         tab.on_history_years_change(e)
         tab.vm.set_history_years.assert_not_called()

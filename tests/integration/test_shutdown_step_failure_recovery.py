@@ -9,6 +9,8 @@ import pytest
 from tests.integration.test_infra_base import mock_singletons  # noqa: F401
 from utils.shutdown import ShutdownCoordinator
 
+pytestmark = pytest.mark.integration
+
 
 class TestShutdownStepFailureRecovery:
     @pytest.mark.asyncio
@@ -98,7 +100,15 @@ class TestShutdownStepFailureRecovery:
 
         assert len(coordinator.step_results) == 7
         names = [r.name for r in coordinator.step_results]
-        assert names == ["Step 0", "Step 1", "Step 2", "Step 3", "Step 4", "Step 5", "Step 6"]
+        assert names == [
+            "Step 0",
+            "Step 1",
+            "Step 2",
+            "Step 3",
+            "Step 4",
+            "Step 5",
+            "Step 6",
+        ]
 
     @pytest.mark.asyncio
     async def test_step_result_elapsed_ms_positive(self, mock_singletons):

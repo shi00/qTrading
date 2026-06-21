@@ -14,6 +14,8 @@ from data.cache.cache_manager import CacheManager
 from data.persistence.db_url_override import override_db_url
 from data.persistence.models import Base
 
+pytestmark = pytest.mark.integration
+
 # 动态从 ORM metadata 生成 truncate 表清单，避免与 schema 真相源脱钩（P1-1）。
 # 排除 alembic_version（迁移版本表，不应被清空）。
 _EXCLUDED_TABLES = frozenset({"alembic_version"})

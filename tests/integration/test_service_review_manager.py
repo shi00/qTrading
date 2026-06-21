@@ -12,6 +12,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 
 from data.persistence.review_manager import ReviewManager
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 def _make_trade_cal_mock():
@@ -112,7 +116,10 @@ class TestReviewManagerIndexDailyType(unittest.TestCase):
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ", "000001.SZ"],
-                    "trade_date": [datetime.date(2024, 3, 15), datetime.date(2024, 3, 18)],
+                    "trade_date": [
+                        datetime.date(2024, 3, 15),
+                        datetime.date(2024, 3, 18),
+                    ],
                     "close": [10.0, 10.3],
                     "pct_chg": [1.0, 3.0],
                 }
@@ -435,8 +442,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
     def _make_manager(self, mock_cache_instance, mock_api_instance=None):
         with (
-            patch("data.persistence.review_manager.CacheManager", return_value=mock_cache_instance),
-            patch("data.persistence.review_manager.TushareClient", return_value=mock_api_instance),
+            patch(
+                "data.persistence.review_manager.CacheManager",
+                return_value=mock_cache_instance,
+            ),
+            patch(
+                "data.persistence.review_manager.TushareClient",
+                return_value=mock_api_instance,
+            ),
             patch("data.persistence.review_manager.ConfigHandler"),
         ):
             return ReviewManager()
@@ -559,7 +572,14 @@ class TestReviewPredictionsCore(unittest.TestCase):
             return_value=pd.DataFrame(
                 {
                     "ts_code": ["000001.SZ"] * 6,
-                    "trade_date": ["20240315", "20240318", "20240319", "20240320", "20240321", "20240322"],
+                    "trade_date": [
+                        "20240315",
+                        "20240318",
+                        "20240319",
+                        "20240320",
+                        "20240321",
+                        "20240322",
+                    ],
                     "close": [10.0, 10.5, 10.7, 10.8, 10.9, 11.0],
                     "pct_chg": [1.0, 5.0, 1.9, 0.9, 0.9, 0.9],
                 }

@@ -5,6 +5,10 @@ from utils.prompt_guard import (
     sanitize_prompt,
     validate_prompt,
 )
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestValidatePromptBasic:

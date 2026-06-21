@@ -8,6 +8,8 @@ import pytest
 from strategies.backtest.engine import VectorBacktestEngine
 from strategies.backtest.config import BacktestConfig
 
+pytestmark = pytest.mark.unit
+
 
 class TestPriceAdjustment:
     def test_apply_qfq_with_adj_factor(self) -> None:
@@ -81,7 +83,12 @@ class TestPriceAdjustment:
         quotes_df = pl.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000001.SZ", "000002.SZ", "000002.SZ"],
-                "trade_date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 1), date(2024, 1, 2)],
+                "trade_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                ],
                 "open": [10.0, 11.0, 20.0, 22.0],
                 "high": [10.5, 11.5, 20.5, 22.5],
                 "low": [9.5, 10.5, 19.5, 21.5],
@@ -154,7 +161,12 @@ class TestExRightDate:
         quotes_df = pl.DataFrame(
             {
                 "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ", "000001.SZ"],
-                "trade_date": [date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+                "trade_date": [
+                    date(2024, 1, 1),
+                    date(2024, 1, 2),
+                    date(2024, 1, 3),
+                    date(2024, 1, 4),
+                ],
                 "open": [20.0, 10.0, 10.5, 5.0],
                 "high": [20.5, 10.5, 11.0, 5.5],
                 "low": [19.5, 9.5, 10.0, 4.5],

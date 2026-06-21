@@ -2,6 +2,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestConfigHandlerKeyringFallback:
@@ -10,11 +12,19 @@ class TestConfigHandlerKeyringFallback:
 
         encrypted_value = "ENCRYPTED_SECRET_123"
 
-        monkeypatch.setattr(cfg_mod.keyring, "set_password", MagicMock(side_effect=RuntimeError("keyring unavailable")))
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "set_password",
+            MagicMock(side_effect=RuntimeError("keyring unavailable")),
+        )
         mock_encrypt = MagicMock(return_value=encrypted_value)
         monkeypatch.setattr(cfg_mod.SecurityManager, "encrypt_data", mock_encrypt)
         saved_configs = []
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda payload: saved_configs.append(payload) or True)
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "save_config",
+            lambda payload: saved_configs.append(payload) or True,
+        )
 
         result = cfg_mod.ConfigHandler.save_db_password("my_secret_password")
 
@@ -26,9 +36,15 @@ class TestConfigHandlerKeyringFallback:
     def test_save_db_password_returns_false_when_both_fail(self, monkeypatch):
         import utils.config_handler as cfg_mod
 
-        monkeypatch.setattr(cfg_mod.keyring, "set_password", MagicMock(side_effect=RuntimeError("keyring unavailable")))
         monkeypatch.setattr(
-            cfg_mod.SecurityManager, "encrypt_data", MagicMock(side_effect=RuntimeError("encryption failed"))
+            cfg_mod.keyring,
+            "set_password",
+            MagicMock(side_effect=RuntimeError("keyring unavailable")),
+        )
+        monkeypatch.setattr(
+            cfg_mod.SecurityManager,
+            "encrypt_data",
+            MagicMock(side_effect=RuntimeError("encryption failed")),
         )
 
         result = cfg_mod.ConfigHandler.save_db_password("my_secret_password")
@@ -45,13 +61,21 @@ class TestConfigHandlerKeyringFallback:
             lambda service, key, pw: keyring_called.append((service, key, pw)),
         )
         saved_configs = []
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda payload: saved_configs.append(payload) or True)
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "save_config",
+            lambda payload: saved_configs.append(payload) or True,
+        )
 
         result = cfg_mod.ConfigHandler.save_db_password("my_secret_password")
 
         assert result is True
         assert len(keyring_called) == 1
-        assert keyring_called[0] == (cfg_mod.KEYRING_SERVICE_NAME, "db_password", "my_secret_password")
+        assert keyring_called[0] == (
+            cfg_mod.KEYRING_SERVICE_NAME,
+            "db_password",
+            "my_secret_password",
+        )
         assert saved_configs == [{"db_password_encrypted": ""}]
 
     def test_save_db_password_returns_false_for_empty(self, monkeypatch):
@@ -63,7 +87,11 @@ class TestConfigHandlerKeyringFallback:
     def test_get_db_password_reads_encrypted_fallback(self, monkeypatch):
         import utils.config_handler as cfg_mod
 
-        monkeypatch.setattr(cfg_mod.keyring, "get_password", MagicMock(side_effect=RuntimeError("keyring unavailable")))
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "get_password",
+            MagicMock(side_effect=RuntimeError("keyring unavailable")),
+        )
         monkeypatch.setattr(
             cfg_mod.ConfigHandler,
             "load_config",
@@ -96,10 +124,26 @@ class TestKeyringFallbackMigratesLegacy:
             return None
 
         monkeypatch.setattr(cfg_mod.keyring, "get_password", mock_get_pw)
-        monkeypatch.setattr(cfg_mod.keyring, "set_password", lambda s, k, v: keyring_writes.append((k, v)))
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "load_config", lambda: {"ts_token": "legacy_encrypted_token"})
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "_try_decrypt", lambda v: "decrypted_token" if v else "")
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda payload: config_saves.append(payload) or True)
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "set_password",
+            lambda s, k, v: keyring_writes.append((k, v)),
+        )
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "load_config",
+            lambda: {"ts_token": "legacy_encrypted_token"},
+        )
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "_try_decrypt",
+            lambda v: "decrypted_token" if v else "",
+        )
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "save_config",
+            lambda payload: config_saves.append(payload) or True,
+        )
 
         result = cfg_mod.ConfigHandler.get_token()
 
@@ -113,9 +157,15 @@ class TestKeyringFallbackMigratesLegacy:
         keyring_writes = []
 
         monkeypatch.setattr(
-            cfg_mod.keyring, "get_password", lambda s, k: "existing_keyring_token" if k == "ts_token" else None
+            cfg_mod.keyring,
+            "get_password",
+            lambda s, k: "existing_keyring_token" if k == "ts_token" else None,
         )
-        monkeypatch.setattr(cfg_mod.keyring, "set_password", lambda s, k, v: keyring_writes.append((k, v)))
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "set_password",
+            lambda s, k, v: keyring_writes.append((k, v)),
+        )
 
         result = cfg_mod.ConfigHandler.get_token()
 
@@ -129,7 +179,11 @@ class TestKeyringFallbackMigratesLegacy:
         config_saves = []
 
         monkeypatch.setattr(cfg_mod.keyring, "get_password", lambda s, k: None)
-        monkeypatch.setattr(cfg_mod.keyring, "set_password", lambda s, k, v: keyring_writes.append((k, v)))
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "set_password",
+            lambda s, k, v: keyring_writes.append((k, v)),
+        )
         monkeypatch.setattr(
             cfg_mod.ConfigHandler,
             "load_config",
@@ -139,8 +193,16 @@ class TestKeyringFallbackMigratesLegacy:
                 "llm_model": "deepseek-v4-flash",
             },
         )
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "_try_decrypt", lambda v: "decrypted_api_key" if v else "")
-        monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda payload: config_saves.append(payload) or True)
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "_try_decrypt",
+            lambda v: "decrypted_api_key" if v else "",
+        )
+        monkeypatch.setattr(
+            cfg_mod.ConfigHandler,
+            "save_config",
+            lambda payload: config_saves.append(payload) or True,
+        )
 
         result = cfg_mod.ConfigHandler.get_llm_config()
 
@@ -157,7 +219,11 @@ class TestKeyringFallbackClearsStale:
         import utils.config_handler as cfg_mod
 
         delete_calls = []
-        monkeypatch.setattr(cfg_mod.keyring, "set_password", MagicMock(side_effect=RuntimeError("keyring unavailable")))
+        monkeypatch.setattr(
+            cfg_mod.keyring,
+            "set_password",
+            MagicMock(side_effect=RuntimeError("keyring unavailable")),
+        )
         monkeypatch.setattr(cfg_mod.keyring, "delete_password", lambda s, k: delete_calls.append((s, k)))
         monkeypatch.setattr(cfg_mod.SecurityManager, "encrypt_data", lambda x: "ENC_NEW")
         monkeypatch.setattr(cfg_mod.ConfigHandler, "save_config", lambda _: True)

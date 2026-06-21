@@ -16,6 +16,8 @@ from ui.views.task_center_view import (
     _get_status_label,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def _build_mock_task_manager():
     m = MagicMock()

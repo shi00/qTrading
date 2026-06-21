@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # R1 + §4.2 禁止的跨层导入方向

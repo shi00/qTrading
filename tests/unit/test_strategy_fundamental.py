@@ -16,6 +16,10 @@ from strategies.fundamental import (
     LargePEStrategy,
     ValueStrategy,
 )
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestValueStrategy(unittest.TestCase):

@@ -6,6 +6,8 @@ from data.constants import SAFE_LIVE_LEARNING_OFFSET_DAYS
 from strategies.ai_mixin import AIStrategyMixin
 from utils.time_utils import get_now
 
+pytestmark = pytest.mark.unit
+
 
 class TestLookaheadGuard:
     def test_backtest_invalid_trade_date_raises(self):

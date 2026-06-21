@@ -19,6 +19,10 @@ from data.data_dictionary import COMMON_COLUMNS, TABLE_DEFINITIONS
 from data.persistence.daos.quote_dao import QuoteDao
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.financial import FinancialSyncStrategy
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestSyncTypeConsistency:

@@ -12,6 +12,8 @@ import pytest
 
 from utils.rate_limiter import TokenBucket
 
+pytestmark = pytest.mark.integration
+
 
 class TestTokenBucketAdaptiveBackoff:
     """S2-1: TokenBucket must reduce rate on server rate-limit signals"""

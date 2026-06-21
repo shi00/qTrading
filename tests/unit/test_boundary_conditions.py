@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # P2-5: 文件含真实 asyncio.sleep（含 60s 长睡眠），标注 slow 以便 CI 分轨运行
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.unit, pytest.mark.slow]
 
 
 class TestTushareClientBoundaryConditions:
@@ -112,7 +112,7 @@ class TestTushareClientBoundaryConditions:
                 with pytest.raises(RuntimeError):
                     await client._handle_api_call(failing_func)
 
-        mock_limiter.reduce_rate.assert_called()
+        mock_limiter.reduce_rate.assert_called_once_with(factor=0.5)
 
     @pytest.mark.asyncio
     async def test_paginated_first_page_failure_raises(self):
@@ -213,7 +213,11 @@ class TestQualityGateBoundaryConditions:
     """Quality Gate strict mode boundary conditions - behavior tests"""
 
     def test_strict_mode_env_var_controls_behavior(self):
-        from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+        from data.persistence.quality_gate import (
+            QualityGateError,
+            QualityTier,
+            _check_tier,
+        )
         import data.persistence.quality_gate as qg_module
 
         original = qg_module._STRICT_QUALITY_GATE
@@ -225,7 +229,11 @@ class TestQualityGateBoundaryConditions:
             qg_module._STRICT_QUALITY_GATE = original
 
     def test_check_tier_none_processor_strict_raises(self):
-        from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+        from data.persistence.quality_gate import (
+            QualityGateError,
+            QualityTier,
+            _check_tier,
+        )
         import data.persistence.quality_gate as qg_module
 
         original = qg_module._STRICT_QUALITY_GATE
@@ -249,7 +257,11 @@ class TestQualityGateBoundaryConditions:
             qg_module._STRICT_QUALITY_GATE = original
 
     def test_check_tier_uninitialized_tier_treated_as_critical(self):
-        from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+        from data.persistence.quality_gate import (
+            QualityGateError,
+            QualityTier,
+            _check_tier,
+        )
 
         processor = MagicMock()
         processor._quality_tier = None
@@ -257,7 +269,11 @@ class TestQualityGateBoundaryConditions:
             _check_tier(processor, QualityTier.BRONZE, "test_func")
 
     def test_check_tier_insufficient_raises(self):
-        from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+        from data.persistence.quality_gate import (
+            QualityGateError,
+            QualityTier,
+            _check_tier,
+        )
 
         processor = MagicMock()
         processor._quality_tier = QualityTier.CRITICAL
@@ -520,7 +536,15 @@ class TestShutdownBoundaryConditions:
         coord = ShutdownCoordinator(service_stop_delay=0)
 
         async def mock_steps(step_timeout_s):
-            return [StepResult(name="Step 0", critical=True, ok=True, timed_out=False, elapsed_ms=10.0)]
+            return [
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=True,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                )
+            ]
 
         coord._run_cleanup_steps = mock_steps
         result1 = await coord.do_cleanup(timeout_s=5.0, step_timeout_s=2.0)
@@ -536,7 +560,15 @@ class TestShutdownBoundaryConditions:
 
         async def slow_steps(step_timeout_s):
             await asyncio.sleep(0.1)
-            return [StepResult(name="Step 0", critical=True, ok=True, timed_out=False, elapsed_ms=10.0)]
+            return [
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=True,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                )
+            ]
 
         coord._run_cleanup_steps = slow_steps
         task1 = asyncio.create_task(coord.do_cleanup(timeout_s=5.0, step_timeout_s=2.0))
@@ -553,7 +585,15 @@ class TestShutdownBoundaryConditions:
         assert coord.watchdog_started
 
         coord._run_cleanup_steps = AsyncMock(
-            return_value=[StepResult(name="Step 0", critical=True, ok=True, timed_out=False, elapsed_ms=10.0)]
+            return_value=[
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=True,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                )
+            ]
         )
         await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
         assert not coord.watchdog_started

@@ -4,6 +4,8 @@ import pandas as pd
 
 from data.persistence.daos.stock_dao import StockDao
 
+pytestmark = pytest.mark.unit
+
 
 def _make_dao():
     dao = StockDao(MagicMock())

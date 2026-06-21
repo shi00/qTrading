@@ -9,6 +9,8 @@ import pytest
 from strategies.backtest.adapter import BacktestStrategyAdapter
 from strategies.base_strategy import BaseStrategy
 
+pytestmark = pytest.mark.unit
+
 
 class MockStrategy(BaseStrategy):
     """用于测试的 Mock 策略"""

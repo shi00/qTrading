@@ -37,6 +37,8 @@ from data.persistence.db_url_override import override_db_url
 from data.persistence.models import Base
 from tests._helpers import build_db_urls, get_pg_connection_params
 
+pytestmark = pytest.mark.integration
+
 logger = logging.getLogger(__name__)
 
 # Tables excluded from comparison (infrastructure, not business schema)
@@ -145,7 +147,12 @@ def _normalize_sql_expression(expr: str | None) -> str | None:
         s,
         flags=re.IGNORECASE,
     )
-    s = re.sub(r"\b([A-Za-z0-9_]+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)", r"\1 IN (\2)", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r"\b([A-Za-z0-9_]+)\s*=\s*ANY\s*\(\s*ARRAY\[(.*?)\]\s*\)",
+        r"\1 IN (\2)",
+        s,
+        flags=re.IGNORECASE,
+    )
 
     # Strip outer parentheses: (review_status = 'PENDING') → review_status = 'PENDING'
     s = s.replace("(", "").replace(")", "").replace(" ", "").upper()
@@ -544,7 +551,12 @@ class TestOrmMigrationConsistency:
                     continue  # Skip PK indexes (covered by test_primary_keys_match)
                 if idx_name in reflected[table_name]["unique_constraints"]:
                     continue  # Skip unique constraints (covered by test_unique_constraints_match)
-                db_index_cols.add((frozenset(idx_info["columns"]), _normalize_sql_expression(idx_info["where"])))
+                db_index_cols.add(
+                    (
+                        frozenset(idx_info["columns"]),
+                        _normalize_sql_expression(idx_info["where"]),
+                    )
+                )
 
             # Check ORM indexes exist in DB
             for col_set in orm_index_cols:

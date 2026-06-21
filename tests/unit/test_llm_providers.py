@@ -13,6 +13,10 @@ from utils.llm_providers import (
     AZURE_DEFAULT_API_VERSION,
     AZURE_API_VERSIONS,
 )
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestGetProviderById:

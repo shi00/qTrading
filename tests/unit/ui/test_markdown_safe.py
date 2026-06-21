@@ -2,7 +2,15 @@
 
 from unittest.mock import MagicMock, patch
 
-from ui.components._markdown_safe import ALLOWED_DOMAINS, _is_allowed_domain, safe_open_url
+from ui.components._markdown_safe import (
+    ALLOWED_DOMAINS,
+    _is_allowed_domain,
+    safe_open_url,
+)
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestAllowedDomains:

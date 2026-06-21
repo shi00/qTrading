@@ -6,6 +6,8 @@ import pandas as pd
 
 from data.data_processor import DataProcessor
 
+pytestmark = pytest.mark.unit
+
 
 def _make_dp():
     DataProcessor._reset_singleton()
@@ -180,7 +182,10 @@ class TestDataProcessorShouldSyncFinancials:
         dp = _make_dp()
         recent = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=5)
         dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": recent.strftime("%Y-%m-%d")})
-        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0),
+        ):
             result, reason = await dp.should_sync_financials()
             assert result is False
 
@@ -189,7 +194,10 @@ class TestDataProcessorShouldSyncFinancials:
         dp = _make_dp()
         old = datetime.datetime(2024, 6, 15, 10, 30, 0) - datetime.timedelta(days=35)
         dp.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": old.strftime("%Y-%m-%d")})
-        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0),
+        ):
             result, reason = await dp.should_sync_financials()
             assert result is True
 
@@ -237,7 +245,10 @@ class TestDataProcessorSyncStockBasic:
         dp.cache.save_stock_basic = AsyncMock(return_value=2)
         dp.cache.update_sync_status = AsyncMock()
         dp.clear_cancel()
-        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0),
+        ):
             result = await dp.sync_stock_basic()
             assert result == 2
 
@@ -248,7 +259,10 @@ class TestDataProcessorSyncStockBasic:
         dp.api.get_stock_basic_all = AsyncMock(return_value=df)
         dp.cache.save_stock_basic = AsyncMock(return_value=0)
         dp.clear_cancel()
-        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 15, 10, 30, 0)):
+        with patch(
+            "data.data_processor.get_now",
+            return_value=datetime.datetime(2024, 6, 15, 10, 30, 0),
+        ):
             result = await dp.sync_stock_basic()
             assert result == 0
 
@@ -415,8 +429,15 @@ class TestDataProcessorGetMarketOverview:
         dp.cache.get_index_daily_range = AsyncMock(return_value=index_df)
         dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+        with patch(
+            "data.data_processor.NewsFetcher.get_hot_concepts",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            with patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ):
                 result = await dp.get_market_overview()
         assert result is not None
         assert len(result["indices"]) == 3
@@ -441,8 +462,15 @@ class TestDataProcessorGetMarketOverview:
         dp.api.get_index_daily = AsyncMock(return_value=api_df)
         dp.cache.get_moneyflow_hsgt = AsyncMock(return_value=None)
         dp.api.get_moneyflow_hsgt = AsyncMock(return_value=None)
-        with patch("data.data_processor.NewsFetcher.get_hot_concepts", new_callable=AsyncMock, return_value=[]):
-            with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+        with patch(
+            "data.data_processor.NewsFetcher.get_hot_concepts",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            with patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ):
                 result = await dp.get_market_overview()
         assert result is not None
         assert len(result["indices"]) == 3
@@ -527,7 +555,13 @@ class TestDataProcessorPrepareScreeningContext:
         dp = _make_dp()
         dp._quality_tier = 3
         dp.cache.get_screening_data = AsyncMock(
-            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "is_tradable": [True],
+                }
+            )
         )
         dp.cache.get_fundamental_screening_data = AsyncMock(
             return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "is_tradable": [True]})
@@ -569,7 +603,13 @@ class TestDataProcessorPrepareScreeningContext:
         dp._quality_tier = None
         dp._assign_basic_tier = AsyncMock()
         dp.cache.get_screening_data = AsyncMock(
-            return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "is_tradable": [True]})
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "is_tradable": [True],
+                }
+            )
         )
         dp.cache.get_fundamental_screening_data = AsyncMock(return_value=None)
         dp.cache.get_northbound = AsyncMock(return_value=None)
@@ -596,7 +636,10 @@ class TestDataProcessorInitializeSystem:
             patch("data.data_dictionary.validate_schema_definitions"),
             patch("data.data_processor.I18n") as mock_i18n,
             patch("data.data_processor.ConfigHandler") as mock_ch,
-            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
         ):
             mock_i18n.get.side_effect = lambda k, **kw: k
             mock_ch.get_init_history_years.return_value = 1
@@ -627,7 +670,10 @@ class TestDataProcessorInitializeSystem:
             patch("data.data_dictionary.validate_schema_definitions"),
             patch("data.data_processor.I18n") as mock_i18n,
             patch("data.data_processor.ConfigHandler") as mock_ch,
-            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
         ):
             mock_i18n.get.side_effect = lambda k, **kw: k
             mock_ch.get_init_history_years.return_value = 1
@@ -650,7 +696,10 @@ class TestDataProcessorInitializeSystem:
             patch("data.data_dictionary.validate_schema_definitions"),
             patch("data.data_processor.I18n") as mock_i18n,
             patch("data.data_processor.ConfigHandler") as mock_ch,
-            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
         ):
             mock_i18n.get.side_effect = lambda k, **kw: k
             mock_ch.get_init_history_years.return_value = 1
@@ -669,7 +718,10 @@ class TestDataProcessorInitializeSystem:
             patch("data.data_dictionary.validate_schema_definitions"),
             patch("data.data_processor.I18n") as mock_i18n,
             patch("data.data_processor.ConfigHandler") as mock_ch,
-            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
         ):
             mock_i18n.get.side_effect = lambda k, **kw: k
             mock_ch.get_init_history_years.return_value = 1
@@ -689,7 +741,10 @@ class TestDataProcessorInitializeSystem:
             patch("data.data_dictionary.validate_schema_definitions"),
             patch("data.data_processor.I18n") as mock_i18n,
             patch("data.data_processor.ConfigHandler") as mock_ch,
-            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
         ):
             mock_i18n.get.side_effect = lambda k, **kw: k
             mock_ch.get_init_history_years.return_value = 1

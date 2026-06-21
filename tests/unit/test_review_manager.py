@@ -5,7 +5,7 @@ import datetime
 
 from data.persistence.review_manager import ReviewManager
 
-pytestmark = pytest.mark.no_auto_mock
+pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
 class TestReviewManagerInit:
@@ -15,6 +15,20 @@ class TestReviewManagerInit:
         rm = ReviewManager()
         assert rm.cache is not None
         assert rm.api is not None
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    def test_init_default_thresholds(self, mock_tc, mock_cm):
+        rm = ReviewManager()
+        assert rm.alpha_win_threshold == 0.5
+        assert rm.alpha_loss_threshold == 0.5
+
+    @patch("data.persistence.review_manager.CacheManager")
+    @patch("data.persistence.review_manager.TushareClient")
+    def test_init_custom_thresholds(self, mock_tc, mock_cm):
+        rm = ReviewManager(alpha_win_threshold=1.0, alpha_loss_threshold=2.0)
+        assert rm.alpha_win_threshold == 1.0
+        assert rm.alpha_loss_threshold == 2.0
 
 
 class TestReviewManagerRunReview:
@@ -659,7 +673,15 @@ class TestReviewManagerRunReviewT5Calculation:
         quotes = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"] * 7,
-                "trade_date": ["20240610", "20240611", "20240612", "20240613", "20240614", "20240617", "20240618"],
+                "trade_date": [
+                    "20240610",
+                    "20240611",
+                    "20240612",
+                    "20240613",
+                    "20240614",
+                    "20240617",
+                    "20240618",
+                ],
                 "close": [10.0, 10.5, 11.0, 10.8, 10.2, 9.8, 9.5],
                 "pct_chg": [1.0, 5.0, 4.76, -1.82, -5.56, -3.92, -3.06],
             }
@@ -931,6 +953,130 @@ class TestReviewManagerRunReviewLossLabel:
         assert label == "DRAW"
 
 
+class TestReviewManagerCustomThresholds:
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_custom_win_threshold_higher(self, mock_cm, mock_tc):
+        """alpha=3.0 with default threshold (0.5) -> WIN.
+        With alpha_win_threshold=5.0, alpha=3.0 -> DRAW (not high enough).
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager(alpha_win_threshold=5.0)
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.5],
+                    "pct_chg": [1.0, 5.0],
+                }
+            )
+        )
+        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        call_args = rm._update_result.call_args
+        label = call_args[0][2]
+        assert label == "DRAW"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_custom_loss_threshold_higher(self, mock_cm, mock_tc):
+        """alpha=-8.0 with default threshold (0.5) -> LOSS.
+        With alpha_loss_threshold=10.0, alpha=-8.0 -> DRAW (not low enough).
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager(alpha_loss_threshold=10.0)
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 9.0],
+                    "pct_chg": [1.0, -6.0],
+                }
+            )
+        )
+        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [2.0]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        call_args = rm._update_result.call_args
+        label = call_args[0][2]
+        assert label == "DRAW"
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_custom_win_threshold_lower(self, mock_cm, mock_tc):
+        """alpha=1.0 with default threshold (0.5) -> WIN.
+        With alpha_win_threshold=0.3, alpha=1.0 still -> WIN.
+        With alpha=0.4, default threshold -> DRAW; threshold=0.3 -> WIN.
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        rm = ReviewManager(alpha_win_threshold=0.3)
+        rm.cache = mock_cache
+        rm._get_pending_predictions = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "id": [1],
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240615"],
+                    "ai_score": [80],
+                    "ai_reason": ["test"],
+                }
+            )
+        )
+        # alpha = 2.0 - 1.6 = 0.4 -> WIN with threshold 0.3, DRAW with default 0.5
+        mock_cache.get_daily_quotes = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "trade_date": ["20240615", "20240616"],
+                    "close": [10.0, 10.4],
+                    "pct_chg": [1.0, 2.0],
+                }
+            )
+        )
+        mock_cache.get_index_daily = AsyncMock(return_value=pd.DataFrame({"pct_chg": [1.6]}))
+        rm._update_result = AsyncMock()
+        await rm.run_review()
+        rm._update_result.assert_called_once()
+        call_args = rm._update_result.call_args
+        label = call_args[0][2]
+        assert label == "WIN"
+
+
 class TestReviewManagerRunReviewExceptionInRow:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
@@ -1051,7 +1197,12 @@ class TestReviewManagerSaveResultsEdgeCases:
                 "trade_date": ["20240615"],
             }
         )
-        await rm.save_results("test_strategy", df, trade_date="20240615", params_snapshot='{"key": "value"}')
+        await rm.save_results(
+            "test_strategy",
+            df,
+            trade_date="20240615",
+            params_snapshot='{"key": "value"}',
+        )
         mock_cache.screener_dao.save_screening_results.assert_called_once()
 
     @pytest.mark.asyncio

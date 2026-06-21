@@ -8,6 +8,10 @@ from datetime import date
 import polars as pl
 
 from strategies.backtest.config import BacktestConfig
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestPositionSizerFactory:
@@ -525,7 +529,10 @@ class TestSlippageWithAvgDailyVolume:
 
     def test_slippage_uses_avg_daily_volume(self):
         """测试滑点计算使用平均成交量"""
-        from data.domain_services.transaction_cost import TransactionCostModel, TransactionCostConfig
+        from data.domain_services.transaction_cost import (
+            TransactionCostModel,
+            TransactionCostConfig,
+        )
 
         config = TransactionCostConfig(
             slippage_model="volume_ratio",

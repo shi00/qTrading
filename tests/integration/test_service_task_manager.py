@@ -18,6 +18,8 @@ from services.task_manager import (
 )
 from tests.conftest import singleton_state as _singleton_state_ctx
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(autouse=True)
 def _reset_task_manager_singleton():
@@ -458,7 +460,12 @@ class TestPersistTaskAsyncTimezone:
         import datetime as _dt
 
         mgr = TaskManager()
-        task = AppTask(id="truncate_test", name="truncate", created_at=_dt.datetime.now(), result="x" * 900)
+        task = AppTask(
+            id="truncate_test",
+            name="truncate",
+            created_at=_dt.datetime.now(),
+            result="x" * 900,
+        )
 
         with pytest.MonkeyPatch.context() as m:
             m.setattr(mgr, "_persist_snapshot", AsyncMock())

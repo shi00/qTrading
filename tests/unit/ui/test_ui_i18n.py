@@ -6,6 +6,10 @@ Covers strategy name translation functionality.
 from unittest.mock import patch
 
 from ui.i18n import translate_strategy_name
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestTranslateStrategyName:

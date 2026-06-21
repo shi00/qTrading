@@ -12,6 +12,7 @@ import pytest
 import main as app_main
 import utils.shutdown as shutdown_mod
 
+pytestmark = pytest.mark.integration
 
 AsyncEventHandler = Callable[[Any], Awaitable[None]]
 SyncClickHandler = Callable[[Any], None]
@@ -213,7 +214,9 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
         ),
     )
     monkeypatch.setattr(
-        app_main.ft, "MainAxisAlignment", SimpleNamespace(END="end", CENTER="center", SPACE_BETWEEN="space_between")
+        app_main.ft,
+        "MainAxisAlignment",
+        SimpleNamespace(END="end", CENTER="center", SPACE_BETWEEN="space_between"),
     )
     monkeypatch.setattr(app_main.ft, "CrossAxisAlignment", SimpleNamespace(CENTER="center"))
     monkeypatch.setattr(app_main.ft, "FontWeight", SimpleNamespace(BOLD="bold"))
@@ -231,7 +234,9 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
     if exit_spy is None:
         monkeypatch.setattr(
-            os, "_exit", lambda _code: (_ for _ in ()).throw(AssertionError("os._exit should not be called"))
+            os,
+            "_exit",
+            lambda _code: (_ for _ in ()).throw(AssertionError("os._exit should not be called")),
         )
     else:
         monkeypatch.setattr(os, "_exit", exit_spy)
@@ -268,7 +273,10 @@ class TestMainDbUpgradeNeeded:
         with (
             patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("main.check_onboarding_needed", return_value=False),
-            patch("data.persistence.db_migrator.DatabaseMigrator.init_db", new_callable=AsyncMock) as mock_migrate,
+            patch(
+                "data.persistence.db_migrator.DatabaseMigrator.init_db",
+                new_callable=AsyncMock,
+            ) as mock_migrate,
         ):
             mock_init.return_value = {"success": False, "error": "db_upgrade_needed"}
             mock_migrate.return_value = None
@@ -294,7 +302,11 @@ class TestMainDbInitFailed:
             patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("main.check_onboarding_needed", return_value=False),
         ):
-            mock_init.return_value = {"success": False, "error": "db_init_failed", "detail": "connection refused"}
+            mock_init.return_value = {
+                "success": False,
+                "error": "db_init_failed",
+                "detail": "connection refused",
+            }
 
             page = _DummyPage()
             await app_main.main(page)
@@ -349,7 +361,11 @@ class TestMainDbInitFailed:
             patch("main.check_onboarding_needed", return_value=False),
             patch("ui.app_layout.AppLayout") as mock_layout,
         ):
-            mock_init.return_value = {"success": False, "error": "db_init_failed", "detail": "error"}
+            mock_init.return_value = {
+                "success": False,
+                "error": "db_init_failed",
+                "detail": "error",
+            }
             mock_layout_instance = MagicMock()
             mock_layout.return_value = mock_layout_instance
 
@@ -580,7 +596,11 @@ class TestMainConfigHandlerCalls:
         monkeypatch.setattr(app_main.ConfigHandler, "get_db_url", track_get_db_url)
         monkeypatch.setattr(app_main.ConfigHandler, "get_token", track_get_token)
         monkeypatch.setattr(app_main.ConfigHandler, "get_llm_config", track_get_llm_config)
-        monkeypatch.setattr(app_main.ConfigHandler, "is_onboarding_complete", track_is_onboarding_complete)
+        monkeypatch.setattr(
+            app_main.ConfigHandler,
+            "is_onboarding_complete",
+            track_is_onboarding_complete,
+        )
 
         with (
             patch("main.check_onboarding_needed", return_value=False),

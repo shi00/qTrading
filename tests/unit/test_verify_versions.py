@@ -7,17 +7,27 @@ import pytest
 
 # Add scripts directory to path
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent / "scripts"))
-import verify_versions  # type: ignore  # Resolved dynamically via sys.path
+import verify_versions  # type: ignore[import-not-found]  # Resolved dynamically via sys.path
+
+pytestmark = pytest.mark.unit
 
 
 def setup_test_files(
-    tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.9", pkg_pyright="1.1.300", ci_pyright="1.1.300"
+    tmp_path,
+    pyproject_v="0.6.9",
+    installer_v="0.6.9",
+    manifest_v="0.6.9",
+    pkg_pyright="1.1.300",
+    ci_pyright="1.1.300",
 ):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(f'[project]\nversion = "{pyproject_v}"\n', encoding="utf-8")
 
     installer = tmp_path / "installer.iss"
-    installer.write_text(f'#define MyAppVersion "{installer_v}" ; x-release-please-version\n', encoding="utf-8")
+    installer.write_text(
+        f'#define MyAppVersion "{installer_v}" ; x-release-please-version\n',
+        encoding="utf-8",
+    )
 
     pkg_json = tmp_path / "package.json"
     pkg_json.write_text(f'{{"devDependencies": {{"pyright": "{pkg_pyright}"}}}}', encoding="utf-8")
@@ -33,7 +43,8 @@ def setup_test_files(
     major_minor = ".".join(pyproject_v.split(".")[:2])
     readme = tmp_path / "README.md"
     readme.write_text(
-        "# README\n[![CI](https://github.com/shi00/qTrading)](https://github.com/shi00/qTrading)\n", encoding="utf-8"
+        "# README\n[![CI](https://github.com/shi00/qTrading)](https://github.com/shi00/qTrading)\n",
+        encoding="utf-8",
     )
 
     contributing = tmp_path / "CONTRIBUTING.md"
@@ -48,10 +59,30 @@ def setup_test_files(
     claude = tmp_path / "CLAUDE.md"
     claude.write_text("# CLAUDE.md\n", encoding="utf-8")
 
-    return pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+    return (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    )
 
 
-def _patch_all_paths(pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude):
+def _patch_all_paths(
+    pyproject,
+    installer,
+    pkg_json,
+    ci_workflow,
+    manifest,
+    readme,
+    contributing,
+    security,
+    claude,
+):
     """Helper to patch all path constants used by verify_versions.main()."""
     return [
         patch("verify_versions.PYPROJECT_PATH", pyproject),
@@ -67,13 +98,29 @@ def _patch_all_paths(pyproject, installer, pkg_json, ci_workflow, manifest, read
 
 
 def test_verify_versions_fix(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, installer_v="0.6.8", manifest_v="0.6.8"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, installer_v="0.6.8", manifest_v="0.6.8")
 
     # Mock all paths and argv
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -97,7 +144,10 @@ def test_verify_versions_fix(tmp_path):
 def test_update_installer_version_failure(tmp_path):
     installer = tmp_path / "installer.iss"
     installer.write_text("some random content without MyAppVersion\n", encoding="utf-8")
-    with patch("verify_versions.INSTALLER_PATH", installer), pytest.raises(RuntimeError) as exc_info:
+    with (
+        patch("verify_versions.INSTALLER_PATH", installer),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
         verify_versions.update_installer_version("0.6.9")
     assert "Failed to update version" in str(exc_info.value)
 
@@ -105,7 +155,10 @@ def test_update_installer_version_failure(tmp_path):
 def test_update_release_manifest_version_failure(tmp_path):
     manifest = tmp_path / ".release-please-manifest.json"
     manifest.write_text("{}", encoding="utf-8")  # missing "." key
-    with patch("verify_versions.RELEASE_MANIFEST_PATH", manifest), pytest.raises(ValueError) as exc_info:
+    with (
+        patch("verify_versions.RELEASE_MANIFEST_PATH", manifest),
+        pytest.raises(ValueError) as exc_info,
+    ):
         verify_versions.update_release_manifest_version("0.6.9")
     assert "Invalid manifest structure" in str(exc_info.value)
 
@@ -113,7 +166,10 @@ def test_update_release_manifest_version_failure(tmp_path):
 def test_get_installer_fallback_version_failure(tmp_path):
     installer = tmp_path / "installer.iss"
     installer.write_text("wrong file format", encoding="utf-8")
-    with patch("verify_versions.INSTALLER_PATH", installer), pytest.raises(ValueError) as exc_info:
+    with (
+        patch("verify_versions.INSTALLER_PATH", installer),
+        pytest.raises(ValueError) as exc_info,
+    ):
         verify_versions.get_installer_fallback_version()
     assert "Could not find MyAppVersion" in str(exc_info.value)
 
@@ -121,17 +177,36 @@ def test_get_installer_fallback_version_failure(tmp_path):
 def test_get_ci_pyright_version_failure(tmp_path):
     ci_workflow = tmp_path / "ci_cd.yml"
     ci_workflow.write_text("wrong content without pyright version", encoding="utf-8")
-    with patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow), pytest.raises(ValueError) as exc_info:
+    with (
+        patch("verify_versions.CI_WORKFLOW_PATH", ci_workflow),
+        pytest.raises(ValueError) as exc_info,
+    ):
         verify_versions.get_ci_pyright_version()
     assert "Could not find pyright version" in str(exc_info.value)
 
 
 def test_verify_versions_all_consistent(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path)
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     # Test without --fix (exit 0, no exceptions)
     with ExitStack() as stack:
@@ -152,11 +227,27 @@ def test_verify_versions_all_consistent(tmp_path):
 
 
 def test_verify_versions_no_fix_mismatch(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.8"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.8")
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -170,11 +261,27 @@ def test_verify_versions_no_fix_mismatch(tmp_path):
 
 
 def test_verify_versions_installer_mismatch_only(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9")
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -188,11 +295,27 @@ def test_verify_versions_installer_mismatch_only(tmp_path):
 
 
 def test_verify_versions_manifest_mismatch_only(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8")
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -208,11 +331,27 @@ def test_verify_versions_manifest_mismatch_only(tmp_path):
 
 
 def test_verify_versions_pyright_mismatch(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pkg_pyright="1.1.300", ci_pyright="1.1.301"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pkg_pyright="1.1.300", ci_pyright="1.1.301")
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -224,13 +363,29 @@ def test_verify_versions_pyright_mismatch(tmp_path):
 
 
 def test_main_initial_read_failure(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.9"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.9")
     # Make one file missing to trigger OSError in main()
     missing_pyproject = tmp_path / "non_existent_pyproject.toml"
     patches = _patch_all_paths(
-        missing_pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        missing_pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -242,17 +397,36 @@ def test_main_initial_read_failure(tmp_path):
 
 
 def test_main_installer_fix_failure(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9")
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
         stack.enter_context(
-            patch("verify_versions.update_installer_version", side_effect=RuntimeError("Mocked update failure"))
+            patch(
+                "verify_versions.update_installer_version",
+                side_effect=RuntimeError("Mocked update failure"),
+            )
         )
         stack.enter_context(patch("sys.argv", ["verify_versions.py", "--fix"]))
         with pytest.raises(SystemExit) as exc_info:
@@ -261,17 +435,36 @@ def test_main_installer_fix_failure(tmp_path):
 
 
 def test_main_manifest_fix_failure(tmp_path):
-    pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude = setup_test_files(
-        tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8"
-    )
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+    ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8")
     patches = _patch_all_paths(
-        pyproject, installer, pkg_json, ci_workflow, manifest, readme, contributing, security, claude
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
     )
     with ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
         stack.enter_context(
-            patch("verify_versions.update_release_manifest_version", side_effect=ValueError("Mocked update failure"))
+            patch(
+                "verify_versions.update_release_manifest_version",
+                side_effect=ValueError("Mocked update failure"),
+            )
         )
         stack.enter_context(patch("sys.argv", ["verify_versions.py", "--fix"]))
         with pytest.raises(SystemExit) as exc_info:

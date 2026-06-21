@@ -14,6 +14,8 @@ import pytest
 from tests.virtual_clock import VirtualClock
 from utils.rate_limiter import TokenBucket
 
+pytestmark = pytest.mark.unit
+
 
 class TestTokenBucketCreation(unittest.TestCase):
     """测试令牌桶创建"""
@@ -57,7 +59,10 @@ class TestTokenBucketConsume(unittest.TestCase):
     def test_consume_sufficient_tokens(self):
         """充足令牌消费"""
         clock = VirtualClock()
-        with patch("utils.rate_limiter.time.monotonic", clock.now), patch("utils.rate_limiter.time.sleep", clock.sleep):
+        with (
+            patch("utils.rate_limiter.time.monotonic", clock.now),
+            patch("utils.rate_limiter.time.sleep", clock.sleep),
+        ):
             bucket = TokenBucket(start_tokens=10, capacity=20, rate=5.0)
 
             start = clock.now()
@@ -81,7 +86,10 @@ class TestTokenBucketConsume(unittest.TestCase):
         不影响测试。session 级事件循环存在但未"运行"，行为一致。
         """
         clock = VirtualClock()
-        with patch("utils.rate_limiter.time.monotonic", clock.now), patch("utils.rate_limiter.time.sleep", clock.sleep):
+        with (
+            patch("utils.rate_limiter.time.monotonic", clock.now),
+            patch("utils.rate_limiter.time.sleep", clock.sleep),
+        ):
             bucket = TokenBucket(start_tokens=1, capacity=10, rate=10.0)
 
             bucket.consume(5)

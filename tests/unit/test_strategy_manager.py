@@ -1,4 +1,8 @@
 from unittest.mock import MagicMock, patch
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestStrategyManagerCache:
@@ -77,7 +81,10 @@ class TestStrategyManagerCache:
 
                             result = mgr.get_all_with_dependencies()
 
-                            assert result["test"]["missing_apis"] == ["moneyflow_hsgt", "hk_hold"]
+                            assert result["test"]["missing_apis"] == [
+                                "moneyflow_hsgt",
+                                "hk_hold",
+                            ]
 
     def test_invalidate_dependency_cache(self):
         """Test that invalidate_dependency_cache clears the cache."""

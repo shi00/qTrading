@@ -3,6 +3,8 @@ import pandas as pd
 
 from data.persistence.data_quality import DataQualityService
 
+pytestmark = pytest.mark.unit
+
 
 class TestDataQualityServiceCheckContinuity:
     def test_empty_df(self):

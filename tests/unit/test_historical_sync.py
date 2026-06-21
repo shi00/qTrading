@@ -8,6 +8,8 @@ import pandas as pd
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.base import SyncResult, SyncStatus
 
+pytestmark = pytest.mark.unit
+
 
 def make_ctx():
     ctx = MagicMock()
@@ -36,11 +38,24 @@ def make_ctx():
     ctx.cache.update_sync_status = AsyncMock()
     ctx.api.get_daily_quotes = AsyncMock(
         return_value=pd.DataFrame(
-            {"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "close": [10.0], "pct_chg": [1.0], "vol": [1000]}
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "close": [10.0],
+                "pct_chg": [1.0],
+                "vol": [1000],
+            }
         )
     )
     ctx.api.get_daily_basic = AsyncMock(
-        return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "pe": [10.0], "pb": [1.0]})
+        return_value=pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "pe": [10.0],
+                "pb": [1.0],
+            }
+        )
     )
     ctx.api.get_limit_list = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_suspend_d = AsyncMock(return_value=pd.DataFrame())
@@ -409,8 +424,16 @@ class TestHistoricalSyncRunExtended:
         ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
         ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
             return_value={
-                datetime.date(2024, 6, 14): {"score": 50, "expected_base": 5000, "issues": ["low count"]},
-                datetime.date(2024, 6, 13): {"score": 90, "expected_base": 5000, "issues": []},
+                datetime.date(2024, 6, 14): {
+                    "score": 50,
+                    "expected_base": 5000,
+                    "issues": ["low count"],
+                },
+                datetime.date(2024, 6, 13): {
+                    "score": 90,
+                    "expected_base": 5000,
+                    "issues": [],
+                },
             }
         )
         strategy = HistoricalSyncStrategy(ctx)
@@ -444,7 +467,10 @@ class TestHistoricalSyncRunExtended:
                     "score": 90,
                     "expected_base": 5000,
                     "issues": ["low count", "stale"],
-                    "tables": {"daily_quotes": {"count": 5000}, "daily_indicators": {"count": 4000}},
+                    "tables": {
+                        "daily_quotes": {"count": 5000},
+                        "daily_indicators": {"count": 4000},
+                    },
                 }
             }
         )
@@ -634,7 +660,9 @@ class TestHistoricalSyncDailySnapshotExtended:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_verify_data_integrity_strict_loss_above_threshold_marks_partial(self):
+    async def test_verify_data_integrity_strict_loss_above_threshold_marks_partial(
+        self,
+    ):
         """strict=True with data loss > 5% must flag status as PARTIAL."""
         ctx = make_ctx()
         # fetched=20 rows, saved=18 rows → 10% loss (> 5%) → PARTIAL
@@ -656,7 +684,9 @@ class TestHistoricalSyncDailySnapshotExtended:
         assert sr.status == SyncStatus.PARTIAL.value
 
     @pytest.mark.asyncio
-    async def test_verify_data_integrity_strict_loss_below_threshold_stays_success(self):
+    async def test_verify_data_integrity_strict_loss_below_threshold_stays_success(
+        self,
+    ):
         """strict=True with data loss < 5% must keep status as SUCCESS."""
         ctx = make_ctx()
         # fetched=100 rows, saved=96 rows → 4% loss (< 5%) → SUCCESS
@@ -678,7 +708,9 @@ class TestHistoricalSyncDailySnapshotExtended:
         assert sr.status == SyncStatus.SUCCESS.value
 
     @pytest.mark.asyncio
-    async def test_verify_data_integrity_strict_boundary_exactly_five_percent_stays_success(self):
+    async def test_verify_data_integrity_strict_boundary_exactly_five_percent_stays_success(
+        self,
+    ):
         """Boundary case: exactly 5% loss (saved = fetched * 0.95) must stay SUCCESS.
 
         Uses fetched=20, saved=19 so that 20 * 0.95 == 19.0 exactly (no
@@ -703,7 +735,9 @@ class TestHistoricalSyncDailySnapshotExtended:
         assert sr.status == SyncStatus.SUCCESS.value
 
     @pytest.mark.asyncio
-    async def test_verify_data_integrity_non_strict_loss_above_threshold_stays_success(self):
+    async def test_verify_data_integrity_non_strict_loss_above_threshold_stays_success(
+        self,
+    ):
         """strict=False (non-critical table) with data loss > 5% must stay SUCCESS.
 
         Backward-compatibility: non-critical tables only warn, never flag PARTIAL.
@@ -743,7 +777,13 @@ class TestHistoricalSyncDailySnapshotExtended:
         ctx = make_ctx()
         ctx.api.get_daily_quotes = AsyncMock(
             return_value=pd.DataFrame(
-                {"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "close": [10.0], "pct_chg": [1.0], "vol": [1000]}
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "close": [10.0],
+                    "pct_chg": [1.0],
+                    "vol": [1000],
+                }
             )
         )
         strategy = HistoricalSyncStrategy(ctx)
@@ -803,7 +843,10 @@ class TestHistoricalSyncRunDeepBranches:
     @pytest.mark.asyncio
     async def test_sync_integrity_config_exception(self):
         ctx = make_ctx()
-        with patch("utils.config_handler.ConfigHandler.get_sync_integrity_config", side_effect=Exception("cfg err")):
+        with patch(
+            "utils.config_handler.ConfigHandler.get_sync_integrity_config",
+            side_effect=Exception("cfg err"),
+        ):
             strategy = HistoricalSyncStrategy(ctx)
             result = SyncResult()
             await strategy._run_historical_sync(5, None, result)
@@ -815,8 +858,16 @@ class TestHistoricalSyncRunDeepBranches:
         ctx.cache.get_cached_dates_for_table = AsyncMock(return_value={"20240614", "20240613"})
         ctx.cache.get_bulk_sync_quality_scores = AsyncMock(
             return_value={
-                datetime.date(2024, 6, 14): {"score": 90, "expected_base": 5000, "issues": []},
-                datetime.date(2024, 6, 13): {"score": 90, "expected_base": 5000, "issues": []},
+                datetime.date(2024, 6, 14): {
+                    "score": 90,
+                    "expected_base": 5000,
+                    "issues": [],
+                },
+                datetime.date(2024, 6, 13): {
+                    "score": 90,
+                    "expected_base": 5000,
+                    "issues": [],
+                },
             }
         )
         strategy = HistoricalSyncStrategy(ctx)
@@ -863,7 +914,10 @@ class TestHistoricalSyncRunDeepBranches:
         ctx.api.get_daily_basic = AsyncMock(side_effect=Exception("API fail"))
         strategy = HistoricalSyncStrategy(ctx)
         result = SyncResult()
-        with patch("utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy", return_value=1):
+        with patch(
+            "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+            return_value=1,
+        ):
             await strategy._run_historical_sync(5, None, result)
         assert result.status in ("failed", "partial")
         assert len(result.errors) > 0
@@ -879,15 +933,27 @@ class TestHistoricalSyncRunDeepBranches:
             if call_count <= 2:
                 raise Exception("transient fail")
             return pd.DataFrame(
-                {"ts_code": ["000001.SZ"], "trade_date": ["20240614"], "close": [10.0], "pct_chg": [1.0], "vol": [1000]}
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "close": [10.0],
+                    "pct_chg": [1.0],
+                    "vol": [1000],
+                }
             )
 
         ctx.api.get_daily_quotes = AsyncMock(side_effect=failing_then_success)
         strategy = HistoricalSyncStrategy(ctx)
         result = SyncResult()
         with (
-            patch("utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy", return_value=1),
-            patch("utils.config_handler.ConfigHandler.get_sync_retry_count", return_value=1),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_retry_count",
+                return_value=1,
+            ),
         ):
             await strategy._run_historical_sync(5, None, result)
         assert result is not None
@@ -900,8 +966,14 @@ class TestHistoricalSyncRunDeepBranches:
         strategy = HistoricalSyncStrategy(ctx)
         result = SyncResult()
         with (
-            patch("utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy", return_value=1),
-            patch("utils.config_handler.ConfigHandler.get_sync_retry_count", return_value=0),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_max_concurrent_heavy",
+                return_value=1,
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_sync_retry_count",
+                return_value=0,
+            ),
         ):
             await strategy._run_historical_sync(5, None, result)
         assert result.status in ("failed", "partial")

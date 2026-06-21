@@ -19,6 +19,8 @@ from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.stock_dao import StockDao
 from tests.integration.test_infra_base import make_clean_db_fixture
 
+pytestmark = pytest.mark.integration
+
 
 class TestBaseDaoConvertParam:
     """测试 BaseDao._convert_param_for_asyncpg 方法"""

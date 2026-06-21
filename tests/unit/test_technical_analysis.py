@@ -12,6 +12,8 @@ import pytest
 
 from utils.technical_analysis import TechnicalAnalysis
 
+pytestmark = pytest.mark.unit
+
 
 def _make_df(rows, with_trade_date=True, with_adj=True):
     data = {
@@ -115,9 +117,30 @@ class TestGetQfqDf:
     def test_qfq_normal(self):
         df = pd.DataFrame(
             [
-                {"trade_date": "20240101", "close": 10.0, "high": 10.5, "low": 9.5, "open": 10.0, "adj_factor": 1.0},
-                {"trade_date": "20240102", "close": 11.0, "high": 11.5, "low": 10.5, "open": 10.5, "adj_factor": 1.0},
-                {"trade_date": "20240103", "close": 10.0, "high": 10.5, "low": 9.5, "open": 10.5, "adj_factor": 2.0},
+                {
+                    "trade_date": "20240101",
+                    "close": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "open": 10.0,
+                    "adj_factor": 1.0,
+                },
+                {
+                    "trade_date": "20240102",
+                    "close": 11.0,
+                    "high": 11.5,
+                    "low": 10.5,
+                    "open": 10.5,
+                    "adj_factor": 1.0,
+                },
+                {
+                    "trade_date": "20240103",
+                    "close": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "open": 10.5,
+                    "adj_factor": 2.0,
+                },
             ]
         )
         result = TechnicalAnalysis._get_qfq_df(df)
@@ -128,9 +151,30 @@ class TestGetQfqDf:
     def test_qfq_null_adj_factor_degradation(self):
         df = pd.DataFrame(
             [
-                {"trade_date": "20240101", "close": 10.0, "open": 10.0, "high": 10.5, "low": 9.5, "adj_factor": None},
-                {"trade_date": "20240102", "close": 11.0, "open": 11.0, "high": 11.5, "low": 10.5, "adj_factor": 1.1},
-                {"trade_date": "20240103", "close": 12.0, "open": 12.0, "high": 12.5, "low": 11.5, "adj_factor": 1.2},
+                {
+                    "trade_date": "20240101",
+                    "close": 10.0,
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.5,
+                    "adj_factor": None,
+                },
+                {
+                    "trade_date": "20240102",
+                    "close": 11.0,
+                    "open": 11.0,
+                    "high": 11.5,
+                    "low": 10.5,
+                    "adj_factor": 1.1,
+                },
+                {
+                    "trade_date": "20240103",
+                    "close": 12.0,
+                    "open": 12.0,
+                    "high": 12.5,
+                    "low": 11.5,
+                    "adj_factor": 1.2,
+                },
             ]
         )
         result = TechnicalAnalysis._get_qfq_df(df)
@@ -200,7 +244,13 @@ class TestMACD:
 
     def test_macd_calculation(self):
         status, macd_val, hist_val = TechnicalAnalysis.get_macd(self.df)
-        assert status in ["GOLDEN_CROSS", "DEATH_CROSS", "BULLISH", "BEARISH", "NEUTRAL"]
+        assert status in [
+            "GOLDEN_CROSS",
+            "DEATH_CROSS",
+            "BULLISH",
+            "BEARISH",
+            "NEUTRAL",
+        ]
         assert isinstance(macd_val, (int, float))
         assert isinstance(hist_val, (int, float))
 

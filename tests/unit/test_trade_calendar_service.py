@@ -5,6 +5,8 @@ import pandas as pd
 
 from data.domain_services.trade_calendar_service import TradeCalendarService
 
+pytestmark = pytest.mark.unit
+
 
 def _make_service(cache_return=None, api_return=None, offline_return=None, cache_return_no_filter=None):
     mock_cache = MagicMock()
@@ -336,7 +338,12 @@ class TestGetPrevTradeDate:
 
     @pytest.mark.asyncio
     async def test_with_dates_before(self):
-        df = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)], "is_open": [1, 1]})
+        df = pd.DataFrame(
+            {
+                "cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)],
+                "is_open": [1, 1],
+            }
+        )
         svc = _make_service(cache_return=df)
         result = await svc.get_prev_trade_date(datetime.date(2024, 6, 14))
         assert result == datetime.date(2024, 6, 13)
@@ -368,7 +375,12 @@ class TestGetNextTradeDate:
 
     @pytest.mark.asyncio
     async def test_with_dates_after(self):
-        df = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 14), datetime.date(2024, 6, 15)], "is_open": [1, 1]})
+        df = pd.DataFrame(
+            {
+                "cal_date": [datetime.date(2024, 6, 14), datetime.date(2024, 6, 15)],
+                "is_open": [1, 1],
+            }
+        )
         svc = _make_service(cache_return=df)
         result = await svc.get_next_trade_date(datetime.date(2024, 6, 14))
         assert result == datetime.date(2024, 6, 15)
@@ -395,13 +407,21 @@ class TestGetLatestTradeDate:
     @pytest.mark.asyncio
     async def test_from_cache_ttl(self):
         svc = _make_service()
-        svc._latest_trade_date_cache = {"ts": 9999999999, "val": datetime.date(2024, 6, 14)}
+        svc._latest_trade_date_cache = {
+            "ts": 9999999999,
+            "val": datetime.date(2024, 6, 14),
+        }
         result = await svc.get_latest_trade_date()
         assert result == datetime.date(2024, 6, 14)
 
     @pytest.mark.asyncio
     async def test_from_db(self):
-        df = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)], "is_open": [1, 1]})
+        df = pd.DataFrame(
+            {
+                "cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)],
+                "is_open": [1, 1],
+            }
+        )
         svc = _make_service(cache_return=df)
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)
@@ -449,7 +469,12 @@ class TestGetLatestTradeDate:
     async def test_no_fallback_when_db_has_data(self, caplog):
         import logging
 
-        df = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)], "is_open": [1, 1]})
+        df = pd.DataFrame(
+            {
+                "cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)],
+                "is_open": [1, 1],
+            }
+        )
         svc = _make_service(cache_return=df)
         with (
             patch("data.domain_services.trade_calendar_service.get_now") as mock_now,
@@ -484,7 +509,12 @@ class TestGetLatestTradeDateAllowFallback:
 
     @pytest.mark.asyncio
     async def test_allow_fallback_false_with_db_data_succeeds(self):
-        df = pd.DataFrame({"cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)], "is_open": [1, 1]})
+        df = pd.DataFrame(
+            {
+                "cal_date": [datetime.date(2024, 6, 13), datetime.date(2024, 6, 14)],
+                "is_open": [1, 1],
+            }
+        )
         svc = _make_service(cache_return=df)
         with patch("data.domain_services.trade_calendar_service.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14, 16, 0)

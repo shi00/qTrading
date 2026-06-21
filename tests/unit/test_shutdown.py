@@ -1,4 +1,17 @@
+"""测试 ShutdownCoordinator 的优雅关闭流程。
+
+覆盖范围:
+- StepResult 数据结构与默认值
+- _CLEANUP_STEPS 步骤定义、超时预算与执行顺序
+- ShutdownCoordinator 初始化、看门狗、单步执行与完整清理流程
+- 各清理步骤 (step0~step6) 的实例存在/缺失分支
+- 看门狗强制退出、日志记录与 step_results 上报
+- main.py 使用的清理超时配置
+"""
+
 import asyncio
+import time
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -9,7 +22,18 @@ from utils.shutdown import ShutdownCoordinator, StepResult, _CLEANUP_STEPS
 pytestmark = pytest.mark.slow
 
 
+def _wait_until(condition, timeout=2.0, interval=0.01):
+    """Poll condition() until True or timeout expires."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return
+        time.sleep(interval)
+
+
 class TestStepResult:
+    """验证 StepResult 数据类的字段默认值与错误字段赋值。"""
+
     def test_defaults(self):
         r = StepResult(name="test", critical=True, ok=True, timed_out=False, elapsed_ms=100.0)
         assert r.name == "test"
@@ -18,11 +42,20 @@ class TestStepResult:
         assert r.error == ""
 
     def test_with_error(self):
-        r = StepResult(name="test", critical=False, ok=False, timed_out=True, elapsed_ms=500.0, error="timeout")
+        r = StepResult(
+            name="test",
+            critical=False,
+            ok=False,
+            timed_out=True,
+            elapsed_ms=500.0,
+            error="timeout",
+        )
         assert r.error == "timeout"
 
 
 class TestCleanupSteps:
+    """验证 _CLEANUP_STEPS 步骤定义的结构、超时预算与顺序约束。"""
+
     def test_steps_defined(self):
         assert len(_CLEANUP_STEPS) == 7
         assert _CLEANUP_STEPS[0][0] == "Step 0"
@@ -56,6 +89,8 @@ class TestCleanupSteps:
 
 
 class TestShutdownCoordinatorInit:
+    """验证 ShutdownCoordinator 的默认初始化与可定制回调/延迟参数。"""
+
     def test_default_init(self):
         coord = ShutdownCoordinator()
         assert coord.cleanup_done is False
@@ -75,6 +110,8 @@ class TestShutdownCoordinatorInit:
 
 
 class TestShutdownCoordinatorWatchdog:
+    """验证看门狗的启动、取消与重复启动幂等行为。"""
+
     def test_start_watchdog(self):
         coord = ShutdownCoordinator()
         coord.start_watchdog(timeout_s=1)
@@ -97,6 +134,8 @@ class TestShutdownCoordinatorWatchdog:
 
 
 class TestShutdownCoordinatorRunAsyncStep:
+    """验证 _run_async_step 对成功、失败、超时、取消与非关键步骤的处理。"""
+
     @pytest.mark.asyncio
     async def test_successful_step(self):
         coord = ShutdownCoordinator()
@@ -165,6 +204,8 @@ class TestShutdownCoordinatorRunAsyncStep:
 
 
 class TestShutdownCoordinatorCleanupSteps:
+    """验证 step0~step6 各清理步骤在单例存在/缺失时的分支行为。"""
+
     @pytest.mark.asyncio
     async def test_step0_cancel_tasks_no_instance(self):
         coord = ShutdownCoordinator()
@@ -184,6 +225,7 @@ class TestShutdownCoordinatorCleanupSteps:
 
     @pytest.mark.asyncio
     async def test_step1_stop_services_no_instances(self):
+        """所有服务单例均为 None 时，step1 应安全跳过不报错。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
@@ -197,6 +239,7 @@ class TestShutdownCoordinatorCleanupSteps:
 
     @pytest.mark.asyncio
     async def test_step1_stop_scheduler(self):
+        """SchedulerService 单例存在且 scheduler.running=True 时应调用 stop()。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
@@ -212,6 +255,7 @@ class TestShutdownCoordinatorCleanupSteps:
 
     @pytest.mark.asyncio
     async def test_step1_stop_news_service(self):
+        """NewsSubscriptionService 单例存在时应调用 stop_async()。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
@@ -228,6 +272,7 @@ class TestShutdownCoordinatorCleanupSteps:
 
     @pytest.mark.asyncio
     async def test_step1_stop_market_data(self):
+        """MarketDataService 单例存在时应调用 stop_async()。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("utils.scheduler_service.SchedulerService") as mock_sched,
@@ -310,6 +355,7 @@ class TestShutdownCoordinatorCleanupSteps:
 
     @pytest.mark.asyncio
     async def test_step4_clear_toast_exception(self):
+        """toast.stop_all 抛异常时 step4 应吞掉异常不影响后续步骤。"""
         mock_page = MagicMock()
         mock_toast = MagicMock()
         mock_toast.stop_all = MagicMock(side_effect=Exception("toast error"))
@@ -362,6 +408,8 @@ class TestShutdownCoordinatorCleanupSteps:
 
 
 class TestShutdownCoordinatorDoCleanup:
+    """验证 do_cleanup 的幂等性、完整流程与并发任务复用行为。"""
+
     @pytest.mark.asyncio
     async def test_cleanup_already_done(self):
         coord = ShutdownCoordinator()
@@ -382,6 +430,7 @@ class TestShutdownCoordinatorDoCleanup:
 
     @pytest.mark.asyncio
     async def test_full_cleanup(self):
+        """所有服务单例均为 None 时完整清理流程应顺利完成并标记 cleanup_done。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
@@ -404,6 +453,7 @@ class TestShutdownCoordinatorDoCleanup:
 
     @pytest.mark.asyncio
     async def test_cleanup_with_running_task(self):
+        """已有 cleanup 任务在运行时应复用该任务而非重复启动清理流程。"""
         coord = ShutdownCoordinator(service_stop_delay=0)
         coord._cleanup_task = asyncio.create_task(AsyncMock()())
         coord._cleanup_started = True
@@ -427,6 +477,8 @@ class TestShutdownCoordinatorDoCleanup:
 
 
 class TestShutdownCoordinatorExecuteCleanup:
+    """验证 _execute_cleanup 对超时、异常、取消与关键步骤失败的处理。"""
+
     @pytest.mark.asyncio
     async def test_timeout(self):
         coord = ShutdownCoordinator(service_stop_delay=0)
@@ -456,7 +508,13 @@ class TestShutdownCoordinatorExecuteCleanup:
         coord = ShutdownCoordinator(service_stop_delay=0)
         coord._run_cleanup_steps = AsyncMock(
             return_value=[
-                StepResult(name="Step 0", critical=True, ok=True, timed_out=False, elapsed_ms=10.0),
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=True,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                ),
             ]
         )
         result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
@@ -468,7 +526,14 @@ class TestShutdownCoordinatorExecuteCleanup:
         coord = ShutdownCoordinator(service_stop_delay=0)
         coord._run_cleanup_steps = AsyncMock(
             return_value=[
-                StepResult(name="Step 0", critical=True, ok=False, timed_out=False, elapsed_ms=10.0, error="fail"),
+                StepResult(
+                    name="Step 0",
+                    critical=True,
+                    ok=False,
+                    timed_out=False,
+                    elapsed_ms=10.0,
+                    error="fail",
+                ),
             ]
         )
         result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
@@ -477,16 +542,18 @@ class TestShutdownCoordinatorExecuteCleanup:
 
 @pytest.mark.slow
 class TestShutdownWatchdogForceExit:
+    """验证看门狗超时后强制退出行为与取消后的安全性。"""
+
     def test_watchdog_force_exit_uses_exit_code_1(self):
+        """看门狗超时应通过 force_exit_callback 触发退出码 1。"""
         exit_codes = []
         coord = ShutdownCoordinator(force_exit_callback=lambda code: exit_codes.append(code))
         coord.start_watchdog(timeout_s=0.1)
-        import time
-
-        time.sleep(0.3)
+        _wait_until(lambda: exit_codes == [1])
         assert exit_codes == [1]
 
     def test_watchdog_canceled_no_force_exit(self):
+        """看门狗在超时前被取消时不应触发 force_exit_callback。"""
         exit_codes = []
         coord = ShutdownCoordinator(force_exit_callback=lambda code: exit_codes.append(code))
         coord.start_watchdog(timeout_s=5)
@@ -494,18 +561,19 @@ class TestShutdownWatchdogForceExit:
         assert exit_codes == []
 
     def test_watchdog_logs_error_on_timeout(self, caplog):
+        """看门狗超时强制退出时应向 utils.shutdown logger 记录 ERROR 级日志。"""
         import logging
 
         coord = ShutdownCoordinator(force_exit_callback=lambda code: None)
         with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
             coord.start_watchdog(timeout_s=0.1)
-            import time
-
-            time.sleep(0.3)
+            _wait_until(lambda: any("forcing exit" in r.message.lower() for r in caplog.records))
             assert any("forcing exit" in r.message.lower() for r in caplog.records)
 
 
 class TestShutdownCoordinatorGracefulForceExit:
+    """验证自定义 force_exit 回调的注入与默认回调的优雅退出语义。"""
+
     def test_custom_callback_tries_sys_exit_first(self):
 
         exit_calls = []
@@ -535,18 +603,27 @@ class TestShutdownCoordinatorGracefulForceExit:
 
 @pytest.mark.slow
 class TestWatchdogStepResultsLogging:
+    """验证看门狗超时日志中包含 step_results 摘要信息。"""
+
     def test_watchdog_timeout_includes_step_results(self, caplog):
+        """看门狗超时日志应包含各步骤名称、超时标记等 step_results 摘要。"""
         import logging
-        import time
 
         coord = ShutdownCoordinator(force_exit_callback=lambda code: None)
         coord._step_results = [
             StepResult(name="Step 0", critical=True, ok=True, timed_out=False, elapsed_ms=100.0),
-            StepResult(name="Step 1", critical=True, ok=False, timed_out=True, elapsed_ms=2000.0, error="timeout"),
+            StepResult(
+                name="Step 1",
+                critical=True,
+                ok=False,
+                timed_out=True,
+                elapsed_ms=2000.0,
+                error="timeout",
+            ),
         ]
         with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
             coord.start_watchdog(timeout_s=0.1)
-            time.sleep(0.3)
+            _wait_until(lambda: any("forcing exit" in r.message.lower() for r in caplog.records))
             log_msgs = [r.message for r in caplog.records if "forcing exit" in r.message.lower()]
             assert len(log_msgs) >= 1
             msg = log_msgs[0]
@@ -556,20 +633,22 @@ class TestWatchdogStepResultsLogging:
             assert "timed_out=True" in msg
 
     def test_watchdog_timeout_empty_step_results(self, caplog):
+        """无 step_results 时看门狗日志应输出 step_results=[] 占位。"""
         import logging
-        import time
 
         coord = ShutdownCoordinator(force_exit_callback=lambda code: None)
         assert coord._step_results == []
         with caplog.at_level(logging.ERROR, logger="utils.shutdown"):
             coord.start_watchdog(timeout_s=0.1)
-            time.sleep(0.3)
+            _wait_until(lambda: any("forcing exit" in r.message.lower() for r in caplog.records))
             log_msgs = [r.message for r in caplog.records if "forcing exit" in r.message.lower()]
             assert len(log_msgs) >= 1
             assert "step_results=[]" in log_msgs[0]
 
 
 class TestDefaultWatchdogTimeout:
+    """验证看门狗默认超时 (25s) 与可定制超时参数。"""
+
     def test_default_watchdog_timeout_is_25s(self):
         coord = ShutdownCoordinator()
         assert coord._watchdog_timeout_s == 25.0
@@ -580,8 +659,11 @@ class TestDefaultWatchdogTimeout:
 
 
 class TestMainPyCleanupTimeouts:
+    """验证 main.py 调用 do_cleanup 时 step_timeout_s 参数的接受与生效。"""
+
     @pytest.mark.asyncio
     async def test_do_cleanup_accepts_step_timeout_s(self):
+        """do_cleanup 应接受 step_timeout_s 参数并完成完整清理流程。"""
         coord = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=lambda code: None)
         with (
             patch("services.task_manager.TaskManager") as mock_tm,
@@ -604,6 +686,7 @@ class TestMainPyCleanupTimeouts:
 
     @pytest.mark.asyncio
     async def test_step_timeout_s_actually_limits_step_duration(self):
+        """step_timeout_s 应真正限制单步耗时，使慢步骤被标记为 timed_out。"""
         coord = ShutdownCoordinator(service_stop_delay=0, force_exit_callback=lambda code: None)
 
         async def slow_cancel():
@@ -630,7 +713,10 @@ class TestMainPyCleanupTimeouts:
 
 
 class TestShutdownStepOrdering:
+    """验证 _CLEANUP_STEPS 中关键步骤的执行顺序约束 (防数据丢失)。"""
+
     def test_flush_db_before_close_processor(self):
+        """flush_db_writes 必须在 close_processor 之前执行以防止数据丢失。"""
         flush_idx = None
         close_idx = None
         for i, (_name, method_name, _critical, _timeout) in enumerate(_CLEANUP_STEPS):

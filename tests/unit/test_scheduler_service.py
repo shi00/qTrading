@@ -6,6 +6,8 @@ from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
 
 from utils.scheduler_service import SchedulerService
 
+pytestmark = pytest.mark.unit
+
 
 def _make_svc():
     with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
@@ -240,7 +242,12 @@ class TestSchedulerServiceWatchConfigChanges:
         mock_ch.get_setting.return_value = None
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
-        config = {"time": "09:30", "enabled": True, "doubao_time": "10:00", "doubao_enabled": False}
+        config = {
+            "time": "09:30",
+            "enabled": True,
+            "doubao_time": "10:00",
+            "doubao_enabled": False,
+        }
         mock_tpm_instance.run_async = AsyncMock(return_value=config)
         svc = SchedulerService()
         svc._last_known_config = config.copy()
@@ -561,8 +568,14 @@ class TestScheduleJobsInvalidTime:
 class TestSchedulerServiceStatus:
     def test_get_status_returns_dict(self):
         with (
-            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
-            patch("utils.scheduler_service.ConfigHandler.get_auto_update_time", return_value="16:30"),
+            patch(
+                "utils.scheduler_service.ConfigHandler.is_auto_update_enabled",
+                return_value=True,
+            ),
+            patch(
+                "utils.scheduler_service.ConfigHandler.get_auto_update_time",
+                return_value="16:30",
+            ),
         ):
             svc = SchedulerService()
             status = svc.get_status()
@@ -573,8 +586,14 @@ class TestSchedulerServiceStatus:
 
     def test_get_status_enabled(self):
         with (
-            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=True),
-            patch("utils.scheduler_service.ConfigHandler.get_auto_update_time", return_value="16:30"),
+            patch(
+                "utils.scheduler_service.ConfigHandler.is_auto_update_enabled",
+                return_value=True,
+            ),
+            patch(
+                "utils.scheduler_service.ConfigHandler.get_auto_update_time",
+                return_value="16:30",
+            ),
         ):
             svc = SchedulerService()
             status = svc.get_status()
@@ -582,8 +601,14 @@ class TestSchedulerServiceStatus:
 
     def test_get_status_disabled(self):
         with (
-            patch("utils.scheduler_service.ConfigHandler.is_auto_update_enabled", return_value=False),
-            patch("utils.scheduler_service.ConfigHandler.get_auto_update_time", return_value="16:30"),
+            patch(
+                "utils.scheduler_service.ConfigHandler.is_auto_update_enabled",
+                return_value=False,
+            ),
+            patch(
+                "utils.scheduler_service.ConfigHandler.get_auto_update_time",
+                return_value="16:30",
+            ),
         ):
             svc = SchedulerService()
             status = svc.get_status()

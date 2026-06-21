@@ -11,6 +11,8 @@ from data.domain_services.transaction_cost import (
     get_stamp_duty_rate,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestTransactionCost:
     def test_buy_commission_with_min(self):

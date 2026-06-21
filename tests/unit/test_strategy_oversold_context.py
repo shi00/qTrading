@@ -11,6 +11,10 @@ import pandas as pd
 
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.oversold_strategy import OversoldStrategy
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestBuildTurnoverContext(unittest.TestCase):

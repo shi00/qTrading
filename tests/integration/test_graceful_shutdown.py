@@ -15,6 +15,8 @@ import pytest
 from tests.integration.test_infra_base import mock_singletons  # noqa: F401
 from utils.shutdown import ShutdownCoordinator
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.mark.asyncio
 async def test_full_cleanup_all_steps(mock_singletons):
@@ -420,7 +422,11 @@ async def test_step5_exception_marks_cleanup_failed(mock_singletons):
     """Verify Step 5 (AI model) runtime errors bubble up and fail cleanup."""
     coordinator = ShutdownCoordinator(page=None)
 
-    with patch.object(coordinator, "_step5_unload_ai_model", side_effect=RuntimeError("llm unload failed")):
+    with patch.object(
+        coordinator,
+        "_step5_unload_ai_model",
+        side_effect=RuntimeError("llm unload failed"),
+    ):
         ok = await coordinator.do_cleanup()
 
     assert ok is False

@@ -7,6 +7,10 @@ Tests for ConfigHandler thread safety.
 import threading
 
 from utils.config_handler import ConfigHandler
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestConfigThreadSafety:

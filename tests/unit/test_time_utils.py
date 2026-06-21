@@ -14,6 +14,8 @@ from utils.time_utils import (
     CST_TZ,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestGetNow:
     def test_returns_datetime(self):

@@ -13,6 +13,8 @@ import pytest
 
 from ui.viewmodels.home_view_model import HomeViewModel
 
+pytestmark = pytest.mark.unit
+
 
 class TestHomeViewModelInit:
     """测试初始化"""

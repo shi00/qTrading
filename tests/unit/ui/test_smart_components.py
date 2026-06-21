@@ -8,6 +8,8 @@ from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.components.toast_manager import ToastCard, ToastManager
 
+pytestmark = pytest.mark.unit
+
 
 class TestToastManager:
     def test_init_appends_container_to_overlay(self, mock_page):
@@ -386,7 +388,15 @@ class TestNewsFeed:
 
     def test_set_news_with_data_switches_to_list(self):
         feed = NewsFeed()
-        df = pd.DataFrame([{"content": "news1", "tags": "tech", "publish_time": "2024-01-01 10:00:00"}])
+        df = pd.DataFrame(
+            [
+                {
+                    "content": "news1",
+                    "tags": "tech",
+                    "publish_time": "2024-01-01 10:00:00",
+                }
+            ]
+        )
 
         feed.set_news(df)
 
@@ -397,8 +407,16 @@ class TestNewsFeed:
         feed = NewsFeed()
         df = pd.DataFrame(
             [
-                {"content": "news1", "tags": "tech", "publish_time": "2024-01-01 10:00:00"},
-                {"content": "news2", "tags": "finance", "publish_time": "2024-01-01 11:00:00"},
+                {
+                    "content": "news1",
+                    "tags": "tech",
+                    "publish_time": "2024-01-01 10:00:00",
+                },
+                {
+                    "content": "news2",
+                    "tags": "finance",
+                    "publish_time": "2024-01-01 11:00:00",
+                },
             ]
         )
 
@@ -435,7 +453,10 @@ class TestNewsFeed:
         feed = NewsFeed()
         df1 = pd.DataFrame([{"content": "old", "tags": "", "publish_time": ""}])
         df2 = pd.DataFrame(
-            [{"content": "new1", "tags": "", "publish_time": ""}, {"content": "new2", "tags": "", "publish_time": ""}]
+            [
+                {"content": "new1", "tags": "", "publish_time": ""},
+                {"content": "new2", "tags": "", "publish_time": ""},
+            ]
         )
 
         feed.set_news(df1)
@@ -494,7 +515,15 @@ class TestNewsFeed:
 
     def test_update_news_tag_updates_matching_item(self):
         feed = NewsFeed()
-        df = pd.DataFrame([{"content": "target news", "tags": "old_tag", "publish_time": "2024-01-01 10:00:00"}])
+        df = pd.DataFrame(
+            [
+                {
+                    "content": "target news",
+                    "tags": "old_tag",
+                    "publish_time": "2024-01-01 10:00:00",
+                }
+            ]
+        )
         feed.set_news(df)
 
         feed.update_news_tag("target news", "new_tag")
@@ -571,7 +600,10 @@ class TestNewsFeed:
     def test_translate_tag_splits_commas(self):
         feed = NewsFeed()
 
-        with patch("ui.components.news_feed.I18n.get", side_effect=lambda k, default=None: default or k):
+        with patch(
+            "ui.components.news_feed.I18n.get",
+            side_effect=lambda k, default=None: default or k,
+        ):
             result = feed._translate_tag("tech, finance")
 
         assert "," in result

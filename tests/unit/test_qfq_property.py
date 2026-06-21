@@ -14,6 +14,8 @@ import pytest
 
 from utils.qfq import qfq_ratio_series
 
+pytestmark = pytest.mark.unit
+
 
 def test_qfq_ratio_none_returns_none():
     """None 输入返回 None（qfq.py:37）。"""

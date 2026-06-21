@@ -138,6 +138,8 @@ class TestLogAsyncOperation:
 
     @pytest.mark.asyncio
     async def test_log_args_positional_and_method_types(self, log_capture):
+        """验证 log_args 对独立函数、实例方法、类方法、静态方法的参数记录差异 (self/cls 应被跳过)。"""
+
         # 1. Standalone function - should log positional arguments
         @log_async_operation(operation_name="test_standalone", log_args=True)
         async def standalone_func(a, b):
@@ -183,6 +185,8 @@ class TestLogAsyncOperation:
 
     @pytest.mark.asyncio
     async def test_sanitize_params(self, log_capture):
+        """sanitize_params 指定的参数在日志中应被脱敏，明文不得泄露。"""
+
         @log_async_operation(
             operation_name="test_sanitize",
             log_args=True,
@@ -197,6 +201,8 @@ class TestLogAsyncOperation:
 
     @pytest.mark.asyncio
     async def test_exception_logging(self, log_capture):
+        """被装饰函数抛异常时应记录 failed 日志并包含异常类型，随后重新抛出。"""
+
         @log_async_operation(operation_name="test_error", log_exceptions=True)
         async def failing_func():
             raise ValueError("Test error")
@@ -247,13 +253,18 @@ class TestTrackPerformance:
 
     @pytest.mark.slow
     def test_sync_function(self, log_capture):
-        @track_performance(threshold_ms=10)
-        def sync_slow():
-            import time
+        from tests.virtual_clock import VirtualClock
 
-            time.sleep(0.02)
+        clock = VirtualClock()
+        with patch("time.perf_counter", clock.now), patch("time.sleep", clock.sleep):
 
-        sync_slow()
+            @track_performance(threshold_ms=10)
+            def sync_slow():
+                import time
+
+                time.sleep(0.02)
+
+            sync_slow()
 
         assert "took" in log_capture.text
 
@@ -293,6 +304,7 @@ class TestAsyncOperationLogger:
 
     @pytest.mark.asyncio
     async def test_exception_handling(self, log_capture):
+        """上下文内抛异常时应记录 failed 日志并附带已收集的 metrics，随后重新抛出。"""
         with pytest.raises(RuntimeError):
             async with AsyncOperationLogger("test_error") as op:
                 op.add_metric("attempts", 3)
@@ -304,6 +316,8 @@ class TestAsyncOperationLogger:
 
 
 class TestLogUiAction:
+    """测试 log_ui_action 装饰器对同步/异步 UI 动作的日志记录。"""
+
     def test_sync_function(self):
         @log_ui_action("TestComponent", "Click", "TestTarget")
         def my_func():
@@ -325,6 +339,8 @@ class TestLogUiAction:
 
 
 class TestUILogger:
+    """测试 UILogger.log_action 的消息格式化 (组件/动作/目标/详情)。"""
+
     def test_log_action_basic(self):
         with patch.object(UILogger._logger, "info") as mock_info:
             UILogger.log_action("Button", "Click")
@@ -351,6 +367,8 @@ class TestObservabilityFixes:
 
     @pytest.mark.asyncio
     async def test_decorator_logger_name_and_stacklevel(self, log_capture):
+        """OBS-001: 装饰器日志的 logger name 与 filename 应指向调用方测试模块而非 log_decorators 模块。"""
+
         @log_async_operation(operation_name="test_obs001")
         async def dummy_operation():
             return "ok"
@@ -368,6 +386,8 @@ class TestObservabilityFixes:
 
     @pytest.mark.asyncio
     async def test_recoverable_exception_severity(self, log_capture):
+        """OBS-003: 可恢复异常 (如 TimeoutError) 应记为 WARNING 且不附带 traceback。"""
+
         # TimeoutError 被 classify_severity 归类为 recoverable (可恢复)
         @log_async_operation(operation_name="test_obs003")
         async def failing_operation():
@@ -389,6 +409,8 @@ class TestObservabilityFixes:
 
     @pytest.mark.asyncio
     async def test_system_exception_severity(self, log_capture):
+        """系统级异常 (如 MemoryError) 应记为 CRITICAL 并附带 exc_info traceback。"""
+
         # MemoryError 属于 system-level，应记录为 CRITICAL 并附带 exc_info
         @log_async_operation(operation_name="test_system_err")
         async def system_error_op():
@@ -406,6 +428,7 @@ class TestObservabilityFixes:
 
     @pytest.mark.asyncio
     async def test_async_operation_logger_custom_name(self, log_capture):
+        """AsyncOperationLogger 应支持自定义 logger_name，所有日志记录使用该 name。"""
         async with AsyncOperationLogger("test_custom_logger", logger_name="custom.logger") as op:
             op.log_milestone("milestone_1")
 

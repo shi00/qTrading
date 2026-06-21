@@ -28,11 +28,19 @@ from tests.builders.stock_data import (
     make_trade_cal_rows,
 )
 
+pytestmark = pytest.mark.integration
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db(test_engine: AsyncEngine):
     """每个测试前清理相关表，避免数据残留干扰断言。"""
-    tables = ["daily_quotes", "stock_basic", "trade_cal", "daily_indicators", "financial_reports"]
+    tables = [
+        "daily_quotes",
+        "stock_basic",
+        "trade_cal",
+        "daily_indicators",
+        "financial_reports",
+    ]
     async with test_engine.begin() as conn:
         for table in tables:
             with contextlib.suppress(Exception):
@@ -261,7 +269,9 @@ class TestQuoteDaoIntegrity:
                 )
 
         scores = await quote_dao.get_bulk_sync_quality_scores(
-            datetime.date(2024, 1, 1), datetime.date(2024, 1, 1), tables=["daily_quotes"]
+            datetime.date(2024, 1, 1),
+            datetime.date(2024, 1, 1),
+            tables=["daily_quotes"],
         )
 
         assert datetime.date(2024, 1, 1) in scores, "应返回 2024-01-01 的质量评分"

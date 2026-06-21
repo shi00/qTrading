@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from data.persistence.db_url_override import override_db_url
 from data.persistence.models import Base
 from tests._helpers import build_db_urls, get_pg_connection_params
-from tests.integration.test_data_db_migrator import _create_isolated_db, _drop_isolated_db
+from tests.integration.test_data_db_migrator import (
+    _create_isolated_db,
+    _drop_isolated_db,
+)
+
+pytestmark = pytest.mark.integration
 
 
 class TestCreatedAtSchema:

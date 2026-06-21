@@ -9,7 +9,7 @@ from ui.components.toast_manager import ToastCard, ToastManager
 
 # P2-5: 文件含真实 asyncio.sleep（100s 长睡眠，虽被 cancel 截断），
 # 标注 slow 以便 CI 分轨运行
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.unit, pytest.mark.slow]
 
 
 class TestToastManagerInit:

@@ -2,6 +2,10 @@ import numpy as np
 import pandas as pd
 
 from strategies.ai_mixin import AIStrategyMixin
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def test_ai_macro():

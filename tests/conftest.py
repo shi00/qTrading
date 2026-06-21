@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from urllib.parse import quote_plus
 from unittest.mock import MagicMock
@@ -20,14 +21,14 @@ import pytest
 
 
 @pytest.fixture(scope="session")
-def event_loop_policy():
+def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
     if sys.platform == "win32":
         return asyncio.WindowsSelectorEventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
 
 
 @contextmanager
-def singleton_state(cls, extra_attrs=None):
+def singleton_state(cls: type, extra_attrs: list[str] | None = None) -> Iterator[None]:
     """Context manager that saves and restores a singleton class's _instance.
 
     Usage:
@@ -63,21 +64,6 @@ def singleton_state(cls, extra_attrs=None):
             setattr(cls, attr, value)
 
 
-@pytest.fixture
-def singleton_reset():
-    """Fixture that provides the singleton_state context manager.
-
-    Usage in tests:
-        def test_something(self, singleton_reset):
-            with singleton_reset(TaskManager):
-                mgr = TaskManager()
-
-    Note: This fixture is currently unused (dead code, kept per §1.4).
-    The singleton_state context manager is imported directly where needed.
-    """
-    return singleton_state
-
-
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -89,20 +75,20 @@ _ORIGINAL_KEYRING = None
 _ORIGINAL_LITELLM = None
 
 
-def _create_mock_keyring():
+def _create_mock_keyring() -> MagicMock:
     """Create a mock keyring module for CI environments."""
-    _password_store = {}
+    _password_store: dict[str, str] = {}
 
-    def get_password(service_name, username):
+    def get_password(service_name: str, username: str) -> str | None:
         return _password_store.get(f"{service_name}:{username}")
 
-    def set_password(service_name, username, password):
+    def set_password(service_name: str, username: str, password: str) -> None:
         _password_store[f"{service_name}:{username}"] = password
 
-    def delete_password(service_name, username):
+    def delete_password(service_name: str, username: str) -> None:
         _password_store.pop(f"{service_name}:{username}", None)
 
-    def clear():
+    def clear() -> None:
         _password_store.clear()
 
     mock_kr = MagicMock()
@@ -116,7 +102,7 @@ def _create_mock_keyring():
     return mock_kr
 
 
-def _create_mock_litellm():
+def _create_mock_litellm() -> MagicMock:
     from unittest.mock import AsyncMock
 
     mock_lt = MagicMock()
@@ -133,7 +119,7 @@ def _create_mock_litellm():
 
     _REASONING_PATTERNS = ("deepseek-reasoner", "o3", "o4-mini")
 
-    def _supports_reasoning(model=""):
+    def _supports_reasoning(model: str = "") -> bool:
         m = model.lower()
         return any(p in m for p in _REASONING_PATTERNS)
 
@@ -141,7 +127,7 @@ def _create_mock_litellm():
     return mock_lt
 
 
-def pytest_unconfigure(config):
+def pytest_unconfigure(config: pytest.Config) -> None:
     """Restore original keyring/litellm modules and clean up temp config after test session."""
     if _ORIGINAL_KEYRING is not None:
         sys.modules["keyring"] = _ORIGINAL_KEYRING
@@ -164,7 +150,7 @@ _temp_config_dir = tempfile.mkdtemp(prefix="astock_test_config_")
 _temp_config_file = os.path.join(_temp_config_dir, "test_user_settings.json")
 
 
-def _get_test_db_url():
+def _get_test_db_url() -> str:
     try:
         from tests.integration.conftest import TEST_DB_URL
 
@@ -180,7 +166,7 @@ def _get_test_db_url():
         return f"postgresql+asyncpg://{_user}:{_encoded_pwd}@{_host}:{_port}/{_name}"
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config) -> None:
     global _MOCK_KEYRING, _MOCK_LITELLM, _ORIGINAL_KEYRING, _ORIGINAL_LITELLM
 
     _ORIGINAL_KEYRING = sys.modules.get("keyring")
@@ -199,7 +185,7 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True, scope="session")
-def isolate_config_file():
+def isolate_config_file() -> Iterator[str]:
     """
     Ensure config isolation is active throughout the test session.
     The actual patching is done in pytest_configure for early interception.
@@ -208,7 +194,7 @@ def isolate_config_file():
 
 
 @pytest.fixture(autouse=True)
-def reset_config_cache():
+def reset_config_cache() -> Iterator[None]:
     """
     Reset ConfigHandler._config_cache before each test to prevent cross-test pollution.
     """
@@ -219,7 +205,7 @@ def reset_config_cache():
 
 
 @pytest.fixture(autouse=True)
-def reset_loop_local_cache():
+def reset_loop_local_cache() -> Iterator[None]:
     """
     Reset loop_local cache before each test to prevent cross-test pollution.
     Tests like TestAIServiceSemaphoreSeparation.test_reload_config_invalidates_both_semaphores
@@ -233,7 +219,7 @@ def reset_loop_local_cache():
 
 
 @pytest.fixture(autouse=True)
-def _reset_mock_keyring_store():
+def _reset_mock_keyring_store() -> Iterator[None]:
     """Clear mock keyring password store between tests to prevent leakage."""
     yield
     if _MOCK_KEYRING is not None and hasattr(_MOCK_KEYRING, "clear"):
@@ -244,7 +230,7 @@ def _reset_mock_keyring_store():
 
 
 @pytest.fixture(autouse=True)
-def mock_external_services(request):
+def mock_external_services(request: pytest.FixtureRequest) -> Iterator[None]:
     """
     Globally mock external network and DB calls for unit tests to prevent CI timeouts.
     Tests that manage their own mocks should use @pytest.mark.no_auto_mock.
@@ -277,7 +263,14 @@ def mock_external_services(request):
     # Mock ReviewManager database calls (async)
     from data.persistence.review_manager import ReviewManager
 
-    patches.append(patch.object(ReviewManager, "get_learning_context", new_callable=AsyncMock, return_value=""))
+    patches.append(
+        patch.object(
+            ReviewManager,
+            "get_learning_context",
+            new_callable=AsyncMock,
+            return_value="",
+        )
+    )
 
     for p in patches:
         p.start()

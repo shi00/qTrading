@@ -8,6 +8,8 @@ import httpx
 
 from services.ai_service import AIService, AIServiceUnavailableError
 
+pytestmark = pytest.mark.unit
+
 
 class TestFailoverConfig:
     """测试 Failover 配置获取"""
@@ -353,7 +355,10 @@ class TestReasoningCheckWithModelOverride:
             yield chunk1
 
         with (
-            patch("services.ai_service._check_reasoning_support", side_effect=mock_check_reasoning),
+            patch(
+                "services.ai_service._check_reasoning_support",
+                side_effect=mock_check_reasoning,
+            ),
             patch("services.ai_service.acompletion", return_value=mock_stream()),
             patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
         ):
@@ -396,7 +401,10 @@ class TestReasoningCheckWithModelOverride:
             yield chunk1
 
         with (
-            patch("services.ai_service._check_reasoning_support", side_effect=mock_check_reasoning),
+            patch(
+                "services.ai_service._check_reasoning_support",
+                side_effect=mock_check_reasoning,
+            ),
             patch("services.ai_service.acompletion", return_value=mock_stream()),
             patch("utils.proxy_manager.ProxyManager.litellm_env_context"),
         ):
@@ -440,7 +448,10 @@ class TestCrossProviderFailoverCredentials:
             "api_key": "sk-qwen-from-credentials",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         }
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
         assert params["model"] == "qwen/qwen-max"
         assert params["api_key"] == "sk-qwen-from-credentials"
@@ -457,7 +468,10 @@ class TestCrossProviderFailoverCredentials:
         messages = [{"role": "user", "content": "test"}]
 
         mock_credential = {"api_key": None, "base_url": ""}
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert params["model"] == "openai/gpt-4o"
         assert "api_key" not in params
@@ -474,8 +488,14 @@ class TestCrossProviderFailoverCredentials:
         }
         messages = [{"role": "user", "content": "test"}]
 
-        mock_credential = {"api_key": "sk-openai-key", "base_url": "https://api.openai.com"}
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        mock_credential = {
+            "api_key": "sk-openai-key",
+            "base_url": "https://api.openai.com",
+        }
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert params["model"] == "openai/gpt-4o"
         assert params["api_key"] == "sk-openai-key"
@@ -513,7 +533,10 @@ class TestCrossProviderCredentialFallback:
             "api_key": "sk-qwen-from-credentials",
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         }
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
         assert params["api_key"] == "sk-qwen-from-credentials"
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -529,7 +552,10 @@ class TestCrossProviderCredentialFallback:
         messages = [{"role": "user", "content": "test"}]
 
         mock_credential = {"api_key": None, "base_url": ""}
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         assert "api_key" not in params
         # 修复后：无凭证 base_url 时回退到 LLM_PROVIDERS 默认值
@@ -554,7 +580,10 @@ class TestCrossProviderBaseUrlFallback:
             "api_key": "sk-openai-custom",
             "base_url": "https://custom-openai-proxy.example.com",
         }
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="openai/gpt-4o")
         # 应使用用户自定义的 base_url，而非 LLM_PROVIDERS 默认值
         assert params["api_base"] == "https://custom-openai-proxy.example.com"
@@ -571,7 +600,10 @@ class TestCrossProviderBaseUrlFallback:
 
         # 凭证中没有 base_url
         mock_credential = {"api_key": "sk-qwen-key", "base_url": ""}
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="qwen/qwen-max")
         # 应使用 LLM_PROVIDERS 中 qwen 的默认 base_url
         assert params["api_base"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -587,7 +619,10 @@ class TestCrossProviderBaseUrlFallback:
         messages = [{"role": "user", "content": "test"}]
 
         mock_credential = {"api_key": "sk-custom-key", "base_url": ""}
-        with patch("services.ai_service.ConfigHandler.get_llm_config_for_provider", return_value=mock_credential):
+        with patch(
+            "services.ai_service.ConfigHandler.get_llm_config_for_provider",
+            return_value=mock_credential,
+        ):
             params = AIService._build_litellm_params(llm_config, messages, model_override="custom/my-model")
         assert params["model"] == "custom/my-model"
         # custom 供应商在 LLM_PROVIDERS 中 base_url 为空，不应设置 api_base

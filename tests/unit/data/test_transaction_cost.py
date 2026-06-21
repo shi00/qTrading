@@ -15,6 +15,8 @@ from data.domain_services.transaction_cost import (
     get_stamp_duty_schedule_description,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestStampDutySchedule:
     def test_schedule_is_sorted(self) -> None:

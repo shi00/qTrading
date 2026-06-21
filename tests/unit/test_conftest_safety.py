@@ -1,6 +1,10 @@
 import os
 import subprocess
 import sys
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestConftestSafety:
@@ -30,7 +34,11 @@ class TestConftestSafety:
             capture_output=True,
             text=True,
             cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
-            env={**os.environ, "TEST_DB_NAME": "test_mysafe", "CI_PG_PASSWORD": "testpw"},
+            env={
+                **os.environ,
+                "TEST_DB_NAME": "test_mysafe",
+                "CI_PG_PASSWORD": "testpw",
+            },
         )
         assert "OK" in result.stdout or result.returncode == 0
 

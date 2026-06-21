@@ -14,6 +14,8 @@ from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
 from strategies.base_strategy import BaseStrategy
 
+pytestmark = pytest.mark.integration
+
 
 class SimpleTestStrategy(BaseStrategy):
     """用于端到端测试的简单策略"""

@@ -17,6 +17,10 @@ from ui.components.health_report_dialog import (
     MetricTile,
 )
 from ui.theme import AppColors
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestDashboardCard:
@@ -1323,3 +1327,53 @@ class TestPaginatedTableVirtualization:
         # _canvas must remain in list_view.controls for re-mount
         assert table.list_view.controls == [table._canvas]
         assert table._canvas.height == 0
+
+    def test_refresh_viewport_is_public_method(self):
+        table = PaginatedTable()
+        assert callable(getattr(table, "refresh_viewport", None))
+
+    def test_refresh_viewport_with_no_rows_does_nothing(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.refresh_viewport(viewport_height=600)
+        assert len(table.rendered_row_controls) == 0
+
+    def test_refresh_viewport_recalculates_visible_rows_for_taller_viewport(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        # Initially uses DEFAULT_VIEWPORT_ROWS=30 + 2*BUFFER_ROWS=16 = 46
+        assert len(table.rendered_row_controls) == 46
+        # Simulate a taller viewport via refresh_viewport
+        table.refresh_viewport(viewport_height=60 * 30)
+        # 60 + 2*BUFFER_ROWS(16) = 76
+        assert len(table.rendered_row_controls) == 76
+
+    def test_refresh_viewport_reduces_rows_for_smaller_viewport(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        assert len(table.rendered_row_controls) == 46
+        # Shrink viewport
+        table.refresh_viewport(viewport_height=10 * 30)
+        # 10 + 2*BUFFER_ROWS(16) = 26
+        assert len(table.rendered_row_controls) == 26
+
+    def test_refresh_viewport_without_height_uses_existing_viewport(self):
+        table = PaginatedTable()
+        table.set_columns(self._cols())
+        table.set_rows([{"name": f"S{i}"} for i in range(500)])
+        # Set a viewport height via scroll event first
+        from ui.components.virtual_table import ROW_HEIGHT
+
+        class _Evt:
+            pixels = 0
+            viewport_dimension = 20 * ROW_HEIGHT
+
+        # Force re-render since _on_scroll skips when delta < RERENDER_THRESHOLD
+        table._last_rendered_first = -1
+        table._on_scroll(_Evt())
+        assert len(table.rendered_row_controls) == 36
+        # refresh_viewport without arg should reuse the scroll-set height
+        table.refresh_viewport()
+        assert len(table.rendered_row_controls) == 36

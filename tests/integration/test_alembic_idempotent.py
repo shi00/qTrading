@@ -7,10 +7,21 @@ import importlib.util
 import os
 
 from sqlalchemy import inspect
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 _spec = importlib.util.spec_from_file_location(
     "alembic_initial_schema",
-    os.path.join(os.path.dirname(__file__), "..", "..", "alembic", "versions", "0001_initial_schema.py"),
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "..",
+        "alembic",
+        "versions",
+        "0001_initial_schema.py",
+    ),
 )
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)

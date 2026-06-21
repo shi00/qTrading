@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 
 from data.persistence.daos.holder_dao import HolderDao
 
+pytestmark = pytest.mark.unit
+
 
 def _make_dao():
     dao = HolderDao(MagicMock(spec=AsyncEngine))
@@ -39,7 +41,7 @@ class TestSaveHolderNumber:
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240630"], "holder_num": [100]})
         result = await dao.save_holder_number(df)
         assert result == 5
-        dao._write_db.assert_called()
+        dao._write_db.assert_called_once()
 
 
 class TestCalculateHolderChanges:

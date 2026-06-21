@@ -14,6 +14,8 @@ from tests.unit.strategies.backtest.fixtures import (
     make_trade_dates,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestMakeTradeDates:
     def test_basic_trade_dates(self) -> None:

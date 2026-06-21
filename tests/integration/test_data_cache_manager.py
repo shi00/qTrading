@@ -13,6 +13,9 @@ from data.constants import (
     TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
 )
 from tests.integration.test_infra_base import TestDatabaseBase
+import pytest
+
+pytestmark = pytest.mark.integration
 
 
 class TestCacheManager(TestDatabaseBase):
@@ -392,7 +395,11 @@ class TestCacheManager(TestDatabaseBase):
             result = await conn.execute(sa.text("SELECT version_num FROM alembic_version"))
             version = result.scalar()
         self.assertIsNotNone(version)
-        self.assertNotEqual(version, "test_rev", "alembic_version should be reset to actual migration version")
+        self.assertNotEqual(
+            version,
+            "test_rev",
+            "alembic_version should be reset to actual migration version",
+        )
 
     async def test_top_list(self):
         """Test Top List (LHB)"""

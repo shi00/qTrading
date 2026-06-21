@@ -6,7 +6,13 @@ import pandas as pd
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from data.persistence.daos.quote_dao import QuoteDao, _is_safe_identifier, _normalize_trade_date
+from data.persistence.daos.quote_dao import (
+    QuoteDao,
+    _is_safe_identifier,
+    _normalize_trade_date,
+)
+
+pytestmark = pytest.mark.unit
 
 
 class TestIsSafeIdentifier:
@@ -316,7 +322,10 @@ class TestQuoteDaoCheckDataExists:
     @pytest.mark.asyncio
     async def test_all_tables_have_data(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
@@ -332,7 +341,10 @@ class TestQuoteDaoCheckDataExists:
     @pytest.mark.asyncio
     async def test_missing_data(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
             result = await dao.check_data_exists("20240615", tables=["daily_quotes"])
             assert result is False
@@ -340,21 +352,30 @@ class TestQuoteDaoCheckDataExists:
     @pytest.mark.asyncio
     async def test_invalid_table(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             result = await dao.check_data_exists("20240615", tables=["invalid_table"])
             assert result is False
 
     @pytest.mark.asyncio
     async def test_empty_tables(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=[]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=[],
+        ):
             result = await dao.check_data_exists("20240615", tables=[])
             assert result is False
 
     @pytest.mark.asyncio
     async def test_none_trade_date_returns_false(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
             result = await dao.check_data_exists(None, tables=["daily_quotes"])
             assert result is False
@@ -362,7 +383,10 @@ class TestQuoteDaoCheckDataExists:
     @pytest.mark.asyncio
     async def test_sql_injection_table_rejected(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             result = await dao.check_data_exists("20240615", tables=["daily_quotes; DROP TABLE users--"])
             assert result is False
 
@@ -387,7 +411,10 @@ class TestQuoteDaoCheckDataExists:
     @pytest.mark.asyncio
     async def test_uses_sqlalchemy_core_not_raw_sql(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(return_value=pd.DataFrame({"tbl": ["daily_quotes"], "val": [1]}))
             await dao.check_data_exists("20240615", tables=["daily_quotes"])
             call_args = dao._read_db_select.call_args
@@ -437,7 +464,10 @@ class TestQuoteDaoGetBulkTableCounts:
     @pytest.mark.asyncio
     async def test_with_data(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(
                 return_value=pd.DataFrame(
                     {
@@ -452,14 +482,20 @@ class TestQuoteDaoGetBulkTableCounts:
     @pytest.mark.asyncio
     async def test_invalid_table(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             result = await dao.get_bulk_table_counts("invalid_table", "20240615", "20240615")
             assert result == {}
 
     @pytest.mark.asyncio
     async def test_empty(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(return_value=pd.DataFrame())
             result = await dao.get_bulk_table_counts("daily_quotes", "20240615", "20240615")
             assert result == {}
@@ -589,7 +625,14 @@ class TestQuoteDaoGetSyncQualityScore:
     async def test_with_string_date(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_sync_quality_scores = AsyncMock(
-            return_value={datetime.date(2024, 6, 15): {"score": 80, "expected_base": 5000, "tables": {}, "issues": []}}
+            return_value={
+                datetime.date(2024, 6, 15): {
+                    "score": 80,
+                    "expected_base": 5000,
+                    "tables": {},
+                    "issues": [],
+                }
+            }
         )
         result = await dao.get_sync_quality_score("20240615")
         assert result["score"] == 80
@@ -598,7 +641,14 @@ class TestQuoteDaoGetSyncQualityScore:
     async def test_with_date_object(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_sync_quality_scores = AsyncMock(
-            return_value={datetime.date(2024, 6, 15): {"score": 90, "expected_base": 5000, "tables": {}, "issues": []}}
+            return_value={
+                datetime.date(2024, 6, 15): {
+                    "score": 90,
+                    "expected_base": 5000,
+                    "tables": {},
+                    "issues": [],
+                }
+            }
         )
         result = await dao.get_sync_quality_score(datetime.date(2024, 6, 15))
         assert result["score"] == 90
@@ -616,7 +666,10 @@ class TestQuoteDaoGetBulkSyncQualityScores:
     async def test_no_expected_bases(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={})
-        with patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_effective_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             result = await dao.get_bulk_sync_quality_scores("20240614", "20240615")
             assert result == {}
 
@@ -625,7 +678,10 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 0})
         dao.get_bulk_table_counts = AsyncMock(return_value={})
-        with patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_effective_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
             assert datetime.date(2024, 6, 15) in result
             assert result[datetime.date(2024, 6, 15)]["score"] == 0
@@ -637,7 +693,10 @@ class TestQuoteDaoGetBulkSyncQualityScores:
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
         dao.get_field_completeness = AsyncMock(return_value={})
         with (
-            patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]),
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_sync_integrity_config.return_value = {
@@ -677,7 +736,10 @@ class TestQuoteDaoCoverageGaps:
     @pytest.mark.asyncio
     async def test_get_bulk_table_counts_exception(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(side_effect=Exception("DB error"))
             result = await dao.get_bulk_table_counts("daily_quotes", "20240615", "20240615")
             assert result == {}
@@ -692,7 +754,10 @@ class TestQuoteDaoCoverageGaps:
     @pytest.mark.asyncio
     async def test_check_data_exists_exception_with_raise_on_error(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        with patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]):
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes"],
+        ):
             dao._read_db_select = AsyncMock(side_effect=Exception("DB error"))
             with pytest.raises(Exception, match="DB error"):
                 await dao.check_data_exists("20240615", tables=["daily_quotes"], raise_on_error=True)
@@ -701,7 +766,10 @@ class TestQuoteDaoCoverageGaps:
     async def test_check_data_exists_table_not_in_metadata(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         with (
-            patch("data.persistence.daos.quote_dao._get_default_synced_tables", return_value=["daily_quotes"]),
+            patch(
+                "data.persistence.daos.quote_dao._get_default_synced_tables",
+                return_value=["daily_quotes"],
+            ),
             patch("data.persistence.daos.quote_dao.Base") as mock_base,
         ):
             mock_base.metadata.tables.get.return_value = None
@@ -819,7 +887,10 @@ class TestQuoteDaoCoverageGaps:
         dao.get_bulk_table_counts = AsyncMock(return_value={datetime.date(2024, 6, 15): 4800})
         dao.get_field_completeness = AsyncMock(return_value={"roe": 0.8, "pe_ttm": 0.9})
         with (
-            patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=["daily_quotes"]),
+            patch(
+                "data.persistence.daos.quote_dao._get_effective_synced_tables",
+                return_value=["daily_quotes"],
+            ),
             patch("utils.config_handler.ConfigHandler") as mock_ch,
         ):
             mock_ch.get_sync_integrity_config.return_value = {
@@ -829,4 +900,200 @@ class TestQuoteDaoCoverageGaps:
                 "quality_weights": {"daily_quotes": 10},
             }
             result = await dao.get_bulk_sync_quality_scores("20240615", "20240615")
-            assert result[datetime.date(2024, 6, 15)]["field_completeness"] == {"roe": 0.8, "pe_ttm": 0.9}
+            assert result[datetime.date(2024, 6, 15)]["field_completeness"] == {
+                "roe": 0.8,
+                "pe_ttm": 0.9,
+            }
+
+
+class TestQuoteDaoGetBlockTradeRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"]}))
+        result = await dao.get_block_trade_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date >= $1" in sql
+        assert "trade_date <= $2" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_block_trade_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestQuoteDaoGetTopListRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"]}))
+        result = await dao.get_top_list_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_top_list_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestQuoteDaoGetMoneyflowRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"]}))
+        result = await dao.get_moneyflow_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date >= $1" in sql
+        assert "trade_date <= $2" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_moneyflow_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestQuoteDaoGetNorthboundRange:
+    @pytest.mark.asyncio
+    async def test_with_date_range(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "trade_date": ["20240615"]}))
+        result = await dao.get_northbound_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date >= $1" in sql
+        assert "trade_date <= $2" in sql
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_northbound_range("20240601", "20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+
+class TestQuoteDaoGetLimitListWithTradeDate:
+    @pytest.mark.asyncio
+    async def test_with_trade_date(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "limit": ["U"]}))
+        result = await dao.get_limit_list(trade_date="20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+        dao._read_db.assert_called_once()
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "trade_date=$1" in sql
+
+    @pytest.mark.asyncio
+    async def test_no_params(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_limit_list()
+        assert isinstance(result, pd.DataFrame)
+        dao._read_db.assert_called_once()
+
+
+class TestQuoteDaoGetBlockTradeNoParams:
+    @pytest.mark.asyncio
+    async def test_no_trade_date(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_block_trade()
+        assert isinstance(result, pd.DataFrame)
+        dao._read_db.assert_called_once()
+        call_args = dao._read_db.call_args
+        sql = call_args[0][0]
+        assert "WHERE 1=1" in sql
+
+
+class TestQuoteDaoGetMoneyflowWithTsCode:
+    @pytest.mark.asyncio
+    async def test_with_ts_code(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_moneyflow(ts_code="000001.SZ")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+
+    @pytest.mark.asyncio
+    async def test_no_params(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_moneyflow()
+        assert isinstance(result, pd.DataFrame)
+
+
+class TestQuoteDaoGetNorthboundWithTsCode:
+    @pytest.mark.asyncio
+    async def test_with_ts_code(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_northbound(ts_code="000001.SZ")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+
+    @pytest.mark.asyncio
+    async def test_no_params(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_northbound()
+        assert isinstance(result, pd.DataFrame)
+
+
+class TestQuoteDaoGetDailyQuotesNoParams:
+    @pytest.mark.asyncio
+    async def test_no_params(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+        result = await dao.get_daily_quotes()
+        assert isinstance(result, pd.DataFrame)
+        dao._read_db.assert_called_once()
+
+
+class TestQuoteDaoGetIndexDailyWithTradeDate:
+    @pytest.mark.asyncio
+    async def test_with_trade_date(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SH"]}))
+        result = await dao.get_index_daily(trade_date="20240615")
+        assert isinstance(result, pd.DataFrame)
+        assert "ts_code" in result.columns
+
+    @pytest.mark.asyncio
+    async def test_no_params(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SH"]}))
+        result = await dao.get_index_daily()
+        assert isinstance(result, pd.DataFrame)
+
+
+class TestQuoteDaoGetCachedTradeDatesNone:
+    @pytest.mark.asyncio
+    async def test_none_result(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(return_value=None)
+        result = await dao.get_cached_trade_dates()
+        assert result == set()

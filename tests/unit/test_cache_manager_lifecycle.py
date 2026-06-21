@@ -3,6 +3,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestCacheManagerLifecycle:

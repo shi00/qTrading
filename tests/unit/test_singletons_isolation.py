@@ -9,6 +9,8 @@ from services.local_model_manager import LocalModelManager
 from services.task_manager import TaskManager, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestSingletonIsolation:
@@ -137,7 +139,10 @@ class TestTaskManagerSingletonIsolation:
     def test_task_manager_reset_clears_instance(self):
         TaskManager._instance = None
         TaskManager._initialized = False
-        with patch("services.task_manager.ThreadPoolManager"), patch("services.task_manager.I18n"):
+        with (
+            patch("services.task_manager.ThreadPoolManager"),
+            patch("services.task_manager.I18n"),
+        ):
             TaskManager()
             assert TaskManager._instance is not None
             TaskManager._reset_singleton()
@@ -146,7 +151,10 @@ class TestTaskManagerSingletonIsolation:
     def test_task_manager_reset_clears_initialized_flag(self):
         TaskManager._instance = None
         TaskManager._initialized = False
-        with patch("services.task_manager.ThreadPoolManager"), patch("services.task_manager.I18n"):
+        with (
+            patch("services.task_manager.ThreadPoolManager"),
+            patch("services.task_manager.I18n"),
+        ):
             TaskManager()
             assert TaskManager._initialized is True
             TaskManager._reset_singleton()
@@ -155,7 +163,10 @@ class TestTaskManagerSingletonIsolation:
     def test_task_manager_returns_same_instance(self):
         TaskManager._instance = None
         TaskManager._initialized = False
-        with patch("services.task_manager.ThreadPoolManager"), patch("services.task_manager.I18n"):
+        with (
+            patch("services.task_manager.ThreadPoolManager"),
+            patch("services.task_manager.I18n"),
+        ):
             mgr1 = TaskManager()
             mgr2 = TaskManager()
             assert mgr1 is mgr2
@@ -164,7 +175,10 @@ class TestTaskManagerSingletonIsolation:
     def test_task_manager_new_instance_has_empty_queue(self):
         TaskManager._instance = None
         TaskManager._initialized = False
-        with patch("services.task_manager.ThreadPoolManager"), patch("services.task_manager.I18n"):
+        with (
+            patch("services.task_manager.ThreadPoolManager"),
+            patch("services.task_manager.I18n"),
+        ):
             mgr = TaskManager()
             t = AppTask(name="test", status=TaskStatus.RUNNING)
             mgr._tasks[t.id] = t
@@ -174,7 +188,10 @@ class TestTaskManagerSingletonIsolation:
 
             TaskManager._instance = None
             TaskManager._initialized = False
-            with patch("services.task_manager.ThreadPoolManager"), patch("services.task_manager.I18n"):
+            with (
+                patch("services.task_manager.ThreadPoolManager"),
+                patch("services.task_manager.I18n"),
+            ):
                 mgr2 = TaskManager()
                 assert len(mgr2._tasks) == 0, "New instance should have empty _tasks queue"
             TaskManager._reset_singleton()
@@ -185,7 +202,10 @@ class TestTaskManagerSingletonIsolation:
         instances = []
 
         def create_instance():
-            with patch("services.task_manager.ThreadPoolManager"), patch("services.task_manager.I18n"):
+            with (
+                patch("services.task_manager.ThreadPoolManager"),
+                patch("services.task_manager.I18n"),
+            ):
                 TaskManager()
                 instances.append(id(TaskManager._instance))
 

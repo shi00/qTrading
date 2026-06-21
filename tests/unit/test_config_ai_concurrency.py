@@ -2,6 +2,8 @@ import pytest
 
 from utils.config_handler import ConfigHandler
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestAIConcurrencyConfig:

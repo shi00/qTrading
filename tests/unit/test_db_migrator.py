@@ -14,6 +14,8 @@ from data.persistence.db_migrator import (
     _RELATION_NOT_FOUND_KEYWORDS,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestDatabaseMigrationNeeded:
     def test_exception_message(self):
@@ -82,7 +84,11 @@ class TestCheckSchemaStatus:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="head_rev")):
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="current_rev")):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="current_rev"),
+            ):
                 current, head, needs = await DatabaseMigrator.check_schema_status(mock_engine)
                 assert current == "current_rev"
                 assert head == "head_rev"
@@ -93,7 +99,11 @@ class TestCheckSchemaStatus:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="same_rev")):
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="same_rev")):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="same_rev"),
+            ):
                 current, head, needs = await DatabaseMigrator.check_schema_status(mock_engine)
                 assert current == "same_rev"
                 assert head == "same_rev"
@@ -167,7 +177,11 @@ class TestInitDbExistingDatabase:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0001")):
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="0001"),
+            ):
                 with patch("data.persistence.db_migrator.logger") as mock_logger:
                     await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
@@ -185,7 +199,11 @@ class TestInitDbExistingDatabase:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="0001"),
+            ):
                 with pytest.raises(DatabaseMigrationNeeded) as exc_info:
                     await DatabaseMigrator.init_db(mock_engine, auto_migrate=False)
 
@@ -198,8 +216,16 @@ class TestInitDbExistingDatabase:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
-                with patch.object(DatabaseMigrator, "_run_alembic_upgrade", AsyncMock(return_value=None)):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="0001"),
+            ):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_run_alembic_upgrade",
+                    AsyncMock(return_value=None),
+                ):
                     await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
 
@@ -209,7 +235,11 @@ class TestInitDbErrorHandling:
         mock_engine = MagicMock()
 
         with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
-            with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(side_effect=Exception("failed"))):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_head_revision",
+                AsyncMock(side_effect=Exception("failed")),
+            ):
                 with pytest.raises(Exception, match="failed"):
                     await DatabaseMigrator.init_db(mock_engine, auto_migrate=True)
 
@@ -359,8 +389,16 @@ class TestRunAlembicUpgradeConfig:
 
             with patch.object(DatabaseMigrator, "_get_alembic_config", return_value=captured_cfg):
                 with patch("data.persistence.db_migrator.command.upgrade") as mock_upgrade:
-                    with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0002")):
-                        with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
+                    with patch.object(
+                        DatabaseMigrator,
+                        "_get_current_revision",
+                        AsyncMock(return_value="0002"),
+                    ):
+                        with patch.object(
+                            DatabaseMigrator,
+                            "_get_head_revision",
+                            AsyncMock(return_value="0002"),
+                        ):
                             await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
         # Verify that database_url is set in attributes (new implementation)
@@ -393,7 +431,10 @@ class TestRunAlembicUpgradeErrorClassification:
 
                     with patch(
                         "data.persistence.db_migrator.classify_error",
-                        return_value={"code": "refused", "message_key": "db_err_refused"},
+                        return_value={
+                            "code": "refused",
+                            "message_key": "db_err_refused",
+                        },
                     ) as mock_classify:
                         with patch(
                             "data.persistence.db_migrator.classify_severity",
@@ -421,8 +462,16 @@ class TestRunAlembicUpgradePostVerification:
             mock_tp.return_value = mock_instance
             mock_instance.run_async = AsyncMock(return_value=None)
 
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0001")):
-                with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="0001"),
+            ):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_get_head_revision",
+                    AsyncMock(return_value="0002"),
+                ):
                     with pytest.raises(RuntimeError, match="version mismatch"):
                         await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
@@ -438,7 +487,11 @@ class TestRunAlembicUpgradePostVerification:
             mock_instance.run_async = AsyncMock(return_value=None)
 
             with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value=None)):
-                with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_get_head_revision",
+                    AsyncMock(return_value="0002"),
+                ):
                     with patch("data.persistence.db_migrator.logger") as mock_logger:
                         await DatabaseMigrator._run_alembic_upgrade(mock_engine)
                         mock_logger.warning.assert_called_once()
@@ -454,8 +507,16 @@ class TestRunAlembicUpgradePostVerification:
             mock_tp.return_value = mock_instance
             mock_instance.run_async = AsyncMock(return_value=None)
 
-            with patch.object(DatabaseMigrator, "_get_current_revision", AsyncMock(return_value="0002")):
-                with patch.object(DatabaseMigrator, "_get_head_revision", AsyncMock(return_value="0002")):
+            with patch.object(
+                DatabaseMigrator,
+                "_get_current_revision",
+                AsyncMock(return_value="0002"),
+            ):
+                with patch.object(
+                    DatabaseMigrator,
+                    "_get_head_revision",
+                    AsyncMock(return_value="0002"),
+                ):
                     await DatabaseMigrator._run_alembic_upgrade(mock_engine)
 
 

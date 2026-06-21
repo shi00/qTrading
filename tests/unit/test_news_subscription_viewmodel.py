@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 def _create_news_service():
     from services.news_subscription_service import NewsSubscriptionService

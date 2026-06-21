@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from utils.diagnostics import SystemDiagnosticsCollector
 from services.task_manager import TaskStatus, AppTask
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.asyncio
 async def test_diagnostics_export(tmp_path):
@@ -19,7 +21,10 @@ async def test_diagnostics_export(tmp_path):
 
     # 写入带有敏感 token 和 数据库密码 的日志
     app_log.write_text("Some normal log\napi_key = test_token_123456\nAnother log", encoding="utf-8")
-    error_log.write_text("Error occurred: postgresql://user:mock_secret_password@localhost:5432/db", encoding="utf-8")
+    error_log.write_text(
+        "Error occurred: postgresql://user:mock_secret_password@localhost:5432/db",
+        encoding="utf-8",
+    )
 
     # Mock config.APP_ROOT 让它指向 tmp_path
     with patch("config.APP_ROOT", str(tmp_path)):
@@ -78,7 +83,10 @@ async def test_diagnostics_export(tmp_path):
             patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
             patch("utils.thread_pool.ThreadPoolManager", return_value=mock_tp),
-            patch("utils.config_handler.ConfigHandler.load_config", return_value=mock_config),
+            patch(
+                "utils.config_handler.ConfigHandler.load_config",
+                return_value=mock_config,
+            ),
         ):
             # 执行导出
             zip_path = await SystemDiagnosticsCollector.export()

@@ -6,6 +6,8 @@ S5-2: Unified singleton reset registry.
 
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 class TestSingletonRegistry:
     """S5-2: Singleton registry for unified reset"""
@@ -33,7 +35,12 @@ class TestSingletonRegistry:
 
     def test_reset_all_singletons(self):
         """reset_all_singletons should call _reset_singleton on all registered"""
-        from utils.singleton_registry import register_singleton, reset_all_singletons, _registry, _lock
+        from utils.singleton_registry import (
+            register_singleton,
+            reset_all_singletons,
+            _registry,
+            _lock,
+        )
 
         reset_called = []
 
@@ -55,7 +62,12 @@ class TestSingletonRegistry:
 
     def test_reset_all_handles_missing_reset(self):
         """reset_all_singletons should handle classes without _reset_singleton"""
-        from utils.singleton_registry import register_singleton, reset_all_singletons, _registry, _lock
+        from utils.singleton_registry import (
+            register_singleton,
+            reset_all_singletons,
+            _registry,
+            _lock,
+        )
 
         @register_singleton
         class DummyNoReset:
@@ -70,7 +82,12 @@ class TestSingletonRegistry:
 
     def test_get_registered_singletons(self):
         """get_registered_singletons should return class names"""
-        from utils.singleton_registry import register_singleton, get_registered_singletons, _registry, _lock
+        from utils.singleton_registry import (
+            register_singleton,
+            get_registered_singletons,
+            _registry,
+            _lock,
+        )
 
         @register_singleton
         class DummyForList:
@@ -88,7 +105,12 @@ class TestSingletonRegistry:
 
     def test_reset_all_handles_exception(self):
         """reset_all_singletons should not crash if _reset_singleton raises"""
-        from utils.singleton_registry import register_singleton, reset_all_singletons, _registry, _lock
+        from utils.singleton_registry import (
+            register_singleton,
+            reset_all_singletons,
+            _registry,
+            _lock,
+        )
 
         @register_singleton
         class DummyCrashy:
@@ -107,7 +129,12 @@ class TestSingletonRegistry:
         """A-P1-5: reset_all_singletons should log ERROR when singleton lacks _reset_singleton"""
         import logging
 
-        from utils.singleton_registry import register_singleton, reset_all_singletons, _registry, _lock
+        from utils.singleton_registry import (
+            register_singleton,
+            reset_all_singletons,
+            _registry,
+            _lock,
+        )
 
         @register_singleton
         class DummyNoResetMethod:
@@ -132,7 +159,12 @@ class TestSingletonRegistry:
 
     def test_reset_calls_close_before_nuking_instance(self):
         """A-P1-5: reset_all_singletons should call close() if available before setting _instance=None"""
-        from utils.singleton_registry import register_singleton, reset_all_singletons, _registry, _lock
+        from utils.singleton_registry import (
+            register_singleton,
+            reset_all_singletons,
+            _registry,
+            _lock,
+        )
 
         close_called = []
 

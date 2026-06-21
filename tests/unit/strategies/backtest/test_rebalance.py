@@ -3,9 +3,14 @@ from datetime import date
 import polars as pl
 import pytest
 
-from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+from data.domain_services.transaction_cost import (
+    TransactionCostConfig,
+    TransactionCostModel,
+)
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
+
+pytestmark = pytest.mark.unit
 
 
 class TestRebalanceLogic:
@@ -84,7 +89,12 @@ class TestRebalanceLogic:
         ]
         signals = pl.DataFrame(
             {
-                "execution_date": [date(2024, 1, 8), date(2024, 1, 9), date(2024, 1, 10), date(2024, 1, 15)],
+                "execution_date": [
+                    date(2024, 1, 8),
+                    date(2024, 1, 9),
+                    date(2024, 1, 10),
+                    date(2024, 1, 15),
+                ],
                 "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ", "000001.SZ"],
                 "signal_rank": [1, 1, 1, 1],
             }

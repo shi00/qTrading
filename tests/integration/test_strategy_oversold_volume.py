@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 from utils.technical_analysis import TechnicalAnalysis
 from strategies.oversold_strategy import OversoldStrategy
 
+pytestmark = pytest.mark.integration
+
 
 def _build_quotes_df(ts_code, dates, close_start, vol_base, vol_spike_at=None):
     rows = []
@@ -47,7 +49,11 @@ class TestOversoldVolumeThreshold:
         result = (
             df.lazy()
             .with_columns(
-                [rsi_expr.over("ts_code"), vol_ratio_expr, pl.col("close").count().over("ts_code").alias("day_count")]
+                [
+                    rsi_expr.over("ts_code"),
+                    vol_ratio_expr,
+                    pl.col("close").count().over("ts_code").alias("day_count"),
+                ]
             )
             .filter(pl.col("trade_date") == dates[-1])
             .filter(pl.col("day_count") >= 28)
@@ -79,7 +85,11 @@ class TestOversoldVolumeThreshold:
         result = (
             df.lazy()
             .with_columns(
-                [rsi_expr.over("ts_code"), vol_ratio_expr, pl.col("close").count().over("ts_code").alias("day_count")]
+                [
+                    rsi_expr.over("ts_code"),
+                    vol_ratio_expr,
+                    pl.col("close").count().over("ts_code").alias("day_count"),
+                ]
             )
             .filter(pl.col("trade_date") == dates[-1])
             .filter(pl.col("day_count") >= 28)
@@ -106,7 +116,11 @@ class TestOversoldVolumeThreshold:
         result = (
             df.lazy()
             .with_columns(
-                [rsi_expr.over("ts_code"), vol_ratio_expr, pl.col("close").count().over("ts_code").alias("day_count")]
+                [
+                    rsi_expr.over("ts_code"),
+                    vol_ratio_expr,
+                    pl.col("close").count().over("ts_code").alias("day_count"),
+                ]
             )
             .filter(pl.col("trade_date") == dates[-1])
             .filter(pl.col("day_count") >= 28)

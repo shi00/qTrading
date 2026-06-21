@@ -1,9 +1,21 @@
+import multiprocessing
 import queue
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from services.local_model_manager import LocalModelManager, _HAS_LLAMA_CPP, _SENTINEL, _persistent_worker
+from services.local_model_manager import (
+    LocalModelManager,
+    _HAS_LLAMA_CPP,
+    _SENTINEL,
+    _persistent_worker,
+)
+
+pytestmark = pytest.mark.unit
+
+# Save real class references before any patching replaces them on the multiprocessing module
+_RealProcess = multiprocessing.Process
+_RealQueue = multiprocessing.Queue
 
 
 class TestLocalModelManagerGetLoadedModelPath:
@@ -72,7 +84,7 @@ class TestLocalModelManagerLoadModel:
 class TestPersistentWorkerEnsureWorker:
     def test_ensure_worker_returns_true_if_already_ready(self):
         mgr = LocalModelManager()
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
         mgr._worker_ready = True
         mgr._model_path = "/path/to/model.gguf"
@@ -82,7 +94,7 @@ class TestPersistentWorkerEnsureWorker:
 
     def test_ensure_worker_restarts_if_model_path_changed(self):
         mgr = LocalModelManager()
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
         mgr._worker_ready = True
         mgr._model_path = "/old/model.gguf"
@@ -92,12 +104,12 @@ class TestPersistentWorkerEnsureWorker:
             patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
             patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
         ):
-            mock_res_queue = MagicMock()
+            mock_res_queue = MagicMock(spec=queue.Queue)
             mock_res_queue.get.return_value = ("ready", "/new/model.gguf")
-            mock_req_queue = MagicMock()
+            mock_req_queue = MagicMock(spec=queue.Queue)
             mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
 
-            mock_proc = MagicMock()
+            mock_proc = MagicMock(spec=_RealProcess)
             mock_proc.is_alive.return_value = True
             mock_proc_cls.return_value = mock_proc
 
@@ -115,11 +127,11 @@ class TestPersistentWorkerEnsureWorker:
             patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
             patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
         ):
-            mock_res_queue = MagicMock()
-            mock_req_queue = MagicMock()
+            mock_res_queue = MagicMock(spec=queue.Queue)
+            mock_req_queue = MagicMock(spec=queue.Queue)
             mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
 
-            mock_proc = MagicMock()
+            mock_proc = MagicMock(spec=_RealProcess)
             mock_proc.is_alive.return_value = True
             mock_proc_cls.return_value = mock_proc
 
@@ -130,24 +142,27 @@ class TestPersistentWorkerEnsureWorker:
     async def test_await_worker_ready_returns_false_on_load_failure(self):
         mgr = LocalModelManager()
         mgr._worker_ready = False
-        mgr._result_queue = MagicMock()
-        mgr._result_queue.get_nowait.return_value = ("error", "Model load failed: no file")
-        mgr._worker_proc = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        mgr._result_queue.get_nowait.return_value = (
+            "error",
+            "Model load failed: no file",
+        )
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready()
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_returns_true_on_ready(self):
         mgr = LocalModelManager()
         mgr._worker_ready = False
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.return_value = ("ready", "/path/to/model.gguf")
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         result = await mgr._await_worker_ready()
@@ -158,9 +173,9 @@ class TestPersistentWorkerEnsureWorker:
     async def test_await_worker_ready_detects_worker_crash(self):
         mgr = LocalModelManager()
         mgr._worker_ready = False
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.side_effect = queue.Empty
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = False
         mgr._worker_proc.exitcode = -11
 
@@ -168,22 +183,22 @@ class TestPersistentWorkerEnsureWorker:
             result = await mgr._await_worker_ready(timeout=1)
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_respects_cancel_event(self):
         mgr = LocalModelManager()
         mgr._worker_ready = False
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.side_effect = queue.Empty
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
         mgr._cancel_event.set()
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=1)
             assert result is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_no_result_queue(self):
@@ -199,12 +214,14 @@ class TestPersistentWorkerShutdownWorker:
         from services.local_model_manager import _SENTINEL
 
         mgr = LocalModelManager()
+        # spec omitted: needs close/join_thread (multiprocessing.Queue) and get/put (queue.Queue)
         mock_req_queue = MagicMock()
-        mock_proc = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
         mock_proc.is_alive.return_value = True
         mock_proc.join.return_value = None
         mgr._request_queue = mock_req_queue
         mgr._worker_proc = mock_proc
+        # spec omitted: same reason as mock_req_queue above
         mgr._result_queue = MagicMock()
         mgr._worker_ready = True
 
@@ -216,33 +233,37 @@ class TestPersistentWorkerShutdownWorker:
 
     def test_shutdown_worker_terminates_if_join_times_out(self):
         mgr = LocalModelManager()
+        # spec omitted: needs close/join_thread (multiprocessing.Queue) and get/put (queue.Queue)
         mock_req_queue = MagicMock()
-        mock_proc = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
         mock_proc.is_alive.side_effect = [True, True, False]
         mock_proc.join.return_value = None
         mgr._request_queue = mock_req_queue
         mgr._worker_proc = mock_proc
+        # spec omitted: same reason as mock_req_queue above
         mgr._result_queue = MagicMock()
         mgr._worker_ready = True
 
         mgr._shutdown_worker()
 
-        mock_proc.terminate.assert_called()
+        mock_proc.terminate.assert_called_once()
 
     def test_shutdown_worker_kills_if_terminate_fails(self):
         mgr = LocalModelManager()
+        # spec omitted: needs close/join_thread (multiprocessing.Queue) and get/put (queue.Queue)
         mock_req_queue = MagicMock()
-        mock_proc = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
         mock_proc.is_alive.side_effect = [True, True, True, False]
         mock_proc.join.return_value = None
         mgr._request_queue = mock_req_queue
         mgr._worker_proc = mock_proc
+        # spec omitted: same reason as mock_req_queue above
         mgr._result_queue = MagicMock()
         mgr._worker_ready = True
 
         mgr._shutdown_worker()
 
-        mock_proc.kill.assert_called()
+        mock_proc.kill.assert_called_once()
 
     def test_shutdown_worker_noop_if_no_proc(self):
         mgr = LocalModelManager()
@@ -273,12 +294,12 @@ class TestPersistentWorkerModelReuse:
                 nonlocal ensure_call_count
                 ensure_call_count += 1
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
                 if mgr._request_queue is None:
-                    mgr._request_queue = MagicMock()
+                    mgr._request_queue = MagicMock(spec=queue.Queue)
                 if mgr._result_queue is None:
-                    mgr._result_queue = MagicMock()
+                    mgr._result_queue = MagicMock(spec=queue.Queue)
                 return True
 
             with (
@@ -290,7 +311,7 @@ class TestPersistentWorkerModelReuse:
                     "local_model_timeout": 30,
                 }
 
-                mgr._result_queue = MagicMock()
+                mgr._result_queue = MagicMock(spec=queue.Queue)
                 mgr._result_queue.get_nowait.return_value = ("ok", "first result")
                 result1 = await mgr.run_inference("first prompt")
                 assert result1 == "first result"
@@ -315,14 +336,27 @@ class TestPersistentWorkerModelReuse:
             mgr._worker_ready = True
             mgr._model_path = "/path/to/model.gguf"
             mgr._model_stat = (0, 0)
-            mgr._last_config = {"n_threads": 4, "n_batch": 1024, "n_ctx": 4096, "n_gpu_layers": 0, "flash_attn": True}
+            mgr._last_config = {
+                "n_threads": 4,
+                "n_batch": 1024,
+                "n_ctx": 4096,
+                "n_gpu_layers": 0,
+                "flash_attn": True,
+            }
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=0, st_size=0)),
             ):
                 result = await mgr.load_model(
                     "/path/to/model.gguf",
-                    config={"n_threads": 4, "n_batch": 1024, "n_ctx": 4096, "n_gpu_layers": 0, "flash_attn": True},
+                    config={
+                        "n_threads": 4,
+                        "n_batch": 1024,
+                        "n_ctx": 4096,
+                        "n_gpu_layers": 0,
+                        "flash_attn": True,
+                    },
                 )
                 assert result is True
 
@@ -339,7 +373,10 @@ class TestLocalModelManagerRunInference:
     async def test_no_model_configured(self):
         with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
             mgr = LocalModelManager()
-            with patch("utils.config_handler.ConfigHandler.get_local_ai_config", return_value={"local_model_path": ""}):
+            with patch(
+                "utils.config_handler.ConfigHandler.get_local_ai_config",
+                return_value={"local_model_path": ""},
+            ):
                 with pytest.raises(RuntimeError, match="not configured"):
                     await mgr.run_inference("test prompt")
 
@@ -384,7 +421,7 @@ class TestLocalModelManagerGetters:
 
 class TestLocalModelManagerReset:
     def test_reset_clears_instance(self):
-        LocalModelManager._instance = MagicMock()
+        LocalModelManager._instance = MagicMock(spec=LocalModelManager)
         LocalModelManager._reset_singleton()
         assert LocalModelManager._instance is None
 
@@ -404,6 +441,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -424,6 +462,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -439,6 +478,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -458,6 +498,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -475,6 +516,7 @@ class TestLocalModelManagerLoadModelWithLlama:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -504,13 +546,13 @@ class TestLocalModelManagerRunInferenceWithModel:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.return_value = ("ok", "result text")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
                 result = await mgr.run_inference("test prompt")
@@ -534,19 +576,19 @@ class TestLocalModelManagerRunInferenceWithModel:
                     "local_model_timeout": 1,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(LocalInferenceTimeoutError):
                     await mgr.run_inference("test prompt")
 
-                mgr._shutdown_worker.assert_called()
+                mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_run_inference_error_response(self):
@@ -563,13 +605,16 @@ class TestLocalModelManagerRunInferenceWithModel:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
-                mock_res_queue.get_nowait.return_value = ("error", "something went wrong")
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue.get_nowait.return_value = (
+                    "error",
+                    "something went wrong",
+                )
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(RuntimeError, match="Inference execution failed"):
@@ -590,13 +635,13 @@ class TestLocalModelManagerRunInferenceWithModel:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.return_value = ("shutdown", "ok")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(RuntimeError, match="Worker shut down unexpectedly"):
@@ -618,12 +663,12 @@ class TestLocalModelManagerRunInferenceWithModel:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
                 mock_req_queue.put.side_effect = Exception("queue full")
                 mgr._request_queue = mock_req_queue
-                mgr._result_queue = MagicMock()
+                mgr._result_queue = MagicMock(spec=queue.Queue)
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
 
                 with pytest.raises(RuntimeError, match="Failed to send request to worker"):
                     await mgr.run_inference("test prompt")
@@ -655,6 +700,7 @@ class TestLocalModelManagerLoadModelTimeout:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -674,6 +720,7 @@ class TestLocalModelManagerLoadModelTimeout:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -696,6 +743,7 @@ class TestLocalModelManagerLoadModelTimeout:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -728,12 +776,17 @@ class TestLocalModelManagerLoadModelClearsCancel:
 
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
-                patch.object(mgr, "_await_worker_ready", side_effect=_assert_cancel_cleared_then_return),
+                patch.object(
+                    mgr,
+                    "_await_worker_ready",
+                    side_effect=_assert_cancel_cleared_then_return,
+                ),
             ):
                 mock_ch.get_typed.return_value = ""
                 mock_tpm.return_value.run_async = AsyncMock(return_value="sha256val")
@@ -767,19 +820,19 @@ class TestLocalModelManagerSubprocessCleanup:
                     "local_model_timeout": 1,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
                 with pytest.raises(LocalInferenceTimeoutError):
                     await mgr.run_inference("test prompt")
 
-                mgr._shutdown_worker.assert_called()
+                mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_worker_exits_without_result(self):
@@ -796,13 +849,13 @@ class TestLocalModelManagerSubprocessCleanup:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.side_effect = queue.Empty
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
                 mgr._worker_ready = True
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = False
 
                 with pytest.raises(RuntimeError, match="exited without producing"):
@@ -866,10 +919,10 @@ class TestCancelEventInterruptsInference:
             mgr = LocalModelManager()
             mgr._worker_ready = True
             mgr._model_path = "/fake/model.gguf"
-            mgr._worker_proc = MagicMock()
+            mgr._worker_proc = MagicMock(spec=_RealProcess)
             mgr._worker_proc.is_alive.return_value = True
-            mgr._request_queue = MagicMock()
-            mgr._result_queue = MagicMock()
+            mgr._request_queue = MagicMock(spec=queue.Queue)
+            mgr._result_queue = MagicMock(spec=queue.Queue)
             mgr._result_queue.get_nowait.side_effect = queue.Empty
             mgr._cancel_event.set()
 
@@ -877,12 +930,15 @@ class TestCancelEventInterruptsInference:
                 patch.object(mgr, "_shutdown_worker"),
                 patch(
                     "services.local_model_manager.ConfigHandler.get_local_ai_config",
-                    return_value={"local_model_path": "/fake/model.gguf", "local_model_timeout": 90},
+                    return_value={
+                        "local_model_path": "/fake/model.gguf",
+                        "local_model_timeout": 90,
+                    },
                 ),
             ):
                 with pytest.raises(RuntimeError, match="Inference cancelled"):
                     await mgr.run_inference("test prompt")
-                mgr._shutdown_worker.assert_called()
+                mgr._shutdown_worker.assert_called_once()
 
 
 class TestLoadModelClearsCancelEvent:
@@ -902,12 +958,17 @@ class TestLoadModelClearsCancelEvent:
 
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=1, st_size=2)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
                 patch("services.local_model_manager.ConfigHandler") as mock_ch,
                 patch.object(mgr, "_ensure_worker", return_value=True),
-                patch.object(mgr, "_await_worker_ready", side_effect=_assert_cancel_cleared_then_return),
+                patch.object(
+                    mgr,
+                    "_await_worker_ready",
+                    side_effect=_assert_cancel_cleared_then_return,
+                ),
             ):
                 mock_ch.get_local_ai_config.return_value = {
                     "local_model_path": "/fake/model.gguf",
@@ -934,11 +995,11 @@ class TestShutdownWorkerLockedNoDeadlock:
             patch("services.local_model_manager.multiprocessing.Process") as mock_proc_cls,
             patch("services.local_model_manager.multiprocessing.Queue") as mock_queue_cls,
         ):
-            mock_req_queue = MagicMock()
-            mock_res_queue = MagicMock()
+            mock_req_queue = MagicMock(spec=queue.Queue)
+            mock_res_queue = MagicMock(spec=queue.Queue)
             mock_queue_cls.side_effect = [mock_req_queue, mock_res_queue]
 
-            mock_proc = MagicMock()
+            mock_proc = MagicMock(spec=_RealProcess)
             mock_proc.is_alive.return_value = True
             mock_proc_cls.return_value = mock_proc
 
@@ -965,24 +1026,24 @@ class TestAwaitWorkerReadyPolling:
     async def test_timeout_with_alive_worker(self):
         """Worker is alive but never produces a result → timeout after specified duration."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.side_effect = queue.Empty
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=0.5)
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_worker_crash_with_exitcode_logged(self):
         """Worker crashes → detect is_alive()=False, log exitcode, return False quickly."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.side_effect = queue.Empty
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = False
         mgr._worker_proc.exitcode = -6
 
@@ -998,24 +1059,24 @@ class TestAwaitWorkerReadyPolling:
     async def test_error_status_from_worker(self):
         """Worker sends ("error", msg) via queue → return False with _worker_ready=False."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.return_value = ("error", "CUDA out of memory")
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready()
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_ready_status_sets_worker_ready(self):
         """Worker sends ("ready", path) → return True, _worker_ready=True."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.return_value = ("ready", "/path/to/model.gguf")
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         result = await mgr._await_worker_ready()
@@ -1026,25 +1087,28 @@ class TestAwaitWorkerReadyPolling:
     async def test_cancel_event_aborts_waiting(self):
         """Cancel event is set → immediately return False without waiting for timeout."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.side_effect = queue.Empty
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
         mgr._cancel_event.set()
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=10)
             assert result is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_worker_crash_with_residual_result(self):
         """Worker crashes but left an error message in the queue → should read and return it."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         # First get_nowait raises Empty (in polling loop), second returns error (after crash detected)
-        mgr._result_queue.get_nowait.side_effect = [queue.Empty, ("error", "import failed")]
-        mgr._worker_proc = MagicMock()
+        mgr._result_queue.get_nowait.side_effect = [
+            queue.Empty,
+            ("error", "import failed"),
+        ]
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = False
 
         with patch.object(mgr, "_shutdown_worker"):
@@ -1057,11 +1121,13 @@ class TestShutdownWorkerLockedExceptionPaths:
 
     def test_close_request_queue_raises(self):
         mgr = LocalModelManager()
+        # spec omitted: needs close/join_thread (multiprocessing.Queue) and get/put (queue.Queue)
         mock_req_queue = MagicMock()
         mock_req_queue.close.side_effect = OSError("broken pipe")
         mock_req_queue.join_thread.side_effect = OSError("broken pipe")
+        # spec omitted: same reason as mock_req_queue above
         mock_res_queue = MagicMock()
-        mock_proc = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
         mock_proc.is_alive.return_value = False
         mgr._request_queue = mock_req_queue
         mgr._result_queue = mock_res_queue
@@ -1075,11 +1141,13 @@ class TestShutdownWorkerLockedExceptionPaths:
 
     def test_close_result_queue_raises(self):
         mgr = LocalModelManager()
+        # spec omitted: needs close/join_thread (multiprocessing.Queue) and get/put (queue.Queue)
         mock_req_queue = MagicMock()
+        # spec omitted: same reason as mock_req_queue above
         mock_res_queue = MagicMock()
         mock_res_queue.close.side_effect = OSError("broken pipe")
         mock_res_queue.join_thread.side_effect = OSError("broken pipe")
-        mock_proc = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
         mock_proc.is_alive.return_value = False
         mgr._request_queue = mock_req_queue
         mgr._result_queue = mock_res_queue
@@ -1093,10 +1161,10 @@ class TestShutdownWorkerLockedExceptionPaths:
 
     def test_sentinel_put_raises(self):
         mgr = LocalModelManager()
-        mock_req_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
         mock_req_queue.put.side_effect = Exception("queue closed")
-        mock_res_queue = MagicMock()
-        mock_proc = MagicMock()
+        mock_res_queue = MagicMock(spec=queue.Queue)
+        mock_proc = MagicMock(spec=_RealProcess)
         mock_proc.is_alive.side_effect = [True, False]
         mock_proc.join.return_value = None
         mgr._request_queue = mock_req_queue
@@ -1116,9 +1184,9 @@ class TestAwaitWorkerReadyEdgeCases:
     async def test_result_queue_becomes_none_mid_poll(self):
         """result_queue is not None initially but becomes None before get_nowait."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait.side_effect = queue.Empty
-        mgr._worker_proc = MagicMock()
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         # Simulate result_queue becoming None after first poll
@@ -1142,8 +1210,8 @@ class TestAwaitWorkerReadyEdgeCases:
     async def test_final_drain_succeeds(self):
         """Polling loop finds nothing, but final drain gets a result."""
         mgr = LocalModelManager()
-        mgr._result_queue = MagicMock()
-        mgr._worker_proc = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
+        mgr._worker_proc = MagicMock(spec=_RealProcess)
         mgr._worker_proc.is_alive.return_value = True
 
         # First get_nowait in loop raises Empty, second in final drain returns ready
@@ -1183,12 +1251,12 @@ class TestRunInferenceWorkerNotReady:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
                 mock_res_queue.get_nowait.return_value = ("ok", "result")
                 mgr._request_queue = mock_req_queue
                 mgr._result_queue = mock_res_queue
-                mgr._worker_proc = MagicMock()
+                mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
                 result = await mgr.run_inference("test prompt")
@@ -1243,7 +1311,7 @@ class TestResetSingleton:
     """Cover _reset_singleton with an active instance."""
 
     def test_reset_calls_shutdown_worker(self):
-        mock_instance = MagicMock()
+        mock_instance = MagicMock(spec=LocalModelManager)
         LocalModelManager._instance = mock_instance
         LocalModelManager._reset_singleton()
         mock_instance._shutdown_worker.assert_called_once()
@@ -1277,8 +1345,8 @@ class TestPersistentWorkerImportFailure:
     """_persistent_worker 在 llama-cpp-python 导入失败时的容错分支。"""
 
     def test_llama_cpp_import_failure(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
         with patch("importlib.import_module", side_effect=ImportError("no module")):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
@@ -1290,8 +1358,8 @@ class TestPersistentWorkerImportFailure:
         mock_req_queue.get.assert_not_called()
 
     def test_llama_cpp_attribute_failure(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
         with patch("importlib.import_module", side_effect=AttributeError("no attr")):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
@@ -1305,9 +1373,10 @@ class TestPersistentWorkerModelLoadFailure:
     """_persistent_worker 在模型加载失败时的容错分支。"""
 
     def test_model_load_failure(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
+        # spec omitted: external library (llama_cpp) with no available type stubs
         mock_llama_module = MagicMock()
         mock_llama_module.Llama.side_effect = Exception("model not found")
 
@@ -1324,10 +1393,12 @@ class TestPersistentWorkerInvalidRequest:
     """_persistent_worker 在收到无效请求格式时的容错分支。"""
 
     def test_invalid_request_format_not_tuple(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
+        # spec omitted: external library (llama_cpp) with no available type stubs
         mock_llama_module = MagicMock()
+        # spec omitted: external library (llama_cpp.Llama) with no available type stubs
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
@@ -1341,10 +1412,12 @@ class TestPersistentWorkerInvalidRequest:
         assert "Invalid request format" in error_calls[0][0][0][1]
 
     def test_invalid_request_format_wrong_length(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
+        # spec omitted: external library (llama_cpp) with no available type stubs
         mock_llama_module = MagicMock()
+        # spec omitted: external library (llama_cpp.Llama) with no available type stubs
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
@@ -1361,10 +1434,12 @@ class TestPersistentWorkerInferenceError:
     """_persistent_worker 在推理异常时的容错分支。"""
 
     def test_inference_error(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
+        # spec omitted: external library (llama_cpp) with no available type stubs
         mock_llama_module = MagicMock()
+        # spec omitted: external library (llama_cpp.Llama) with no available type stubs
         mock_llama = MagicMock()
         mock_llama.create_chat_completion.side_effect = Exception("inference failed")
         mock_llama_module.Llama.return_value = mock_llama
@@ -1383,10 +1458,12 @@ class TestPersistentWorkerQueueGetError:
     """_persistent_worker 在 queue.get 异常时继续循环的分支。"""
 
     def test_queue_get_error_continues(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
+        # spec omitted: external library (llama_cpp) with no available type stubs
         mock_llama_module = MagicMock()
+        # spec omitted: external library (llama_cpp.Llama) with no available type stubs
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
@@ -1403,10 +1480,12 @@ class TestPersistentWorkerSentinelShutdown:
     """_persistent_worker 收到 sentinel 时正常关闭的分支。"""
 
     def test_sentinel_shutdown(self):
-        mock_req_queue = MagicMock()
-        mock_res_queue = MagicMock()
+        mock_req_queue = MagicMock(spec=queue.Queue)
+        mock_res_queue = MagicMock(spec=queue.Queue)
 
+        # spec omitted: external library (llama_cpp) with no available type stubs
         mock_llama_module = MagicMock()
+        # spec omitted: external library (llama_cpp.Llama) with no available type stubs
         mock_llama = MagicMock()
         mock_llama_module.Llama.return_value = mock_llama
 
@@ -1426,27 +1505,27 @@ class TestAwaitWorkerReadyOsAndTimeoutErrors:
     async def test_await_worker_ready_os_error(self):
         mgr = LocalModelManager()
         mgr._worker_ready = False
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait = MagicMock(side_effect=OSError("os error"))
         mgr._worker_proc = None
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=0.1)
             assert result is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_timeout_error(self):
         mgr = LocalModelManager()
         mgr._worker_ready = False
-        mgr._result_queue = MagicMock()
+        mgr._result_queue = MagicMock(spec=queue.Queue)
         mgr._result_queue.get_nowait = MagicMock(side_effect=queue.Empty)
         mgr._worker_proc = None
 
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=0.1)
             assert result is False
-            mgr._shutdown_worker.assert_called()
+            mgr._shutdown_worker.assert_called_once()
 
 
 class TestRunInferenceWorkerDiesDuringPolling:
@@ -1468,8 +1547,8 @@ class TestRunInferenceWorkerDiesDuringPolling:
                     "local_model_timeout": 30,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
 
                 poll_count = 0
 
@@ -1482,7 +1561,7 @@ class TestRunInferenceWorkerDiesDuringPolling:
 
                 mock_res_queue.get_nowait.side_effect = mock_get_nowait
 
-                mock_proc = MagicMock()
+                mock_proc = MagicMock(spec=_RealProcess)
                 mock_proc.is_alive.side_effect = [True, False]
 
                 mgr._request_queue = mock_req_queue
@@ -1513,8 +1592,8 @@ class TestRunInferenceDeadlineReached:
                     "local_model_timeout": 2.0,
                 }
 
-                mock_req_queue = MagicMock()
-                mock_res_queue = MagicMock()
+                mock_req_queue = MagicMock(spec=queue.Queue)
+                mock_res_queue = MagicMock(spec=queue.Queue)
 
                 call_count = 0
 
@@ -1527,7 +1606,7 @@ class TestRunInferenceDeadlineReached:
 
                 mock_res_queue.get_nowait.side_effect = mock_get_nowait
 
-                mock_proc = MagicMock()
+                mock_proc = MagicMock(spec=_RealProcess)
                 mock_proc.is_alive.return_value = True
 
                 mgr._request_queue = mock_req_queue
@@ -1549,6 +1628,7 @@ class TestModelIntegritySha256:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -1575,6 +1655,7 @@ class TestModelIntegritySha256:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
@@ -1599,6 +1680,7 @@ class TestModelIntegritySha256:
             mgr = LocalModelManager()
             with (
                 patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
                 patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
                 patch.object(LocalModelManager, "_get_load_lock"),
                 patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,

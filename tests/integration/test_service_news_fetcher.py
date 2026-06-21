@@ -11,6 +11,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 
 from data.external.news_fetcher import NewsFetcher, _run_with_python_string_storage
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestGetStockNews(unittest.TestCase):

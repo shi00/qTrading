@@ -9,6 +9,8 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 class TestSchedulerServiceSingleton:
     """Tests for SchedulerService singleton pattern and reset behavior.
@@ -94,7 +96,9 @@ class TestSchedulerServiceSingleton:
 
 
 @pytest.mark.asyncio
-async def test_daily_update_logic_handles_dataframe_result_without_bool_error(monkeypatch):
+async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
+    monkeypatch,
+):
     """_daily_update_logic should not evaluate DataFrame in boolean context."""
     import services.task_manager as tm_mod
     import utils.scheduler_service as sched_mod
@@ -189,7 +193,14 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
             }
 
     class _FakeReviewManager:
-        async def save_results(self, strategy_name, result_df, trade_date=None, run_id=None, params_snapshot=None):
+        async def save_results(
+            self,
+            strategy_name,
+            result_df,
+            trade_date=None,
+            run_id=None,
+            params_snapshot=None,
+        ):
             holder["saved"] = (strategy_name, trade_date, run_id, result_df.copy())
 
     class _FakeTaskManager:
@@ -208,7 +219,11 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
     monkeypatch.setattr(sched_mod, "ReviewManager", _FakeReviewManager)
     monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
-    monkeypatch.setitem(sys.modules, "strategies.ai_strategy", types.SimpleNamespace(AISelectionStrategy=_FakeStrategy))
+    monkeypatch.setitem(
+        sys.modules,
+        "strategies.ai_strategy",
+        types.SimpleNamespace(AISelectionStrategy=_FakeStrategy),
+    )
 
     await service._run_nightly_prediction()
     assert holder["factory"] is not None
@@ -242,7 +257,11 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
         staticmethod(lambda key, **kwargs: f"{key}:{kwargs.get('count', kwargs.get('date', ''))}"),
     )
 
-    holder: dict[str, typing.Any] = {"factory": None, "save_called": False, "unique_key": None}
+    holder: dict[str, typing.Any] = {
+        "factory": None,
+        "save_called": False,
+        "unique_key": None,
+    }
 
     class _FakeTradeCalendar:
         async def is_trading_day(self, _today):
@@ -262,7 +281,14 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
             return {"screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]})}
 
     class _FakeReviewManager:
-        async def save_results(self, strategy_name, result_df, trade_date=None, run_id=None, params_snapshot=None):
+        async def save_results(
+            self,
+            strategy_name,
+            result_df,
+            trade_date=None,
+            run_id=None,
+            params_snapshot=None,
+        ):
             holder["save_called"] = True
 
     class _FakeTaskManager:
@@ -280,7 +306,11 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
     monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
     monkeypatch.setattr(sched_mod, "ReviewManager", _FakeReviewManager)
     monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
-    monkeypatch.setitem(sys.modules, "strategies.ai_strategy", types.SimpleNamespace(AISelectionStrategy=_FakeStrategy))
+    monkeypatch.setitem(
+        sys.modules,
+        "strategies.ai_strategy",
+        types.SimpleNamespace(AISelectionStrategy=_FakeStrategy),
+    )
 
     await service._run_nightly_prediction()
     assert holder["factory"] is not None
@@ -302,7 +332,9 @@ def test_scheduler_loads_persisted_idempotency_dates(monkeypatch):
         "scheduler_last_nightly_prediction": "20260427",
     }
     monkeypatch.setattr(
-        sched_mod.ConfigHandler, "get_setting", staticmethod(lambda key, default=None: values.get(key, default))
+        sched_mod.ConfigHandler,
+        "get_setting",
+        staticmethod(lambda key, default=None: values.get(key, default)),
     )
 
     service = sched_mod.SchedulerService()
@@ -317,9 +349,15 @@ def test_scheduler_marks_run_dates_and_persists(monkeypatch):
 
     sched_mod.SchedulerService._reset_singleton()
     saved = []
-    monkeypatch.setattr(sched_mod.ConfigHandler, "get_setting", staticmethod(lambda key, default=None: default))
     monkeypatch.setattr(
-        sched_mod.ConfigHandler, "save_config", staticmethod(lambda payload: saved.append(payload) or True)
+        sched_mod.ConfigHandler,
+        "get_setting",
+        staticmethod(lambda key, default=None: default),
+    )
+    monkeypatch.setattr(
+        sched_mod.ConfigHandler,
+        "save_config",
+        staticmethod(lambda payload: saved.append(payload) or True),
     )
 
     service = sched_mod.SchedulerService()

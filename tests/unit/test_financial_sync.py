@@ -9,6 +9,8 @@ from data.sync.financial import FinancialSyncStrategy
 from data.sync.base import SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
 
+pytestmark = pytest.mark.unit
+
 
 def make_ctx():
     ctx = MagicMock()
@@ -47,7 +49,13 @@ def make_ctx():
         return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]})
     )
     ctx.api.get_balancesheet = AsyncMock(
-        return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "total_assets": [1000.0]})
+        return_value=pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "end_date": ["20240331"],
+                "total_assets": [1000.0],
+            }
+        )
     )
     ctx.api.get_fina_indicator = AsyncMock(
         return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "roe": [10.0]})
@@ -347,7 +355,11 @@ class TestFinancialSyncCorporateActions:
         for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
             api_method = getattr(ctx.api, cfg["api"], None)
             if api_method is None:
-                setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+                setattr(
+                    ctx.api,
+                    cfg["api"],
+                    AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})),
+                )
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
 
@@ -436,7 +448,7 @@ class TestFinancialSyncAllStocksSynced:
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run(force=True, progress_callback=progress_cb)
         assert result is not None
-        progress_cb.assert_called()
+        progress_cb.assert_called_once()
 
 
 class TestFinancialSyncFullSyncErrorPaths:
@@ -622,7 +634,11 @@ class TestFinancialSyncCorporateActionsErrorPaths:
         from data.constants import FINANCIAL_BATCH_TABLES
 
         for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
-            setattr(ctx.api, cfg["api"], AsyncMock(side_effect=Exception("permission denied")))
+            setattr(
+                ctx.api,
+                cfg["api"],
+                AsyncMock(side_effect=Exception("permission denied")),
+            )
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
 
@@ -652,7 +668,11 @@ class TestFinancialSyncCorporateActionsErrorPaths:
         from data.constants import FINANCIAL_BATCH_TABLES
 
         for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
-            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+            setattr(
+                ctx.api,
+                cfg["api"],
+                AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})),
+            )
         strategy = FinancialSyncStrategy(ctx)
         strategy._shutdown_event.set()
         await strategy._sync_corporate_actions_by_date(["20240614"])
@@ -663,7 +683,11 @@ class TestFinancialSyncCorporateActionsErrorPaths:
         from data.constants import FINANCIAL_BATCH_TABLES
 
         for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
-            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+            setattr(
+                ctx.api,
+                cfg["api"],
+                AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})),
+            )
         progress_cb = MagicMock()
         strategy = FinancialSyncStrategy(ctx)
         strategy._shutdown_event.clear()
@@ -677,7 +701,11 @@ class TestFinancialSyncCorporateActionsErrorPaths:
         from data.constants import FINANCIAL_BATCH_TABLES
 
         for _table_name, cfg in FINANCIAL_BATCH_TABLES.items():
-            setattr(ctx.api, cfg["api"], AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})))
+            setattr(
+                ctx.api,
+                cfg["api"],
+                AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]})),
+            )
         ctx.cache.save_fina_forecast = AsyncMock(return_value=None)
         ctx.cache.save_dividend = AsyncMock(return_value=None)
         ctx.cache.save_repurchase = AsyncMock(return_value=None)

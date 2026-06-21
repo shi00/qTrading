@@ -5,6 +5,8 @@ import pytest
 
 from ui.components.chart_utils import generate_kline_png
 
+pytestmark = pytest.mark.unit
+
 
 def _make_ohlcv_df(n=30):
     dates = pd.bdate_range("2024-01-02", periods=n)

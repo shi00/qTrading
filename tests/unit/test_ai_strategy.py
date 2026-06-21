@@ -5,6 +5,8 @@ from unittest.mock import patch, MagicMock
 from data.persistence.quality_gate import QualityTier
 from strategies.ai_strategy import AISelectionStrategy
 
+pytestmark = pytest.mark.unit
+
 
 def _make_dp(tier=QualityTier.GOLD):
     dp = MagicMock()

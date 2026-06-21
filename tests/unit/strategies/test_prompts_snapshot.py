@@ -9,7 +9,10 @@ from strategies.strategy_prompts import (
     FORBIDDEN_STATIC_HEADERS,
     STRATEGY_PROMPTS,
 )
+import pytest
 
+
+pytestmark = pytest.mark.unit
 
 # 完整 key 集合：新增或删除 key 时此测试失败，提示更新
 EXPECTED_STRATEGY_KEYS = frozenset(

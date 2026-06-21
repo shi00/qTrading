@@ -23,6 +23,8 @@ from sqlalchemy import create_engine, inspect
 
 from data.persistence.models import Base
 
+pytestmark = pytest.mark.integration
+
 EXCLUDED_COLS = set()
 
 
@@ -232,7 +234,12 @@ class TestMetadataVsAlembicConsistency:
         assert "params_snapshot" in alembic_cols, "params_snapshot column missing in Alembic"
 
         # Check backtest_results JSONB columns
-        for col in ["params_snapshot", "nav_curve_json", "trades_json", "period_stats_json"]:
+        for col in [
+            "params_snapshot",
+            "nav_curve_json",
+            "trades_json",
+            "period_stats_json",
+        ]:
             assert col in _get_table_columns(meta_engine, "backtest_results"), (
                 f"{col} missing in backtest_results (metadata)"
             )

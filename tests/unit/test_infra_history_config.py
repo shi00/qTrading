@@ -8,6 +8,8 @@ from ui.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.time_utils import get_now
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.asyncio
 async def test_config_and_calendar():

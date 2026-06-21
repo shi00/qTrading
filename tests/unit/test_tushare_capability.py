@@ -8,7 +8,7 @@ from data.external.tushare_client import TushareClient, TushareAPIPermissionErro
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
 # P2-5: 文件含真实 asyncio.sleep（10s 长睡眠），标注 slow 以便 CI 分轨运行
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.unit, pytest.mark.slow]
 
 
 @pytest.fixture
@@ -143,7 +143,10 @@ class TestPersistCapabilitiesToAppState:
         mock_engine = MagicMock()
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
-            patch("data.persistence.app_state_service.set_app_state", new_callable=AsyncMock) as mock_set,
+            patch(
+                "data.persistence.app_state_service.set_app_state",
+                new_callable=AsyncMock,
+            ) as mock_set,
         ):
             mock_cm.return_value.engine = mock_engine
             await client.persist_capabilities_to_app_state()
@@ -173,7 +176,10 @@ class TestLoadCapabilitiesFromAppState:
         mock_engine = MagicMock()
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
-            patch("data.persistence.app_state_service.get_app_state", new_callable=AsyncMock) as mock_get,
+            patch(
+                "data.persistence.app_state_service.get_app_state",
+                new_callable=AsyncMock,
+            ) as mock_get,
         ):
             mock_cm.return_value.engine = mock_engine
             mock_get.return_value = stored_payload
@@ -191,7 +197,10 @@ class TestLoadCapabilitiesFromAppState:
         mock_engine = MagicMock()
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
-            patch("data.persistence.app_state_service.get_app_state", new_callable=AsyncMock) as mock_get,
+            patch(
+                "data.persistence.app_state_service.get_app_state",
+                new_callable=AsyncMock,
+            ) as mock_get,
         ):
             mock_cm.return_value.engine = mock_engine
             mock_get.return_value = stored_payload
@@ -360,7 +369,10 @@ class TestRuntimePermissionPersistence:
 
         with (
             patch("data.cache.cache_manager.CacheManager") as mock_cm,
-            patch("data.persistence.app_state_service.set_app_state", new_callable=AsyncMock) as mock_set,
+            patch(
+                "data.persistence.app_state_service.set_app_state",
+                new_callable=AsyncMock,
+            ) as mock_set,
         ):
             mock_cm.return_value.engine = MagicMock()
             mock_set.side_effect = RuntimeError("DB down")

@@ -21,6 +21,8 @@ from data.constants import SAFE_BACKTEST_LEARNING_OFFSET_DAYS
 from data.external.news_fetcher import NewsFetcher
 from strategies.oversold_strategy import OversoldStrategy
 
+pytestmark = pytest.mark.integration
+
 
 @pytest_asyncio.fixture
 async def db_cache(test_engine: AsyncEngine):
@@ -137,7 +139,8 @@ class TestBacktestAIContextIntegration:
         with (
             patch("strategies.ai_mixin.AIService") as mock_ai_cls,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
             ) as mock_lc,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
@@ -203,7 +206,8 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
             ) as mock_lc,
         ):
             mock_ai = MagicMock()
@@ -267,7 +271,8 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
             ) as mock_lc,
         ):
             mock_ai = MagicMock()
@@ -351,7 +356,8 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
             ) as mock_lc,
             patch.object(strategy, "should_include_learning_context", return_value=True),
         ):
@@ -417,7 +423,8 @@ class TestBacktestAIContextIntegration:
             patch.object(NewsFetcher, "get_stock_news", new_callable=AsyncMock) as mock_news,
             patch.object(NewsFetcher, "get_us_major_moves", new_callable=AsyncMock) as mock_global,
             patch(
-                "data.persistence.review_manager.ReviewManager.get_learning_context", new_callable=AsyncMock
+                "data.persistence.review_manager.ReviewManager.get_learning_context",
+                new_callable=AsyncMock,
             ) as mock_lc,
         ):
             mock_ai = MagicMock()

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import random
+import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -39,9 +40,15 @@ from strategies.market import VolumeBreakoutStrategy
 _vb_params = {p["name"]: p["default"] for p in VolumeBreakoutStrategy().get_parameters()}
 # 必过样本（平安银行）：显式高于 VolumeBreakoutStrategy 阈值
 _PA_PCT_CHG_RANGE = (_vb_params["pct_chg_min"] + 1.0, _vb_params["pct_chg_max"] - 1.0)
-_PA_TURNOVER_RANGE = (_vb_params["turnover_min"] + 0.5, _vb_params["turnover_min"] + 3.0)
+_PA_TURNOVER_RANGE = (
+    _vb_params["turnover_min"] + 0.5,
+    _vb_params["turnover_min"] + 3.0,
+)
 # 必不过样本（贵州茅台）：显式低于 pct_chg_min 阈值
-_MT_PCT_CHG_RANGE = (max(0.0, _vb_params["pct_chg_min"] - 1.8), max(0.0, _vb_params["pct_chg_min"] - 0.5))
+_MT_PCT_CHG_RANGE = (
+    max(0.0, _vb_params["pct_chg_min"] - 1.8),
+    max(0.0, _vb_params["pct_chg_min"] - 0.5),
+)
 
 # A8: 裸 SQL 列清单常量化 — 与 ORM 模型对齐校验
 # INSERT 仅写入业务列（省略 updated_at/created_at 等 server_default 列及可空列），
@@ -157,6 +164,9 @@ async def e2e_browser(e2e_playwright):
 
 @pytest.fixture(scope="session")
 def event_loop_policy():
+    # 覆盖 tests/conftest.py 中的 event_loop_policy（使用 WindowsSelectorEventLoopPolicy）。
+    # E2E 测试需要 WindowsProactorEventLoopPolicy：Flet 子进程启动 (subprocess.Popen) 与
+    # Playwright 异步驱动在 Windows 上依赖 Proactor 事件循环，Selector 不支持子进程。
     if sys.platform == "win32":
         return asyncio.WindowsProactorEventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
@@ -181,11 +191,11 @@ def _terminate(proc):
     proc.terminate()
     try:
         proc.wait(timeout=10)
-    except Exception:  # noqa: BLE001
+    except subprocess.TimeoutExpired:
         proc.kill()
         try:
             proc.wait(timeout=5)
-        except Exception:  # noqa: BLE001
+        except subprocess.TimeoutExpired:
             logger.warning("[E2E] Flet app PID %s 未能在 kill 后回收", proc.pid)
 
 
@@ -213,7 +223,10 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     context = await browser.new_context(viewport={"width": 1400, "height": 900})
     await context.tracing.start(screenshots=True, snapshots=True)
     page = await context.new_page()
-    page.on("console", lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text))
+    page.on(
+        "console",
+        lambda msg: logger.debug("[BROWSER CONSOLE] %s: %s", msg.type, msg.text),
+    )
     page.on("pageerror", lambda err: logger.debug("[BROWSER ERROR] %s", err))
     fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
 
@@ -250,7 +263,8 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
 
     try:
         await fp.open(app.url)
-    except Exception:
+    except Exception as exc:
+        logger.warning("[E2E] fp.open(%s) failed: %s", app.url, exc)
         if not app.is_alive():
             logger.error(
                 "[E2E] Flet app process died during page open. PID %d, exit code %s",
@@ -277,8 +291,8 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
         except RuntimeError:
             await context.close()
             raise
-        except Exception:  # noqa: BLE001
-            pass  # Don't fail if the check itself fails
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[E2E] DB error UI check failed (non-fatal): %s", exc)
 
     fp.bind_context((None, None, context, page, request))
     return fp
@@ -340,6 +354,7 @@ async def _seed_e2e_data() -> None:
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
     except Exception as e:
         # R9: 脱敏后抛出，用 from None 显式抑制异常链，防原始异常（可能含 DB 连接串）泄漏进 junit XML
+        logger.warning("[E2E] DB migration failed during seed: %s", type(e).__name__)
         from utils.sanitizers import DataSanitizer
 
         raise RuntimeError(f"E2E seed aborted: DB migration failed: {DataSanitizer.sanitize_error(e)}") from None

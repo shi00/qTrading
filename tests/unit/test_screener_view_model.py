@@ -10,6 +10,8 @@ import pytest
 from ui.components.virtual_table import PaginatedTable
 from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def vm():
@@ -321,7 +323,14 @@ class TestScreenerViewModelRunStrategy:
 
         submitted_coro = []
 
-        def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
@@ -366,7 +375,14 @@ class TestScreenerViewModelRunStrategy:
 
         submitted_coro = []
 
-        def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
@@ -413,7 +429,14 @@ class TestScreenerViewModelRunStrategy:
 
         submitted_coro = []
 
-        def mock_submit_task(name, task_type, coroutine_factory, cancellable=False, unique_key=None, **kwargs):
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
             submitted_coro.append(coroutine_factory(task_id="test_task_id"))
             return "test_task_id"
 
@@ -426,6 +449,109 @@ class TestScreenerViewModelRunStrategy:
         await submitted_coro[0]
         status_calls = vm.on_status.call_args_list
         assert any(("策略降级运行" in (args[0] if args else "") and args[1] == "orange") for args, _ in status_calls)
+
+    @pytest.mark.asyncio
+    async def test_run_strategy_failure_reverts_loading_and_shows_error(self, vm):
+        """策略执行失败时，is_loading 恢复为 False 并通过 on_status 显示错误 i18n key。"""
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strategy"
+        mock_strategy.name_key = "test_strategy_name"
+        mock_strategy.filter = AsyncMock(side_effect=RuntimeError("strategy crashed"))
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": datetime.date(2024, 12, 31),
+            }
+        )
+
+        on_progress = MagicMock()
+        on_status = MagicMock()
+        vm.on_progress = on_progress
+        vm.on_status = on_status
+
+        submitted_coro = []
+
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
+            submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = mock_submit_task
+            await vm.run_strategy("test_strategy")
+
+        assert len(submitted_coro) == 1
+        with pytest.raises(RuntimeError, match="Strategy execution crashed"):
+            await submitted_coro[0]
+
+        # Verify is_loading reverts: on_progress called with False
+        on_progress.assert_any_call(False)
+        # Verify on_status called with error i18n key (screener_exec_error) and red color
+        error_status_calls = [args for args, _ in on_status.call_args_list if len(args) >= 2 and args[1] == "red"]
+        assert len(error_status_calls) >= 1
+        # The error message should contain the i18n key content for screener_exec_error
+        error_msg = error_status_calls[-1][0]
+        assert "screener_exec_error" in error_msg or "执行中出错" in error_msg or "Execution Error" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_run_strategy_cancellation_cleans_up_state(self, vm):
+        """策略执行取消时，状态正确清理。"""
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strategy"
+        mock_strategy.name_key = "test_strategy_name"
+        mock_strategy.filter = AsyncMock(side_effect=asyncio.CancelledError())
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": datetime.date(2024, 12, 31),
+            }
+        )
+
+        on_progress = MagicMock()
+        on_status = MagicMock()
+        vm.on_progress = on_progress
+        vm.on_status = on_status
+
+        submitted_coro = []
+
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
+            submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = mock_submit_task
+            await vm.run_strategy("test_strategy")
+
+        assert len(submitted_coro) == 1
+        with pytest.raises(asyncio.CancelledError):
+            await submitted_coro[0]
+
+        # Verify is_loading reverts: on_progress called with False
+        on_progress.assert_any_call(False)
+        # Verify on_status called with cancellation i18n key (screener_cancelled) and orange color
+        cancel_status_calls = [args for args, _ in on_status.call_args_list if len(args) >= 2 and args[1] == "orange"]
+        assert len(cancel_status_calls) >= 1
+        cancel_msg = cancel_status_calls[-1][0]
+        assert "screener_cancelled" in cancel_msg or "取消" in cancel_msg or "cancelled" in cancel_msg.lower()
 
 
 class TestSortHelper:

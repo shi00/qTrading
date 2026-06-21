@@ -1,4 +1,8 @@
 import inspect
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestIsCoroutineFunctionDetection:

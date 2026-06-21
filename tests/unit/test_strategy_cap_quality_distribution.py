@@ -4,6 +4,8 @@ import pytest
 from strategies.fundamental import LargePEStrategy
 from strategies.oversold_strategy import OversoldStrategy
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.unit
 class TestOversoldSortForAi:

@@ -9,8 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from tests.unit.ui.conftest import set_page
-from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS, StepConfig
+from ui.viewmodels.onboarding_view_model import (
+    OnboardingViewModel,
+    STEP_CONFIGS,
+    StepConfig,
+)
 
+pytestmark = pytest.mark.unit
 
 # --- I18n mock (autouse, returns key as value) ---
 
@@ -402,8 +407,14 @@ class TestOnboardingVMSync:
     async def test_start_sync_exception(self, sync_vm, mock_data_processor):
         mock_data_processor.initialize_system = AsyncMock(side_effect=RuntimeError("sync failed"))
         with (
-            patch("ui.viewmodels.onboarding_view_model.classify_error", return_value={"type": "general"}),
-            patch("ui.viewmodels.onboarding_view_model.get_error_message", return_value="Error occurred"),
+            patch(
+                "ui.viewmodels.onboarding_view_model.classify_error",
+                return_value={"type": "general"},
+            ),
+            patch(
+                "ui.viewmodels.onboarding_view_model.get_error_message",
+                return_value="Error occurred",
+            ),
         ):
             await sync_vm.start_sync(quick=True)
         assert sync_vm.sync_in_progress is False
@@ -611,7 +622,13 @@ class TestStepConfigContract:
 
     def test_validate_before_next_steps(self):
         validate_steps = [config.id for config in STEP_CONFIGS if config.validate_before_next]
-        assert validate_steps == ["database", "token", "cloud_ai", "local_model", "schedule"]
+        assert validate_steps == [
+            "database",
+            "token",
+            "cloud_ai",
+            "local_model",
+            "schedule",
+        ]
 
     def test_step_configs_structure(self):
         # 首步是 welcome

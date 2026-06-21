@@ -8,6 +8,8 @@ import pytest
 
 from ui.components.backtest.backtest_config_panel import BacktestConfigPanel
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_page() -> MagicMock:

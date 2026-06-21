@@ -149,6 +149,8 @@ class BacktestViewModel:
             try:
 
                 def _progress_callback(progress: float, message: str):
+                    if not self._is_running:
+                        return
                     if self.on_progress:
                         self.on_progress(progress, message)
                     TaskManager().update_progress(task_id, progress, message)

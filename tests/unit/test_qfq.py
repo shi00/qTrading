@@ -3,6 +3,8 @@ import polars as pl
 import pandas as pd
 from utils.qfq import qfq_ratio_expr, qfq_ratio_series
 
+pytestmark = pytest.mark.unit
+
 
 class TestQFQ:
     def test_qfq_ratio_expr_polars(self):
@@ -10,7 +12,11 @@ class TestQFQ:
             {
                 "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
                 "trade_date": ["20240101", "20240102", "20240103"],
-                "adj_factor": [None, 2.0, 1.0],  # MKT-003: First is None, requires backward_fill
+                "adj_factor": [
+                    None,
+                    2.0,
+                    1.0,
+                ],  # MKT-003: First is None, requires backward_fill
             }
         )
 
@@ -70,7 +76,12 @@ class TestQFQ:
         assert ratios == pytest.approx([1.0, 1.0])
 
     def test_qfq_ratio_expr_empty(self):
-        df = pl.DataFrame({"ts_code": pl.Series(dtype=pl.String), "adj_factor": pl.Series(dtype=pl.Float64)})
+        df = pl.DataFrame(
+            {
+                "ts_code": pl.Series(dtype=pl.String),
+                "adj_factor": pl.Series(dtype=pl.Float64),
+            }
+        )
         result = df.with_columns(qfq_ratio_expr())
         assert result.height == 0
         assert "qfq_ratio" in result.columns

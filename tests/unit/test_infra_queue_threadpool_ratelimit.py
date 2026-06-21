@@ -14,6 +14,8 @@ import pytest
 from utils.rate_limiter import TokenBucket
 from utils.thread_pool import ThreadPoolManager
 
+pytestmark = pytest.mark.unit
+
 
 class TestProcessingQueueMaxsize:
     """S1-2: processing_queue should have maxsize and overflow handling"""

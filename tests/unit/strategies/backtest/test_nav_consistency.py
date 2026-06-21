@@ -16,7 +16,12 @@ import pytest
 from strategies.backtest.config import BacktestConfig
 from strategies.backtest.engine import VectorBacktestEngine
 from strategies.backtest.portfolio import PortfolioSimulator
-from data.domain_services.transaction_cost import TransactionCostConfig, TransactionCostModel
+from data.domain_services.transaction_cost import (
+    TransactionCostConfig,
+    TransactionCostModel,
+)
+
+pytestmark = pytest.mark.unit
 
 
 class TestNavQfqConsistency:

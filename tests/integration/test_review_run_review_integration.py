@@ -4,6 +4,10 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
+import pytest
+
+
+pytestmark = pytest.mark.integration
 
 
 class TestRunReviewE2E(unittest.TestCase):

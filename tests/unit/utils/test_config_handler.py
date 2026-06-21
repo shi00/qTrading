@@ -1,6 +1,10 @@
 from unittest.mock import patch, MagicMock
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestConfigHandlerDefaults:
@@ -250,10 +254,16 @@ class TestSaveDbPasswordEncryptFallback:
 
     def test_save_db_password_encrypt_failure_returns_false(self):
         with (
-            patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable")),
+            patch.object(
+                cfg_mod.keyring,
+                "set_password",
+                side_effect=RuntimeError("keyring unavailable"),
+            ),
             patch.object(cfg_mod.keyring, "delete_password", MagicMock()),
             patch.object(
-                cfg_mod.SecurityManager, "encrypt_data", side_effect=cfg_mod.DecryptionError("encrypt failed")
+                cfg_mod.SecurityManager,
+                "encrypt_data",
+                side_effect=cfg_mod.DecryptionError("encrypt failed"),
             ),
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
@@ -265,9 +275,17 @@ class TestSaveDbPasswordEncryptFallback:
         from utils.security_utils import SecurityError
 
         with (
-            patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable")),
+            patch.object(
+                cfg_mod.keyring,
+                "set_password",
+                side_effect=RuntimeError("keyring unavailable"),
+            ),
             patch.object(cfg_mod.keyring, "delete_password", MagicMock()),
-            patch.object(cfg_mod.SecurityManager, "encrypt_data", side_effect=SecurityError("security error")),
+            patch.object(
+                cfg_mod.SecurityManager,
+                "encrypt_data",
+                side_effect=SecurityError("security error"),
+            ),
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
@@ -276,9 +294,17 @@ class TestSaveDbPasswordEncryptFallback:
     def test_generic_exception_returns_false(self):
         """SecurityManager.encrypt_data 抛普通 Exception → 返回 False"""
         with (
-            patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable")),
+            patch.object(
+                cfg_mod.keyring,
+                "set_password",
+                side_effect=RuntimeError("keyring unavailable"),
+            ),
             patch.object(cfg_mod.keyring, "delete_password", MagicMock()),
-            patch.object(cfg_mod.SecurityManager, "encrypt_data", side_effect=RuntimeError("unexpected")),
+            patch.object(
+                cfg_mod.SecurityManager,
+                "encrypt_data",
+                side_effect=RuntimeError("unexpected"),
+            ),
             patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True),
         ):
             result = cfg_mod.ConfigHandler.save_db_password("my_password")
@@ -290,9 +316,15 @@ class TestSaveTokenEncryptFallback:
 
     def test_save_token_encrypt_failure_returns_false(self):
         with (
-            patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable")),
             patch.object(
-                cfg_mod.SecurityManager, "encrypt_data", side_effect=cfg_mod.DecryptionError("encrypt failed")
+                cfg_mod.keyring,
+                "set_password",
+                side_effect=RuntimeError("keyring unavailable"),
+            ),
+            patch.object(
+                cfg_mod.SecurityManager,
+                "encrypt_data",
+                side_effect=cfg_mod.DecryptionError("encrypt failed"),
             ),
         ):
             result = cfg_mod.ConfigHandler.save_token("my_token")
@@ -312,7 +344,11 @@ class TestConfigHandlerSaveConfigReplace:
 
 
 class TestConfigHandlerGetDbPassword:
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"db_password_encrypted": "enc_val"})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"db_password_encrypted": "enc_val"},
+    )
     @patch.object(cfg_mod.ConfigHandler, "_try_decrypt", return_value="decrypted_pw")
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
     def test_from_encrypted_config(self, mock_kr, mock_decrypt, mock_load):
@@ -358,7 +394,12 @@ class TestConfigHandlerGetDbConfig:
     @patch.object(
         cfg_mod.ConfigHandler,
         "load_config",
-        return_value={"db_host": "localhost", "db_port": 5432, "db_user": "admin", "db_name": "testdb"},
+        return_value={
+            "db_host": "localhost",
+            "db_port": 5432,
+            "db_user": "admin",
+            "db_name": "testdb",
+        },
     )
     def test_full_config(self, mock_load, mock_pw):
         result = cfg_mod.ConfigHandler.get_db_config()
@@ -488,12 +529,20 @@ class TestConfigHandlerSaveLocalAiConfig:
 
 
 class TestConfigHandlerNoProxyDomains:
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"no_proxy_domains": ["localhost", "127.0.0.1"]})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"no_proxy_domains": ["localhost", "127.0.0.1"]},
+    )
     def test_get_domains(self, mock_load):
         result = cfg_mod.ConfigHandler.get_no_proxy_domains()
         assert result == ["localhost", "127.0.0.1"]
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"no_proxy_domains": "not_a_list"})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"no_proxy_domains": "not_a_list"},
+    )
     def test_invalid_format(self, mock_load):
         result = cfg_mod.ConfigHandler.get_no_proxy_domains()
         assert result == []
@@ -535,7 +584,11 @@ class TestConfigHandlerEnsureDefaults:
 
     @patch.object(cfg_mod.ConfigHandler, "_save_json_atomically", return_value=True)
     def test_no_save_when_already_complete(self, mock_save):
-        with patch.object(cfg_mod.ConfigHandler, "_config_cache", cfg_mod.ConfigHandler.DEFAULT_CONFIG.copy()):
+        with patch.object(
+            cfg_mod.ConfigHandler,
+            "_config_cache",
+            cfg_mod.ConfigHandler.DEFAULT_CONFIG.copy(),
+        ):
             cfg_mod.ConfigHandler.ensure_defaults()
             mock_save.assert_not_called()
 
@@ -618,7 +671,11 @@ class TestSaveTokenKeyringDeleteLogsDebug:
     deletion fails, not silently swallow the exception."""
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(
+        cfg_mod.keyring,
+        "delete_password",
+        side_effect=RuntimeError("keyring unavailable"),
+    )
     def test_empty_token_logs_debug_on_keyring_failure(self, mock_del, mock_save):
         with patch.object(cfg_mod, "logger") as mock_logger:
             cfg_mod.ConfigHandler.save_token("")
@@ -632,7 +689,11 @@ class TestSaveDbPasswordKeyringDeleteLogsDebug:
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     @patch.object(cfg_mod.SecurityManager, "encrypt_data", return_value="encrypted")
-    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(
+        cfg_mod.keyring,
+        "delete_password",
+        side_effect=RuntimeError("keyring unavailable"),
+    )
     @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
     def test_fallback_logs_debug_on_keyring_delete_failure(self, mock_set, mock_del, mock_enc, mock_save):
         with patch.object(cfg_mod, "logger") as mock_logger:
@@ -646,7 +707,11 @@ class TestSaveLlmConfigKeyringDeleteLogsDebug:
     deletion fails, not silently swallow the exception."""
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(cfg_mod.keyring, "delete_password", side_effect=RuntimeError("keyring unavailable"))
+    @patch.object(
+        cfg_mod.keyring,
+        "delete_password",
+        side_effect=RuntimeError("keyring unavailable"),
+    )
     def test_empty_key_logs_debug_on_keyring_delete_failure(self, mock_del, mock_save):
         with patch.object(cfg_mod, "logger") as mock_logger:
             cfg_mod.ConfigHandler.save_llm_config(
@@ -743,7 +808,11 @@ class TestGetMaxIoWorkersUsesDefaultConfig:
     @patch.object(
         cfg_mod.ConfigHandler,
         "load_config",
-        return_value={"max_io_workers": 5, "db_connection_pool_size": 20, "db_max_overflow": 10},
+        return_value={
+            "max_io_workers": 5,
+            "db_connection_pool_size": 20,
+            "db_max_overflow": 10,
+        },
     )
     def test_custom_io_workers_within_db_capacity(self, mock_load):
         result = cfg_mod.ConfigHandler.get_max_io_workers()
@@ -771,7 +840,10 @@ class TestMultiProviderCredentials:
         "load_config",
         return_value={
             "llm_provider_credentials": {
-                "qwen": {"base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "models": ["qwen-plus"]}
+                "qwen": {
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "models": ["qwen-plus"],
+                }
             }
         },
     )
@@ -786,7 +858,9 @@ class TestMultiProviderCredentials:
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_fallback_to_global_api_key(self, mock_load, mock_decrypt, mock_kr):
         with patch.object(
-            cfg_mod.keyring, "get_password", side_effect=lambda svc, key: "global_key" if key == "ai_api_key" else None
+            cfg_mod.keyring,
+            "get_password",
+            side_effect=lambda svc, key: "global_key" if key == "ai_api_key" else None,
         ):
             result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
             assert result["api_key"] == "global_key"
@@ -804,7 +878,9 @@ class TestMultiProviderCredentials:
         assert result["api_key"] == "qwen_key"
 
     @patch.object(
-        cfg_mod.ConfigHandler, "load_config", return_value={"llm_custom_models": {}, "llm_provider_credentials": {}}
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_custom_models": {}, "llm_provider_credentials": {}},
     )
     @patch.object(cfg_mod.ConfigHandler, "save_config")
     @patch.object(cfg_mod.keyring, "set_password")
@@ -859,7 +935,10 @@ class TestMigrateCustomModelsCredentials:
         config = {"llm_custom_models": {"deepseek": ["deepseek-v3", "deepseek-v4-flash"]}}
         result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
         assert result is False
-        assert config["llm_custom_models"]["deepseek"] == ["deepseek-v3", "deepseek-v4-flash"]
+        assert config["llm_custom_models"]["deepseek"] == [
+            "deepseek-v3",
+            "deepseek-v4-flash",
+        ]
 
     @patch.object(cfg_mod.keyring, "set_password")
     def test_migrate_old_dict_format_with_api_key(self, mock_keyring):
@@ -925,7 +1004,12 @@ class TestMigrateCustomModelsCredentials:
     def test_migrate_models_from_credentials_to_custom_models(self):
         config = {
             "llm_custom_models": {"other": ["model1"]},
-            "llm_provider_credentials": {"azure": {"models": ["gpt-4-azure"], "base_url": "https://azure.openai.com"}},
+            "llm_provider_credentials": {
+                "azure": {
+                    "models": ["gpt-4-azure"],
+                    "base_url": "https://azure.openai.com",
+                }
+            },
         }
         result = cfg_mod.ConfigHandler._migrate_custom_models_credentials(config)
         assert result is True
@@ -957,25 +1041,43 @@ class TestValidateFailoverCredentials:
         result = cfg_mod.ConfigHandler.validate_failover_credentials()
         assert result == []
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["deepseek/deepseek-v3"]})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_failover_models": ["deepseek/deepseek-v3"]},
+    )
     @patch.object(
         cfg_mod.ConfigHandler,
         "get_provider_credential",
-        return_value={"api_key": "valid_key", "models": ["deepseek-v3"], "base_url": ""},
+        return_value={
+            "api_key": "valid_key",
+            "models": ["deepseek-v3"],
+            "base_url": "",
+        },
     )
     def test_valid_credentials_returns_empty(self, mock_cred, mock_load):
         result = cfg_mod.ConfigHandler.validate_failover_credentials()
         assert result == []
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["qwen/qwen-plus"]})
     @patch.object(
-        cfg_mod.ConfigHandler, "get_provider_credential", return_value={"api_key": None, "models": [], "base_url": ""}
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_failover_models": ["qwen/qwen-plus"]},
+    )
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_provider_credential",
+        return_value={"api_key": None, "models": [], "base_url": ""},
     )
     def test_missing_api_key(self, mock_cred, mock_load):
         result = cfg_mod.ConfigHandler.validate_failover_credentials()
         assert "qwen" in result
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["qwen/qwen-plus"]})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_failover_models": ["qwen/qwen-plus"]},
+    )
     @patch.object(
         cfg_mod.ConfigHandler,
         "get_provider_credential",
@@ -1025,7 +1127,11 @@ class TestLoadConfigWithValidation:
         mock_file = MagicMock()
         mock_file.read.return_value = '{"llm_provider": "deepseek", "llm_model": "deepseek-v3"}'
         mock_open.return_value.__enter__.return_value = mock_file
-        with patch.object(cfg_mod.json, "load", return_value={"llm_provider": "deepseek", "llm_model": "deepseek-v3"}):
+        with patch.object(
+            cfg_mod.json,
+            "load",
+            return_value={"llm_provider": "deepseek", "llm_model": "deepseek-v3"},
+        ):
             result = cfg_mod.ConfigHandler.load_config_with_validation()
             assert result.is_valid is True
             assert result.used_defaults is False
@@ -1042,7 +1148,14 @@ class TestLoadConfigWithValidation:
                     cfg_mod.AppConfig,
                     "model_validate",
                     side_effect=ValidationError.from_exception_data(
-                        "test", [{"type": "extra_forbidden", "loc": ("ts_token",), "input": "secret_token_value"}]
+                        "test",
+                        [
+                            {
+                                "type": "extra_forbidden",
+                                "loc": ("ts_token",),
+                                "input": "secret_token_value",
+                            }
+                        ],
                     ),
                 ):
                     result = cfg_mod.ConfigHandler.load_config_with_validation()
@@ -1061,7 +1174,11 @@ class TestLoadConfigWithValidation:
 class TestAiPrompts:
     """测试 AI prompt 相关方法"""
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_system_prompt": "custom prompt"})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"ai_system_prompt": "custom prompt"},
+    )
     def test_get_ai_system_prompt_custom(self, mock_load):
         result = cfg_mod.ConfigHandler.get_ai_system_prompt()
         assert result == "custom prompt"
@@ -1097,7 +1214,9 @@ class TestAiPrompts:
         mock_save.assert_called_once_with({"ai_system_prompt": ""})
 
     @patch.object(
-        cfg_mod.ConfigHandler, "load_config", return_value={"ai_strategy_prompt_oversold": "custom strategy prompt"}
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"ai_strategy_prompt_oversold": "custom strategy prompt"},
     )
     def test_get_strategy_prompt(self, mock_load):
         result = cfg_mod.ConfigHandler.get_strategy_prompt("oversold")
@@ -1126,7 +1245,11 @@ class TestAiPrompts:
             result = cfg_mod.ConfigHandler.set_strategy_prompt("oversold", "bad prompt")
             assert result is False
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_news_prompt": "custom news prompt"})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"ai_news_prompt": "custom news prompt"},
+    )
     def test_get_ai_news_prompt_custom(self, mock_load):
         result = cfg_mod.ConfigHandler.get_ai_news_prompt()
         assert result == "custom news prompt"
@@ -1158,7 +1281,11 @@ class TestSaveProviderCredentialEncrypt:
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
     @patch.object(cfg_mod.keyring, "set_password", side_effect=RuntimeError("keyring unavailable"))
-    @patch.object(cfg_mod.SecurityManager, "encrypt_data", side_effect=RuntimeError("encrypt failed"))
+    @patch.object(
+        cfg_mod.SecurityManager,
+        "encrypt_data",
+        side_effect=RuntimeError("encrypt failed"),
+    )
     def test_encrypt_failure_returns_false(self, mock_encrypt, mock_keyring, mock_save):
         result = cfg_mod.ConfigHandler.save_provider_credential(
             provider="qwen",
@@ -1183,7 +1310,9 @@ class TestGetProviderCredentialFallback:
     """测试 get_provider_credential keyring fallback 路径"""
 
     @patch.object(
-        cfg_mod.keyring, "get_password", side_effect=lambda s, k: "provider_key" if k == "ai_api_key_qwen" else None
+        cfg_mod.keyring,
+        "get_password",
+        side_effect=lambda s, k: "provider_key" if k == "ai_api_key_qwen" else None,
     )
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_from_provider_keyring(self, mock_load, mock_kr):
@@ -1201,7 +1330,11 @@ class TestGetProviderCredentialFallback:
         result = cfg_mod.ConfigHandler.get_provider_credential("qwen")
         assert result["api_key"] == "decrypted_key"
 
-    @patch.object(cfg_mod.keyring, "get_password", side_effect=lambda s, k: "global_key" if k == "ai_api_key" else None)
+    @patch.object(
+        cfg_mod.keyring,
+        "get_password",
+        side_effect=lambda s, k: "global_key" if k == "ai_api_key" else None,
+    )
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_fallback_to_global_keyring(self, mock_load, mock_kr):
         result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")
@@ -1209,7 +1342,11 @@ class TestGetProviderCredentialFallback:
 
     @patch.object(cfg_mod.keyring, "get_password", return_value=None)
     @patch.object(cfg_mod.SecurityManager, "decrypt_data", return_value="decrypted_from_config")
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"ai_api_key": "ENCRYPTED_GLOBAL"})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"ai_api_key": "ENCRYPTED_GLOBAL"},
+    )
     def test_fallback_to_global_encrypted(self, mock_load, mock_decrypt, mock_kr):
         result = cfg_mod.ConfigHandler.get_provider_credential("unknown_provider")
         assert result["api_key"] == "decrypted_from_config"
@@ -1377,7 +1514,9 @@ class TestGetFailoverConfig:
         },
     )
     @patch.object(
-        cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": ["qwen/qwen-plus", "openai/gpt-4"]}
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_failover_models": ["qwen/qwen-plus", "openai/gpt-4"]},
     )
     def test_with_fallbacks(self, mock_load, mock_llm):
         result = cfg_mod.ConfigHandler.get_failover_config()
@@ -1398,7 +1537,11 @@ class TestGetFailoverConfig:
             "custom_models": {},
         },
     )
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_failover_models": "not_a_list"})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_failover_models": "not_a_list"},
+    )
     def test_invalid_fallbacks_returns_empty(self, mock_load, mock_llm):
         result = cfg_mod.ConfigHandler.get_failover_config()
         assert result["fallbacks"] == []
@@ -1472,7 +1615,9 @@ class TestSaveDbConfig:
         from data.persistence.db_config_service import DatabaseConfigService
 
         with patch.object(
-            DatabaseConfigService, "build_url", return_value="postgresql+asyncpg://user:pass@host:5432/db"
+            DatabaseConfigService,
+            "build_url",
+            return_value="postgresql+asyncpg://user:pass@host:5432/db",
         ):
             result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "password", "mydb")
         assert result is True
@@ -1482,7 +1627,11 @@ class TestSaveDbConfig:
     def test_save_without_password(self, mock_save, mock_pw):
         from data.persistence.db_config_service import DatabaseConfigService
 
-        with patch.object(DatabaseConfigService, "build_url", return_value="postgresql://user:@host:5432/db"):
+        with patch.object(
+            DatabaseConfigService,
+            "build_url",
+            return_value="postgresql://user:@host:5432/db",
+        ):
             result = cfg_mod.ConfigHandler.save_db_config("localhost", 5432, "user", "", "mydb")
         assert result is True
         mock_pw.assert_not_called()
@@ -1535,7 +1684,9 @@ class TestGetLlmConfigForProviderWarning:
     """测试 get_llm_config_for_provider 无模型警告"""
 
     @patch.object(
-        cfg_mod.ConfigHandler, "get_provider_credential", return_value={"api_key": "key", "base_url": "", "models": []}
+        cfg_mod.ConfigHandler,
+        "get_provider_credential",
+        return_value={"api_key": "key", "base_url": "", "models": []},
     )
     def test_no_models_warning(self, mock_cred):
         with patch.object(cfg_mod, "logger") as mock_logger:
@@ -1625,7 +1776,11 @@ class TestSaveProviderCredentialClearSemantics:
         mock_del.assert_called_once_with(cfg_mod.KEYRING_SERVICE_NAME, "ai_api_key_qwen")
 
     @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"llm_provider_credentials": {"qwen": {}}})
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={"llm_provider_credentials": {"qwen": {}}},
+    )
     def test_empty_base_url_clears_config(self, mock_load, mock_save):
         """空字符串 base_url 应清除配置中的 base_url 字段"""
         result = cfg_mod.ConfigHandler.save_provider_credential(

@@ -5,6 +5,8 @@ import pytest
 
 from utils.loop_local import get_loop_local, del_loop_local, clear_all_loop_locals
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def cleanup_stores():

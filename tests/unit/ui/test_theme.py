@@ -4,6 +4,8 @@ import pytest
 
 from ui.theme import AppColors, AppStyles, ThemeName, CUSTOM_COLOR_PRESETS
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture(autouse=True)
 def _save_restore_appcolors():
@@ -49,7 +51,12 @@ class TestAppColorsUnsubscribe:
 class TestAppColorsLoadTheme:
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_sets_theme_name(self):
         AppColors.load_theme(ThemeName.LIGHT)
@@ -57,7 +64,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_sets_theme_mode(self):
         AppColors.load_theme(ThemeName.LIGHT)
@@ -65,7 +77,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_applies_dark_preset_colors(self):
         AppColors.load_theme(ThemeName.DARK)
@@ -74,7 +91,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_applies_light_preset_colors(self):
         AppColors.load_theme(ThemeName.LIGHT)
@@ -83,7 +105,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_syncs_rise_alias(self):
         AppColors.load_theme(ThemeName.LIGHT)
@@ -91,7 +118,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_syncs_fall_alias(self):
         AppColors.load_theme(ThemeName.LIGHT)
@@ -99,7 +131,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_syncs_table_grid_v_alias(self):
         AppColors.load_theme(ThemeName.NAVY)
@@ -107,7 +144,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_syncs_table_grid_h_alias(self):
         AppColors.load_theme(ThemeName.NAVY)
@@ -115,7 +157,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_notifies_listeners(self):
         listener = MagicMock()
@@ -125,7 +172,12 @@ class TestAppColorsLoadTheme:
 
     @patch(
         "ui.theme.THEME_MODE_MAP",
-        {ThemeName.DARK: "DARK", ThemeName.LIGHT: "LIGHT", ThemeName.NAVY: "DARK", ThemeName.DRACULA: "DARK"},
+        {
+            ThemeName.DARK: "DARK",
+            ThemeName.LIGHT: "LIGHT",
+            ThemeName.NAVY: "DARK",
+            ThemeName.DRACULA: "DARK",
+        },
     )
     def test_listener_exception_does_not_stop_others(self):
         bad_listener = MagicMock(side_effect=RuntimeError("boom"))

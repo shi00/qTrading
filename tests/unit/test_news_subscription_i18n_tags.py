@@ -2,6 +2,8 @@ import pytest
 
 from services.news_subscription_service import NewsSubscriptionService
 
+pytestmark = pytest.mark.unit
+
 
 def _make_i18n_mock(overrides=None):
     overrides = overrides or {}

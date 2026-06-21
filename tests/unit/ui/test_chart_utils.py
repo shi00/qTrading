@@ -13,6 +13,8 @@ from ui.components.chart_utils import (
     generate_kline_html,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestChartUtils:
     """Tests for K-line chart utilities."""

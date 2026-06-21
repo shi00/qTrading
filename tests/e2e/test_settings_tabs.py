@@ -2,11 +2,10 @@ import logging
 
 import pytest
 
-pytestmark = pytest.mark.e2e
-
 from ui.i18n import I18n
 from tests.e2e.timeouts import TIMEOUTS
 
+pytestmark = pytest.mark.e2e
 logger = logging.getLogger(__name__)
 
 

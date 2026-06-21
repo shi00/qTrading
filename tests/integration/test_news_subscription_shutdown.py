@@ -5,6 +5,8 @@ import pytest
 
 from services.news_subscription_service import NewsSubscriptionService
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture(autouse=True)
 def _reset_singleton():
@@ -29,7 +31,10 @@ async def test_safe_queue_put_timeout_path_drops_oldest_and_keeps_newest():
         coro.close()
         raise TimeoutError()
 
-    with patch("services.news_subscription_service.asyncio.wait_for", side_effect=_raise_timeout):
+    with patch(
+        "services.news_subscription_service.asyncio.wait_for",
+        side_effect=_raise_timeout,
+    ):
         await asyncio.gather(
             svc._safe_queue_put({"id": "new1"}),
             svc._safe_queue_put({"id": "new2"}),

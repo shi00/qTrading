@@ -6,6 +6,8 @@ import pytest
 
 from utils.config_handler import ConfigHandler
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def isolated_config(tmp_path):
@@ -90,8 +92,14 @@ class TestConfigHandler:
 
     def test_save_db_password_falls_back_to_encrypt_data_when_keyring_unavailable(self, isolated_config):
         with (
-            patch("utils.config_handler.keyring.set_password", side_effect=RuntimeError("keyring unavailable")),
-            patch("utils.config_handler.SecurityManager.encrypt_data", return_value="encrypted-secret") as mock_encrypt,
+            patch(
+                "utils.config_handler.keyring.set_password",
+                side_effect=RuntimeError("keyring unavailable"),
+            ),
+            patch(
+                "utils.config_handler.SecurityManager.encrypt_data",
+                return_value="encrypted-secret",
+            ) as mock_encrypt,
         ):
             result = ConfigHandler.save_db_password("secret")
 

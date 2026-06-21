@@ -7,6 +7,8 @@ from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_ch_for_panels():
@@ -128,8 +130,14 @@ def mock_llm_providers():
             },
         },
     ):
-        with patch("ui.components.config_panels.llm_config_panel.AZURE_API_VERSIONS", ["2024-02-01"]):
-            with patch("ui.components.config_panels.llm_config_panel.AZURE_DEFAULT_API_VERSION", "2024-02-01"):
+        with patch(
+            "ui.components.config_panels.llm_config_panel.AZURE_API_VERSIONS",
+            ["2024-02-01"],
+        ):
+            with patch(
+                "ui.components.config_panels.llm_config_panel.AZURE_DEFAULT_API_VERSION",
+                "2024-02-01",
+            ):
                 yield
 
 
@@ -231,7 +239,10 @@ class TestTushareConfigPanel:
         panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.token_input.value = "bad_token"
 
-        with patch("tushare.set_token"), patch("tushare.pro_api", side_effect=Exception("invalid token")):
+        with (
+            patch("tushare.set_token"),
+            patch("tushare.pro_api", side_effect=Exception("invalid token")),
+        ):
             result = await panel.verify_token()
 
         assert result is False
@@ -385,7 +396,11 @@ class TestLLMConfigPanel:
     ):
         on_test = AsyncMock(return_value={"success": True})
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
@@ -405,7 +420,11 @@ class TestLLMConfigPanel:
     ):
         on_test = AsyncMock()
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         panel.api_key_input.value = ""
 
@@ -524,7 +543,11 @@ class TestLLMConfigPanel:
     ):
         on_test = AsyncMock(return_value={"success": True})
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         panel.api_key_input.value = " sk-test "
         panel.model_dropdown.value = "  "
@@ -1161,7 +1184,10 @@ class TestLLMConfigPanelExtended:
         panel._api_key_modified = True
         panel.api_key_input.value = "old-key"
         # 模拟该供应商无已存储凭证
-        mock_config_handler_llm.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
+        mock_config_handler_llm.get_provider_credential.return_value = {
+            "api_key": "",
+            "base_url": "",
+        }
         e = MagicMock()
         e.control.value = "openai"
         panel._on_provider_change(e)
@@ -1201,7 +1227,11 @@ class TestLLMConfigPanelExtended:
         }
         on_test = AsyncMock()
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         panel.api_key_input.value = "azure-key"
         panel.azure_resource_input.value = ""
@@ -1245,7 +1275,11 @@ class TestLLMConfigPanelExtended:
             "api_version": "2024-02-01",
         }
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         # Set Azure mode - required for _on_llm_test_connection to use Azure branch
         panel._is_azure = True
@@ -1268,7 +1302,11 @@ class TestLLMConfigPanelExtended:
     ):
         on_test = AsyncMock(return_value={"success": False, "message": "auth_failed"})
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
@@ -1282,14 +1320,22 @@ class TestLLMConfigPanelExtended:
     ):
         on_test = AsyncMock(side_effect=Exception("network error"))
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_test_connection=on_test
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_test_connection=on_test,
         )
         panel.api_key_input.value = "sk-test"
         panel.model_dropdown.value = "deepseek-chat"
         with (
             patch(
                 "utils.error_classifier.classify_error",
-                return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True},
+                return_value={
+                    "code": "network",
+                    "message_key": "llm_err_network",
+                    "should_retry": True,
+                },
             ),
             patch("utils.error_classifier.get_error_message", return_value="Network error"),
             patch.object(panel, "_safe_update"),
@@ -1417,7 +1463,11 @@ class TestLLMConfigPanelExtended:
         with (
             patch(
                 "utils.error_classifier.classify_error",
-                return_value={"code": "network", "message_key": "llm_err_network", "should_retry": True},
+                return_value={
+                    "code": "network",
+                    "message_key": "llm_err_network",
+                    "should_retry": True,
+                },
             ),
             patch("utils.error_classifier.get_error_message", return_value="Network error"),
             patch.object(panel, "_safe_update"),
@@ -1428,7 +1478,11 @@ class TestLLMConfigPanelExtended:
     def test_set_loading_state(self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page):
         on_loading = MagicMock()
         panel = _make_llm_panel(
-            mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_loading_change=on_loading
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_loading_change=on_loading,
         )
         panel._set_loading_state(True)
         assert panel.test_button.disabled is True
@@ -1519,7 +1573,13 @@ class TestLLMConfigPanelExtended:
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
         on_save = MagicMock()
-        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, on_save=on_save)
+        panel = _make_llm_panel(
+            mock_config_handler_llm,
+            mock_i18n_llm,
+            mock_llm_providers,
+            mock_page,
+            on_save=on_save,
+        )
         panel._api_key_modified = False
         panel.model_dropdown.value = "deepseek-chat"
         panel.on_reload_service = AsyncMock()
@@ -1826,7 +1886,11 @@ class TestTushareConfigPanelExtended:
     def test_set_loading_state_internal_disabled(self, mock_ch_for_panels, mock_i18n, mock_page):
         on_loading = MagicMock()
         panel = _make_tushare_panel(
-            mock_ch_for_panels, mock_i18n, mock_page, on_loading_change=on_loading, show_internal_loading=False
+            mock_ch_for_panels,
+            mock_i18n,
+            mock_page,
+            on_loading_change=on_loading,
+            show_internal_loading=False,
         )
         panel._set_loading_state(True)
         on_loading.assert_called_with(True)
@@ -1993,7 +2057,11 @@ class TestTushareConfigPanelExtended:
     def test_set_loading_state_with_callback(self, mock_ch_for_panels, mock_i18n, mock_page):
         on_loading = MagicMock()
         panel = _make_tushare_panel(
-            mock_ch_for_panels, mock_i18n, mock_page, on_loading_change=on_loading, show_internal_loading=False
+            mock_ch_for_panels,
+            mock_i18n,
+            mock_page,
+            on_loading_change=on_loading,
+            show_internal_loading=False,
         )
         panel._set_loading_state(True)
         on_loading.assert_called_with(True)

@@ -11,7 +11,10 @@ from unittest.mock import MagicMock, patch
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from utils.scheduler_service import SchedulerService
+import pytest
 
+
+pytestmark = pytest.mark.unit
 
 # ---------------------------------------------------------------------------
 # CacheManager._atexit_cleanup

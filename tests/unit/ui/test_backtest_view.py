@@ -10,6 +10,8 @@ import pytest
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from ui.views.backtest_view import BacktestView
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.fixture
 def mock_page() -> MagicMock:

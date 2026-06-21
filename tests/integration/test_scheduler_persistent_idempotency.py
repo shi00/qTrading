@@ -1,5 +1,6 @@
 import pytest
 
+pytestmark = pytest.mark.integration
 
 _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"

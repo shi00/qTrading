@@ -1,4 +1,8 @@
 from collections import OrderedDict
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 def test_seen_hashes_initialized_as_ordered_dict():

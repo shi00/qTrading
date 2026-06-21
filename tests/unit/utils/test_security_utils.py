@@ -11,6 +11,8 @@ from utils.security_utils import (
     _hide_file_windows,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestMachineFingerprint:
     def test_fingerprint_is_bytes(self):
@@ -54,7 +56,10 @@ class TestHideFileWindows:
     def test_non_windows_chmod_error_handled(self):
         with (
             patch("utils.security_utils.os.name", "posix"),
-            patch("utils.security_utils.os.chmod", side_effect=OSError("permission denied")),
+            patch(
+                "utils.security_utils.os.chmod",
+                side_effect=OSError("permission denied"),
+            ),
         ):
             _hide_file_windows("/some/path")
 
@@ -115,7 +120,11 @@ class TestSecurityManagerGetKey:
         mock_exists.side_effect = lambda p: p in (SecurityManager.KEY_FILE, SecurityManager.KEY_FILE_BAK)
 
         with (
-            patch.object(SecurityManager, "_load_key_file", side_effect=[Exception("corrupt"), key_bytes]),
+            patch.object(
+                SecurityManager,
+                "_load_key_file",
+                side_effect=[Exception("corrupt"), key_bytes],
+            ),
             patch.object(SecurityManager, "_copy_file"),
         ):
             result = SecurityManager.get_key()

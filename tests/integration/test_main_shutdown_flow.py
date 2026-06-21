@@ -10,6 +10,7 @@ import pytest
 import main as app_main
 import utils.shutdown as shutdown_mod
 
+pytestmark = pytest.mark.integration
 
 AsyncEventHandler = Callable[[Any], Awaitable[None]]
 SyncClickHandler = Callable[[Any], None]
@@ -155,7 +156,9 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
     if exit_spy is None:
         monkeypatch.setattr(
-            os, "_exit", lambda _code: (_ for _ in ()).throw(AssertionError("os._exit should not be called"))
+            os,
+            "_exit",
+            lambda _code: (_ for _ in ()).throw(AssertionError("os._exit should not be called")),
         )
     else:
         monkeypatch.setattr(os, "_exit", exit_spy)

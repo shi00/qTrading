@@ -12,6 +12,8 @@ import pytest
 
 from strategies.backtest.data_provider import BacktestDataProvider
 
+pytestmark = pytest.mark.unit
+
 
 class TestBacktestDataProvider:
     @pytest.fixture
@@ -306,7 +308,11 @@ class TestBacktestQualityProxy:
 
     def test_check_tier_raises_when_proxy_tier_too_low(self) -> None:
         """SILVER proxy 不满足 GOLD 要求时应抛 QualityGateError。"""
-        from data.persistence.quality_gate import QualityGateError, QualityTier, _check_tier
+        from data.persistence.quality_gate import (
+            QualityGateError,
+            QualityTier,
+            _check_tier,
+        )
 
         from strategies.backtest.data_provider import _BacktestQualityProxy
 

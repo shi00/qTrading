@@ -1,11 +1,11 @@
 import pytest
 
-pytestmark = pytest.mark.e2e
-
 from ui.i18n import I18n
 from tests.e2e.labels import strategy_label
 from tests.e2e.pages import App, ScreenerPage
 from tests.e2e.timeouts import TIMEOUTS
+
+pytestmark = pytest.mark.e2e
 
 
 async def test_screener_then_backtest(e2e_page):

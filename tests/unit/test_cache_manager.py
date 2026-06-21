@@ -16,6 +16,8 @@ from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.backtest_dao import BacktestDAO
 
+pytestmark = pytest.mark.unit
+
 
 def _make_async_engine_ctx(mock_conn=None):
     if mock_conn is None:
@@ -46,13 +48,22 @@ def _make_mgr():
 
 class TestCacheManagerCreateEngine:
     @patch("data.cache.cache_manager.create_async_engine")
-    @patch("utils.config_handler.ConfigHandler.get_db_connection_pool_size", return_value="10")
+    @patch(
+        "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
+        return_value="10",
+    )
     @patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value="5")
     @patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value="30")
     @patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value="1800")
     @patch("utils.config_handler.ConfigHandler.get_db_pool_pre_ping", return_value=True)
     def test_create_engine_defaults(
-        self, mock_ping, mock_recycle, mock_timeout, mock_overflow, mock_pool_size, mock_create
+        self,
+        mock_ping,
+        mock_recycle,
+        mock_timeout,
+        mock_overflow,
+        mock_pool_size,
+        mock_create,
     ):
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
@@ -71,13 +82,22 @@ class TestCacheManagerCreateEngine:
         assert mgr.engine == mock_engine
 
     @patch("data.cache.cache_manager.create_async_engine")
-    @patch("utils.config_handler.ConfigHandler.get_db_connection_pool_size", return_value="invalid")
+    @patch(
+        "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
+        return_value="invalid",
+    )
     @patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value="invalid")
     @patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value="invalid")
     @patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value="invalid")
     @patch("utils.config_handler.ConfigHandler.get_db_pool_pre_ping", side_effect=TypeError)
     def test_create_engine_invalid_config(
-        self, mock_ping, mock_recycle, mock_timeout, mock_overflow, mock_pool_size, mock_create
+        self,
+        mock_ping,
+        mock_recycle,
+        mock_timeout,
+        mock_overflow,
+        mock_pool_size,
+        mock_create,
     ):
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
@@ -95,13 +115,25 @@ class TestCacheManagerCreateEngine:
         )
 
     @patch("data.cache.cache_manager.create_async_engine")
-    @patch("utils.config_handler.ConfigHandler.get_db_connection_pool_size", return_value=None)
+    @patch(
+        "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
+        return_value=None,
+    )
     @patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value=None)
     @patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value=None)
     @patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value=None)
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_pre_ping", side_effect=ValueError)
+    @patch(
+        "utils.config_handler.ConfigHandler.get_db_pool_pre_ping",
+        side_effect=ValueError,
+    )
     def test_create_engine_none_config(
-        self, mock_ping, mock_recycle, mock_timeout, mock_overflow, mock_pool_size, mock_create
+        self,
+        mock_ping,
+        mock_recycle,
+        mock_timeout,
+        mock_overflow,
+        mock_pool_size,
+        mock_create,
     ):
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
@@ -127,7 +159,12 @@ class TestCacheManagerInitDb:
         mock_lock = AsyncMock()
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
-        with patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock):
+        with patch.object(
+            CacheManager,
+            "_init_lock",
+            new_callable=PropertyMock,
+            return_value=mock_lock,
+        ):
             await mgr.init_db()
 
     @pytest.mark.asyncio
@@ -138,7 +175,12 @@ class TestCacheManagerInitDb:
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock()
@@ -154,7 +196,12 @@ class TestCacheManagerInitDb:
         mock_lock = AsyncMock()
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
-        with patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock):
+        with patch.object(
+            CacheManager,
+            "_init_lock",
+            new_callable=PropertyMock,
+            return_value=mock_lock,
+        ):
             with pytest.raises(RuntimeError, match="not configured"):
                 await mgr.init_db()
 
@@ -168,7 +215,12 @@ class TestCacheManagerInitDb:
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
             patch.object(mgr, "_create_engine") as mock_create,
         ):
@@ -184,7 +236,12 @@ class TestCacheManagerInitDb:
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock(side_effect=Exception("migration failed"))
@@ -201,7 +258,12 @@ class TestCacheManagerInitDb:
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock(side_effect=DatabaseMigrationNeeded(current_rev="abc", head_rev="def"))
@@ -221,7 +283,12 @@ class TestCacheManagerInitDb:
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock(side_effect=asyncio.CancelledError())
@@ -237,7 +304,12 @@ class TestCacheManagerInitDb:
         mock_lock.__aenter__ = AsyncMock(return_value=None)
         mock_lock.__aexit__ = AsyncMock(return_value=None)
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=mock_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=mock_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
             patch("data.cache.cache_manager.logger") as mock_logger,
         ):
@@ -297,7 +369,10 @@ class TestCacheManagerClose:
         with (
             patch("utils.loop_local.get_loop_local") as mock_gll,
             patch("utils.loop_local.del_loop_local"),
-            patch("data.persistence.daos.base_dao.BaseDao._get_maintenance_event", side_effect=Exception("no event")),
+            patch(
+                "data.persistence.daos.base_dao.BaseDao._get_maintenance_event",
+                side_effect=Exception("no event"),
+            ),
         ):
             mock_gll.return_value = MagicMock()
             mock_gll.return_value.is_set = MagicMock(return_value=True)
@@ -316,7 +391,12 @@ class TestCacheManagerHardReset:
     @pytest.mark.asyncio
     async def test_hard_reset_failure(self):
         mgr = _make_mgr()
-        with patch.object(mgr, "clear_all_cache", new_callable=AsyncMock, side_effect=Exception("reset failed")):
+        with patch.object(
+            mgr,
+            "clear_all_cache",
+            new_callable=AsyncMock,
+            side_effect=Exception("reset failed"),
+        ):
             with pytest.raises(Exception, match="reset failed"):
                 await mgr.hard_reset()
 
@@ -353,7 +433,12 @@ class TestCacheManagerClearAllCache:
         mock_event.set = MagicMock()
 
         with (
-            patch.object(CacheManager, "_maintenance_event", new_callable=PropertyMock, return_value=mock_event),
+            patch.object(
+                CacheManager,
+                "_maintenance_event",
+                new_callable=PropertyMock,
+                return_value=mock_event,
+            ),
             patch("data.persistence.daos.base_dao.BaseDao._get_maintenance_event") as mock_evt,
             patch.object(mgr, "init_db", new_callable=AsyncMock),
         ):
@@ -366,7 +451,7 @@ class TestCacheManagerClearAllCache:
             mgr.engine.begin = MagicMock(return_value=mock_engine_ctx)
 
             await mgr.clear_all_cache()
-            mock_event.clear.assert_called()
+            mock_event.clear.assert_called_once()
 
 
 class TestCacheManagerWaitForMaintenance:
@@ -375,7 +460,12 @@ class TestCacheManagerWaitForMaintenance:
         mgr = _make_mgr()
         mock_event = MagicMock()
         mock_event.is_set = MagicMock(return_value=True)
-        with patch.object(CacheManager, "_maintenance_event", new_callable=PropertyMock, return_value=mock_event):
+        with patch.object(
+            CacheManager,
+            "_maintenance_event",
+            new_callable=PropertyMock,
+            return_value=mock_event,
+        ):
             await mgr.wait_for_maintenance()
 
     @pytest.mark.asyncio
@@ -384,7 +474,12 @@ class TestCacheManagerWaitForMaintenance:
         mock_event = MagicMock()
         mock_event.is_set = MagicMock(return_value=False)
         mock_event.wait = AsyncMock()
-        with patch.object(CacheManager, "_maintenance_event", new_callable=PropertyMock, return_value=mock_event):
+        with patch.object(
+            CacheManager,
+            "_maintenance_event",
+            new_callable=PropertyMock,
+            return_value=mock_event,
+        ):
             await mgr.wait_for_maintenance()
             mock_event.wait.assert_called_once_with()
 
@@ -675,7 +770,10 @@ class TestCacheManagerGetConnectionString:
         mgr = CacheManager.__new__(CacheManager)
         with patch.object(CacheManager, "__init__", lambda self: None):
             mgr._initialized = False
-            with patch("utils.config_handler.ConfigHandler.get_db_url", return_value="postgresql://user:pass@host/db"):
+            with patch(
+                "utils.config_handler.ConfigHandler.get_db_url",
+                return_value="postgresql://user:pass@host/db",
+            ):
                 result = mgr._get_connection_string()
                 assert result == "postgresql://user:pass@host/db"
 
@@ -881,11 +979,26 @@ class TestCacheManagerInit:
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         with (
-            patch("utils.config_handler.ConfigHandler.get_db_connection_pool_size", return_value="10"),
-            patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value="5"),
-            patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value="30"),
-            patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value="1800"),
-            patch("utils.config_handler.ConfigHandler.get_db_pool_pre_ping", return_value=True),
+            patch(
+                "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
+                return_value="10",
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_db_max_overflow",
+                return_value="5",
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_db_pool_timeout",
+                return_value="30",
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_db_pool_recycle",
+                return_value="1800",
+            ),
+            patch(
+                "utils.config_handler.ConfigHandler.get_db_pool_pre_ping",
+                return_value=True,
+            ),
         ):
             mgr = CacheManager()
             assert mgr.engine == mock_engine
@@ -1786,7 +1899,12 @@ class TestConcurrentInitDb:
         real_lock = asyncio.Lock()
 
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=real_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=real_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock()
@@ -1850,7 +1968,12 @@ class TestConcurrentInitDbForce:
             call_order.append(len(call_order) + 1)
 
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=real_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=real_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock(side_effect=tracked_init_db)
@@ -1882,7 +2005,12 @@ class TestConcurrentInitDbForce:
             await asyncio.sleep(0.05)
 
         with (
-            patch.object(CacheManager, "_init_lock", new_callable=PropertyMock, return_value=real_lock),
+            patch.object(
+                CacheManager,
+                "_init_lock",
+                new_callable=PropertyMock,
+                return_value=real_lock,
+            ),
             patch("data.persistence.db_migrator.DatabaseMigrator") as mock_migrator,
         ):
             mock_migrator.init_db = AsyncMock(side_effect=slow_init_db)

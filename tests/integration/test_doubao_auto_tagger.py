@@ -5,9 +5,19 @@ import pytest
 
 from scripts.doubao_auto_tagger import DoubaoTagger
 
+pytestmark = pytest.mark.integration
+
 
 class _FakeLocator:
-    def __init__(self, *, visible: bool, enabled: bool = True, editable: bool = True, timeout_log=None, key=""):
+    def __init__(
+        self,
+        *,
+        visible: bool,
+        enabled: bool = True,
+        editable: bool = True,
+        timeout_log=None,
+        key="",
+    ):
         self.visible = visible
         self.enabled = enabled
         self.editable = editable
@@ -46,7 +56,11 @@ class _FakePage:
         content_html="<html></html>",
     ):
         self._css_configs = css_configs or {}
-        self._role_config = role_config or {"visible": False, "enabled": True, "editable": True}
+        self._role_config = role_config or {
+            "visible": False,
+            "enabled": True,
+            "editable": True,
+        }
         self.url = url
         self._title = title
         self._content_html = content_html
@@ -180,7 +194,9 @@ async def test_process_batch_returns_false_when_input_preparation_fails(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_run_doubao_tagging_does_not_clear_concepts_before_tagger_run(monkeypatch):
+async def test_run_doubao_tagging_does_not_clear_concepts_before_tagger_run(
+    monkeypatch,
+):
     from data.data_processor import DataProcessor
 
     dao = SimpleNamespace(

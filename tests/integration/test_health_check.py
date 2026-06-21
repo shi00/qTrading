@@ -153,3 +153,5 @@ class TestLagDaysGoldStandard:
 
 
 import pytest
+
+pytestmark = pytest.mark.integration

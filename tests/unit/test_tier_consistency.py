@@ -10,6 +10,10 @@ from data.constants import (
     TIER_QUOTE_FRESHNESS_DAYS,
 )
 from data.mixins.health_mixin import _compute_tier
+import pytest
+
+
+pytestmark = pytest.mark.unit
 
 
 class TestComputeTierConsistency(unittest.TestCase):
@@ -18,12 +22,22 @@ class TestComputeTierConsistency(unittest.TestCase):
 
     def test_bronze_when_quotes_stale(self):
         self.assertEqual(
-            _compute_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1, fin_fresh_ratio=1.0, missing_critical=False), 1
+            _compute_tier(
+                lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1,
+                fin_fresh_ratio=1.0,
+                missing_critical=False,
+            ),
+            1,
         )
 
     def test_silver_when_quotes_fresh_but_low_fundamental(self):
         self.assertEqual(
-            _compute_tier(lag_days=0, fin_fresh_ratio=0.6, missing_critical=False, avg_fundamental=0.1),
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.6,
+                missing_critical=False,
+                avg_fundamental=0.1,
+            ),
             2,
         )
 
@@ -64,19 +78,31 @@ class TestComputeTierConsistency(unittest.TestCase):
 
     def test_silver_when_fin_ratio_above_neutral(self):
         self.assertEqual(
-            _compute_tier(lag_days=0, fin_fresh_ratio=TIER_FIN_FRESH_RATIO_NEUTRAL + 0.01, missing_critical=False),
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=TIER_FIN_FRESH_RATIO_NEUTRAL + 0.01,
+                missing_critical=False,
+            ),
             2,
         )
 
     def test_silver_when_quotes_fresh_and_min_fin_ratio(self):
         self.assertEqual(
-            _compute_tier(lag_days=0, fin_fresh_ratio=TIER_FIN_FRESH_RATIO_MIN, missing_critical=False),
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=TIER_FIN_FRESH_RATIO_MIN,
+                missing_critical=False,
+            ),
             2,
         )
 
     def test_bronze_when_quotes_fresh_but_very_low_fin_ratio(self):
         self.assertEqual(
-            _compute_tier(lag_days=0, fin_fresh_ratio=TIER_FIN_FRESH_RATIO_MIN - 0.05, missing_critical=False),
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=TIER_FIN_FRESH_RATIO_MIN - 0.05,
+                missing_critical=False,
+            ),
             1,
         )
 
@@ -114,13 +140,21 @@ class TestComputeTierConsistency(unittest.TestCase):
 class TestTierBoundaryValues(unittest.TestCase):
     def test_lag_exactly_at_threshold_is_silver(self):
         self.assertEqual(
-            _compute_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS, fin_fresh_ratio=0.6, missing_critical=False),
+            _compute_tier(
+                lag_days=TIER_QUOTE_FRESHNESS_DAYS,
+                fin_fresh_ratio=0.6,
+                missing_critical=False,
+            ),
             2,
         )
 
     def test_lag_one_over_threshold_is_bronze(self):
         self.assertEqual(
-            _compute_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1, fin_fresh_ratio=0.6, missing_critical=False),
+            _compute_tier(
+                lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1,
+                fin_fresh_ratio=0.6,
+                missing_critical=False,
+            ),
             1,
         )
 
@@ -139,7 +173,12 @@ class TestTierBoundaryValues(unittest.TestCase):
 
     def test_avg_fundamental_none_uses_ratio_only(self):
         self.assertEqual(
-            _compute_tier(lag_days=0, fin_fresh_ratio=0.6, missing_critical=False, avg_fundamental=None),
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.6,
+                missing_critical=False,
+                avg_fundamental=None,
+            ),
             2,
         )
 
@@ -151,13 +190,22 @@ class TestTierBoundaryValues(unittest.TestCase):
 
     def test_fin_fresh_ratio_none_stale_quotes_is_bronze(self):
         self.assertEqual(
-            _compute_tier(lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1, fin_fresh_ratio=None, missing_critical=False),
+            _compute_tier(
+                lag_days=TIER_QUOTE_FRESHNESS_DAYS + 1,
+                fin_fresh_ratio=None,
+                missing_critical=False,
+            ),
             1,
         )
 
     def test_fin_fresh_ratio_none_never_gold(self):
         self.assertEqual(
-            _compute_tier(lag_days=0, fin_fresh_ratio=None, missing_critical=False, avg_fundamental=0.9),
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=None,
+                missing_critical=False,
+                avg_fundamental=0.9,
+            ),
             2,
         )
 

@@ -17,6 +17,8 @@ from data.persistence.quality_gate import (
     require_quality,
 )
 
+pytestmark = pytest.mark.unit
+
 
 class TestQualityTier:
     def test_critical(self):
@@ -248,11 +250,25 @@ class TestComputeTier:
         assert _compute_tier(lag_days=6, fin_fresh_ratio=0.9, missing_critical=False) == 1
 
     def test_gold_high_fin_ratio(self):
-        assert _compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False, avg_fundamental=0.8) == 3
+        assert (
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.95,
+                missing_critical=False,
+                avg_fundamental=0.8,
+            )
+            == 3
+        )
 
     def test_gold_fresh_fin_date(self):
         assert (
-            _compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10, avg_fundamental=0.8)
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.5,
+                missing_critical=False,
+                fin_lag_days=10,
+                avg_fundamental=0.8,
+            )
             == 3
         )
 
@@ -263,14 +279,28 @@ class TestComputeTier:
         assert _compute_tier(lag_days=3, fin_fresh_ratio=0.3, missing_critical=False) == 2
 
     def test_stale_fin_date_no_gold(self):
-        assert _compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=200) == 2
+        assert (
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.5,
+                missing_critical=False,
+                fin_lag_days=200,
+            )
+            == 2
+        )
 
     def test_fast_path_low_ratio_with_fin_lag_no_gold(self):
         assert _compute_tier(lag_days=0, fin_fresh_ratio=0.3, missing_critical=False, fin_lag_days=10) == 2
 
     def test_fast_path_gold_requires_both_fin_lag_and_ratio(self):
         assert (
-            _compute_tier(lag_days=0, fin_fresh_ratio=0.6, missing_critical=False, fin_lag_days=10, avg_fundamental=0.8)
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.6,
+                missing_critical=False,
+                fin_lag_days=10,
+                avg_fundamental=0.8,
+            )
             == 3
         )
 
@@ -287,33 +317,81 @@ class TestComputeTier:
         assert _compute_tier(lag_days=3, fin_fresh_ratio=0.1, missing_critical=False) == 2
 
     def test_silver_low_avg_fundamental(self):
-        assert _compute_tier(lag_days=0, fin_fresh_ratio=0.9, missing_critical=False, avg_fundamental=0.2) == 2
+        assert (
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.9,
+                missing_critical=False,
+                avg_fundamental=0.2,
+            )
+            == 2
+        )
 
     def test_gold_blocked_by_avg_fundamental(self):
-        assert _compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False, avg_fundamental=0.5) == 2
+        assert (
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.95,
+                missing_critical=False,
+                avg_fundamental=0.5,
+            )
+            == 2
+        )
 
     def test_gold_with_high_avg_fundamental(self):
-        assert _compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False, avg_fundamental=0.8) == 3
+        assert (
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.95,
+                missing_critical=False,
+                avg_fundamental=0.8,
+            )
+            == 3
+        )
 
     def test_gold_fresh_fin_date_with_avg_fundamental(self):
         assert (
-            _compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10, avg_fundamental=0.8)
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.5,
+                missing_critical=False,
+                fin_lag_days=10,
+                avg_fundamental=0.8,
+            )
             == 3
         )
 
     def test_gold_fresh_fin_date_blocked_by_avg_fundamental(self):
         assert (
-            _compute_tier(lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10, avg_fundamental=0.6)
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.5,
+                missing_critical=False,
+                fin_lag_days=10,
+                avg_fundamental=0.6,
+            )
             == 2
         )
 
     def test_fast_path_no_gold_without_avg_fundamental(self):
-        assert _compute_tier(lag_days=0, fin_fresh_ratio=0.95, missing_critical=False, avg_fundamental=None) == 2
+        assert (
+            _compute_tier(
+                lag_days=0,
+                fin_fresh_ratio=0.95,
+                missing_critical=False,
+                avg_fundamental=None,
+            )
+            == 2
+        )
 
     def test_fast_path_no_gold_without_avg_fundamental_even_with_fin_lag(self):
         assert (
             _compute_tier(
-                lag_days=0, fin_fresh_ratio=0.5, missing_critical=False, fin_lag_days=10, avg_fundamental=None
+                lag_days=0,
+                fin_fresh_ratio=0.5,
+                missing_critical=False,
+                fin_lag_days=10,
+                avg_fundamental=None,
             )
             == 2
         )
