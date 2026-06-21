@@ -1,4 +1,5 @@
 import logging
+import re
 
 import flet as ft
 import pandas as pd
@@ -89,7 +90,6 @@ class NewsFeed(ft.Container):
     def update_theme(self):
         """Re-render list on theme change"""
         style = AppStyles.card()
-        self.bgcolor = style["bgcolor"]  # type: ignore[untyped]
         self.bgcolor = style["bgcolor"]  # type: ignore[untyped]
         # Update static texts (only if not using semantic tokens, but here we are)
         # self.empty_text.color = AppColors.TEXT_HINT  <-- Automatic
@@ -246,6 +246,23 @@ class NewsFeed(ft.Container):
         if self.page:
             self.news_list.update()
 
+    _POSITIVE_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
+    _NEGATIVE_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "miss")
+
+    @classmethod
+    def _detect_sentiment(cls, content: str) -> str:
+        """Detect sentiment using word-boundary matching (case-insensitive)."""
+        if not content:
+            return "neutral"
+        text = content.lower()
+        pos_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in cls._POSITIVE_KEYWORDS)
+        neg_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in cls._NEGATIVE_KEYWORDS)
+        if pos_count > neg_count:
+            return "positive"
+        if neg_count > pos_count:
+            return "negative"
+        return "neutral"
+
     def _build_news_item(self, row):
         raw_tag = row.get("tags", "") or ""
         translated_tag = self._translate_tag(raw_tag)
@@ -253,8 +270,13 @@ class NewsFeed(ft.Container):
         content = str(row.get("content", "") or "")
         time_str = str(row.get("publish_time", "") or "")
 
-        is_positive = "利好" in content or "Up" in content or "Gain" in content
-        bg_color = ft.Colors.with_opacity(0.1, AppColors.UP) if is_positive else ft.Colors.TRANSPARENT
+        sentiment = self._detect_sentiment(content)
+        if sentiment == "positive":
+            bg_color = ft.Colors.with_opacity(0.1, AppColors.UP)
+        elif sentiment == "negative":
+            bg_color = ft.Colors.with_opacity(0.1, AppColors.DOWN)
+        else:
+            bg_color = ft.Colors.TRANSPARENT
 
         item = ft.Container(
             content=ft.Column(

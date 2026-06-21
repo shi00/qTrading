@@ -1,8 +1,15 @@
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _is_debug_mode() -> bool:
+    """Check if DEBUG mode is enabled via environment variable."""
+    return os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+
 
 LOCALE_MAP = {
     "zh": "zh_CN",
@@ -106,6 +113,10 @@ class I18n:
             I18n.get("app_title", locale="en_US")  # Returns "A-Share Intelligent Screener"
         """
         if not cls._initialized:
+            if _is_debug_mode():
+                raise RuntimeError(
+                    "[I18n] Not initialized in DEBUG mode. Call I18n.initialize(locale) explicitly at startup."
+                )
             logger.warning(
                 "[I18n] Auto-initializing with default locale. Call I18n.initialize(locale) explicitly at startup."
             )

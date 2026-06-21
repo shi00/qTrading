@@ -328,6 +328,32 @@ class PaginatedTable(ft.Column):
         row.content = ft.Row(self._build_cells(row_data), spacing=0)
         row.on_click = lambda e, r=row_data: self._handle_row_click(r)
 
+    def refresh_viewport(self, viewport_height=None):
+        """Recalculate visible rows based on viewport height.
+
+        If *viewport_height* is provided, it replaces the stored viewport
+        height.  If omitted, the previously stored height (from the last
+        scroll event) is reused.  When the resulting row count differs from
+        the current window, the table is re-rendered.
+        """
+        if viewport_height is not None:
+            self._viewport_h = float(viewport_height)
+
+        if not self._viewport_h:
+            return
+
+        new_capacity = self._window_capacity()
+        current_capacity = self._win_end - self._win_start
+        if new_capacity != current_capacity:
+            target = max(self._win_start, 0)
+            self._last_rendered_first = -1
+            self._render_window(target_first=target)
+            if self.page:
+                try:
+                    self._canvas.update()
+                except Exception as e:
+                    logger.debug("UI render error: %s", e, exc_info=True)
+
     def _on_scroll(self, e):
         viewport_h = getattr(e, "viewport_dimension", None)
         if viewport_h:

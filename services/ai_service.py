@@ -228,7 +228,7 @@ def _check_reasoning_support(model: str) -> bool:
                     # Bidirectional substring match: "qwen3.6-max" matches "qwen3.6-max-preview"
                     model_lower = model.lower()
                     model_id_lower = m["id"].lower()
-                    if model_lower in model_id_lower or model_id_lower in model_lower:
+                    if model_lower == model_id_lower:
                         return True
         return False
 

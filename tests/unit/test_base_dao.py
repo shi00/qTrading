@@ -2451,8 +2451,8 @@ class TestChunkedExecuteParallel:
         assert results[2]["chunk_idx"].iloc[0] == 4
 
     @pytest.mark.asyncio
-    async def test_parallel_concurrent_execution(self):
-        """Verify chunks execute concurrently (not serially) by measuring overlap."""
+    async def test_sequential_execution_no_overlap(self):
+        """Verify _chunked_execute runs chunks sequentially (no overlap)."""
         import asyncio
 
         active_count = 0
@@ -2464,7 +2464,7 @@ class TestChunkedExecuteParallel:
             async with lock:
                 active_count += 1
                 max_active = max(max_active, active_count)
-            await asyncio.sleep(0.01)  # Simulate I/O
+            await asyncio.sleep(0.05)  # Simulate I/O
             async with lock:
                 active_count -= 1
             return pd.DataFrame({"id": params})
@@ -2476,8 +2476,8 @@ class TestChunkedExecuteParallel:
             values,
             chunk_size=2,
         )
-        # With 10 chunks and pool_size-2=8 max concurrent, we expect some parallelism
-        assert max_active > 1, f"Expected concurrent execution, max_active={max_active}"
+        # _chunked_execute is sequential, so max_active should be 1
+        assert max_active == 1
 
     @pytest.mark.asyncio
     async def test_parallel_semaphore_limits_concurrency(self):

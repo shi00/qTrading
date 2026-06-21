@@ -366,7 +366,6 @@ class AppColors:
 
     # 内部状态
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
-    _CURRENT_THEME_MODE = ft.ThemeMode.DARK
     _CURRENT_THEME_NAME = ThemeName.DARK
     _listeners = []
     _listeners_lock = threading.Lock()  # Thread-safe lock for _listeners list

@@ -1010,9 +1010,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "无辅助数据" in result
-        assert valid is False
+        assert "无辅助数据" in result
 
     @pytest.mark.asyncio
     async def test_with_audit(self):
@@ -1024,9 +1024,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "审计意见" in result
-        assert valid is True
+        assert "无辅助数据" not in result
 
     @pytest.mark.asyncio
     async def test_with_pledge_high(self):
@@ -1038,10 +1038,10 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"pledge_ratio": [45.0]}))
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "质押比例" in result
         assert "⚠️" in result
-        assert valid is True
+        assert "无辅助数据" not in result
 
     @pytest.mark.asyncio
     async def test_with_holdernumber(self):
@@ -1060,10 +1060,10 @@ class TestBuildAuxiliaryDataText:
                 }
             )
         )
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "股东人数" in result
         assert "筹码集中" in result
-        assert valid is True
+        assert "无辅助数据" not in result
 
     @pytest.mark.asyncio
     async def test_with_dividend(self):
@@ -1082,18 +1082,18 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=None)
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "分红" in result
-        assert valid is True
+        assert "无辅助数据" not in result
 
     @pytest.mark.asyncio
     async def test_exception(self):
         s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(side_effect=Exception("DB error"))
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert isinstance(result, str)
-        assert valid is False
+        assert "无辅助数据" in result
 
     @pytest.mark.asyncio
     async def test_empty_all_data(self):
@@ -1105,9 +1105,9 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame())
         cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result == "无辅助数据"
-        assert valid is False
+        assert "无辅助数据" in result
 
     @pytest.mark.asyncio
     async def test_high_pledge_warning(self):
@@ -1119,9 +1119,8 @@ class TestBuildAuxiliaryDataText:
         cache.get_pledge_stat = AsyncMock(return_value=pd.DataFrame({"pledge_ratio": [50.0]}))
         cache.get_top10_holders = AsyncMock(return_value=None)
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "质押比例较高" in result or result == "无辅助数据"
-        assert valid is True or valid is False
 
     @pytest.mark.asyncio
     async def test_holder_number_without_ratio(self):
@@ -1142,12 +1141,12 @@ class TestBuildAuxiliaryDataText:
                 }
             )
         )
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "股东人数" in result
         assert "500,000" in result
         assert "筹码集中" not in result
         assert "筹码分散" not in result
-        assert valid is True
+        assert "无辅助数据" not in result
 
     @pytest.mark.asyncio
     async def test_with_prefetched(self):
@@ -1173,9 +1172,9 @@ class TestBuildAuxiliaryDataText:
                 ),
             }
         }
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, prefetched)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache, prefetched)
         assert result is not None
-        assert valid is True
+        assert "无辅助数据" not in result
 
     @pytest.mark.asyncio
     async def test_passes_as_of_date_to_all_cache_calls(self):
@@ -1231,9 +1230,9 @@ class TestBuildAuxiliaryDataText:
             }
         )
         cache.get_top10_holders = AsyncMock(return_value=holders_df)
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert "股东B" in result
-        assert valid is True
+        assert "无辅助数据" not in result
 
 
 class TestBuildMacroContext:
@@ -1681,9 +1680,9 @@ class TestBuilderLabelsOut:
             )
         )
         labels: list[str] = []
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result  # 非空
-        assert valid is True
+        assert "无辅助数据" not in result
         assert len(labels) == 6  # 6 个子项全部注册
 
     @pytest.mark.asyncio
@@ -1697,9 +1696,9 @@ class TestBuilderLabelsOut:
         cache.get_top10_holders = AsyncMock(return_value=pd.DataFrame())
         cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert labels == []
-        assert valid is False
+        assert "无辅助数据" in result
 
     @pytest.mark.asyncio
     async def test_auxiliary_data_labels_out_exception(self):
@@ -1707,9 +1706,9 @@ class TestBuilderLabelsOut:
         cache = MagicMock()
         cache.get_fina_audit = AsyncMock(side_effect=RuntimeError("DB error"))
         labels: list[str] = []
-        result, valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
+        result = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert labels == []
-        assert valid is False
+        assert "无辅助数据" in result
 
     def test_capital_flow_labels_out_with_data(self):
         mf_df = pd.DataFrame(
@@ -1836,8 +1835,8 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_pledge_stat = AsyncMock(return_value=None)
             cache.get_top10_holders = AsyncMock(return_value=None)
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
-            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
-            assert valid is False
+            result = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert "无辅助数据" in result
             assert result == I18n.get("ai_no_auxiliary_data")
         finally:
             I18n.set_locale(original_locale)
@@ -1855,8 +1854,8 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_pledge_stat = AsyncMock(return_value=None)
             cache.get_top10_holders = AsyncMock(return_value=None)
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
-            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
-            assert valid is False
+            result = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert "No auxiliary data" in result
             assert result == I18n.get("ai_no_auxiliary_data")
         finally:
             I18n.set_locale(original_locale)
@@ -1874,8 +1873,8 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_pledge_stat = AsyncMock(return_value=None)
             cache.get_top10_holders = AsyncMock(return_value=None)
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
-            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
-            assert valid is True
+            result = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert "无辅助数据" not in result
             assert result != I18n.get("ai_no_auxiliary_data")
         finally:
             I18n.set_locale(original_locale)
@@ -1893,8 +1892,8 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_pledge_stat = AsyncMock(return_value=None)
             cache.get_top10_holders = AsyncMock(return_value=None)
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
-            result, valid = await s._build_auxiliary_data_text("000001.SZ", cache)
-            assert valid is True
+            result = await s._build_auxiliary_data_text("000001.SZ", cache)
+            assert "No auxiliary data" not in result
             assert result != I18n.get("ai_no_auxiliary_data")
         finally:
             I18n.set_locale(original_locale)

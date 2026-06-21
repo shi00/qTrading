@@ -327,7 +327,7 @@ class TestInvariant3BuilderLabelEquivalence:
         )
 
         labels: list[str] = []
-        result, _ = await mixin._build_auxiliary_data_text(
+        result = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -375,13 +375,13 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result, valid = await mixin._build_auxiliary_data_text(
+        result = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
         )
         assert result == I18n.get("ai_no_auxiliary_data")
-        assert valid is False
+        assert "无辅助数据" in result
         assert labels == []
 
     @pytest.mark.asyncio
@@ -391,13 +391,13 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_fina_audit = _async_raise(RuntimeError("DB error"))
 
         labels: list[str] = []
-        result, valid = await mixin._build_auxiliary_data_text(
+        result = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
         )
         assert result == I18n.get("ai_no_auxiliary_data")
-        assert valid is False
+        assert "无辅助数据" in result
         assert labels == []
 
     @pytest.mark.asyncio
@@ -427,13 +427,13 @@ class TestInvariant3BuilderLabelEquivalence:
         )
 
         labels: list[str] = []
-        result, valid = await mixin._build_auxiliary_data_text(
+        result = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
         )
         assert result == I18n.get("ai_no_auxiliary_data")
-        assert valid is False
+        assert "无辅助数据" in result
         assert labels == []
 
     def test_capital_flow_has_data_registers_labels(self):
@@ -1358,7 +1358,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result, _ = await mixin._build_auxiliary_data_text(
+        result = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,
@@ -1378,7 +1378,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
 
         labels: list[str] = []
-        result, _ = await mixin._build_auxiliary_data_text(
+        result = await mixin._build_auxiliary_data_text(
             "000001.SZ",
             mixin.cache,
             labels_out=labels,

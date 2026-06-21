@@ -127,10 +127,7 @@ class StockDetailDialog(ft.AlertDialog):
         close = self._format_val("close", I18n.get("unit_yuan"))
         pct = self.stock_data.get("pct_chg", 0)
         # Guard against NaN from raw DataFrame data
-        try:
-            pct = float(pct) if pct is not None and pct == pct else 0  # NaN != NaN
-        except (ValueError, TypeError):
-            pct = 0
+        pct = float(pct) if is_valid_number(pct) else 0
         pct_color = AppColors.UP if pct > 0 else AppColors.DOWN
         pct_str = f"+{pct:.2f}%" if pct > 0 else f"{pct:.2f}%"
 
@@ -412,7 +409,7 @@ class StockDetailDialog(ft.AlertDialog):
     def _format_val(self, key, suffix=""):
         """Format a value with handling for NaN"""
         val = self.stock_data.get(key)
-        if val is None or (isinstance(val, (float, Decimal)) and val != val):  # NaN check
+        if not is_valid_number(val):
             return "-"
         try:
             return f"{float(val):.2f}{suffix}"

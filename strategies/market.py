@@ -25,6 +25,7 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
 
     def __init__(self):
         super().__init__("strategy_volume_breakout_name", "strategy_volume_breakout_desc")
+        self._data_warnings: list[str] = []
 
     def get_parameters(self):
         return [
@@ -58,15 +59,18 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
         ]
 
     def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+        self._data_warnings = []
         p = context.get("params", {})
         chg_min = p.get("pct_chg_min", 2)
         chg_max = p.get("pct_chg_max", 7)
         turnover = p.get("turnover_min", 3)
         if chg_min >= chg_max:
-            logger.warning(
+            warning_msg = (
                 f"[VolumeBreakoutStrategy] pct_chg_min ({chg_min}) >= pct_chg_max ({chg_max}), "
                 f"auto-adjusting pct_chg_max to {chg_min + 0.5}"
             )
+            logger.warning(warning_msg)
+            self._data_warnings.append(warning_msg)
             chg_max = chg_min + 0.5
         return (
             lf.drop_nulls(subset=["pct_chg", "turnover_rate"])
