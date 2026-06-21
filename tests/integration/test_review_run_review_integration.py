@@ -63,6 +63,8 @@ class TestRunReviewE2E(unittest.TestCase):
         manager.cache.get_index_daily = AsyncMock(return_value=index_df)
         manager.api = MagicMock()
         manager.api.get_index_daily = AsyncMock(return_value=index_df)
+        manager.alpha_win_threshold = 0.5
+        manager.alpha_loss_threshold = 0.5
         return manager
 
     @patch("data.persistence.review_manager.ConfigHandler")
