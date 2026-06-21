@@ -1,5 +1,5 @@
 import logging
-
+import math
 from decimal import Decimal
 
 import flet as ft
@@ -10,6 +10,58 @@ from ui.i18n import I18n
 from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
+
+# Tushare unit conversion constants
+TUSHARE_MV_UNIT = 10000  # Tushare returns market value in 万元, convert to 亿
+TUSHARE_AMOUNT_UNIT = 100000  # Tushare returns amount in 千元, convert to 亿
+
+
+def is_valid_number(val) -> bool:
+    """Check if val is a valid (non-NaN) number."""
+    if val is None:
+        return False
+    if isinstance(val, (float, Decimal)):
+        return not math.isnan(val)
+    if isinstance(val, int):
+        return True
+    try:
+        float_val = float(val)
+        return not math.isnan(float_val)
+    except (TypeError, ValueError):
+        return False
+
+
+def format_mv(val) -> str:
+    """Format market value in 亿 (pure function)."""
+    if not is_valid_number(val):
+        return "-"
+    try:
+        return f"{float(val) / TUSHARE_MV_UNIT:.1f}{I18n.get('unit_yi')}"
+    except (ValueError, TypeError):
+        return "-"
+
+
+def format_vol(val) -> str:
+    """Format volume (pure function)."""
+    if not is_valid_number(val):
+        return "-"
+    try:
+        v = float(val)
+        if v >= 10000:
+            return f"{v / 10000:.1f}{I18n.get('unit_wanshou')}"
+        return f"{v:.0f}{I18n.get('unit_shou')}"
+    except (ValueError, TypeError):
+        return "-"
+
+
+def format_amount(val) -> str:
+    """Format amount in 亿 (pure function)."""
+    if not is_valid_number(val):
+        return "-"
+    try:
+        return f"{float(val) / TUSHARE_AMOUNT_UNIT:.2f}{I18n.get('unit_yi')}"
+    except (ValueError, TypeError):
+        return "-"
 
 
 class StockDetailDialog(ft.AlertDialog):
@@ -369,38 +421,15 @@ class StockDetailDialog(ft.AlertDialog):
 
     def _format_mv(self, key):
         """Format market value in 亿"""
-        val = self.stock_data.get(key)
-        if val is None or (isinstance(val, (float, Decimal)) and val != val):
-            return "-"
-        try:
-            # Tushare returns in 万元, convert to 亿
-            return f"{float(val) / 10000:.1f}{I18n.get('unit_yi')}"
-        except (ValueError, TypeError):
-            return "-"
+        return format_mv(self.stock_data.get(key))
 
     def _format_vol(self, key):
         """Format volume"""
-        val = self.stock_data.get(key)
-        if val is None or (isinstance(val, (float, Decimal)) and val != val):
-            return "-"
-        try:
-            v = float(val)
-            if v >= 10000:
-                return f"{v / 10000:.1f}{I18n.get('unit_wanshou')}"
-            return f"{v:.0f}{I18n.get('unit_shou')}"
-        except (ValueError, TypeError):
-            return "-"
+        return format_vol(self.stock_data.get(key))
 
     def _format_amount(self, key):
         """Format amount in 亿"""
-        val = self.stock_data.get(key)
-        if val is None or (isinstance(val, (float, Decimal)) and val != val):
-            return "-"
-        try:
-            # Amount is in 千元
-            return f"{float(val) / 100000:.2f}{I18n.get('unit_yi')}"
-        except (ValueError, TypeError):
-            return "-"
+        return format_amount(self.stock_data.get(key))
 
     def _close(self, e):
         self.open = False
