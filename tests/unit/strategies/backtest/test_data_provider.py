@@ -460,6 +460,57 @@ class TestBacktestQualityProxy:
         cache.get_screening_data_range.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_preload_range_default_limit_is_366(self) -> None:
+        """验证默认 preload_max_days 为 366。"""
+        cache = MagicMock()
+        provider = BacktestDataProvider(cache)
+        assert provider.preload_max_days == 366
+
+    @pytest.mark.asyncio
+    async def test_preload_range_custom_limit_allows_wider_range(self) -> None:
+        """验证自定义 preload_max_days=730 允许超过 366 但小于 730 天的范围预加载。"""
+        cache = MagicMock()
+        cache.get_screening_data_range = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                }
+            )
+        )
+        cache.get_fundamental_screening_data_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list_range = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade_range = AsyncMock(return_value=pd.DataFrame())
+
+        provider = BacktestDataProvider(cache, preload_max_days=730)
+
+        # 500 天范围：超过默认 366 但小于自定义 730，应正常预加载
+        await provider.preload_range(date(2024, 1, 1), date(2025, 5, 15))
+
+        # 预加载应正常初始化（不为 None）
+        assert provider._preloaded is not None
+        # 范围查询应被调用
+        cache.get_screening_data_range.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_preload_range_custom_limit_skips_when_exceeded(self) -> None:
+        """验证自定义 preload_max_days=730 在范围超过 730 天时跳过预加载。"""
+        cache = MagicMock()
+        provider = BacktestDataProvider(cache, preload_max_days=730)
+
+        # 超过 730 天的范围 (2024-01-01 到 2026-02-01)
+        await provider.preload_range(date(2024, 1, 1), date(2026, 2, 1))
+
+        # 预加载应被跳过 (为 None)
+        assert provider._preloaded is None
+        cache.get_screening_data_range.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_preload_range_robust_date_handling(self) -> None:
         """验证对于 null, NaT, None 等无效日期，能够进行过滤且不报错。"""
         cache = MagicMock()

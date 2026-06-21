@@ -104,6 +104,10 @@ class ProviderCredential(BaseModel):
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    # 配置版本号，用于未来配置结构变更时检测旧配置并迁移。默认值 1 保持向后兼容
+    # （现有配置无此字段时反序列化为默认值 1）。
+    config_version: int = Field(default=1, ge=1)
+
     # Default is empty so that ConfigHandler.get_db_url() falls through to the
     # DATABASE_URL environment variable (12-factor app compliance) when the user
     # has not yet configured a host via onboarding. Explicitly setting db_host

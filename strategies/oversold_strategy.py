@@ -467,20 +467,23 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             }
         return stats
 
-    def _build_turnover_context(self, row: dict, prefetched: PreFetchedContext) -> str:
+    def _build_turnover_context(self, row: dict, prefetched: PreFetchedContext) -> tuple[str, bool]:
         """
         构建换手率趋势上下文。
         分析换手率变化趋势，判断是缩量下跌还是放量下跌。
+
+        Returns:
+            (text, is_valid)：is_valid=False 表示数据不可用/无效，调用方应跳过注入。
         """
         ts_code = row.get("ts_code", "")
         indicators_df = prefetched.indicators
 
         if indicators_df is None or indicators_df.empty:
-            return "换手率数据: 暂不可用"
+            return ("换手率数据: 暂不可用", False)
 
         stock_indicators = indicators_df[indicators_df["ts_code"] == ts_code]
         if stock_indicators.empty:
-            return "换手率数据: 当日无记录"
+            return ("换手率数据: 当日无记录", False)
 
         parts = []
         turnover_col = "turnover_rate"
@@ -496,7 +499,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 avg_20d = recent_20[turnover_col].mean() if len(recent_20) >= 20 else None
 
                 if pd.isna(current_turnover) or pd.isna(avg_5d):  # type: ignore[union-attr]
-                    return "换手率数据: 包含无效值"
+                    return ("换手率数据: 包含无效值", False)
 
                 parts.append(f"当前换手率: {current_turnover:.2f}%")
                 parts.append(f"5日均值: {avg_5d:.2f}%")
@@ -516,18 +519,23 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 else:
                     parts.append("当日: 换手率相对平稳")
 
-        return "\n".join(parts) if parts else "换手率数据: 无有效数据"
+        if parts:
+            return ("\n".join(parts), True)
+        return ("换手率数据: 无有效数据", False)
 
-    def _build_sector_context(self, row: dict, prefetched: PreFetchedContext) -> str:
+    def _build_sector_context(self, row: dict, prefetched: PreFetchedContext) -> tuple[str, bool]:
         """
         构建行业统计上下文。
         显示同行业其他股票的涨跌分布。
+
+        Returns:
+            (text, is_valid)：始终返回 is_valid=True，因为即使无数据也展示行业信息。
         """
         sector_stats = prefetched.sector_stats
         industry = row.get("industry", "")
 
         if not sector_stats or industry not in sector_stats:
-            return f"行业统计: {industry or '未知'} (暂无数据)"
+            return (f"行业统计: {industry or '未知'} (暂无数据)", True)
 
         stats = sector_stats[industry]
         parts = [f"行业: {industry}"]
@@ -537,20 +545,23 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         avg_pct = stats.get("avg_pct_chg") or 0
         parts.append(f"平均涨跌幅: {avg_pct:.2f}%")
 
-        return "\n".join(parts)
+        return ("\n".join(parts), True)
 
-    def _build_market_context(self, row: dict, prefetched: PreFetchedContext) -> str:
+    def _build_market_context(self, row: dict, prefetched: PreFetchedContext) -> tuple[str, bool]:
         """
         构建大盘环境上下文。
         显示上证指数、深证成指、创业板指的表现及 MA20 趋势。
+
+        Returns:
+            (text, is_valid)：is_valid=False 表示数据不可用，调用方应跳过注入。
         """
         market_context_str = prefetched.market_context_str
         if market_context_str:
-            return market_context_str
+            return (market_context_str, True)
 
         market_data = prefetched.market_context
         if not market_data:
-            return "大盘环境: 数据暂不可用"
+            return ("大盘环境: 数据暂不可用", False)
 
         index_names = {
             "000001.SH": "上证指数",
@@ -570,31 +581,34 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             direction = "上涨" if pct_chg > 0 else "下跌" if pct_chg < 0 else "平盘"
             parts.append(f"{name}: {pct_chg:+.2f}% ({direction}, {trend})")
 
-        return "\n".join(parts)
+        return ("\n".join(parts), True)
 
-    def _build_support_context(self, row: dict, prefetched: PreFetchedContext) -> str:
+    def _build_support_context(self, row: dict, prefetched: PreFetchedContext) -> tuple[str, bool]:
         """
         构建多维量化支撑位分析上下文。
         包含：布林带下轨(动态支撑)、VWAC(筹码支撑)、最大放量柱支撑、价值区下沿(结构支撑)。
 
         P1-18 fix: 使用复权后的价格和成交量进行计算，确保与 _math_filter 中的 RSI 计算口径一致。
         跨除权除息日时，原始 close 会有跳变，导致 VWAC 失真。
+
+        Returns:
+            (text, is_valid)：is_valid=False 表示数据不可用/无效，调用方应跳过注入。
         """
         ts_code = row.get("ts_code", "")
         history_dict = prefetched.history
 
         if not history_dict or ts_code not in history_dict:
-            return "支撑位分析: 历史数据暂不可用"
+            return ("支撑位分析: 历史数据暂不可用", False)
 
         history_df = history_dict[ts_code]
         if history_df is None or history_df.empty or len(history_df) < 20:
-            return "支撑位分析: 数据不足"
+            return ("支撑位分析: 数据不足", False)
 
         parts = []
         current_close = row.get("close")
 
         if current_close is None or current_close <= 0:
-            return "支撑位分析: 当前价格数据无效"
+            return ("支撑位分析: 当前价格数据无效", False)
 
         if "trade_date" in history_df.columns:
             history_df = history_df.sort_values("trade_date", ascending=True)
@@ -651,4 +665,6 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 dist_val = (current_qfq_close - val_120) / val_120 * 100
                 parts.append(f"120日价值区下沿(前低集群): {val_120:.2f} (距离 {dist_val:+.2f}%)")
 
-        return "\n".join(parts) if parts else "支撑位分析: 无有效数据"
+        if parts:
+            return ("\n".join(parts), True)
+        return ("支撑位分析: 无有效数据", False)

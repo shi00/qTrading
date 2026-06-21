@@ -56,6 +56,33 @@ class TestAppConfig:
         assert cfg.max_io_workers == 16
         assert cfg.onboarding_complete is False
         assert cfg.ts_token == ""
+        assert cfg.config_version == 1
+
+    def test_config_version_default(self):
+        """默认 config_version 为 1"""
+        cfg = AppConfig()
+        assert cfg.config_version == 1
+
+    def test_config_version_custom(self):
+        """自定义 config_version 生效"""
+        cfg = AppConfig(config_version=2)
+        assert cfg.config_version == 2
+
+    def test_config_version_old_config_compatibility(self):
+        """旧配置（无 config_version 字段）反序列化为默认值 1"""
+        raw = {"db_host": "10.0.0.1", "db_port": 5432}
+        cfg = AppConfig.model_validate(raw)
+        assert cfg.config_version == 1
+
+    def test_config_version_invalid_zero(self):
+        """config_version < 1 校验失败"""
+        with pytest.raises(ValidationError):
+            AppConfig(config_version=0)
+
+    def test_config_version_invalid_negative(self):
+        """config_version 负数校验失败"""
+        with pytest.raises(ValidationError):
+            AppConfig(config_version=-1)
 
     def test_field_validation_db_port(self):
         with pytest.raises(ValidationError):

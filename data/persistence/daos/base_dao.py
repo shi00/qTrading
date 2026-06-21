@@ -148,21 +148,35 @@ class BaseDao:
             except (ValueError, TypeError):
                 template_takes_start_idx = False
 
-        results = []
+        try:
+            from utils.config_handler import ConfigHandler
+
+            pool_size = ConfigHandler.get_db_connection_pool_size()
+            max_concurrent = max(1, pool_size - 2)
+        except Exception:
+            max_concurrent = 8  # 默认并发数
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def _execute_chunk(chunk, chunk_start_idx):
+            async with semaphore:
+                placeholders = ",".join([f"${chunk_start_idx + j}" for j in range(len(chunk))])
+                extra_suffix = params_fn(chunk) if params_fn else []
+                if callable(sql_template):
+                    if template_takes_start_idx:
+                        sql = sql_template(placeholders, len(chunk), chunk_start_idx)
+                    else:
+                        sql = sql_template(placeholders, len(chunk))
+                else:
+                    sql = sql_template.format(placeholders=placeholders)
+                return await db_fn(sql, extra_prefix + chunk + extra_suffix, **db_kwargs)
+
+        chunk_tasks = []
         for i in range(0, len(values), chunk_size):
             chunk = values[i : i + chunk_size]
-            placeholders = ",".join([f"${actual_start_idx + j}" for j in range(len(chunk))])
-            extra_suffix = params_fn(chunk) if params_fn else []
-            if callable(sql_template):
-                if template_takes_start_idx:
-                    sql = sql_template(placeholders, len(chunk), actual_start_idx)
-                else:
-                    sql = sql_template(placeholders, len(chunk))
-            else:
-                sql = sql_template.format(placeholders=placeholders)
-            result = await db_fn(sql, extra_prefix + chunk + extra_suffix, **db_kwargs)
-            results.append(result)
-        return results
+            chunk_tasks.append(_execute_chunk(chunk, actual_start_idx))
+
+        results = await asyncio.gather(*chunk_tasks)
+        return list(results)
 
     @staticmethod
     async def chunked_in_query(

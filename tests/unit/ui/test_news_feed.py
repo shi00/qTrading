@@ -273,6 +273,66 @@ class TestNewsFeed:
         feed.page = mock_page
         feed.update_news_tag("Any content", "利好")
 
+    def test_update_news_tag_updates_all_duplicate_content(
+        self, mock_i18n, mock_app_styles, mock_app_colors, mock_page
+    ):
+        """R1.9: Two news items with same content must both be updated (not just the first)."""
+        feed = NewsFeed()
+        feed.page = mock_page
+        feed.news_list.page = mock_page
+        news_data = pd.DataFrame(
+            {
+                "content": ["Same content", "Same content"],
+                "publish_time": ["2024-06-15 10:30:00", "2024-06-15 11:00:00"],
+                "tags": ["公告", "公告"],
+            }
+        )
+        feed.set_news(news_data, has_more=False)
+        feed.update_news_tag("Same content", "利好")
+
+        # Both items should have their tag updated (not just the first match)
+        # _translate_tag("利好") returns "利好" (default fallback for unknown key "tag_利好")
+        tag_values = []
+        for item in feed.news_list.controls:
+            col = item.content
+            row = col.controls[0]
+            tag_text = row.controls[0]
+            tag_values.append(tag_text.value)
+        # Both should be updated to the same translated value, not the original "公告"
+        assert len(tag_values) == 2
+        assert tag_values[0] == tag_values[1]
+        assert tag_values[0] != "公告"
+
+    def test_update_news_tag_no_matching_content_returns_silently(
+        self, mock_i18n, mock_app_styles, mock_app_colors, mock_page
+    ):
+        """R1.9: When content has no matching news_id, update silently returns."""
+        feed = NewsFeed()
+        feed.page = mock_page
+        feed.news_list.page = mock_page
+        news_data = pd.DataFrame(
+            {
+                "content": ["Existing content"],
+                "publish_time": ["2024-06-15 10:30:00"],
+                "tags": ["公告"],
+            }
+        )
+        feed.set_news(news_data, has_more=False)
+        # Capture original tag value
+        item = feed.news_list.controls[0]
+        original_tag = item.content.controls[0].controls[0].value
+        feed.update_news_tag("Non-existent content", "利好")
+        # Tag should remain unchanged
+        assert item.content.controls[0].controls[0].value == original_tag
+
+    def test_update_news_tag_empty_list_returns_directly(self, mock_i18n, mock_app_styles, mock_app_colors, mock_page):
+        """R1.9: Empty news list (no controls) returns directly without error."""
+        feed = NewsFeed()
+        feed.page = mock_page
+        # No set_news called, news_list.controls is empty
+        feed.update_news_tag("Any content", "利好")
+        assert feed.news_list.controls == []
+
     @pytest.mark.asyncio
     async def test_handle_load_more(self, mock_i18n, mock_app_styles, mock_app_colors, mock_page):
         load_more_callback = MagicMock()
@@ -294,7 +354,7 @@ class TestNewsFeed:
                 "tags": "利好",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
 
     def test_build_news_item_english_positive(self, mock_i18n, mock_app_styles, mock_app_colors):
@@ -306,7 +366,7 @@ class TestNewsFeed:
                 "tags": "analysis",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
 
     def test_build_news_item_gain_keyword(self, mock_i18n, mock_app_styles, mock_app_colors):
@@ -318,7 +378,7 @@ class TestNewsFeed:
                 "tags": "financial",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
 
     def test_build_news_item_negative_content(self, mock_i18n, mock_app_styles, mock_app_colors):
@@ -330,7 +390,7 @@ class TestNewsFeed:
                 "tags": "公告",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
 
     def test_build_news_item_missing_tags(self, mock_i18n, mock_app_styles, mock_app_colors):
@@ -341,7 +401,7 @@ class TestNewsFeed:
                 "publish_time": "2024-06-15 10:30:00",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
 
     def test_build_news_item_missing_content(self, mock_i18n, mock_app_styles, mock_app_colors):
@@ -353,7 +413,7 @@ class TestNewsFeed:
                 "tags": "公告",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
 
 
@@ -435,7 +495,7 @@ class TestNewsFeedSentiment:
                 "tags": "公告",
             }
         )
-        item = feed._build_news_item(row)
+        item = feed._build_news_item(row, 1)
         assert item is not None
         # Negative sentiment should use DOWN color with opacity (not transparent)
         assert item.bgcolor != ft.Colors.TRANSPARENT

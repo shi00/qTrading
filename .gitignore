@@ -86,6 +86,7 @@ mylog*.txt
 # 3. Environment Variables & Secrets
 .env
 .env.*
+!.env.example
 .secret.key
 .secret.key.bak
 .secret.legacy

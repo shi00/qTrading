@@ -63,6 +63,7 @@ class BacktestConfig:
     allow_limit_up_buy: bool = False
     allow_limit_down_sell: bool = False
     cash_reserve_pct: float = 0.1
+    preload_max_days: int = 366
 
     def validate(self) -> list[str]:
         errors = []
@@ -78,6 +79,8 @@ class BacktestConfig:
             errors.append("cash_reserve_pct must be in [0, 1)")
         if self.max_position_count <= 0:
             errors.append("max_position_count must be positive")
+        if self.preload_max_days < 30:
+            errors.append("preload_max_days must be at least 30")
         return errors
 
     def get_cost_config(self) -> TransactionCostConfig:

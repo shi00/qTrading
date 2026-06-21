@@ -42,12 +42,13 @@ class TestBuildTurnoverContext(unittest.TestCase):
         prefetched.indicators = indicators_df
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIn("当前换手率", result)
-        self.assertIn("5日均值", result)
-        self.assertIn("20日均值", result)
-        self.assertIn("趋势", result)
+        self.assertTrue(result_valid)
+        self.assertIn("当前换手率", result_text)
+        self.assertIn("5日均值", result_text)
+        self.assertIn("20日均值", result_text)
+        self.assertIn("趋势", result_text)
 
     def test_build_turnover_text_empty(self):
         """空 DataFrame 返回"暂不可用" """
@@ -57,9 +58,10 @@ class TestBuildTurnoverContext(unittest.TestCase):
         prefetched.indicators = pd.DataFrame()
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIn("暂不可用", result)
+        self.assertFalse(result_valid)
+        self.assertIn("暂不可用", result_text)
 
     def test_build_turnover_text_single_day(self):
         """只有 1 天数据时不应崩溃，正常计算当日换手率"""
@@ -79,10 +81,10 @@ class TestBuildTurnoverContext(unittest.TestCase):
         prefetched.indicators = indicators_df
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, _ = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIsInstance(result, str)
-        self.assertNotIn("error", result.lower())
+        self.assertIsInstance(result_text, str)
+        self.assertNotIn("error", result_text.lower())
 
 
 class TestBuildSectorContext(unittest.TestCase):
@@ -103,12 +105,13 @@ class TestBuildSectorContext(unittest.TestCase):
         prefetched.sector_stats = sector_stats
 
         row = {"ts_code": "000001.SZ", "industry": "电子", "close": 10.0}
-        result = self.strategy._build_sector_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_sector_context(row, prefetched)
 
-        self.assertIn("电子", result)
-        self.assertIn("上涨家数", result)
-        self.assertIn("下跌家数", result)
-        self.assertIn("平均涨跌幅", result)
+        self.assertTrue(result_valid)
+        self.assertIn("电子", result_text)
+        self.assertIn("上涨家数", result_text)
+        self.assertIn("下跌家数", result_text)
+        self.assertIn("平均涨跌幅", result_text)
 
     def test_build_sector_context_missing(self):
         """行业不存在时返回"暂无数据" """
@@ -118,9 +121,11 @@ class TestBuildSectorContext(unittest.TestCase):
         prefetched.sector_stats = {}
 
         row = {"ts_code": "000001.SZ", "industry": "未知行业", "close": 10.0}
-        result = self.strategy._build_sector_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_sector_context(row, prefetched)
 
-        self.assertIn("暂无数据", result)
+        # 即使无数据，sector context 仍返回 is_valid=True（显示行业信息）
+        self.assertTrue(result_valid)
+        self.assertIn("暂无数据", result_text)
 
 
 class TestBuildHistoryTextLimitTag(unittest.TestCase):
@@ -323,10 +328,10 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, _ = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIsInstance(result, str)
-        self.assertNotIn("error", result.lower())
+        self.assertIsInstance(result_text, str)
+        self.assertNotIn("error", result_text.lower())
 
     def test_build_support_levels_full_calculation(self):
         """完整支撑位计算包含布林下轨和VWAC"""
@@ -372,10 +377,10 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": 12.0}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, _ = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIn("布林下轨", result)
-        self.assertIn("VWAC", result)
+        self.assertIn("布林下轨", result_text)
+        self.assertIn("VWAC", result_text)
 
     def test_build_support_levels_missing_history(self):
         """历史数据缺失时返回提示"""
@@ -385,9 +390,10 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {}
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIn("暂不可用", result)
+        self.assertFalse(result_valid)
+        self.assertIn("暂不可用", result_text)
 
     def test_build_support_levels_invalid_close(self):
         """当前价格无效时返回提示"""
@@ -411,9 +417,10 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": None}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIn("无效", result)
+        self.assertFalse(result_valid)
+        self.assertIn("无效", result_text)
 
     def test_build_support_levels_with_adj_factor(self):
         """P1-18: 测试复权处理 - 跨除权除息日时使用复权价格计算VWAC"""
@@ -462,10 +469,10 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": 5.0}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, _ = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIn("VWAC", result)
-        self.assertIn("5.", result)
+        self.assertIn("VWAC", result_text)
+        self.assertIn("5.", result_text)
 
     def test_build_support_levels_qfq_calculation_correctness(self):
         """P1-18: 验证复权计算的正确性 - VWAC应使用复权价格而非原始价格"""
@@ -496,12 +503,12 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, _ = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIn("VWAC", result)
+        self.assertIn("VWAC", result_text)
         import re
 
-        vwac_match = re.search(r"VWAC:\s*(\d+\.\d+)", result)
+        vwac_match = re.search(r"VWAC:\s*(\d+\.\d+)", result_text)
         if vwac_match:
             vwac_value = float(vwac_match.group(1))
             expected_qfq_close_1 = 20.0 * 2.0
@@ -538,10 +545,10 @@ class TestBuildSupportContext(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_support_context(row, prefetched)
+        result_text, _ = self.strategy._build_support_context(row, prefetched)
 
-        self.assertIsInstance(result, str)
-        self.assertNotIn("error", result.lower())
+        self.assertIsInstance(result_text, str)
+        self.assertNotIn("error", result_text.lower())
 
 
 class TestRSIPercentile(unittest.TestCase):
@@ -704,11 +711,12 @@ class TestBuildMarketContext(unittest.TestCase):
         prefetched.market_context = market_data
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_market_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_market_context(row, prefetched)
 
-        self.assertIn("大盘环境", result)
-        self.assertIn("上证指数", result)
-        self.assertIn("多头趋势", result)
+        self.assertTrue(result_valid)
+        self.assertIn("大盘环境", result_text)
+        self.assertIn("上证指数", result_text)
+        self.assertIn("多头趋势", result_text)
 
     def test_build_market_context_with_trend(self):
         """大盘数据包含趋势判断"""
@@ -722,9 +730,9 @@ class TestBuildMarketContext(unittest.TestCase):
         prefetched.market_context = market_data
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_market_context(row, prefetched)
+        result_text, _ = self.strategy._build_market_context(row, prefetched)
 
-        self.assertIn("空头趋势", result)
+        self.assertIn("空头趋势", result_text)
 
     def test_build_market_context_empty(self):
         """大盘数据不可用时返回提示"""
@@ -734,9 +742,10 @@ class TestBuildMarketContext(unittest.TestCase):
         prefetched.market_context = {}
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_market_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_market_context(row, prefetched)
 
-        self.assertIn("暂不可用", result)
+        self.assertFalse(result_valid)
+        self.assertIn("暂不可用", result_text)
 
 
 if __name__ == "__main__":
@@ -825,9 +834,9 @@ class TestTurnoverEdgeCases(unittest.TestCase):
         prefetched.indicators = indicators_df
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, _ = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIn("持续缩量", result)
+        self.assertIn("持续缩量", result_text)
 
     def test_turnover_expanding_trend(self):
         """近期放量趋势检测"""
@@ -848,9 +857,9 @@ class TestTurnoverEdgeCases(unittest.TestCase):
         prefetched.indicators = indicators_df
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, _ = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIn("近期放量", result)
+        self.assertIn("近期放量", result_text)
 
     def test_turnover_stock_not_in_indicators(self):
         """股票代码不在指标数据中"""
@@ -870,9 +879,10 @@ class TestTurnoverEdgeCases(unittest.TestCase):
         prefetched.indicators = indicators_df
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIn("无记录", result)
+        self.assertFalse(result_valid)
+        self.assertIn("无记录", result_text)
 
     def test_turnover_nan_values(self):
         """换手率包含 NaN 值"""
@@ -902,9 +912,10 @@ class TestTurnoverEdgeCases(unittest.TestCase):
         prefetched.indicators = indicators_df
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_turnover_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_turnover_context(row, prefetched)
 
-        self.assertIn("无效值", result)
+        self.assertFalse(result_valid)
+        self.assertIn("无效值", result_text)
 
 
 class TestSectorEdgeCases(unittest.TestCase):
@@ -921,9 +932,9 @@ class TestSectorEdgeCases(unittest.TestCase):
         prefetched.sector_stats = {"电子": {"count": 10}}
 
         row = {"ts_code": "000001.SZ", "industry": "", "close": 10.0}
-        result = self.strategy._build_sector_context(row, prefetched)
+        result_text, _ = self.strategy._build_sector_context(row, prefetched)
 
-        self.assertIn("暂无数据", result)
+        self.assertIn("暂无数据", result_text)
 
     def test_sector_stats_missing_fields(self):
         """行业统计缺少字段"""
@@ -933,10 +944,10 @@ class TestSectorEdgeCases(unittest.TestCase):
         prefetched.sector_stats = {"电子": {"count": 10}}
 
         row = {"ts_code": "000001.SZ", "industry": "电子", "close": 10.0}
-        result = self.strategy._build_sector_context(row, prefetched)
+        result_text, _ = self.strategy._build_sector_context(row, prefetched)
 
-        self.assertIn("电子", result)
-        self.assertIn("上涨家数: 0", result)
+        self.assertIn("电子", result_text)
+        self.assertIn("上涨家数: 0", result_text)
 
 
 class TestMarketEdgeCases(unittest.TestCase):
@@ -953,9 +964,10 @@ class TestMarketEdgeCases(unittest.TestCase):
         prefetched.market_context_str = "缓存的大盘环境文本"
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_market_context(row, prefetched)
+        result_text, result_valid = self.strategy._build_market_context(row, prefetched)
 
-        self.assertEqual(result, "缓存的大盘环境文本")
+        self.assertTrue(result_valid)
+        self.assertEqual(result_text, "缓存的大盘环境文本")
 
     def test_market_context_non_dict_data(self):
         """大盘数据包含非字典类型"""
@@ -968,9 +980,9 @@ class TestMarketEdgeCases(unittest.TestCase):
         }
 
         row = {"ts_code": "000001.SZ", "close": 10.0}
-        result = self.strategy._build_market_context(row, prefetched)
+        result_text, _ = self.strategy._build_market_context(row, prefetched)
 
-        self.assertIn("深证成指", result)
+        self.assertIn("深证成指", result_text)
 
 
 class TestComputeSectorStats(unittest.TestCase):

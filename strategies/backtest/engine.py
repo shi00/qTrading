@@ -47,7 +47,7 @@ class VectorBacktestEngine:
         self.cache = cache
         self.config = config
         self.cost_model = TransactionCostModel(config.get_cost_config())
-        self.data_provider = BacktestDataProvider(cache, data_processor)
+        self.data_provider = BacktestDataProvider(cache, data_processor, preload_max_days=config.preload_max_days)
         self.strategy_adapter = BacktestStrategyAdapter()
 
     async def run(
@@ -670,17 +670,19 @@ class VectorBacktestEngine:
         if benchmark_df.is_empty():
             return pl.Series([0.0] * len(trade_dates))
 
-        bm_dict: dict[date, float] = {}
-        for row in benchmark_df.iter_rows(named=True):
-            trade_date_val = row["trade_date"]
-            if isinstance(trade_date_val, str):
-                d_str = trade_date_val.replace("-", "").strip()[:8]
-                trade_date_val = datetime.datetime.strptime(d_str, "%Y%m%d").date()
-            bm_dict[trade_date_val] = float(row["pct_chg"]) / 100
+        # 标准化 benchmark_df 的 trade_date 列为 date 类型
+        bm = benchmark_df
+        if bm["trade_date"].dtype == pl.Utf8:
+            bm = bm.with_columns(pl.col("trade_date").str.replace("-", "").str.to_date("%Y%m%d"))
 
-        returns = [bm_dict.get(d, 0.0) for d in trade_dates]
+        # 构建 trade_dates DataFrame 并 join
+        trade_dates_df = pl.DataFrame({"trade_date": trade_dates})
+        joined = trade_dates_df.join(bm, on="trade_date", how="left")
 
-        return pl.Series(returns)
+        # 缺失值填充 0.0，除以 100 转换为小数
+        returns = joined["pct_chg"].fill_null(0.0) / 100
+
+        return returns
 
     def _calc_period_stats(
         self,

@@ -567,6 +567,27 @@ class TestNewsFeed:
 
         assert feed.content == feed.empty_state
 
+    def test_update_news_tag_updates_all_duplicate_content(self):
+        """R1.9: Two news items with same content must both be updated (not just the first)."""
+        feed = NewsFeed()
+        df = pd.DataFrame(
+            [
+                {"content": "dup", "tags": "old", "publish_time": "2024-01-01 10:00:00"},
+                {"content": "dup", "tags": "old", "publish_time": "2024-01-01 11:00:00"},
+            ]
+        )
+        feed.set_news(df)
+
+        feed.update_news_tag("dup", "new")
+
+        # Both items should have their tag updated (not just the first match)
+        for item in feed.news_list.controls:
+            col = item.content
+            row = col.controls[0]
+            tag_text = row.controls[0]
+            # _translate_tag("new") returns "new" (default fallback for unknown key)
+            assert tag_text.value == "new"
+
     def test_append_news_adds_items(self):
         feed = NewsFeed()
         df1 = pd.DataFrame([{"content": "first", "tags": "", "publish_time": ""}])

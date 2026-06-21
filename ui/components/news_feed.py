@@ -16,6 +16,8 @@ class NewsFeed(ft.Container):
     Displays a scrollable list of news items.
     """
 
+    _news_id_counter: int = 0  # 类属性，递增计数器，为每条新闻分配唯一 ID
+
     def __init__(self, on_load_more_click=None):
         style = AppStyles.card()
         super().__init__()
@@ -29,6 +31,7 @@ class NewsFeed(ft.Container):
         # Internal State
         self._cached_news = pd.DataFrame()  # Cache for theme reloading
         self._cached_has_more = False
+        self._content_to_ids: dict[str, list[int]] = {}  # content → news_id 列表映射
 
         self.news_list = ft.ListView(
             spacing=10,
@@ -89,8 +92,7 @@ class NewsFeed(ft.Container):
 
     def update_theme(self):
         """Re-render list on theme change"""
-        style = AppStyles.card()
-        self.bgcolor = style["bgcolor"]  # type: ignore[untyped]
+        # bgcolor 使用 ft.Colors.SURFACE 语义 token（__init__ 中设置），自动随主题切换，无需重新赋值。
         # Update static texts (only if not using semantic tokens, but here we are)
         # self.empty_text.color = AppColors.TEXT_HINT  <-- Automatic
         # self.load_more_text.color = AppColors.PRIMARY_LIGHT <-- Automatic
@@ -129,9 +131,14 @@ class NewsFeed(ft.Container):
                 self.update()
 
         # Rebuild items
+        self._content_to_ids = {}
         controls = []
         for _, row in news_data.iterrows():
-            controls.append(self._build_news_item(row))
+            self._news_id_counter += 1
+            news_id = self._news_id_counter
+            controls.append(self._build_news_item(row, news_id))
+            content = str(row.get("content", "") or "")
+            self._content_to_ids.setdefault(content, []).append(news_id)
 
         if has_more:
             controls.append(self.load_more_btn)
@@ -154,35 +161,51 @@ class NewsFeed(ft.Container):
 
     def update_news_tag(self, content: str, tags: str):
         """
-        Update tag for a single news item by content match (TAG_UPDATE).
+        Update tag for news items matching the given content (TAG_UPDATE).
+
+        Uses ``_content_to_ids`` to locate all news_ids for the content, then
+        precisely targets each control via its ``key`` attribute. This ensures
+        all duplicate-content items are updated (not just the first match).
         """
         if not content or not self.news_list.controls:
             return
 
         translated_tag = self._translate_tag(tags)
+        news_ids = self._content_to_ids.get(content, [])
+        if not news_ids:
+            return
 
+        # Build a lookup from key → control for O(1) precise targeting
+        key_to_item: dict[str, ft.Control] = {}
         for item in self.news_list.controls:
             if item == self.load_more_btn:
+                continue
+            key_val = getattr(item, "key", None)
+            if key_val is not None:
+                key_to_item[str(key_val)] = item
+
+        for news_id in news_ids:
+            key_str = str(news_id)
+            item = key_to_item.get(key_str)
+            if item is None:
                 continue
             try:
                 col = item.content  # type: ignore[untyped]
                 if not isinstance(col, ft.Column):
                     continue
                 row = col.controls[0] if col.controls else None
-                content_text = col.controls[1] if len(col.controls) > 1 else None
-                if not isinstance(row, ft.Row) or not isinstance(content_text, ft.Text):
-                    continue
-                if content_text.value != content:
+                if not isinstance(row, ft.Row):
                     continue
                 for row_ctrl in row.controls:
                     if isinstance(row_ctrl, ft.Text) and row_ctrl.weight == ft.FontWeight.BOLD:
                         row_ctrl.value = translated_tag
-                        if self.page:
-                            self.news_list.update()
-                        return
+                        break
             except Exception as e:
                 logger.warning(f"[NewsFeed] Error updating tag: {e}")
                 continue
+
+        if self.page:
+            self.news_list.update()
 
     def prepend_news(self, news_data: pd.DataFrame):
         """
@@ -209,7 +232,11 @@ class NewsFeed(ft.Container):
         # Reverse iteration to keep order correct when inserting at 0
         for i in range(len(news_data) - 1, -1, -1):
             row = news_data.iloc[i]
-            new_items.append(self._build_news_item(row))
+            self._news_id_counter += 1
+            news_id = self._news_id_counter
+            new_items.append(self._build_news_item(row, news_id))
+            content = str(row.get("content", "") or "")
+            self._content_to_ids.setdefault(content, []).append(news_id)
 
         # Insert at top
         for item in new_items:
@@ -227,7 +254,11 @@ class NewsFeed(ft.Container):
             self.news_list.controls.pop()
 
         for _, row in news_data.iterrows():
-            self.news_list.controls.append(self._build_news_item(row))
+            self._news_id_counter += 1
+            news_id = self._news_id_counter
+            self.news_list.controls.append(self._build_news_item(row, news_id))
+            content = str(row.get("content", "") or "")
+            self._content_to_ids.setdefault(content, []).append(news_id)
 
         # Update Cache
         if not news_data.empty:
@@ -263,7 +294,7 @@ class NewsFeed(ft.Container):
             return "negative"
         return "neutral"
 
-    def _build_news_item(self, row):
+    def _build_news_item(self, row, news_id: int):
         raw_tag = row.get("tags", "") or ""
         translated_tag = self._translate_tag(raw_tag)
 
@@ -279,6 +310,7 @@ class NewsFeed(ft.Container):
             bg_color = ft.Colors.TRANSPARENT
 
         item = ft.Container(
+            key=str(news_id),
             content=ft.Column(
                 [
                     ft.Row(

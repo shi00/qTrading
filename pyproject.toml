@@ -62,6 +62,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.5.0",
     "pytest-rerunfailures>=14.0",
+    "pytest-randomly>=3.15.0",
     "ruff>=0.15.0",
     "pyright>=1.1.410",
     "pandas-stubs>=3.0.0.250204",

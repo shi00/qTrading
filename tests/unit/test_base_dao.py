@@ -2451,35 +2451,6 @@ class TestChunkedExecuteParallel:
         assert results[2]["chunk_idx"].iloc[0] == 4
 
     @pytest.mark.asyncio
-    async def test_sequential_execution_no_overlap(self):
-        """Verify _chunked_execute runs chunks sequentially (no overlap)."""
-        import asyncio
-
-        active_count = 0
-        max_active = 0
-        lock = asyncio.Lock()
-
-        async def mock_db_fn(sql, params, **kwargs):
-            nonlocal active_count, max_active
-            async with lock:
-                active_count += 1
-                max_active = max(max_active, active_count)
-            await asyncio.sleep(0.05)  # Simulate I/O
-            async with lock:
-                active_count -= 1
-            return pd.DataFrame({"id": params})
-
-        values = list(range(20))
-        await BaseDao._chunked_execute(
-            mock_db_fn,
-            "SELECT * FROM t WHERE id IN ({placeholders})",
-            values,
-            chunk_size=2,
-        )
-        # _chunked_execute is sequential, so max_active should be 1
-        assert max_active == 1
-
-    @pytest.mark.asyncio
     async def test_parallel_semaphore_limits_concurrency(self):
         """Verify semaphore limits concurrency to avoid pool exhaustion."""
         import asyncio

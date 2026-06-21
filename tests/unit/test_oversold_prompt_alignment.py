@@ -282,7 +282,7 @@ async def test_strategy_manager_oversold_pipeline_forwards_shared_context_flags(
         patch.object(
             strategy,
             "_build_multi_period_financials",
-            AsyncMock(return_value="财务数据不足"),
+            AsyncMock(return_value=("", False)),
         ),
         patch.object(
             strategy,

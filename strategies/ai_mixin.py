@@ -72,7 +72,7 @@ class PreFetchedContext:
     is_backtest: bool = False
 
 
-ContextBuilder = Callable[[dict, PreFetchedContext], str]
+ContextBuilder = Callable[[dict, PreFetchedContext], tuple[str, bool]]
 
 
 class AIStrategyMixin:
@@ -98,7 +98,8 @@ class AIStrategyMixin:
         enable_ai_analysis: Class-level flag; set False to skip Phase 2 AI analysis.
         _context_builders: Dict of registered context builder functions.
             Key: context block name (e.g., "turnover", "sector")
-            Value: Callable[[row: dict, prefetched: PreFetchedContext], str]
+            Value: Callable[[row: dict, prefetched: PreFetchedContext], tuple[str, bool]]
+                where the bool is `is_valid` (True = inject block, False = skip).
     """
 
     enable_ai_analysis: bool = True
@@ -117,7 +118,8 @@ class AIStrategyMixin:
 
         Args:
             name: Context block name (e.g., "turnover", "sector", "market")
-            builder: Function(row: dict, prefetched: PreFetchedContext) -> str
+            builder: Function(row: dict, prefetched: PreFetchedContext) -> tuple[str, bool]
+                Returns (text, is_valid); block is injected only when is_valid is True.
         """
         self._context_builders[name] = builder
         logger.debug("[AIStrategyMixin] Registered context builder: %s", name)
@@ -705,8 +707,8 @@ class AIStrategyMixin:
             custom_context_blocks = []
             for name, builder in self._context_builders.items():
                 try:
-                    block_text = builder(row, prefetched)
-                    if block_text:
+                    block_text, block_valid = builder(row, prefetched)
+                    if block_valid and block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
                 except Exception as e:
                     logger.warning(
@@ -730,7 +732,7 @@ class AIStrategyMixin:
 
             # 7a. Multi-Period Financial Trends (Phase 1.2)
             multi_period_labels: list[str] = []
-            multi_period_text = await self._build_multi_period_financials(
+            multi_period_text, multi_period_valid = await self._build_multi_period_financials(
                 ts_code,
                 dp.cache,
                 prefetched.auxiliary_data,
@@ -740,7 +742,7 @@ class AIStrategyMixin:
 
             # 7b. Auxiliary Data (Phase 1.2)
             auxiliary_labels: list[str] = []
-            auxiliary_text = await self._build_auxiliary_data_text(
+            auxiliary_text, auxiliary_valid = await self._build_auxiliary_data_text(
                 ts_code,
                 dp.cache,
                 prefetched.auxiliary_data,
@@ -752,15 +754,12 @@ class AIStrategyMixin:
 
             # Combine all financial context
             financials_parts = [base_financials]
-            invalid_texts = [I18n.get("ai_financial_insufficient"), I18n.get("ai_financial_fetch_failed")]
-            if multi_period_text and multi_period_text not in invalid_texts:
+            if multi_period_valid:
                 financials_parts.append(
                     f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_multi_period_trend'))}\n{multi_period_text}"
                 )
                 financial_labels.extend(multi_period_labels)
-            # Note: 使用 I18n.get 翻译文本做哨兵比较，依赖运行时 locale 不变的前提。
-            # 若需支持运行时 locale 切换，应改为 builder 返回空串 + 布尔标记。
-            if auxiliary_text and auxiliary_text != I18n.get("ai_no_auxiliary_data"):
+            if auxiliary_valid:
                 financials_parts.append(
                     f"\n{I18n.get('ai_section_wrapper', title=I18n.get('ai_auxiliary_data'))}\n{auxiliary_text}"
                 )
@@ -1229,7 +1228,7 @@ class AIStrategyMixin:
         prefetched: dict | None = None,
         as_of_date: str | None = None,
         labels_out: list[str] | None = None,
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         构建多期财务趋势数据。
 
@@ -1243,7 +1242,7 @@ class AIStrategyMixin:
             labels_out: 输出参数，收集成功注入的标签 key
 
         Returns:
-            财务趋势文本
+            (财务趋势文本, is_valid)：is_valid=False 表示数据不足/失败，调用方应跳过注入。
         """
 
         try:
@@ -1253,7 +1252,7 @@ class AIStrategyMixin:
                 df = await cache.get_financial_reports_history(ts_code, periods=8, as_of_date=as_of_date)
 
             if df is None or df.empty:
-                return I18n.get("ai_financial_insufficient")
+                return ("", False)
 
             parts = []
 
@@ -1336,7 +1335,7 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_accounts_receiv")
 
-            return "\n".join(parts) if parts else I18n.get("ai_financial_insufficient")
+            return ("\n".join(parts), True) if parts else ("", False)
 
         except Exception as e:
             logger.warning(
@@ -1344,7 +1343,7 @@ class AIStrategyMixin:
             )
             if labels_out is not None:
                 labels_out.clear()
-            return I18n.get("ai_financial_fetch_failed")
+            return ("", False)
 
     async def _build_auxiliary_data_text(
         self,
@@ -1353,7 +1352,7 @@ class AIStrategyMixin:
         prefetched: dict | None = None,
         as_of_date: str | None = None,
         labels_out: list[str] | None = None,
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         构建辅助数据文本。
 
@@ -1367,7 +1366,7 @@ class AIStrategyMixin:
             labels_out: 输出参数，收集成功注入的标签 key
 
         Returns:
-            辅助数据文本
+            (辅助数据文本, is_valid)：is_valid=False 表示无数据/异常，调用方应跳过注入。
         """
 
         lines = []
@@ -1492,11 +1491,11 @@ class AIStrategyMixin:
             )
             if labels_out is not None:
                 labels_out.clear()
-            return I18n.get("ai_no_auxiliary_data")
+            return ("", False)
 
         if has_data:
-            return "\n".join(lines) + "\n"
-        return I18n.get("ai_no_auxiliary_data")
+            return ("\n".join(lines) + "\n", True)
+        return ("", False)
 
     async def _build_macro_context(self, cache: typing.Any, as_of_date: str | None = None) -> str:
         """

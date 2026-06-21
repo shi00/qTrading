@@ -57,12 +57,14 @@ class BacktestDataProvider:
         self,
         cache: CacheManager,
         data_processor: DataProcessor | None = None,
+        preload_max_days: int = 366,
     ):
         self.cache = cache
         self.data_processor = data_processor
         # 缓存 proxy，避免每次 build_context 都新建实例
         self._quality_proxy = _BacktestQualityProxy() if data_processor is None else None
         self._preloaded: dict | None = None
+        self.preload_max_days = preload_max_days
 
     async def preload_range(self, start_date: date, end_date: date):
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
@@ -87,8 +89,9 @@ class BacktestDataProvider:
             self._preloaded = None
             return
 
-        # 增加区间保护，限制最长 1 年，防止大范围数据加载导致 OOM/DB 过载
-        days_limit = 366
+        # 增加区间保护，限制最长预加载天数（默认 366，可通过 preload_max_days 配置），
+        # 防止大范围数据加载导致 OOM/DB 过载
+        days_limit = self.preload_max_days
         if (end_date_obj - start_date_obj).days > days_limit:
             logger.warning(
                 f"[BacktestDataProvider] Preload range too wide ({(end_date_obj - start_date_obj).days} days > {days_limit}). "

@@ -30,6 +30,8 @@ class ScreenerDao(BaseDao):
     # --- Screening History ---
 
     async def get_screening_history(self, strategy_name: str | None = None, limit: int | None = 100):
+        # SECURITY: f-string 仅注入 SH_BASE_COLS（代码内常量，来自 ScreeningHistory 模型字段），
+        # 非用户输入，无注入风险。用户输入值（strategy_name, limit）通过 $N 占位符参数化。
         sql = f"SELECT {self.SH_BASE_COLS} FROM screening_history sh WHERE 1=1"
         p = []
         idx = 1
@@ -60,6 +62,8 @@ class ScreenerDao(BaseDao):
         self, trade_date: str | None, strategy_name: str | None = None, run_id: str | None = None
     ):
         if run_id:
+            # SECURITY: f-string 仅注入 SH_FULL_COLS（代码内常量，来自 ScreeningHistory 模型字段），
+            # 非用户输入，无注入风险。用户输入值（run_id）通过 $1 占位符参数化。
             sql = (
                 f"SELECT {self.SH_FULL_COLS} FROM screening_history sh"
                 f" LEFT JOIN screening_thinking st ON sh.id = st.history_id"
@@ -67,6 +71,8 @@ class ScreenerDao(BaseDao):
             )
             return await self._read_db(sql, (run_id,))
 
+        # SECURITY: f-string 仅注入 SH_FULL_COLS（代码内常量，来自 ScreeningHistory 模型字段），
+        # 非用户输入，无注入风险。用户输入值（trade_date, strategy_name）通过 $N 占位符参数化。
         sql = (
             f"SELECT {self.SH_FULL_COLS} FROM screening_history sh"
             f" LEFT JOIN screening_thinking st ON sh.id = st.history_id"

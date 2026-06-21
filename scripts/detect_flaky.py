@@ -25,7 +25,7 @@ def main():
     for i in range(args.runs):
         print(f"运行 {i + 1}/{args.runs}...")
         result = subprocess.run(
-            [sys.executable, "-m", "pytest", args.path, "-q", "--tb=no", "-p", "no:randomly"],
+            [sys.executable, "-m", "pytest", args.path, "-q", "--tb=no"],
             capture_output=True,
             text=True,
         )

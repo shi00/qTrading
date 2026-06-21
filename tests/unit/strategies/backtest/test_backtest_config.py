@@ -62,6 +62,21 @@ class TestBacktestConfigDefaults:
         )
         assert config.initial_capital == 1_000_000.0
 
+    def test_default_preload_max_days(self) -> None:
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+        )
+        assert config.preload_max_days == 366
+
+    def test_custom_preload_max_days(self) -> None:
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            preload_max_days=730,
+        )
+        assert config.preload_max_days == 730
+
 
 class TestBacktestConfigValidation:
     def test_validate_valid_config(self) -> None:
@@ -90,6 +105,35 @@ class TestBacktestConfigValidation:
         errors = config.validate()
         assert len(errors) == 1
         assert "initial_capital must be positive" in errors[0]
+
+    def test_validate_preload_max_days_zero(self) -> None:
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            preload_max_days=0,
+        )
+        errors = config.validate()
+        assert len(errors) == 1
+        assert "preload_max_days must be at least 30" in errors[0]
+
+    def test_validate_preload_max_days_below_minimum(self) -> None:
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            preload_max_days=29,
+        )
+        errors = config.validate()
+        assert len(errors) == 1
+        assert "preload_max_days must be at least 30" in errors[0]
+
+    def test_validate_preload_max_days_at_minimum(self) -> None:
+        config = BacktestConfig(
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            preload_max_days=30,
+        )
+        errors = config.validate()
+        assert len(errors) == 0
 
 
 def _make_result(**overrides) -> BacktestResult:

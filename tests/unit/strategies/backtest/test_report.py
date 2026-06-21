@@ -4,9 +4,27 @@ import dataclasses
 import polars as pl
 import pytest
 
+from core.i18n import I18n
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.backtest.metrics import PROFIT_THRESHOLD
 from strategies.backtest.report import BacktestReport
+
+
+@pytest.fixture(autouse=True)
+def reset_i18n():
+    """Ensure I18n is initialized in zh_CN for each test."""
+    I18n._initialized = False
+    I18n._locale = "zh_CN"
+    I18n._strings_cache = {}
+    I18n._missing_keys = set()
+    I18n._listeners = None
+    I18n.initialize("zh_CN")
+    yield
+    I18n._initialized = False
+    I18n._locale = "zh_CN"
+    I18n._strings_cache = {}
+    I18n._missing_keys = set()
+    I18n._listeners = None
 
 
 @pytest.fixture
@@ -122,7 +140,7 @@ class TestBacktestReport:
         result_with_warning = backtest_result.with_warnings(list(backtest_result.data_warnings) + ["test warning"])
         report = BacktestReport()
         summary = report.format_summary(result_with_warning)
-        assert "数据警告" in summary
+        assert I18n.get("report_section_data_warnings") in summary
         assert "test warning" in summary
 
     def test_format_monthly_stats(self, backtest_result: BacktestResult) -> None:
@@ -134,18 +152,18 @@ class TestBacktestReport:
     def test_format_monthly_stats_empty(self, empty_result: BacktestResult) -> None:
         report = BacktestReport()
         stats = report.format_monthly_stats(empty_result)
-        assert "无月度统计数据" in stats
+        assert I18n.get("report_no_monthly_stats") in stats
 
     def test_format_trade_summary(self, backtest_result: BacktestResult) -> None:
         report = BacktestReport()
         trade_summary = report.format_trade_summary(backtest_result)
-        assert "总交易: 2" in trade_summary
+        assert f"{I18n.get('report_total_trades_count')}: 2" in trade_summary
         assert "800.00" in trade_summary
 
     def test_format_trade_summary_empty(self, empty_result: BacktestResult) -> None:
         report = BacktestReport()
         trade_summary = report.format_trade_summary(empty_result)
-        assert "无交易记录" in trade_summary
+        assert I18n.get("report_no_trades") in trade_summary
 
     def test_format_trade_summary_zero_pnl_not_counted_as_loss(self, backtest_result: BacktestResult) -> None:
         """realized_pnl == 0 归入 DRAW，不计入亏损次数。
@@ -156,8 +174,8 @@ class TestBacktestReport:
         """
         report = BacktestReport()
         summary = report.format_trade_summary(backtest_result)
-        assert "盈利次数: 1" in summary
-        assert "亏损次数: 0" in summary
+        assert f"{I18n.get('report_winning_count')}: 1" in summary
+        assert f"{I18n.get('report_losing_count')}: 0" in summary
 
     def test_format_trade_summary_draw_excluded_from_loss(self, backtest_result: BacktestResult) -> None:
         """混合盈亏中 0 归入 DRAW，仅负值计入亏损。"""
@@ -174,9 +192,9 @@ class TestBacktestReport:
         result = dataclasses.replace(backtest_result, trades=trades_with_draw)
         report = BacktestReport()
         summary = report.format_trade_summary(result)
-        assert "总交易: 3" in summary
-        assert "盈利次数: 1" in summary
-        assert "亏损次数: 1" in summary
+        assert f"{I18n.get('report_total_trades_count')}: 3" in summary
+        assert f"{I18n.get('report_winning_count')}: 1" in summary
+        assert f"{I18n.get('report_losing_count')}: 1" in summary
 
     def test_profit_threshold_shared_constant(self) -> None:
         """PROFIT_THRESHOLD 常量在 report 与 metrics 间共享，值为 0.0"""
@@ -185,14 +203,107 @@ class TestBacktestReport:
     def test_to_markdown(self, backtest_result: BacktestResult) -> None:
         report = BacktestReport()
         md = report.to_markdown(backtest_result)
-        assert "# 回测报告" in md
+        assert I18n.get("report_title", strategy_name="test_strategy") in md
         assert "test_strategy" in md
-        assert "## 摘要" in md
-        assert "## 月度统计" in md
-        assert "## 交易统计" in md
+        assert f"## {I18n.get('report_section_summary')}" in md
+        assert f"## {I18n.get('report_section_monthly')}" in md
+        assert f"## {I18n.get('report_section_trades')}" in md
 
     def test_to_markdown_with_warnings(self, backtest_result: BacktestResult) -> None:
         result_with_warning = backtest_result.with_warnings(list(backtest_result.data_warnings) + ["test warning"])
         report = BacktestReport()
         md = report.to_markdown(result_with_warning)
-        assert "## 数据警告" in md
+        assert f"## {I18n.get('report_section_data_warnings')}" in md
+
+
+class TestBacktestReportI18nLocale:
+    """中英文标签验证：切换 locale 后报告标签应随之变化。"""
+
+    def test_summary_labels_in_zh_cn(self, backtest_result: BacktestResult) -> None:
+        I18n.set_locale("zh_CN")
+        report = BacktestReport()
+        summary = report.format_summary(backtest_result)
+        assert I18n.get("report_strategy") in summary
+        assert I18n.get("report_total_return") in summary
+        assert I18n.get("report_sharpe_ratio") in summary
+        assert I18n.get("report_max_drawdown") in summary
+
+    def test_summary_labels_in_en_us(self, backtest_result: BacktestResult) -> None:
+        I18n.set_locale("en_US")
+        report = BacktestReport()
+        summary = report.format_summary(backtest_result)
+        assert I18n.get("report_strategy") in summary
+        assert I18n.get("report_total_return") in summary
+        assert I18n.get("report_sharpe_ratio") in summary
+        assert I18n.get("report_max_drawdown") in summary
+
+    def test_markdown_sections_in_zh_cn(self, backtest_result: BacktestResult) -> None:
+        I18n.set_locale("zh_CN")
+        report = BacktestReport()
+        md = report.to_markdown(backtest_result)
+        assert f"## {I18n.get('report_section_summary')}" in md
+        assert f"## {I18n.get('report_section_monthly')}" in md
+        assert f"## {I18n.get('report_section_trades')}" in md
+
+    def test_markdown_sections_in_en_us(self, backtest_result: BacktestResult) -> None:
+        I18n.set_locale("en_US")
+        report = BacktestReport()
+        md = report.to_markdown(backtest_result)
+        assert f"## {I18n.get('report_section_summary')}" in md
+        assert f"## {I18n.get('report_section_monthly')}" in md
+        assert f"## {I18n.get('report_section_trades')}" in md
+
+    def test_locale_switch_changes_labels(self, backtest_result: BacktestResult) -> None:
+        """切换 locale 后，相同 key 的标签文本应不同。"""
+        report = BacktestReport()
+        I18n.set_locale("zh_CN")
+        zh_summary = report.format_summary(backtest_result)
+        zh_label = I18n.get("report_total_return")
+
+        I18n.set_locale("en_US")
+        en_summary = report.format_summary(backtest_result)
+        en_label = I18n.get("report_total_return")
+
+        assert zh_label != en_label
+        assert zh_label in zh_summary
+        assert en_label in en_summary
+
+    def test_no_trades_label_in_both_locales(self, empty_result: BacktestResult) -> None:
+        report = BacktestReport()
+        I18n.set_locale("zh_CN")
+        assert report.format_trade_summary(empty_result) == I18n.get("report_no_trades")
+
+        I18n.set_locale("en_US")
+        assert report.format_trade_summary(empty_result) == I18n.get("report_no_trades")
+
+    def test_no_monthly_stats_label_in_both_locales(self, empty_result: BacktestResult) -> None:
+        report = BacktestReport()
+        I18n.set_locale("zh_CN")
+        assert report.format_monthly_stats(empty_result) == I18n.get("report_no_monthly_stats")
+
+        I18n.set_locale("en_US")
+        assert report.format_monthly_stats(empty_result) == I18n.get("report_no_monthly_stats")
+
+
+class TestBacktestReportI18nParamInjection:
+    """参数注入验证：report_title 含 strategy_name，report_data_warnings 含 count。"""
+
+    def test_report_title_includes_strategy_name(self, backtest_result: BacktestResult) -> None:
+        report = BacktestReport()
+        md = report.to_markdown(backtest_result)
+        expected_title = I18n.get("report_title", strategy_name=backtest_result.strategy_name)
+        assert f"# {expected_title}" in md
+
+    def test_report_data_warnings_includes_count(self, backtest_result: BacktestResult) -> None:
+        warnings = ["w1", "w2", "w3"]
+        result_with_warnings = backtest_result.with_warnings(warnings)
+        report = BacktestReport()
+        summary = report.format_summary(result_with_warnings)
+        expected_line = I18n.get("report_data_warnings", count=len(warnings)) + ":"
+        assert expected_line in summary
+
+    def test_report_generated_at_includes_time_and_run_id(self, backtest_result: BacktestResult) -> None:
+        report = BacktestReport()
+        md = report.to_markdown(backtest_result)
+        assert backtest_result.run_id in md
+        assert I18n.get("report_run_id") in md or "Run ID" in md or "运行ID" in md

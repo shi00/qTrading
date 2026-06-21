@@ -503,7 +503,7 @@ class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
         prefetched.indicators = indicators_df
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_turnover_context(row, prefetched)
-        self.assertIn("缩量下跌", result)
+        self.assertIn("缩量下跌", result[0])
 
     def test_expand_trend(self):
         s = OversoldStrategy()
@@ -522,7 +522,7 @@ class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
         prefetched.indicators = indicators_df
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_turnover_context(row, prefetched)
-        self.assertIn("放量下跌", result)
+        self.assertIn("放量下跌", result[0])
 
     def test_stable_turnover(self):
         s = OversoldStrategy()
@@ -540,7 +540,7 @@ class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
         prefetched.indicators = indicators_df
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_turnover_context(row, prefetched)
-        self.assertIn("相对平稳", result)
+        self.assertIn("相对平稳", result[0])
 
     def test_nan_values(self):
         s = OversoldStrategy()
@@ -555,7 +555,7 @@ class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
         prefetched.indicators = indicators_df
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_turnover_context(row, prefetched)
-        self.assertIn("无效值", result)
+        self.assertIn("无效值", result[0])
 
     def test_no_stock_data(self):
         s = OversoldStrategy()
@@ -570,7 +570,7 @@ class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
         prefetched.indicators = indicators_df
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_turnover_context(row, prefetched)
-        self.assertIn("当日无记录", result)
+        self.assertIn("当日无记录", result[0])
 
 
 class TestOversoldBuildSupportContextExtended(unittest.TestCase):
@@ -595,7 +595,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
         row = {"ts_code": "000001.SZ", "close": 11.5}
         result = s._build_support_context(row, prefetched)
-        self.assertIn("布林下轨", result)
+        self.assertIn("布林下轨", result[0])
 
     def test_max_volume_support(self):
         s = OversoldStrategy()
@@ -617,7 +617,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
         row = {"ts_code": "000001.SZ", "close": 10.5}
         result = s._build_support_context(row, prefetched)
-        self.assertIsInstance(result, str)
+        self.assertIsInstance(result, tuple)
 
     def test_empty_history_dict(self):
         s = OversoldStrategy()
@@ -625,7 +625,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
         prefetched.history = {}
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_support_context(row, prefetched)
-        self.assertIn("暂不可用", result)
+        self.assertIn("暂不可用", result[0])
 
     def test_close_zero_or_negative(self):
         s = OversoldStrategy()
@@ -643,7 +643,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
         row = {"ts_code": "000001.SZ", "close": 0}
         result = s._build_support_context(row, prefetched)
-        self.assertIn("无效", result)
+        self.assertIn("无效", result[0])
 
     def test_data_less_than_20(self):
         s = OversoldStrategy()
@@ -661,7 +661,7 @@ class TestOversoldBuildSupportContextExtended(unittest.TestCase):
         prefetched.history = {"000001.SZ": history_df}
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_support_context(row, prefetched)
-        self.assertIsInstance(result, str)
+        self.assertIsInstance(result, tuple)
 
 
 class TestOversoldBuildMarketContextBranches(unittest.TestCase):
@@ -672,7 +672,7 @@ class TestOversoldBuildMarketContextBranches(unittest.TestCase):
         prefetched.market_context = {"000001.SH": {"pct_chg": 1.0, "trend": "多头趋势"}}
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_market_context(row, prefetched)
-        self.assertIn("自定义大盘文本", result)
+        self.assertIn("自定义大盘文本", result[0])
 
     def test_market_context_non_dict_entry(self):
         s = OversoldStrategy()
@@ -690,7 +690,7 @@ class TestOversoldBuildMarketContextBranches(unittest.TestCase):
         }
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_market_context(row, prefetched)
-        self.assertIn("下跌", result)
+        self.assertIn("下跌", result[0])
 
     def test_market_context_flat(self):
         s = OversoldStrategy()
@@ -700,7 +700,7 @@ class TestOversoldBuildMarketContextBranches(unittest.TestCase):
         }
         row = {"ts_code": "000001.SZ", "close": 10.0}
         result = s._build_market_context(row, prefetched)
-        self.assertIn("平盘", result)
+        self.assertIn("平盘", result[0])
 
 
 class TestOversoldGetDynamicDescription(unittest.TestCase):

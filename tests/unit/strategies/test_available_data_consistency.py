@@ -204,7 +204,7 @@ class TestInvariant3BuilderLabelEquivalence:
         }
         for label_key in labels:
             text_key = label_to_text_key[label_key]
-            assert I18n.get(text_key) in result, (
+            assert I18n.get(text_key) in result[0], (
                 f"Label '{label_key}' registered but corresponding text key '{text_key}' not in result"
             )
 
@@ -220,7 +220,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_financial_insufficient")
+        assert result == ("", False)
         assert labels == []
 
     @pytest.mark.asyncio
@@ -235,7 +235,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_financial_insufficient")
+        assert result == ("", False)
         assert labels == []
 
     @pytest.mark.asyncio
@@ -250,7 +250,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_financial_fetch_failed")
+        assert result == ("", False)
         assert labels == []
 
     @pytest.mark.asyncio
@@ -282,7 +282,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_financial_insufficient")
+        assert result == ("", False)
         assert labels == []
 
     @pytest.mark.asyncio
@@ -359,7 +359,7 @@ class TestInvariant3BuilderLabelEquivalence:
         }
         for label_key in labels:
             text_key = label_to_text_key[label_key]
-            assert I18n.get(text_key) in result, (
+            assert I18n.get(text_key) in result[0], (
                 f"Label '{label_key}' registered but corresponding text key '{text_key}' not in result"
             )
 
@@ -380,8 +380,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_no_auxiliary_data")
-        assert "无辅助数据" in result
+        assert result == ("", False)
         assert labels == []
 
     @pytest.mark.asyncio
@@ -396,8 +395,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_no_auxiliary_data")
-        assert "无辅助数据" in result
+        assert result == ("", False)
         assert labels == []
 
     @pytest.mark.asyncio
@@ -432,8 +430,7 @@ class TestInvariant3BuilderLabelEquivalence:
             mixin.cache,
             labels_out=labels,
         )
-        assert result == I18n.get("ai_no_auxiliary_data")
-        assert "无辅助数据" in result
+        assert result == ("", False)
         assert labels == []
 
     def test_capital_flow_has_data_registers_labels(self):

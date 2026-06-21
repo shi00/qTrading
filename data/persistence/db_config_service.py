@@ -339,6 +339,15 @@ class DatabaseConfigService:
 
         Returns:
             Tuple of (success, message)
+
+        SECURITY: ``CREATE DATABASE`` 使用 f-string 拼接 ``database`` 名称，无法参数化。
+        原因：PostgreSQL DDL 语句（CREATE/DROP/ALTER DATABASE）不支持 bind parameters，
+        数据库名是标识符（identifier）而非字面值，必须直接出现在 SQL 文本中。
+        安全边界由以下两层防护保证：
+        1. 白名单校验：``re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", database)``
+           仅允许字母开头、字母数字下划线组合，拒绝任何特殊字符（含引号、分号、注释符）。
+        2. 双引号转义：``database.replace('"', '""')`` 将双引号转义为两个双引号，
+           防止引号注入（即使白名单已拒绝，仍作为深度防御保留）。
         """
         # PostgreSQL 标识符最大长度 (NAMEDATALEN - 1)
         MAX_DATABASE_NAME_LENGTH = 63
@@ -361,6 +370,8 @@ class DatabaseConfigService:
                 if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", database):
                     return False, I18n.get("db_err_invalid_name").format(database=database)
                 safe_name = database.replace('"', '""')
+                # SECURITY: CREATE DATABASE 不支持参数化（PostgreSQL DDL 限制），
+                # safe_name 已通过白名单校验和双引号转义，安全边界见方法 docstring。
                 await conn.execute(f'CREATE DATABASE "{safe_name}"')
             finally:
                 await conn.close()

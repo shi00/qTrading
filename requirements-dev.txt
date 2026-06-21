@@ -309,12 +309,15 @@ pytest==9.0.3
     #   astockscreener (pyproject.toml)
     #   pytest-asyncio
     #   pytest-cov
+    #   pytest-randomly
     #   pytest-rerunfailures
     #   pytest-xdist
     #   syrupy
 pytest-asyncio==1.4.0
     # via astockscreener (pyproject.toml)
 pytest-cov==7.1.0
+    # via astockscreener (pyproject.toml)
+pytest-randomly==4.1.0
     # via astockscreener (pyproject.toml)
 pytest-rerunfailures==16.3
     # via astockscreener (pyproject.toml)

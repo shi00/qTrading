@@ -128,11 +128,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
-          uv pip install --system -r requirements-dev.txt
+          uv pip install -r requirements.txt
+          uv pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          uv pip install -r requirements-dev.txt
           pip install pyright==1.1.410
 
       - name: Report optional deps status
@@ -287,11 +290,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt || echo "Optional deps failed"
-          uv pip install --system -r requirements-dev.txt
+          uv pip install -r requirements.txt
+          uv pip install -r requirements-optional.txt || echo "Optional deps failed"
+          uv pip install -r requirements-dev.txt
           pip install playwright pytest-playwright
 
       - name: Get Playwright Version
@@ -437,12 +443,15 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install dependencies
         shell: bash
         run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
-          uv pip install --system -r requirements-dev.txt
+          uv pip install -r requirements.txt
+          uv pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          uv pip install -r requirements-dev.txt
           pip install pyright==1.1.410
 
       - name: Report optional deps status
@@ -626,11 +635,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install dependencies
         run: |
-          uv pip install --system llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
-          uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt || echo "Optional deps failed, continuing..."
+          uv pip install llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
+          uv pip install -r requirements.txt
+          uv pip install -r requirements-optional.txt || echo "Optional deps failed, continuing..."
           pip install pyinstaller
 
       - name: Install UPX
@@ -762,11 +774,14 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
 
+      - name: Create virtual environment
+        run: uv venv
+
       - name: Install dependencies
         run: |
-          uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
-          uv pip install --system -r requirements-dev.txt
+          uv pip install -r requirements.txt
+          uv pip install -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          uv pip install -r requirements-dev.txt
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
