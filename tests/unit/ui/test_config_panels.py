@@ -1922,7 +1922,7 @@ class TestTushareConfigPanelExtended:
     def test_refresh_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
         panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
         panel.refresh_locale()
-        mock_i18n.get.assert_called()
+        mock_i18n.get.assert_called()  # 多次调用预期 (多个标签翻译)
 
     def test_compact_mode_hint_text(self, mock_ch_for_panels, mock_i18n, mock_page):
         panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)

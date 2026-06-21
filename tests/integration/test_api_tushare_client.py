@@ -412,7 +412,7 @@ class TestSlowApiLimiters:
 
             await client.get_daily_quotes(ts_code="000001.SZ")
 
-            general_limiter.on_success.assert_called()
+            assert general_limiter.on_success.call_count == 2  # 多次调用预期 (daily + adj_factor)
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")

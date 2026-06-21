@@ -81,7 +81,7 @@ class FletPage:
                     )
                     return
             except Exception as exc:  # noqa: BLE001
-                logger.debug("mouse.click('%s') via bounding_box failed: %s", name, exc)
+                logger.debug("mouse.click('%s') via bounding_box failed: %s", name, exc, exc_info=True)
             try:
                 await target.click(force=True, timeout=self._tm(3000))
                 return
@@ -153,7 +153,7 @@ class FletPage:
                 )
                 await el.clear()
                 await el.type(value, delay=30)
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             try:
                 # [PITFALL_WARNING] Flet TextField 元素定位黑洞
                 # 坑点：在 Flet Web 中，get_by_role("textbox", name="xxx") 几乎永远找不到输入框。
@@ -165,7 +165,8 @@ class FletPage:
                 #      尝试直接去点击那个 label 的纯文本节点，然后用键盘模拟全选删除和输入。
                 # 针对 Flet multiline=True 的黑盒行为：它把 label 文本合并到了父容器（如 tabpanel）的 aria-label 中
                 logger.warning(
-                    f"fill_textbox standard method failed for label '{label}', trying fallback (aria-label click + keyboard)"
+                    f"fill_textbox standard method failed for label '{label}', trying fallback (aria-label click + keyboard): {e}",
+                    exc_info=True,
                 )
 
                 # 寻找 aria-label 包含目标文本的节点
@@ -182,7 +183,7 @@ class FletPage:
                 await self.page.keyboard.type(value, delay=50)
                 return
             except Exception as fallback_exc:  # noqa: BLE001
-                logger.error(f"fill_textbox fallback failed for label '{label}': {fallback_exc}")
+                logger.error(f"fill_textbox fallback failed for label '{label}': {fallback_exc}", exc_info=True)
                 raise
 
     async def select_dropdown(
@@ -379,7 +380,7 @@ class FletPage:
             await loc_combined.wait_for(state="attached", timeout=scaled)
             return
         except Exception as e:  # noqa: BLE001
-            logger.debug("Combined locator wait_for failed for text '%s': %s", text, e)
+            logger.debug("Combined locator wait_for failed for text '%s': %s", text, e, exc_info=True)
 
         # Fallback: poll input field values
         start_time = asyncio.get_event_loop().time()
@@ -393,7 +394,7 @@ class FletPage:
                     if text.lower() in val.lower():
                         return
             except Exception as exc:  # noqa: BLE001
-                logger.debug("expect_text: input polling failed for '%s': %s", text, exc)
+                logger.debug("expect_text: input polling failed for '%s': %s", text, exc, exc_info=True)
             await self.page.wait_for_timeout(200)
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -450,7 +451,7 @@ class FletPage:
                         )
                 logger.debug("==========================================")
             except Exception as ex:  # noqa: BLE001
-                logger.debug("Failed to dump debug semantics: %s", ex)
+                logger.debug("Failed to dump debug semantics: %s", ex, exc_info=True)
 
         try:
             loop = asyncio.get_running_loop()
@@ -511,7 +512,7 @@ class FletPage:
                         )
                 logger.debug("==========================================")
             except Exception as ex:  # noqa: BLE001
-                logger.debug("Failed to dump debug DOM in expect_text: %s", ex)
+                logger.debug("Failed to dump debug DOM in expect_text: %s", ex, exc_info=True)
 
         try:
             loop = asyncio.get_running_loop()

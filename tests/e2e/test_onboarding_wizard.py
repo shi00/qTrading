@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 
@@ -10,6 +11,8 @@ from tests.e2e.timeouts import TIMEOUTS
 from urllib.parse import unquote_plus
 
 pytestmark = pytest.mark.e2e
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_db_url(url: str) -> dict[str, str]:
@@ -77,9 +80,9 @@ async def test_wizard_language_switch(wizard_page):
                 if await wizard_page.has_text(welcome_guide_zh):
                     break
                 await wizard_page.page.wait_for_timeout(200)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
             # 还原失败时不抛出，避免掩盖原始测试失败；下游测试会显式失败暴露问题
-            pass
+            logger.warning("[onboarding_wizard] restore language to zh failed: %s", e, exc_info=True)
 
 
 async def test_wizard_forward_then_back(wizard_page):

@@ -59,7 +59,7 @@ class TestClearAllCacheReset:
             try:
                 await mgr.close()
             except Exception as e:  # noqa: BLE001
-                logger.warning("[TestCacheReset] cache_mgr.close() failed: %s", e)
+                logger.warning("[TestCacheReset] cache_mgr.close() failed: %s", e, exc_info=True)
 
     @pytest.mark.asyncio
     async def test_clear_all_cache_recreates_tables(self, cache_mgr: CacheManager, test_engine: AsyncEngine):

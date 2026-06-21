@@ -238,7 +238,7 @@ class TestStockDetailDialog:
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async.return_value = _async_b64()
             await dlg.load_chart("000001.SZ")
-        dlg.chart_container.update.assert_called()
+        assert dlg.chart_container.update.call_count == 2  # 多次调用预期 (loading + chart)
 
     def test_pct_chg_positive_has_plus(self):
         data = {"pct_chg": 3.5}
@@ -627,7 +627,7 @@ class TestStockDetailDialogLoadChart:
         dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
 
         await dlg.load_chart("000001.SZ")
-        dlg.chart_container.update.assert_called()
+        assert dlg.chart_container.update.call_count == 2  # 多次调用预期 (loading + empty)
 
     @pytest.mark.asyncio
     async def test_load_chart_exception(self, mock_page):
@@ -639,7 +639,7 @@ class TestStockDetailDialogLoadChart:
         dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
 
         await dlg.load_chart("000001.SZ")
-        dlg.chart_container.update.assert_called()
+        assert dlg.chart_container.update.call_count == 2  # 多次调用预期 (loading + error)
 
 
 def _collect_markdown_controls(control, found):

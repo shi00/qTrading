@@ -8,11 +8,14 @@ P1-15 fix (rewritten): 测试 prompt_validator DataDeclaration 完整性 + promp
 3. 每条 prompt 模板不含静态数据枚举
 """
 
+import logging
 import os
 
 import pytest
 from strategies.prompt_validator import get_declarations
 from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADERS
+
+logger = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.integration
 
@@ -78,5 +81,6 @@ class TestPromptTemplateConsistency:
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
+                logger.warning("[PromptTemplate] injector %s failed: %s", decl.name, e, exc_info=True)
                 errors.append(f"{decl.name}: {type(e).__name__}: {e}")
         assert not errors, f"Declaration injector 调用失败: {errors}"

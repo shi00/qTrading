@@ -1052,3 +1052,69 @@ class TestFinancialSyncCounterLockLoopLocal:
 
         assert result2 is not None
         assert isinstance(result2, SyncResult)
+
+
+class TestFinancialSyncPartialFailure:
+    """Partial-failure boundary tests: some stocks succeed, some fail,
+    sync continues and preserves successfully fetched data."""
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_some_stocks_fail_sync_continues(self):
+        """When some stocks' API calls fail during full sync, the sync should
+        continue processing remaining stocks and preserve successfully fetched data."""
+        ctx = make_ctx()
+        ctx.cache.get_stock_basic = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "000003.SZ"],
+                    "list_status": ["L", "L", "L"],
+                }
+            )
+        )
+
+        failing_stock = "000002.SZ"
+        income_df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "revenue": [100.0]})
+        balance_df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "total_assets": [1000.0]})
+        indicator_df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "roe": [10.0]})
+        cashflow_df = pd.DataFrame({"ts_code": ["000001.SZ"], "end_date": ["20240331"], "cfps": [1.0]})
+
+        async def selective_income(*args, **kwargs):
+            if kwargs.get("ts_code") == failing_stock:
+                raise RuntimeError("API error")
+            return income_df
+
+        async def selective_balance(*args, **kwargs):
+            if kwargs.get("ts_code") == failing_stock:
+                raise RuntimeError("API error")
+            return balance_df
+
+        async def selective_indicator(*args, **kwargs):
+            if kwargs.get("ts_code") == failing_stock:
+                raise RuntimeError("API error")
+            return indicator_df
+
+        async def selective_cashflow(*args, **kwargs):
+            if kwargs.get("ts_code") == failing_stock:
+                raise RuntimeError("API error")
+            return cashflow_df
+
+        ctx.api.get_income = AsyncMock(side_effect=selective_income)
+        ctx.api.get_balancesheet = AsyncMock(side_effect=selective_balance)
+        ctx.api.get_fina_indicator = AsyncMock(side_effect=selective_indicator)
+        ctx.api.get_cashflow = AsyncMock(side_effect=selective_cashflow)
+
+        strategy = FinancialSyncStrategy(ctx)
+        result = await strategy.run(force=True)
+
+        # Sync should not crash
+        assert result is not None
+        assert isinstance(result, SyncResult)
+        # Successfully fetched data should be saved (for non-failing stocks)
+        assert ctx.cache.save_financial_reports.await_count >= 1
+        # The failing stock should not be marked complete
+        mark_calls = ctx.cache.mark_stock_step4_completed.call_args_list
+        marked_codes = {c[0][0] for c in mark_calls}
+        assert failing_stock not in marked_codes
+        # Non-failing stocks should be marked complete
+        assert "000001.SZ" in marked_codes
+        assert "000003.SZ" in marked_codes

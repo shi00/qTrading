@@ -45,7 +45,7 @@ def _drain_stdout(proc: subprocess.Popen) -> None:
                     f.write(line)
                     f.flush()
     except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"\n[E2E App Launcher Log Error]: {e}\n")
+        logger.warning("[E2E App Launcher] stdout drain error: %s", e, exc_info=True)
 
 
 _STARTUP_ERROR_PATTERNS = (
@@ -133,7 +133,7 @@ def start_flet_app(config_file: Path, env_overrides: dict[str, str]) -> tuple[su
     try:
         wait_until_ready(url)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[E2E] Flet app not ready at %s, terminating process: %s", url, exc)
+        logger.warning("[E2E] Flet app not ready at %s, terminating process: %s", url, exc, exc_info=True)
         proc.terminate()
         raise
     # HTTP 200 only means the Flet web server is up; the app may still
