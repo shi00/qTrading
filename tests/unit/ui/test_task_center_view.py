@@ -697,8 +697,8 @@ class TestTaskCenterView:
         set_page(view, wrap_mock_page(mock_page))
         tasks = [_make_task() for _ in range(PAGE_SIZE * 2)]
         view._refresh_ui(tasks)
-        assert "1" in view.page_info_text.value
-        assert "2" in view.page_info_text.value
+        assert "1" in (view.page_info_text.value or "")
+        assert "2" in (view.page_info_text.value or "")
 
         view._go_next(None)
         assert view.page_info_text.value == "2 / 2"

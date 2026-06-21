@@ -25,10 +25,16 @@ class ReviewManager:
     3. Extracts 'Lessons' for Prompt Context.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        alpha_win_threshold: float = 0.5,
+        alpha_loss_threshold: float = 0.5,
+    ):
         self.cache = CacheManager()
         self.api = TushareClient()
         self.config = ConfigHandler()
+        self.alpha_win_threshold = alpha_win_threshold
+        self.alpha_loss_threshold = alpha_loss_threshold
 
     @log_async_operation(
         operation_name="t1_review",
@@ -174,9 +180,9 @@ class ReviewManager:
                     alpha = t1_pct - index_pct
 
                     label = "DRAW"
-                    if alpha > 0.5:
+                    if alpha > self.alpha_win_threshold:
                         label = "WIN"
-                    elif alpha < -0.5:
+                    elif alpha < -self.alpha_loss_threshold:
                         label = "LOSS"
 
                     updates.append(

@@ -100,7 +100,7 @@ class TestConcurrentStringStorage:
 
             return _run_with_python_string_storage(work)
 
-        results = [None, None]
+        results: list[str | None] = [None, None]
 
         def run_0():
             results[0] = slow_fetcher("A")
