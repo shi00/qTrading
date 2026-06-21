@@ -8,6 +8,14 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _reset_alias_cache():
+    """Clear MetaDataManager._alias_cache before each test to prevent cross-test pollution."""
+    MetaDataManager.invalidate_cache()
+    yield
+    MetaDataManager.invalidate_cache()
+
+
 class TestGetTableAlias:
     @patch("core.i18n.I18n")
     def test_table_with_alias(self, mock_i18n):

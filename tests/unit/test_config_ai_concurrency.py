@@ -5,6 +5,15 @@ from utils.config_handler import ConfigHandler
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _reset_ai_concurrency_config():
+    """Restore default ai concurrency settings after each test to prevent
+    cross-test pollution via persisted config (set_typed writes to disk)."""
+    yield
+    ConfigHandler.set_ai_max_concurrent_analysis(5)
+    ConfigHandler.set_ai_news_max_concurrent(1)
+
+
 @pytest.mark.unit
 class TestAIConcurrencyConfig:
     def test_analysis_concurrency_clamped_upper(self):

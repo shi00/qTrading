@@ -20,8 +20,6 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
 
     @property
     def required_history_days(self):
-        from utils.config_handler import ConfigHandler
-
         return ConfigHandler.get_init_history_years() * 250
 
     def __init__(self):
