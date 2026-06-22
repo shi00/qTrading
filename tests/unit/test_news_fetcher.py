@@ -385,6 +385,20 @@ class TestGetLatestGlobalNews:
         result = await NewsFetcher.get_latest_global_news()
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_akshare_returns_list(self):
+        """When akshare returns list instead of DataFrame, _ensure_dataframe normalizes it."""
+        fetcher = NewsFetcher()
+        list_data = [
+            {"title": "News1", "content": "Content1", "publish_time": "2024-06-14"},
+            {"title": "News2", "content": "Content2", "publish_time": "2024-06-14"},
+        ]
+        with patch("data.external.news_fetcher.ak") as mock_ak:
+            mock_ak.stock_info_global_cls.return_value = list_data
+            result = await fetcher.get_latest_global_news()
+            # Should not raise AttributeError, should return a list (possibly empty if columns don't match)
+            assert isinstance(result, list)
+
 
 class TestGetUsMajorMoves:
     @pytest.mark.asyncio
@@ -752,6 +766,20 @@ class TestGetHotConcepts:
         with patch("asyncio.wait_for", side_effect=asyncio.CancelledError()):
             with pytest.raises(asyncio.CancelledError):
                 await NewsFetcher.get_hot_concepts()
+
+    @pytest.mark.asyncio
+    async def test_akshare_returns_list(self):
+        """When akshare returns list instead of DataFrame, _ensure_dataframe normalizes it."""
+        fetcher = NewsFetcher()
+        list_data = [
+            {"板块": "AI", "涨跌幅": 3.5},
+            {"板块": "芯片", "涨跌幅": 2.1},
+        ]
+        with patch("data.external.news_fetcher.ak") as mock_ak:
+            mock_ak.stock_sector_spot.return_value = list_data
+            result = await fetcher.get_hot_concepts()
+            # Should not raise AttributeError
+            assert isinstance(result, list)
 
 
 class TestNewsFetcherGetLatestGlobalNews:
@@ -1275,3 +1303,42 @@ class TestGetHotConceptsDirectExecution:
             result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
         assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
+
+
+class TestEnsureDataframe:
+    """Tests for the _ensure_dataframe() helper that normalizes akshare return values."""
+
+    def test_none_input(self):
+        from data.external.news_fetcher import _ensure_dataframe
+
+        result = _ensure_dataframe(None, source="test")
+        assert result is None
+
+    def test_dataframe_input(self):
+        from data.external.news_fetcher import _ensure_dataframe
+
+        df = pd.DataFrame({"a": [1]})
+        result = _ensure_dataframe(df, source="test")
+        assert result is df
+
+    def test_list_of_dicts_input(self):
+        from data.external.news_fetcher import _ensure_dataframe
+
+        data = [{"a": 1}, {"a": 2}]
+        result = _ensure_dataframe(data, source="test")
+        assert isinstance(result, pd.DataFrame)
+        assert len(result) == 2
+        assert list(result["a"]) == [1, 2]
+
+    def test_empty_list_input(self):
+        from data.external.news_fetcher import _ensure_dataframe
+
+        result = _ensure_dataframe([], source="test")
+        assert isinstance(result, pd.DataFrame)
+        assert result.empty
+
+    def test_unexpected_type_input(self):
+        from data.external.news_fetcher import _ensure_dataframe
+
+        result = _ensure_dataframe(42, source="test")
+        assert result is None

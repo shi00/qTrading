@@ -33,7 +33,7 @@ from data.data_dictionary import TABLE_DEFINITIONS
 from data.persistence.data_quality import DataQualityService
 from core.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now, parse_date
+from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
@@ -183,7 +183,14 @@ class HealthCheckMixin:
                 return
 
             try:
-                latest_dt = parse_date(str(latest_quote_date), "%Y%m%d")
+                normalized = to_yyyymmdd_str(latest_quote_date)
+                if not normalized:
+                    self._quality_tier = 1
+                    logger.warning(
+                        f"[DataProcessor] FastCheck | ⚠️ Invalid quote date '{latest_quote_date}'. Degrading to BRONZE.",
+                    )
+                    return
+                latest_dt = parse_date(normalized, "%Y%m%d")
                 days_lag = (get_now() - latest_dt).days
                 logger.debug(
                     f"[DataProcessor] FastCheck | Quote Lag measured as {days_lag}d",
@@ -236,9 +243,10 @@ class HealthCheckMixin:
                             empty_critical.append(table)
                             continue
 
-                    if last_date:
+                    normalized = to_yyyymmdd_str(last_date)
+                    if normalized:
                         try:
-                            table_lag = (get_now() - parse_date(str(last_date), "%Y%m%d")).days
+                            table_lag = (get_now() - parse_date(normalized, "%Y%m%d")).days
                             if table_lag > TIER_QUOTE_FRESHNESS_DAYS:
                                 stale_critical.append(table)
                         except (ValueError, TypeError):
@@ -259,9 +267,10 @@ class HealthCheckMixin:
                 fin_lag_days = None
                 fin_info = sync_dict.get("financial_reports", {})
                 fin_date = fin_info.get("last_data_date", "") if fin_info else ""
-                if fin_date:
+                normalized = to_yyyymmdd_str(fin_date)
+                if normalized:
                     try:
-                        fin_lag_days = (get_now() - parse_date(str(fin_date), "%Y%m%d")).days
+                        fin_lag_days = (get_now() - parse_date(normalized, "%Y%m%d")).days
                     except (ValueError, TypeError):
                         pass
 

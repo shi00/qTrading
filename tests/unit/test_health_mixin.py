@@ -194,6 +194,67 @@ class TestAssignBasicTier:
         await proc._assign_basic_tier()
         assert proc._quality_tier == 1
 
+    @pytest.mark.asyncio
+    async def test_latest_quote_date_none_string(self):
+        """When last_data_date is 'None' string, to_yyyymmdd_str returns None and tier degrades."""
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes"],
+                "last_data_date": ["None"],
+                "status": ["success"],
+                "last_result_status": ["success"],
+                "record_count": [5000],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            await proc._assign_basic_tier()
+            assert proc._quality_tier == 1
+
+    @pytest.mark.asyncio
+    async def test_last_date_nan_string(self):
+        """When last_data_date is 'nan' string, to_yyyymmdd_str returns None and table is marked stale."""
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes"],
+                "last_data_date": ["nan"],
+                "status": ["success"],
+                "last_result_status": ["success"],
+                "record_count": [5000],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            await proc._assign_basic_tier()
+            # nan date should degrade tier
+            assert proc._quality_tier == 1
+
+    @pytest.mark.asyncio
+    async def test_fin_date_nat_string(self):
+        """When fin_date is 'NaT' string, to_yyyymmdd_str returns None and no exception is raised."""
+        proc = FakeProcessor()
+        sync_df = pd.DataFrame(
+            {
+                "table_name": ["daily_quotes", "financial_reports"],
+                "last_data_date": ["20240610", "NaT"],
+                "status": ["success", "success"],
+                "last_result_status": ["success", "success"],
+                "record_count": [5000, 100],
+            }
+        )
+        proc.cache.get_sync_status = AsyncMock(return_value=sync_df)
+        with patch("data.mixins.health_mixin.get_now") as mock_now:
+            mock_now.return_value = datetime.datetime(2024, 6, 14)
+            with patch("data.mixins.health_mixin.parse_date") as mock_parse:
+                mock_parse.return_value = datetime.datetime(2024, 6, 10)
+                # Should not raise any exception
+                await proc._assign_basic_tier()
+                assert proc._quality_tier is not None
+
 
 class TestCheckDataHealth:
     @pytest.mark.asyncio

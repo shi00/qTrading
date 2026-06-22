@@ -41,6 +41,26 @@ def _run_with_python_string_storage(fetcher):
             pd.options.mode.string_storage = old_storage
 
 
+def _ensure_dataframe(result, source: str = "") -> pd.DataFrame | None:
+    """Normalize akshare return value to DataFrame or None.
+    Some akshare APIs return list instead of DataFrame on certain versions/error paths.
+    """
+    if result is None:
+        return None
+    if isinstance(result, pd.DataFrame):
+        return result
+    if isinstance(result, list):
+        if not result:
+            return pd.DataFrame()
+        try:
+            return pd.DataFrame(result)
+        except Exception:
+            logger.warning("[NewsFetcher] Failed to convert list to DataFrame from %s", source)
+            return None
+    logger.warning("[NewsFetcher] Unexpected return type from %s: %s", source, type(result).__name__)
+    return None
+
+
 class NewsFetcher:
     """
     Fetches news data using AKShare and direct robust Sina/THS clients.
@@ -97,11 +117,14 @@ class NewsFetcher:
                     end_date = get_now().strftime("%Y%m%d")
                     start_date = (get_now() - timedelta(days=180)).strftime("%Y%m%d")
 
-                    df_cninfo = ak.stock_zh_a_disclosure_report_cninfo(
-                        symbol=symbol,
-                        market=market,
-                        start_date=start_date,
-                        end_date=end_date,
+                    df_cninfo = _ensure_dataframe(
+                        ak.stock_zh_a_disclosure_report_cninfo(
+                            symbol=symbol,
+                            market=market,
+                            start_date=start_date,
+                            end_date=end_date,
+                        ),
+                        source="stock_zh_a_disclosure_report_cninfo",
                     )
 
                     if df_cninfo is not None and not df_cninfo.empty:
@@ -139,7 +162,7 @@ class NewsFetcher:
                 # Layer 2: 东财新闻搜索 (EastMoney News Search) - Fallback
                 # -------------------------------------------------------------
                 try:
-                    df_em = ak.stock_news_em(symbol=symbol)
+                    df_em = _ensure_dataframe(ak.stock_news_em(symbol=symbol), source="stock_news_em")
 
                     if df_em is not None and not df_em.empty:
                         news_list = []
@@ -209,7 +232,9 @@ class NewsFetcher:
 
             def _fetch():
                 # ProxyManager already whitelists domestic domains via NO_PROXY at startup
-                return _run_with_python_string_storage(ak.stock_info_global_cls)
+                return _ensure_dataframe(
+                    _run_with_python_string_storage(ak.stock_info_global_cls), source="stock_info_global_cls"
+                )
 
             try:
                 # Use Global IO Pool
@@ -479,7 +504,10 @@ class NewsFetcher:
         def _fetch():
             # Sina Finance - Concept Boards
             # ProxyManager already whitelists domestic domains via NO_PROXY at startup
-            return _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念"))
+            return _ensure_dataframe(
+                _run_with_python_string_storage(lambda: ak.stock_sector_spot(indicator="概念")),
+                source="stock_sector_spot",
+            )
 
         try:
             # Use Global IO Pool with timeout to prevent hanging on unresponsive API

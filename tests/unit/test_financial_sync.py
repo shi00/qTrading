@@ -14,7 +14,7 @@ pytestmark = pytest.mark.unit
 
 def make_ctx():
     ctx = MagicMock()
-    ctx.api = MagicMock()
+    ctx.api = AsyncMock()
     ctx.cache = MagicMock()
     ctx.processor = MagicMock()
     ctx.processor.trade_calendar = MagicMock()
@@ -1118,3 +1118,27 @@ class TestFinancialSyncPartialFailure:
         # Non-failing stocks should be marked complete
         assert "000001.SZ" in marked_codes
         assert "000003.SZ" in marked_codes
+
+
+class TestAsyncMockCoverage:
+    """Verify that ctx.api as AsyncMock allows awaiting unmocked async methods."""
+
+    @pytest.mark.asyncio
+    async def test_unmocked_async_method_awaitable(self):
+        """Unmocked methods on ctx.api (AsyncMock) should be awaitable without error."""
+        ctx = make_ctx()
+        # get_repurchase is NOT explicitly set in make_ctx()
+        result = await ctx.api.get_repurchase(symbol="000001.SZ", date="20240610")
+        # Should not raise "MagicMock can't be used in 'await' expression"
+        # AsyncMock returns a coroutine that resolves to another AsyncMock
+        assert result is not None or result is None  # just verifying no exception
+
+    @pytest.mark.asyncio
+    async def test_cache_engine_mock_chain(self):
+        """ctx.cache.engine.begin should work as a synchronous MagicMock chain."""
+        ctx = make_ctx()
+        # engine is a MagicMock attribute, begin() returns another MagicMock
+        engine = ctx.cache.engine
+        assert engine is not None
+        begin_result = engine.begin()
+        assert begin_result is not None
