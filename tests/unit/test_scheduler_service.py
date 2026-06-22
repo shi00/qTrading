@@ -633,7 +633,7 @@ class TestSchedulerStart:
         svc.scheduler.running = False
         svc.start()
         svc.scheduler.start.assert_called_once()
-        svc.scheduler.add_job.assert_called()
+        assert svc.scheduler.add_job.call_count == 5  # 多次调用预期 (3 schedule_jobs + config_watchdog + load_db_state)
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_start_exception(self, mock_ch):

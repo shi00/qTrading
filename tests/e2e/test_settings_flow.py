@@ -1,10 +1,13 @@
 import base64
+import logging
 
 import pytest
 
 from ui.i18n import I18n
 
 pytestmark = pytest.mark.e2e
+
+logger = logging.getLogger(__name__)
 
 
 async def test_settings_page_loads(e2e_page):
@@ -87,7 +90,8 @@ async def test_settings_theme_switch(e2e_page):
                 }""",
                 screenshot_b64,
             )
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[settings_flow] screenshot pixel sampling failed: %s", e, exc_info=True)
             is_light_bg = False
         if is_light_bg:
             break
@@ -151,9 +155,9 @@ async def test_settings_language_switch(e2e_page):
                 if await e2e_page.has_text(nav_settings_zh):
                     break
                 await e2e_page.page.wait_for_timeout(200)
-        except Exception:
+        except Exception as e:  # noqa: BLE001
             # 还原失败时不抛出，避免掩盖原始测试失败；下游测试会显式失败暴露问题
-            pass
+            logger.warning("[settings_flow] restore language to zh failed: %s", e, exc_info=True)
 
 
 @pytest.mark.mutates_config
@@ -194,5 +198,5 @@ async def test_settings_log_level_switch(e2e_page):
         # pristine_config 只还原磁盘配置，不调用 update_log_level，需通过 UI 切换回 INFO。
         try:
             await e2e_page.select_dropdown(log_level_label, log_level_info, timeout_ms=10000)
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[settings_flow] restore log level to INFO failed: %s", e, exc_info=True)

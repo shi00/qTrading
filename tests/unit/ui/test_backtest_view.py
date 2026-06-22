@@ -201,7 +201,7 @@ class TestBacktestView:
         view._on_run_backtest({"start_date": date(2024, 1, 1), "end_date": date(2024, 12, 31)})
 
         assert view.status_text.value == "mock_text"
-        view.update.assert_called()
+        view.update.assert_called_once()
 
     @patch("ui.views.backtest_view.BacktestViewModel")
     @patch("ui.views.backtest_view.BacktestConfigPanel")

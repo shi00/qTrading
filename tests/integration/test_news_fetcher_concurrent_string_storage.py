@@ -7,12 +7,15 @@
 - 内部锁对临界区交错变更的互斥保护
 """
 
+import logging
 import threading
 
 import pandas as pd
 import pytest
 
 from data.external.news_fetcher import _run_with_python_string_storage
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.mark.slow
@@ -69,6 +72,7 @@ class TestConcurrentStringStorage:
 
                 _run_with_python_string_storage(work)
             except Exception as e:
+                logger.warning("[ConcurrentStringStorage] fetcher raised: %s", e, exc_info=True)
                 errors.append(e)
 
         threads = [threading.Thread(target=concurrent_fetcher, args=(i,)) for i in range(5)]

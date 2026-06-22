@@ -425,7 +425,7 @@ class TestBacktestViewModelRunBacktest:
             await captured_factory(task_id="task_789")
 
         assert vm._is_running is False
-        on_status.assert_called()
+        assert on_status.call_count == 2  # 多次调用预期 (starting + failed)
         status_call_args = on_status.call_args[0]
         assert "red" in status_call_args
         final_progress_calls = [c for c in on_progress.call_args_list if c[0][0] == 1.0]

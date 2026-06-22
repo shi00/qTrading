@@ -858,7 +858,7 @@ class TestReviewPredictionsCore(unittest.TestCase):
 
         async def run_test():
             await manager.run_review()
-            mock_cache_instance.get_index_daily.assert_called()
+            mock_cache_instance.get_index_daily.assert_called_once()
             mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()
 
         asyncio.run(run_test())

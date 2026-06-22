@@ -216,7 +216,7 @@ class TestSystemTabThemeChange:
         tab.theme_dropdown.value = "navy"
         with patch("ui.theme.apply_page_theme"):
             tab.on_theme_change(None)
-        page.update.assert_called()
+        page.update.assert_called_once()
 
     def test_on_theme_change_without_page_no_error(self, mock_page):
         snack = MagicMock()
@@ -896,7 +896,7 @@ class TestSystemTabDiagnostics:
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_dc:
             mock_dc.export = AsyncMock(return_value="/tmp/diag.zip")
             await tab.on_export_diagnostics(None)
-        snack.assert_called()
+        snack.assert_called_once()
         success_call = [c for c in snack.call_args_list if c.kwargs.get("color") == self.mock_ac.SUCCESS]
         assert len(success_call) == 1
 
@@ -991,7 +991,7 @@ class TestSystemTabLocaleChange:
         ]
         # All rows share the same SettingRow mock, so update_locale is called 9 times total
         for row in rows:
-            row.update_locale.assert_called()
+            row.update_locale.assert_called()  # 多次调用预期 (9次, 所有row共享mock)
 
     def test_on_locale_change_calls_section_header_update_locale(self, mock_page):
         tab = self._make_tab()

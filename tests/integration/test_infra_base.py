@@ -55,7 +55,7 @@ def make_clean_db_fixture(tables: list[str] | None = None):
                 try:
                     await conn.execute(text(f"DELETE FROM {table}"))
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("[TestDB] DELETE %s failed: %s", table, e)
+                    logger.warning("[TestDB] DELETE %s failed: %s", table, e, exc_info=True)
         yield
 
     return clean_db

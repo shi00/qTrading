@@ -1075,3 +1075,45 @@ class TestMergeMacroDataPublishDate:
         assert "publish_date" in result.columns
         # period 2024-06-01 -> publish_date should be 2024-07-16
         assert result["publish_date"].iloc[0] == datetime.date(2024, 7, 16)
+
+
+class TestMacroSyncPartialFailure:
+    """Partial-failure boundary tests: some sub-syncs fail, some succeed,
+    sync continues and preserves successfully fetched data."""
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_monthly_fails_shibor_succeeds(self):
+        """When macro monthly sync fails but shibor sync succeeds, the sync
+        should continue, collect errors, and preserve successfully fetched data."""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(side_effect=RuntimeError("Macro API error"))
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [2.0]}))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=5)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        ctx.cache.market_dao = MagicMock()
+        ctx.cache.market_dao.get_latest_index_weight_date = AsyncMock(return_value="2024-06-10")
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2024, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = await strategy.run()
+
+        # Sync should not crash
+        assert result is not None
+        assert isinstance(result, SyncResult)
+        # Monthly error should be collected
+        assert len(result.errors) >= 1
+        assert any("Macro Monthly" in e for e in result.errors)
+        # Shibor data should be saved
+        assert result.added >= 5
+        # Sync should not be marked as fully failed
+        assert result.status != "failed"

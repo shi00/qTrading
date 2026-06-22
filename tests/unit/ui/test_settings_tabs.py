@@ -568,7 +568,7 @@ class TestAIBrainTab:
         tab.local_model_panel = MagicMock()
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, ""), create=True):
             await tab._save_ai_settings(None)
-        tab.show_snack.assert_called()
+        tab.show_snack.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_ai_settings_prompt_validation_fails(self, mock_page):
@@ -1104,7 +1104,7 @@ class TestSystemTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab._on_locale_change("en_US")
-        self.mock_i18n.get.assert_called()
+        self.mock_i18n.get.assert_called()  # 多次调用预期 (多个标签翻译)
 
     def test_on_locale_change_exception_handled(self, mock_page):
         tab = self._make_tab()

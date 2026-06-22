@@ -131,7 +131,7 @@ class TestNewsSubscriptionCorrelationId:
                 mock_fetcher.get_latest_global_news = AsyncMock(return_value=[])
                 await svc._fetch_and_notify()
 
-            mock_cs.assert_called()
+            mock_cs.assert_called_once()
 
         NewsSubscriptionService._instance = None
 

@@ -292,7 +292,7 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
             await context.close()
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[E2E] DB error UI check failed (non-fatal): %s", exc)
+            logger.debug("[E2E] DB error UI check failed (non-fatal): %s", exc, exc_info=True)
 
     fp.bind_context((None, None, context, page, request))
     return fp

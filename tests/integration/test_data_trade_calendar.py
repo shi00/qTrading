@@ -104,7 +104,7 @@ class TestTradeCalendarService(TestDatabaseBase):
 
         result = await self.service.is_trading_day(test_date)
         self.assertTrue(result)
-        self.mock_api.get_trade_cal.assert_called()
+        self.mock_api.get_trade_cal.assert_called_once()
 
     async def test_get_trade_dates_from_db(self):
         """Test get_trade_dates returns correct dates from DB."""
@@ -146,7 +146,7 @@ class TestTradeCalendarService(TestDatabaseBase):
         result = await self.service.get_trade_dates(start, end)
 
         self.assertEqual(len(result), 5)
-        self.mock_api.get_trade_cal.assert_called()
+        self.mock_api.get_trade_cal.assert_called_once()
 
         cached_df = await self.cache.get_trade_cal(start, end, is_open="1")
         self.assertIsNotNone(cached_df)

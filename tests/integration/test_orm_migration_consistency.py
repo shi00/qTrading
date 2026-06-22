@@ -172,7 +172,8 @@ def _orm_server_default(col: sa.Column) -> str | None:
     try:
         compiled = sd.arg.compile(dialect=pg_dialect())  # type: ignore[union-attr]
         return _normalize_default(str(compiled))
-    except Exception:
+    except Exception as e:
+        logger.warning("[OrmServerDefault] compile failed, falling back to str(arg): %s", e, exc_info=True)
         return _normalize_default(str(arg))
 
 
@@ -188,7 +189,8 @@ def _compile_type(col_type: sa.types.TypeEngine) -> str:
     """Compile a SQLAlchemy type to its PG-dialect string representation."""
     try:
         return col_type.compile(dialect=pg_dialect())
-    except Exception:
+    except Exception as e:
+        logger.warning("[CompileType] compile failed, falling back to str(col_type): %s", e, exc_info=True)
         return str(col_type)
 
 
@@ -539,7 +541,8 @@ class TestOrmMigrationConsistency:
                 if where_expr is not None:
                     try:
                         where_str = str(where_expr.compile(dialect=pg_dialect()))
-                    except Exception:
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[IndexWhere] compile failed, fallback to text: %s", e, exc_info=True)
                         where_str = str(where_expr.text if hasattr(where_expr, "text") else where_expr)
                 orm_index_cols.add((col_set, _normalize_sql_expression(where_str)))
 
