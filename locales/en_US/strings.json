@@ -389,6 +389,7 @@
     "settings_db_timeout": "Connection Timeout",
     "settings_db_timeout_desc": "Max wait time to acquire connection (seconds)",
     "settings_db_pool_saved": "DB connection pool settings saved",
+    "db_reconfigure": "Reconfigure",
     "settings_save_config": "Save Config",
     "settings_init_done": "History Data Init Complete!",
     "settings_no_proxy_desc": "Domains to bypass proxy",

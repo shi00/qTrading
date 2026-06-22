@@ -355,6 +355,19 @@ async def main(page: ft.Page):
                     page.clean()
                     await _init_services_and_start_app()
 
+                async def on_reconfigure_click(e):
+                    page.clean()
+                    await cache_manager.close()
+                    ConfigHandler.set_onboarding_complete(False)
+                    wizard = OnboardingWizard(page, on_complete=on_onboarding_complete)
+                    page.add(
+                        ft.Container(
+                            content=wizard,
+                            expand=True,
+                            padding=40,
+                        ),
+                    )
+
                 def on_skip_click(e):
                     page.clean()
                     show_toast(I18n.get("warning_skip_db"), "warning")
@@ -380,6 +393,11 @@ async def main(page: ft.Page):
                                             I18n.get("retry"),
                                             icon=ft.Icons.REFRESH,
                                             on_click=lambda e: page.run_task(on_retry_click, e),
+                                        ),
+                                        ft.TextButton(
+                                            I18n.get("db_reconfigure"),
+                                            icon=ft.Icons.SETTINGS,
+                                            on_click=lambda e: page.run_task(on_reconfigure_click, e),
                                         ),
                                         ft.TextButton(
                                             I18n.get("skip"),

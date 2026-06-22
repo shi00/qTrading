@@ -324,6 +324,7 @@
     "dialog_confirm_full_sync_content": "将尝试完整获取所有股票最新的日线行情数据。耗时较长，是否继续？",
     "btn_confirm_init": "开始初始化",
     "btn_confirm_sync": "开始同步",
+    "db_reconfigure": "重新配置",
     "settings_save_config": "保存配置",
     "settings_init_done": "初始化历史数据完成！",
     "settings_check_health": "开始检查",

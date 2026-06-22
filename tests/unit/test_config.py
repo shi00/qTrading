@@ -7,6 +7,17 @@ import pytest
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def restore_config_after_reload():
+    import config
+
+    original_db_url = config.DB_URL
+    original_db_url_sync = config.DB_URL_SYNC
+    yield
+    config.DB_URL = original_db_url
+    config.DB_URL_SYNC = original_db_url_sync
+
+
 class TestConfigModule:
     def test_db_url_from_environment(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://user:pass@host:5432/db")

@@ -375,11 +375,56 @@ class TestMainDbInitFailed:
             container = page.controls[0]
             col = container.content
             row = col.controls[-1]
-            skip_btn = row.controls[1]
+            skip_btn = row.controls[2]
             assert skip_btn.on_click is not None
 
             skip_btn.on_click(MagicMock())
             mock_layout_instance.show.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_db_init_failed_reconfigure_button(self, monkeypatch):
+        _prepare_main(monkeypatch)
+        mock_cm = AsyncMock()
+        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
+
+        with (
+            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("main.check_onboarding_needed", return_value=False),
+            patch("main.ConfigHandler") as mock_config,
+            patch("main.OnboardingWizard") as mock_wizard,
+        ):
+            mock_init.return_value = {
+                "success": False,
+                "error": "db_init_failed",
+                "detail": "error",
+            }
+
+            page = _DummyPage()
+            await app_main.main(page)
+
+            container = page.controls[0]
+            col = container.content
+            row = col.controls[-1]
+            reconfigure_btn = row.controls[1]
+            assert reconfigure_btn.on_click is not None
+
+            # Click schedules the coroutine
+            reconfigure_btn.on_click(MagicMock())
+
+            # Execute the scheduled coroutine
+            assert len(page.run_task_calls) == 1
+            coro, args = page.run_task_calls[0]
+            await coro(*args)
+
+            # Assert CacheManager.close was awaited
+            mock_cm.close.assert_awaited_once()
+
+            # Assert set_onboarding_complete(False) was called
+            mock_config.set_onboarding_complete.assert_called_once_with(False)
+
+            # Assert OnboardingWizard was created and page was populated
+            mock_wizard.assert_called_once()
+            assert len(page.controls) == 1
 
 
 class TestMainOnboardingFlow:
