@@ -250,6 +250,12 @@ class LLMConfigPanel(ft.Container):
 
         self._load_config()
 
+    @staticmethod
+    def _get_provider_name(provider: dict, provider_id: str) -> str:
+        if I18n.current_locale() == "zh_CN":
+            return provider.get("name", provider_id)
+        return provider.get("name_en", provider.get("name", provider_id))
+
     def _build_provider_options(self) -> list:  # pragma: no cover
         options = []
 
@@ -263,7 +269,7 @@ class LLMConfigPanel(ft.Container):
                 options.append(
                     ft.dropdown.Option(
                         key=provider_id,
-                        text=provider.get("name", provider_id),
+                        text=self._get_provider_name(provider, provider_id),
                     )
                 )
 
@@ -277,7 +283,7 @@ class LLMConfigPanel(ft.Container):
                 options.append(
                     ft.dropdown.Option(
                         key=provider_id,
-                        text=provider.get("name", provider_id),
+                        text=self._get_provider_name(provider, provider_id),
                     )
                 )
 
@@ -302,7 +308,7 @@ class LLMConfigPanel(ft.Container):
         for model in models:
             text = model.get("name", model.get("id", ""))
             tag = model.get("tag", "")
-            display_tag = get_display_tag(tag)
+            display_tag = I18n.get(get_display_tag(tag), default=get_display_tag(tag))
             if display_tag:
                 text = f"{text} ({display_tag})"
             options.append(
@@ -441,7 +447,7 @@ class LLMConfigPanel(ft.Container):
         self._current_provider = provider_id
 
         provider = LLM_PROVIDERS.get(provider_id, {})
-        provider_name = provider.get("name", provider_id)
+        provider_name = self._get_provider_name(provider, provider_id)
 
         self.model_dropdown.options = self._build_model_options(provider_id)
         self.model_dropdown.value = None

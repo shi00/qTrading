@@ -1574,5 +1574,18 @@
     "report_section_monthly": "Monthly Stats",
     "report_section_trades": "Trade Stats",
     "report_section_data_warnings": "Data Warnings",
-    "error_task_manager_init_failed": "TaskManager initialization failed"
+    "error_task_manager_init_failed": "TaskManager initialization failed",
+    "init_sync_market_snapshot": "Syncing daily market snapshot",
+    "init_sync_financial": "Syncing financial reports",
+    "init_sync_ai_review": "Updating AI review records",
+    "init_daily_update_done": "Daily update complete",
+    "error_missing_playwright": "System is missing automation dependencies (Playwright).",
+    "tag_recommend": "Recommended",
+    "tag_flagship": "Flagship",
+    "tag_fast": "Fast",
+    "tag_latest": "Latest",
+    "tag_reasoning": "Reasoning",
+    "tag_reasoning_plus": "Reasoning+",
+    "tag_latest_flagship": "Latest Flagship",
+    "tag_coding": "Coding"
 }

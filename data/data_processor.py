@@ -308,20 +308,20 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         await self.init_data()
 
         if progress_callback:
-            progress_callback(0.2, 1.0, "同步今日行情快照")
+            progress_callback(0.2, 1.0, I18n.get("init_sync_market_snapshot"))
         result = await self.sync_daily_market_snapshot()
 
         if progress_callback:
-            progress_callback(0.5, 1.0, "同步财务数据")
+            progress_callback(0.5, 1.0, I18n.get("init_sync_financial"))
         await self.sync_financial_reports()
 
         if progress_callback:
-            progress_callback(0.8, 1.0, "更新 AI 审评记录")
+            progress_callback(0.8, 1.0, I18n.get("init_sync_ai_review"))
         review_mgr = ReviewManager()
         await review_mgr.run_review()
 
         if progress_callback:
-            progress_callback(1.0, 1.0, "日更完成")
+            progress_callback(1.0, 1.0, I18n.get("init_daily_update_done"))
         return result
 
     async def run_doubao_tagging(
@@ -336,7 +336,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             logger.error(
                 "Playwright 依赖缺失，请运行 `pip install playwright && playwright install`",
             )
-            raise RuntimeError("系统缺少自动化打标底层依赖组件。") from e
+            raise RuntimeError(I18n.get("error_missing_playwright")) from e
 
         tagger = DoubaoTagger()
         tagger.dao = self.cache.stock_dao

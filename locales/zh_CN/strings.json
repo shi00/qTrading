@@ -1574,5 +1574,18 @@
     "report_section_monthly": "月度统计",
     "report_section_trades": "交易统计",
     "report_section_data_warnings": "数据警告",
-    "error_task_manager_init_failed": "TaskManager 初始化失败"
+    "error_task_manager_init_failed": "TaskManager 初始化失败",
+    "init_sync_market_snapshot": "同步今日行情快照",
+    "init_sync_financial": "同步财务数据",
+    "init_sync_ai_review": "更新 AI 审评记录",
+    "init_daily_update_done": "日更完成",
+    "error_missing_playwright": "系统缺少自动化打标底层依赖组件。",
+    "tag_recommend": "推荐",
+    "tag_flagship": "旗舰",
+    "tag_fast": "高速",
+    "tag_latest": "最新",
+    "tag_reasoning": "推理",
+    "tag_reasoning_plus": "推理增强",
+    "tag_latest_flagship": "最新旗舰",
+    "tag_coding": "代码专用"
 }
