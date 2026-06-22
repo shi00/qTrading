@@ -400,7 +400,7 @@ async def main(page: ft.Page):
                                 ft.Text(
                                     I18n.get("error_db_init_failed")
                                     if result.get("error") != "db_engine_missing"
-                                    else I18n.get("error_db_engine_missing", "数据库引擎未创建"),
+                                    else I18n.get("error_db_engine_missing"),
                                     size=20,
                                     weight=ft.FontWeight.BOLD,
                                 ),
