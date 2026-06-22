@@ -10,6 +10,7 @@ from utils.exception_hooks import install_asyncio_handler_for_loop, install_glob
 from utils.log_decorators import UILogger
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
+from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from services.news_subscription_service import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
@@ -358,7 +359,7 @@ async def main(page: ft.Page):
                 async def on_reconfigure_click(e):
                     page.clean()
                     await cache_manager.close()
-                    ConfigHandler.set_onboarding_complete(False)
+                    await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
                     wizard = OnboardingWizard(page, on_complete=on_onboarding_complete)
                     page.add(
                         ft.Container(
@@ -428,10 +429,10 @@ async def main(page: ft.Page):
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
 
         app_layout.show()
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, True)
 
     async def on_onboarding_complete():
         await _init_services_and_start_app()
-        ConfigHandler.set_onboarding_complete(True)
 
     db_url = ConfigHandler.get_db_url()
     token = ConfigHandler.get_token()
