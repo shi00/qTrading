@@ -196,12 +196,26 @@ def isolate_config_file() -> Iterator[str]:
 @pytest.fixture(autouse=True)
 def reset_config_cache() -> Iterator[None]:
     """
-    Reset ConfigHandler._config_cache before each test to prevent cross-test pollution.
+    Reset ConfigHandler._config_cache and restore config.DB_URL / DATABASE_URL
+    before each test to prevent cross-test pollution.
     """
+    import config as config_mod
     from utils.config_handler import ConfigHandler
+
+    saved_db_url = config_mod.DB_URL
+    saved_env_db_url = os.environ.get("DATABASE_URL")
 
     ConfigHandler._config_cache = None
     yield
+    ConfigHandler._config_cache = None
+
+    # Restore global DB state that may have been mutated by tests
+    # using direct assignment instead of monkeypatch.
+    config_mod.DB_URL = saved_db_url
+    if saved_env_db_url is not None:
+        os.environ["DATABASE_URL"] = saved_env_db_url
+    elif "DATABASE_URL" in os.environ:
+        del os.environ["DATABASE_URL"]
 
 
 @pytest.fixture(autouse=True)
