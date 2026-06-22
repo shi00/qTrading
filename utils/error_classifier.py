@@ -202,6 +202,24 @@ def classify_error(e: Exception, context: str = "general") -> dict:
             return {"code": "auth", "message_key": "db_err_auth"}
         if "timeout" in error_str:
             return {"code": "timeout", "message_key": "db_err_timeout"}
+        if (
+            "closed in the middle of operation" in error_str
+            or "connection was closed" in error_str
+            or "interrupted" in error_str
+        ):
+            return {"code": "interrupted", "message_key": "db_err_interrupted"}
+        if "winerror 64" in error_str:
+            return {"code": "proxy", "message_key": "db_err_proxy"}
+        if "does not exist" in error_str:
+            import re
+
+            match = re.search(r'database\s+["\']?([^"\'\s]+)["\']?\s+does\s+not\s+exist', error_str)
+            db_name = match.group(1) if match else ""
+            return {
+                "code": "not_found",
+                "message_key": "db_err_not_found",
+                "format_args": {"database": db_name or "目标数据库"},
+            }
         if "refused" in error_str or "connect" in error_str:
             return {"code": "refused", "message_key": "db_err_refused"}
         return {"code": "unknown", "message_key": "db_err_unknown"}

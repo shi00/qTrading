@@ -21,6 +21,21 @@ from app.bootstrap import check_onboarding_needed, initialize_services, mask_sen
 logger = logging.getLogger(__name__)
 
 
+def _get_localized_detail(detail: str) -> str:
+    """Classify and return localized error message for database initialization details."""
+    if not detail:
+        return ""
+    try:
+        from utils.error_classifier import classify_error, get_error_message
+
+        classified = classify_error(Exception(detail), context="db")
+        if classified.get("message_key") != "db_err_unknown":
+            return get_error_message(classified)
+    except Exception as e:
+        logger.warning("[Main] Failed to classify and localize error detail '%s': %s", detail, e)
+    return detail
+
+
 async def main(page: ft.Page):
     setup_logging()
 
@@ -350,7 +365,7 @@ async def main(page: ft.Page):
                 )
                 _show_dialog(upgrade_dialog)
 
-            elif result.get("error") == "db_init_failed":
+            elif result.get("error") in ("db_init_failed", "db_engine_missing", "task_manager_init_failed"):
 
                 async def on_retry_click(e):
                     page.clean()
@@ -383,11 +398,17 @@ async def main(page: ft.Page):
                             [
                                 ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
                                 ft.Text(
-                                    I18n.get("error_db_init_failed"),
+                                    I18n.get("error_db_init_failed")
+                                    if result.get("error") != "db_engine_missing"
+                                    else I18n.get("error_db_engine_missing", "数据库引擎未创建"),
                                     size=20,
                                     weight=ft.FontWeight.BOLD,
                                 ),
-                                ft.Text(str(result.get("detail", ""))[:200], color=ft.Colors.RED_400, size=14),
+                                ft.Text(
+                                    _get_localized_detail(str(result.get("detail") or ""))[:200],
+                                    color=ft.Colors.RED_400,
+                                    size=14,
+                                ),
                                 ft.Row(
                                     [
                                         ft.ElevatedButton(
