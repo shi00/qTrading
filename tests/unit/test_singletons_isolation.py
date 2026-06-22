@@ -120,16 +120,17 @@ class TestCacheManagerSingletonIsolation:
         CacheManager._initialized = False
         instances = []
 
-        def create_instance():
-            with patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None):
+        with patch("data.cache.cache_manager.ConfigHandler.get_db_url", return_value=None):
+
+            def create_instance():
                 CacheManager()
                 instances.append(id(CacheManager._instance))
 
-        threads = [threading.Thread(target=create_instance) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            threads = [threading.Thread(target=create_instance) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         assert len(set(instances)) == 1, "Multiple instances created across threads"
         CacheManager._reset_singleton()
@@ -201,19 +202,20 @@ class TestTaskManagerSingletonIsolation:
         TaskManager._initialized = False
         instances = []
 
-        def create_instance():
-            with (
-                patch("services.task_manager.ThreadPoolManager"),
-                patch("services.task_manager.I18n"),
-            ):
+        with (
+            patch("services.task_manager.ThreadPoolManager"),
+            patch("services.task_manager.I18n"),
+        ):
+
+            def create_instance():
                 TaskManager()
                 instances.append(id(TaskManager._instance))
 
-        threads = [threading.Thread(target=create_instance) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+            threads = [threading.Thread(target=create_instance) for _ in range(10)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         assert len(set(instances)) == 1, "Multiple instances created across threads"
         TaskManager._reset_singleton()
