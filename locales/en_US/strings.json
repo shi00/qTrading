@@ -1573,5 +1573,6 @@
     "report_section_summary": "Summary",
     "report_section_monthly": "Monthly Stats",
     "report_section_trades": "Trade Stats",
-    "report_section_data_warnings": "Data Warnings"
+    "report_section_data_warnings": "Data Warnings",
+    "error_task_manager_init_failed": "TaskManager initialization failed"
 }

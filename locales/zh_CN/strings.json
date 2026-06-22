@@ -1573,5 +1573,6 @@
     "report_section_summary": "摘要",
     "report_section_monthly": "月度统计",
     "report_section_trades": "交易统计",
-    "report_section_data_warnings": "数据警告"
+    "report_section_data_warnings": "数据警告",
+    "error_task_manager_init_failed": "TaskManager 初始化失败"
 }
