@@ -133,3 +133,18 @@ class TestConcurrentStringStorage:
         b_range = (b_start, b_end)
         overlap = max(a_range[0], b_range[0]) <= min(a_range[1], b_range[1])
         assert not overlap, f"Critical sections overlapped: {execution_log}"
+
+    def test_run_with_python_string_storage_timeout_raises_timeouterror(self):
+        """当无法在 10s 内获取锁时，应该抛出 TimeoutError。"""
+        from unittest.mock import patch
+        from data.external.news_fetcher import _run_with_python_string_storage
+
+        # 替换整个锁对象，强制 acquire 返回 False（即超时未获取到锁）
+        with patch("data.external.news_fetcher._pd_options_lock") as mock_lock:
+            mock_lock.acquire.return_value = False
+
+            with pytest.raises(TimeoutError, match="Could not acquire _pd_options_lock"):
+                _run_with_python_string_storage(lambda: None)
+
+            # 确保获取失败时不会调用 release
+            mock_lock.release.assert_not_called()

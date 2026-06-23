@@ -29,16 +29,28 @@ _HOT_CONCEPTS_TIMEOUT_SECONDS = 15.0
 # Lock for thread-safe mutation of pd.options.mode.string_storage
 _pd_options_lock = threading.Lock()
 
+# CLS circuit breaker state (separate from Sina counters above)
+_CLS_CONSECUTIVE_FAILURES = 0
+_CLS_FAILURE_THRESHOLD = 3
+_CLS_CIRCUIT_OPENED_AT = 0.0
+_CLS_CIRCUIT_COOLDOWN_SECONDS = 60.0
+
 
 def _run_with_python_string_storage(fetcher):
     """Run AKShare calls under a single critical section for global pandas option safety."""
-    with _pd_options_lock:
+    # 限制锁获取最大超时时间为 10.0 秒，防止连环死锁
+    acquired = _pd_options_lock.acquire(timeout=10.0)
+    if not acquired:
+        raise TimeoutError("[NewsFetcher] Could not acquire _pd_options_lock within 10s")
+    try:
         old_storage = pd.options.mode.string_storage
         pd.options.mode.string_storage = "python"
         try:
             return fetcher()
         finally:
             pd.options.mode.string_storage = old_storage
+    finally:
+        _pd_options_lock.release()
 
 
 def _ensure_dataframe(result, source: str = "") -> pd.DataFrame | None:
@@ -225,94 +237,122 @@ class NewsFetcher:
         as_of: When set to a historical date, returns empty list to prevent
         look-ahead bias in backtesting / AI context construction.
         """
+        # 保留原有的 look-ahead bias 保护逻辑
         if as_of is not None and as_of != get_now().date():
             return []
 
+        global _CLS_CONSECUTIVE_FAILURES, _CLS_CIRCUIT_OPENED_AT
+        now_ts = get_now().timestamp()  # 遵循系统统一时间获取规范
+
+        # 1. 熔断判定
+        if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
+            # 熔断开启期间（冷却窗口内），直接快速失败
+            if now_ts - _CLS_CIRCUIT_OPENED_AT < _CLS_CIRCUIT_COOLDOWN_SECONDS:
+                logger.warning("[NewsFetcher] CLS circuit breaker is OPEN. Fast failing request.")
+                return []
+            else:
+                logger.info("[NewsFetcher] CLS circuit breaker is HALF-OPEN. Attempting probe request.")
+
+        # 2. 直连请求函数 (移出全局锁，避免 akshare 挂起时死锁)
+        def _fetch_cls():
+            url = "https://www.cls.cn/api/cache?name=telegraph"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": "https://www.cls.cn/telegraph",
+            }
+            resp = requests.get(url, headers=headers, timeout=5.0)
+            resp.raise_for_status()
+            return resp.json()
+
         try:
+            # 使用全局 IO 线程池异步执行请求，防止阻塞 asyncio 事件循环
+            data = await ThreadPoolManager().run_async(TaskType.IO, _fetch_cls)
 
-            def _fetch():
-                # ProxyManager already whitelists domestic domains via NO_PROXY at startup
-                return _ensure_dataframe(
-                    _run_with_python_string_storage(ak.stock_info_global_cls), source="stock_info_global_cls"
-                )
+            # 请求成功，闭合熔断器并清空计数
+            if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
+                logger.info("[NewsFetcher] CLS circuit breaker CLOSED (recovered).")
+            _CLS_CONSECUTIVE_FAILURES = 0
 
-            try:
-                # Use Global IO Pool
-                df = await ThreadPoolManager().run_async(TaskType.IO, _fetch)
-            except RuntimeError:
+            # 3. 健壮解析 JSON
+            if not data or not isinstance(data, dict) or "data" not in data or "roll_data" not in data["data"]:
+                logger.warning("[NewsFetcher] CLS API response missing expected structure")
                 return []
 
-            if df is None or df.empty:
+            roll_data = data["data"]["roll_data"]
+            if not isinstance(roll_data, list) or not roll_data:
                 return []
 
             news_list = []
-            now = get_now()
-            today_str = now.strftime("%Y-%m-%d")
 
-            for _, row in df.head(limit if limit is not None else len(df)).iterrows():
-                # Extract raw time string
-                raw_time = row.get("发布时间") or row.get("时间") or row.get("time", "")
-                final_time = raw_time
+            for item in roll_data[:limit] if limit is not None else roll_data:
+                if not isinstance(item, dict):
+                    continue
 
-                # Handle time-only string (e.g. "09:30:00") -> Prepend Date
-                if raw_time and len(str(raw_time)) <= 8 and ":" in str(raw_time):
+                # 获取标题与内容（如果不存在 title 则回退至 content 截断）
+                title = item.get("title") or item.get("content", "")
+                title_str = str(title).strip()
+                if not title_str:
+                    title_str = I18n.get("news_no_title")
+
+                content_str = str(item.get("content") or "").strip()
+
+                # ctime 时间戳转换：自动检测毫秒/秒级
+                ctime = item.get("ctime")
+                if ctime:
                     try:
-                        # Parse time to determine if it's today or yesterday
-                        # e.g. If now is 00:05 and news is 23:55 -> Yesterday
-                        t_parts = list(map(int, str(raw_time).split(":")))
-                        # Handle HH:MM or HH:MM:SS
-                        if len(t_parts) >= 2:
-                            news_dt = now.replace(
-                                hour=t_parts[0],
-                                minute=t_parts[1],
-                                second=t_parts[2] if len(t_parts) > 2 else 0,
-                            )
-
-                            # If news time is significantly in the future (> 30 mins), it's likely yesterday's news
-                            # (e.g. Now 10:00, News 23:00 -> Yesterday 23:00)
-                            if news_dt > now + timedelta(minutes=30):
-                                news_dt -= timedelta(days=1)
-
-                            final_time = news_dt.strftime("%Y-%m-%d %H:%M:%S")
-                        else:
-                            final_time = f"{today_str} {raw_time}"
-                    except (ValueError, IndexError, TypeError) as exc:
+                        ctime_val = float(ctime)
+                        # 毫秒级时间戳检测：大于 1e12 视为毫秒
+                        if ctime_val > 1e12:
+                            ctime_val = ctime_val / 1000.0
+                        dt = datetime.datetime.fromtimestamp(ctime_val, tz=CST_TZ)
+                        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception as conversion_err:
                         logger.debug(
-                            "[NewsFetcher] Time parse fallback for '%s': %s",
-                            raw_time,
-                            DataSanitizer.sanitize_error(exc),
+                            "[NewsFetcher] Timestamp conversion fallback: %s",
+                            DataSanitizer.sanitize_error(conversion_err),
                         )
-                        final_time = f"{today_str} {raw_time}"
+                        time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    time_str = get_now().strftime("%Y-%m-%d %H:%M:%S")
 
-                # Standardize time format to YYYY-MM-DD HH:MM:SS for consistent sorting
-                try:
-                    # Try parsing with pandas for robustness (handles multiple formats)
-                    dt_obj = pd.to_datetime(final_time)
-                    if dt_obj.tzinfo is None:
-                        dt_obj = dt_obj.tz_localize(CST_TZ)  # type: ignore[union-attr]
-                    final_time = dt_obj.strftime("%Y-%m-%d %H:%M:%S")
-                except (ValueError, TypeError) as exc:
-                    logger.debug(
-                        "[NewsFetcher] Pandas time standardize fallback for '%s': %s",
-                        final_time,
-                        DataSanitizer.sanitize_error(exc),
-                    )
-                    final_time = str(final_time)
+                news_list.append({"title": title_str, "content": content_str, "time": time_str})
 
-                news_list.append(
-                    {
-                        "title": row.get("标题") or row.get("title", I18n.get("news_no_title")),
-                        "content": row.get("内容") or row.get("content", ""),
-                        "time": final_time,
-                    },
-                )
-
-            # Ensure we sort by time DESC so news_list[0] is truly the latest
+            # 按时间降序排列
             news_list.sort(key=lambda x: x["time"], reverse=True)
             return news_list
 
+        except RuntimeError as infra_err:
+            # 基础设施错误（如线程池未初始化）不应计入 CLS API 连续失败计数
+            logger.warning(
+                "[NewsFetcher] CLS fetch skipped due to infrastructure error: %s",
+                DataSanitizer.sanitize_error(infra_err),
+            )
+            return []
         except Exception as e:
-            logger.error("[News] Error fetching global news: %s", DataSanitizer.sanitize_error(e))
+            # 异常处理，递增连续失败计数并视情况触发熔断
+            _CLS_CONSECUTIVE_FAILURES += 1
+            if _CLS_CONSECUTIVE_FAILURES >= _CLS_FAILURE_THRESHOLD:
+                if _CLS_CONSECUTIVE_FAILURES == _CLS_FAILURE_THRESHOLD:
+                    _CLS_CIRCUIT_OPENED_AT = get_now().timestamp()
+                    logger.error(
+                        "[NewsFetcher] CLS API failed 3 consecutive times. Circuit breaker OPENED. Error: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+                else:
+                    # 半开探活失败：重置冷却计时器，使下一个 60s 窗口从此刻重新计时
+                    _CLS_CIRCUIT_OPENED_AT = get_now().timestamp()
+                    logger.error(
+                        "[NewsFetcher] CLS API failed in HALF-OPEN state. Cooldown reset. Error: %s",
+                        DataSanitizer.sanitize_error(e),
+                    )
+            else:
+                logger.warning(
+                    "[NewsFetcher] CLS API request failed (%d/%d): %s",
+                    _CLS_CONSECUTIVE_FAILURES,
+                    _CLS_FAILURE_THRESHOLD,
+                    DataSanitizer.sanitize_error(e),
+                )
             return []
 
     @staticmethod

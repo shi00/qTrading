@@ -94,34 +94,55 @@ class TestGetStockNews(unittest.TestCase):
 
 
 class TestGetLatestGlobalNews(unittest.TestCase):
-    """测试全球新闻获取"""
+    """测试全球新闻获取（直连 CLS API）。"""
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_global_news_success(self, mock_pool):
+    @patch("data.external.news_fetcher.requests.get")
+    def test_get_global_news_success(self, mock_get, mock_pool):
         """成功获取全球新闻"""
-        mock_df = pd.DataFrame(
-            {
-                "标题": ["美联储加息", "经济数据公布"],
-                "内容": ["美联储宣布加息25个基点", "最新经济数据出炉"],
-                "发布时间": ["2024-03-15 10:30:00", "2024-03-15 09:00:00"],
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {
+                        "title": "美联储加息",
+                        "content": "美联储宣布加息25个基点",
+                        "ctime": 1710469800,  # 2024-03-15 10:30:00 CST
+                    },
+                    {
+                        "title": "经济数据公布",
+                        "content": "最新经济数据出炉",
+                        "ctime": 1710464400,  # 2024-03-15 09:00:00 CST
+                    },
+                ]
             }
-        )
+        }
+        mock_get.return_value = mock_resp
 
         mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=mock_df)
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_pool.return_value = mock_manager
 
         async def run_test():
             result = await NewsFetcher.get_latest_global_news(limit=20)
             self.assertEqual(len(result), 2)
+            self.assertEqual(result[0]["title"], "美联储加息")
+            self.assertEqual(result[0]["time"], "2024-03-15 10:30:00")
 
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_global_news_empty(self, mock_pool):
-        """空数据返回空列表"""
+    @patch("data.external.news_fetcher.requests.get")
+    def test_get_global_news_empty(self, mock_get, mock_pool):
+        """空 roll_data 返回空列表"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": {"roll_data": []}}
+        mock_get.return_value = mock_resp
+
         mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=pd.DataFrame())
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_pool.return_value = mock_manager
 
         async def run_test():
@@ -131,10 +152,16 @@ class TestGetLatestGlobalNews(unittest.TestCase):
         asyncio.run(run_test())
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    def test_get_global_news_none(self, mock_pool):
-        """None 数据返回空列表"""
+    @patch("data.external.news_fetcher.requests.get")
+    def test_get_global_news_none_response(self, mock_get, mock_pool):
+        """返回 None 时返回空列表"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = None
+        mock_get.return_value = mock_resp
+
         mock_manager = MagicMock()
-        mock_manager.run_async = AsyncMock(return_value=None)
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_pool.return_value = mock_manager
 
         async def run_test():
@@ -145,9 +172,31 @@ class TestGetLatestGlobalNews(unittest.TestCase):
 
     @patch("data.external.news_fetcher.ThreadPoolManager")
     def test_get_global_news_runtime_error(self, mock_pool):
-        """RuntimeError 返回空列表"""
+        """RuntimeError 返回空列表且不触发熔断"""
+        import data.external.news_fetcher as nf_mod
+
         mock_manager = MagicMock()
         mock_manager.run_async = AsyncMock(side_effect=RuntimeError("Pool error"))
+        mock_pool.return_value = mock_manager
+
+        async def run_test():
+            result = await NewsFetcher.get_latest_global_news(limit=20)
+            self.assertEqual(result, [])
+            self.assertEqual(nf_mod._CLS_CONSECUTIVE_FAILURES, 0)
+
+        asyncio.run(run_test())
+
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    def test_get_global_news_missing_structure(self, mock_get, mock_pool):
+        """返回 JSON 缺少 data 键时返回空列表"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"unexpected": "structure"}
+        mock_get.return_value = mock_resp
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
         mock_pool.return_value = mock_manager
 
         async def run_test():

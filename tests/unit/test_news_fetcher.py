@@ -1,10 +1,12 @@
 import asyncio
+import datetime
 import logging
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
+from core.i18n import I18n
 from data.external.news_fetcher import (
     NewsFetcher,
     _run_with_python_string_storage,
@@ -13,6 +15,8 @@ from data.external.news_fetcher import (
     _SINA_CONSECUTIVE_FAILURES,
     _SINA_EMPTY_THRESHOLD,
 )
+from utils.time_utils import CST_TZ
+import requests
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
@@ -24,12 +28,19 @@ def clean_global_caches():
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
+    # 重置 CLS 熔断器状态，防止测试间状态泄漏
+    import data.external.news_fetcher as _nf_mod
+
+    _nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    _nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
     yield
     _US_MOVES_CACHE.clear()
     _SINA_CONSECUTIVE_EMPTY.clear()
     _SINA_CONSECUTIVE_EMPTY["concept"] = 0
     _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
     _SINA_CONSECUTIVE_FAILURES["concept"] = 0
+    _nf_mod._CLS_CONSECUTIVE_FAILURES = 0
+    _nf_mod._CLS_CIRCUIT_OPENED_AT = 0.0
 
 
 class TestRunWithPythonStringStorage:
@@ -235,170 +246,279 @@ class TestGetStockNews:
 
 
 class TestGetLatestGlobalNews:
+    """测试 get_latest_global_news —— 直连 CLS API + 熔断器。"""
+
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_success_with_data(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "标题": ["重大新闻1", "重大新闻2"],
-                "内容": ["内容1", "内容2"],
-                "发布时间": ["2024-06-14 10:00:00", "2024-06-14 09:00:00"],
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_success_with_data(self, mock_get, mock_tpm):
+        """成功获取数据，ctime 秒级时间戳正确转换。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "重大新闻1", "content": "内容1", "ctime": 1718330400},
+                    {"title": "重大新闻2", "content": "内容2", "ctime": 1718326800},
+                ]
             }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+        }
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
 
         result = await NewsFetcher.get_latest_global_news(limit=5)
         assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["title"] == "重大新闻1"
+        assert result[0]["time"] == "2024-06-14 10:00:00"
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_runtime_error(self, mock_tpm):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
-
-        result = await NewsFetcher.get_latest_global_news()
-        assert result == []
-
-    @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_empty_df(self, mock_ak, mock_run, mock_tpm):
-        mock_ak.stock_info_global_cls.return_value = pd.DataFrame()
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=pd.DataFrame())
-
-        result = await NewsFetcher.get_latest_global_news()
-        assert result == []
-
-    @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_none_df(self, mock_ak, mock_run, mock_tpm):
-        mock_ak.stock_info_global_cls.return_value = None
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=None)
-
-        result = await NewsFetcher.get_latest_global_news()
-        assert result == []
-
-    @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_time_only_string(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "标题": ["新闻"],
-                "内容": ["内容"],
-                "发布时间": ["09:30:00"],
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_success_with_millisecond_ctime(self, mock_get, mock_tpm):
+        """ctime 毫秒级时间戳自动检测并除以 1000。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "毫秒新闻", "content": "", "ctime": 1718330400000},
+                ]
             }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+        }
+        mock_get.return_value = mock_response
 
-        result = await NewsFetcher.get_latest_global_news(limit=1)
-        assert isinstance(result, list)
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert len(result) == 1
+        assert result[0]["time"] == "2024-06-14 10:00:00"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_success_with_missing_ctime(self, mock_get, mock_tpm):
+        """ctime 缺失时回退到 get_now()。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "无时间戳", "content": "内容"},
+                ]
+            }
+        }
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert len(result) == 1
+        assert result[0]["title"] == "无时间戳"
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_success_with_invalid_ctime(self, mock_get, mock_tpm):
+        """ctime 非法值时回退到 get_now()。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "非法时间", "content": "", "ctime": "not-a-number"},
+                ]
+            }
+        }
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news(limit=5)
         assert len(result) == 1
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_time_column_variants(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "标题": ["新闻"],
-                "内容": ["内容"],
-                "时间": ["2024-06-14 10:00:00"],
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_title_fallback_to_content(self, mock_get, mock_tpm):
+        """title 缺失时回退到 content。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"content": "内容作为标题", "ctime": 1718330400},
+                ]
             }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+        }
+        mock_get.return_value = mock_response
 
-        result = await NewsFetcher.get_latest_global_news(limit=1)
-        assert isinstance(result, list)
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert result[0]["title"] == "内容作为标题"
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_title_column_variant(self, mock_ak, mock_run, mock_tpm):
-        df = pd.DataFrame(
-            {
-                "title": ["English Title"],
-                "content": ["Content"],
-                "time": ["2024-06-14 10:00:00"],
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_empty_title_and_content_uses_i18n(self, mock_get, mock_tpm):
+        """title 和 content 均空时使用 I18n 默认值。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "", "content": "", "ctime": 1718330400},
+                ]
             }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=df)
+        }
+        mock_get.return_value = mock_response
 
-        result = await NewsFetcher.get_latest_global_news(limit=1)
-        assert isinstance(result, list)
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news(limit=5)
+        assert result[0]["title"] == I18n.get("news_no_title")
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    @patch(
-        "data.external.news_fetcher._run_with_python_string_storage",
-        side_effect=lambda f: f(),
-    )
-    @patch("data.external.news_fetcher.ak")
-    async def test_general_exception(self, mock_ak, mock_run, mock_tpm):
-        mock_ak.stock_info_global_cls.side_effect = Exception("api error")
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(side_effect=Exception("api error"))
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_empty_roll_data(self, mock_get, mock_tpm):
+        """roll_data 为空列表时返回空列表。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": {"roll_data": []}}
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
 
         result = await NewsFetcher.get_latest_global_news()
         assert result == []
 
     @pytest.mark.asyncio
-    async def test_akshare_returns_list(self):
-        """When akshare returns list instead of DataFrame, _ensure_dataframe normalizes it."""
-        fetcher = NewsFetcher()
-        list_data = [
-            {"title": "News1", "content": "Content1", "publish_time": "2024-06-14"},
-            {"title": "News2", "content": "Content2", "publish_time": "2024-06-14"},
-        ]
-        with patch("data.external.news_fetcher.ak") as mock_ak:
-            mock_ak.stock_info_global_cls.return_value = list_data
-            result = await fetcher.get_latest_global_news()
-            # Should not raise AttributeError, should return a list (possibly empty if columns don't match)
-            assert isinstance(result, list)
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_missing_data_structure(self, mock_get, mock_tpm):
+        """返回 JSON 缺少 data/roll_data 键时返回空列表。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"unexpected": "structure"}
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    async def test_runtime_error_does_not_trigger_circuit_breaker(self, mock_tpm):
+        """RuntimeError（基础设施错误）不递增熔断计数。"""
+        import data.external.news_fetcher as nf_mod
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=RuntimeError("no pool"))
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+        assert nf_mod._CLS_CONSECUTIVE_FAILURES == 0
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_requests_exception_increments_circuit_breaker(self, mock_get, mock_tpm):
+        """requests 异常递增熔断计数。"""
+        import data.external.news_fetcher as nf_mod
+
+        mock_get.side_effect = requests.ConnectionError("network down")
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+        assert nf_mod._CLS_CONSECUTIVE_FAILURES == 1
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_http_error_increments_circuit_breaker(self, mock_get, mock_tpm):
+        """HTTP 4xx/5xx 递增熔断计数。"""
+        import data.external.news_fetcher as nf_mod
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = requests.HTTPError("403 Forbidden")
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result == []
+        assert nf_mod._CLS_CONSECUTIVE_FAILURES == 1
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_limit_truncates_results(self, mock_get, mock_tpm):
+        """limit 参数截断结果数量。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {"roll_data": [{"title": f"新闻{i}", "content": "", "ctime": 1718330400 + i} for i in range(10)]}
+        }
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news(limit=3)
+        assert len(result) == 3
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_sorted_desc_by_time(self, mock_get, mock_tpm):
+        """结果按时间降序排列。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "旧新闻", "content": "", "ctime": 1718326800},
+                    {"title": "新新闻", "content": "", "ctime": 1718330400},
+                ]
+            }
+        }
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        result = await NewsFetcher.get_latest_global_news()
+        assert result[0]["title"] == "新新闻"
+        assert result[1]["title"] == "旧新闻"
 
 
 class TestGetUsMajorMoves:
@@ -785,14 +905,21 @@ class TestGetHotConcepts:
 
 class TestNewsFetcherGetLatestGlobalNews:
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher._run_with_python_string_storage")
     @patch("data.external.news_fetcher.ThreadPoolManager")
-    async def test_get_latest_global_news(self, mock_tpm, mock_run):
-        mock_tpm_instance = MagicMock()
-        mock_tpm.return_value = mock_tpm_instance
-        mock_tpm_instance.run_async = AsyncMock(return_value=[])
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_get_latest_global_news(self, mock_get, mock_tpm):
+        """基本冒烟测试：返回 list 类型。"""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": {"roll_data": []}}
+        mock_get.return_value = mock_response
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
         result = await NewsFetcher.get_latest_global_news()
-        assert isinstance(result, (list, str))
+        assert isinstance(result, list)
 
 
 class TestNewsFetcherGetStockNews:
@@ -1101,79 +1228,74 @@ class TestGetStockNewsDirectExecution:
 
 
 class TestGetLatestGlobalNewsDirectExecution:
+    """通过 ThreadPoolManager side_effect 直接执行 _fetch_cls 的测试。"""
+
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_time_only_yesterday_logic(self, mock_ak):
-        from datetime import datetime
-
-        now = datetime(2024, 6, 14, 1, 5, 0)
-        df = pd.DataFrame(
-            {
-                "标题": ["夜间新闻"],
-                "内容": ["内容"],
-                "发布时间": ["23:55:00"],
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_direct_success_ctime_seconds(self, mock_get):
+        """秒级 ctime 直接执行成功。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "直接执行", "content": "内容", "ctime": 1718330400},
+                ]
             }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
+        }
+        mock_get.return_value = mock_resp
 
-        with patch("data.external.news_fetcher.get_now", return_value=now):
-            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-                mock_tpm_instance = MagicMock()
-                mock_tpm.return_value = mock_tpm_instance
-                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-                result = await NewsFetcher.get_latest_global_news(limit=1)
+            result = await NewsFetcher.get_latest_global_news(limit=1)
         assert isinstance(result, list)
         assert len(result) == 1
-        assert "2024-06-13" in result[0]["time"]
+        assert result[0]["title"] == "直接执行"
+        assert result[0]["time"] == "2024-06-14 10:00:00"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_time_parse_fallback_short_time(self, mock_ak):
-        from datetime import datetime
-
-        now = datetime(2024, 6, 14, 10, 0, 0)
-        df = pd.DataFrame(
-            {
-                "标题": ["新闻"],
-                "内容": ["内容"],
-                "发布时间": ["093000"],
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_direct_success_ctime_milliseconds(self, mock_get):
+        """毫秒级 ctime 自动检测并转换。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {
+                "roll_data": [
+                    {"title": "毫秒", "content": "", "ctime": 1718330400000},
+                ]
             }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
+        }
+        mock_get.return_value = mock_resp
 
-        with patch("data.external.news_fetcher.get_now", return_value=now):
-            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-                mock_tpm_instance = MagicMock()
-                mock_tpm.return_value = mock_tpm_instance
-                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-                result = await NewsFetcher.get_latest_global_news(limit=1)
-        assert isinstance(result, list)
+            result = await NewsFetcher.get_latest_global_news(limit=1)
+        assert len(result) == 1
+        assert result[0]["time"] == "2024-06-14 10:00:00"
 
     @pytest.mark.asyncio
-    @patch("data.external.news_fetcher.ak")
-    async def test_pandas_time_standardize_fallback(self, mock_ak):
-        from datetime import datetime
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_direct_missing_data_key(self, mock_get):
+        """返回 JSON 缺少 data 键时返回空列表。"""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"no_data": True}
+        mock_get.return_value = mock_resp
 
-        now = datetime(2024, 6, 14, 10, 0, 0)
-        df = pd.DataFrame(
-            {
-                "标题": ["新闻"],
-                "内容": ["内容"],
-                "发布时间": ["not-a-date"],
-            }
-        )
-        mock_ak.stock_info_global_cls.return_value = df
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
 
-        with patch("data.external.news_fetcher.get_now", return_value=now):
-            with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
-                mock_tpm_instance = MagicMock()
-                mock_tpm.return_value = mock_tpm_instance
-                mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
-
-                result = await NewsFetcher.get_latest_global_news(limit=1)
-        assert isinstance(result, list)
+            result = await NewsFetcher.get_latest_global_news(limit=1)
+        assert result == []
 
 
 class TestGetUsMajorMovesDirectExecution:
@@ -1395,3 +1517,117 @@ class TestEnsureDataframe:
 
         result = _ensure_dataframe(42, source="test")
         assert result is None
+
+
+class TestCLSCircuitBreaker:
+    """测试 CLS 熔断器的开启、半开探活与恢复逻辑。"""
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_circuit_opens_after_threshold(self, mock_get, mock_tpm):
+        """连续 3 次失败后熔断器开启。"""
+        import data.external.news_fetcher as nf_mod
+
+        mock_get.side_effect = requests.ConnectionError("network down")
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        with patch("data.external.news_fetcher.get_now", return_value=base_time):
+            for _ in range(3):
+                res = await NewsFetcher.get_latest_global_news()
+                assert res == []
+            assert nf_mod._CLS_CONSECUTIVE_FAILURES == 3
+            assert base_time.timestamp() == nf_mod._CLS_CIRCUIT_OPENED_AT
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_circuit_fast_fails_when_open(self, mock_get, mock_tpm):
+        """熔断开启期间直接返回空列表，不发起网络调用。"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._CLS_CONSECUTIVE_FAILURES = 3
+        nf_mod._CLS_CIRCUIT_OPENED_AT = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0)).timestamp()
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        now = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 30))
+        with patch("data.external.news_fetcher.get_now", return_value=now):
+            res = await NewsFetcher.get_latest_global_news()
+            assert res == []
+            mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_circuit_half_open_recovery(self, mock_get, mock_tpm):
+        """冷却期过后半开探活成功，熔断器关闭恢复。"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._CLS_CONSECUTIVE_FAILURES = 3
+        base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "data": {"roll_data": [{"title": "探活成功", "content": "", "ctime": 1718330400}]}
+        }
+        mock_get.return_value = mock_resp
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        future_time = base_time + datetime.timedelta(seconds=61)
+        with patch("data.external.news_fetcher.get_now", return_value=future_time):
+            res = await NewsFetcher.get_latest_global_news()
+            assert len(res) == 1
+            assert res[0]["title"] == "探活成功"
+            assert nf_mod._CLS_CONSECUTIVE_FAILURES == 0
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ThreadPoolManager")
+    @patch("data.external.news_fetcher.requests.get")
+    async def test_circuit_half_open_failure_resets_cooldown(self, mock_get, mock_tpm):
+        """半开探活失败时重置冷却计时器，下一个 60s 窗口重新计时。"""
+        import data.external.news_fetcher as nf_mod
+
+        nf_mod._CLS_CONSECUTIVE_FAILURES = 3
+        base_time = CST_TZ.localize(datetime.datetime(2024, 6, 14, 10, 0, 0))
+        nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
+
+        mock_get.side_effect = requests.ConnectionError("still down")
+
+        mock_manager = MagicMock()
+        mock_manager.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+        mock_tpm.return_value = mock_manager
+
+        probe_time = base_time + datetime.timedelta(seconds=61)
+        with patch("data.external.news_fetcher.get_now", return_value=probe_time):
+            res = await NewsFetcher.get_latest_global_news()
+            assert res == []
+            assert nf_mod._CLS_CONSECUTIVE_FAILURES == 4
+            assert probe_time.timestamp() == nf_mod._CLS_CIRCUIT_OPENED_AT
+
+        # 探活失败后 30s 内应快速失败
+        mock_get.reset_mock()
+        fast_fail_time = probe_time + datetime.timedelta(seconds=30)
+        with patch("data.external.news_fetcher.get_now", return_value=fast_fail_time):
+            res = await NewsFetcher.get_latest_global_news()
+            assert res == []
+            mock_get.assert_not_called()
+
+        # 探活失败后 61s 应再次进入半开
+        mock_get.reset_mock()
+        mock_get.side_effect = requests.ConnectionError("still down")
+        second_probe_time = probe_time + datetime.timedelta(seconds=61)
+        with patch("data.external.news_fetcher.get_now", return_value=second_probe_time):
+            res = await NewsFetcher.get_latest_global_news()
+            assert res == []
+            mock_get.assert_called_once()
