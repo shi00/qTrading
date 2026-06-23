@@ -39,7 +39,7 @@ class MockSession:
 
 class MockFletPage:
     def __init__(self):
-        self.controls = []
+        self.controls = [MagicMock()]
         self.overlay = []
         self._client_storage = MockClientStorage()
         self._session = MockSession()

@@ -68,6 +68,14 @@ class TestToastManager:
 
         assert len(manager.toasts_stack.controls) == 0
 
+    def test_show_does_nothing_when_page_controls_empty(self, mock_page):
+        mock_page.controls.clear()
+        manager = ToastManager(mock_page)
+
+        manager.show("hello")
+
+        assert len(manager.toasts_stack.controls) == 0
+
     def test_show_registers_task_via_run_task(self, mock_page):
         manager = ToastManager(mock_page)
 
