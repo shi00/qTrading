@@ -1,4 +1,4 @@
-"""main.py 测试 - 覆盖数据库升级、初始化失败、onboarding等场景"""
+"""main.py 测试 - 覆盖窗口/对话框/disconnect管理等场景"""
 
 import asyncio
 import os
@@ -9,26 +9,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import app.startup_controller as startup_ctrl
 import main as app_main
+import ui.views.onboarding_wizard as onboarding_wizard_mod
 import utils.shutdown as shutdown_mod
 
 pytestmark = pytest.mark.integration
 
 AsyncEventHandler = Callable[[Any], Awaitable[None]]
 SyncClickHandler = Callable[[Any], None]
-
-
-class _FakeTextButton:
-    def __init__(self, label: str, on_click: SyncClickHandler | None = None):
-        self.label = label
-        self.on_click = on_click
-
-
-class _FakeElevatedButton:
-    def __init__(self, label: str, on_click=None, icon=None):
-        self.label = label
-        self.on_click = on_click
-        self.icon = icon
 
 
 class _DummyWindow:
@@ -114,52 +103,6 @@ class _FakeCoordinator:
         os._exit(code)
 
 
-class _FakeAlertDialog:
-    def __init__(self, **kwargs):
-        self.modal = kwargs.get("modal")
-        self.title = kwargs.get("title")
-        self.content = kwargs.get("content")
-        self.actions = kwargs.get("actions", [])
-        self.actions_alignment = kwargs.get("actions_alignment")
-        self.open = False
-
-
-class _FakeProgressBar:
-    def __init__(self, width=300):
-        self.width = width
-
-
-class _FakeColumn:
-    def __init__(self, controls=None, spacing=10, horizontal_alignment=None, alignment=None):
-        self.controls = controls or []
-        self.spacing = spacing
-        self.horizontal_alignment = horizontal_alignment
-        self.alignment = alignment
-
-
-class _FakeRow:
-    def __init__(self, controls=None, alignment=None, spacing=20, vertical_alignment=None):
-        self.controls = controls or []
-        self.alignment = alignment
-        self.spacing = spacing
-        self.vertical_alignment = vertical_alignment
-
-
-class _FakeContainer:
-    def __init__(self, content=None, expand=None, alignment=None, padding=None):
-        self.content = content
-        self.expand = expand
-        self.alignment = alignment
-        self.padding = padding
-
-
-class _FakeIcon:
-    def __init__(self, name, color=None, size=48):
-        self.name = name
-        self.color = color
-        self.size = size
-
-
 class _LoggerSpy:
     def __init__(self):
         self.messages: list[str] = []
@@ -194,35 +137,8 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
-    monkeypatch.setattr(app_main, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
-    monkeypatch.setattr(app_main.ft, "Container", _FakeContainer)
-    monkeypatch.setattr(app_main.ft, "AlertDialog", _FakeAlertDialog)
-    monkeypatch.setattr(app_main.ft, "Text", lambda value, **_kwargs: value)
-    monkeypatch.setattr(app_main.ft, "ProgressBar", _FakeProgressBar)
-    monkeypatch.setattr(app_main.ft, "Column", _FakeColumn)
-    monkeypatch.setattr(app_main.ft, "Row", _FakeRow)
-    monkeypatch.setattr(app_main.ft, "Icon", _FakeIcon)
-    monkeypatch.setattr(
-        app_main.ft,
-        "TextButton",
-        lambda label, on_click=None, **_kwargs: _FakeTextButton(label=label, on_click=on_click),
-    )
-    monkeypatch.setattr(
-        app_main.ft,
-        "ElevatedButton",
-        lambda label, on_click=None, icon=None, **_kwargs: _FakeElevatedButton(
-            label=label, on_click=on_click, icon=icon
-        ),
-    )
-    monkeypatch.setattr(
-        app_main.ft,
-        "MainAxisAlignment",
-        SimpleNamespace(END="end", CENTER="center", SPACE_BETWEEN="space_between"),
-    )
-    monkeypatch.setattr(app_main.ft, "CrossAxisAlignment", SimpleNamespace(CENTER="center"))
-    monkeypatch.setattr(app_main.ft, "FontWeight", SimpleNamespace(BOLD="bold"))
+    # WindowEventType must be a string "close" so SimpleNamespace(type="close") matches
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
-    monkeypatch.setattr(app_main.ft, "alignment", SimpleNamespace(center="center"))
     monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
     monkeypatch.setattr(app_main.ProxyManager, "apply_smart_proxy_policy", lambda: None)
     monkeypatch.setattr(app_main.ConfigHandler, "ensure_defaults", lambda: None)
@@ -232,7 +148,13 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main.ConfigHandler, "is_onboarding_complete", lambda: False)
     monkeypatch.setattr(app_main.I18n, "initialize", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_main.I18n, "get", lambda key, default=None: default or key)
+    # Mock startup flow to avoid real DB operations: stop at NEED_ONBOARDING by default
+    monkeypatch.setattr(startup_ctrl, "check_onboarding_needed", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(onboarding_wizard_mod, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
+    _tpm_mock = MagicMock()
+    _tpm_mock.return_value.run_async = AsyncMock()
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", _tpm_mock)
     if exit_spy is None:
         monkeypatch.setattr(
             os,
@@ -241,252 +163,6 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
         )
     else:
         monkeypatch.setattr(os, "_exit", exit_spy)
-
-
-class TestMainDbUpgradeNeeded:
-    @pytest.mark.asyncio
-    async def test_db_upgrade_needed_shows_dialog(self, monkeypatch):
-        _prepare_main(monkeypatch)
-        mock_cm = MagicMock()
-        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
-
-        with (
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("main.check_onboarding_needed", return_value=False),
-        ):
-            mock_init.return_value = {"success": False, "error": "db_upgrade_needed"}
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            assert page.current_dialog is not None
-            assert page.current_dialog.open is True
-            dialog = page.current_dialog
-            assert "升级" in str(dialog.title) or "upgrade" in str(dialog.title).lower()
-
-    @pytest.mark.asyncio
-    async def test_db_upgrade_success_flow(self, monkeypatch):
-        _prepare_main(monkeypatch)
-        mock_cm = MagicMock()
-        mock_cm.engine = MagicMock()
-        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
-
-        with (
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("main.check_onboarding_needed", return_value=False),
-            patch(
-                "data.persistence.db_migrator.DatabaseMigrator.init_db",
-                new_callable=AsyncMock,
-            ) as mock_migrate,
-        ):
-            mock_init.return_value = {"success": False, "error": "db_upgrade_needed"}
-            mock_migrate.return_value = None
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            upgrade_dialog = page.current_dialog
-            assert upgrade_dialog is not None
-
-            upgrade_btn = upgrade_dialog.actions[0]
-            assert upgrade_btn.on_click is not None
-
-
-class TestMainDbInitFailed:
-    @pytest.mark.asyncio
-    async def test_db_init_failed_shows_error_page(self, monkeypatch):
-        _prepare_main(monkeypatch)
-        mock_cm = MagicMock()
-        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
-
-        with (
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("main.check_onboarding_needed", return_value=False),
-        ):
-            mock_init.return_value = {
-                "success": False,
-                "error": "db_init_failed",
-                "detail": "connection refused",
-            }
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            assert len(page.controls) > 0
-            container = page.controls[0]
-            assert isinstance(container, _FakeContainer)
-            assert container.expand is True
-
-    @pytest.mark.asyncio
-    async def test_db_init_failed_retry_button(self, monkeypatch):
-        _prepare_main(monkeypatch)
-        mock_cm = MagicMock()
-        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
-
-        init_call_count = 0
-
-        async def mock_init_services(*args, **kwargs):
-            nonlocal init_call_count
-            init_call_count += 1
-            if init_call_count == 1:
-                return {"success": False, "error": "db_init_failed", "detail": "error"}
-            return {"success": True}
-
-        with (
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("ui.app_layout.AppLayout") as mock_layout,
-        ):
-            mock_init.side_effect = mock_init_services
-            mock_layout_instance = MagicMock()
-            mock_layout.return_value = mock_layout_instance
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            assert len(page.controls) > 0
-            container = page.controls[0]
-            col = container.content
-            row = col.controls[-1]
-            retry_btn = row.controls[0]
-            assert retry_btn.on_click is not None
-
-    @pytest.mark.asyncio
-    async def test_db_init_failed_skip_button(self, monkeypatch):
-        _prepare_main(monkeypatch)
-        mock_cm = MagicMock()
-        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
-
-        with (
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("ui.app_layout.AppLayout") as mock_layout,
-        ):
-            mock_init.return_value = {
-                "success": False,
-                "error": "db_init_failed",
-                "detail": "error",
-            }
-            mock_layout_instance = MagicMock()
-            mock_layout.return_value = mock_layout_instance
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            container = page.controls[0]
-            col = container.content
-            row = col.controls[-1]
-            skip_btn = row.controls[2]
-            assert skip_btn.on_click is not None
-
-            skip_btn.on_click(MagicMock())
-            mock_layout_instance.show.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_db_init_failed_reconfigure_button(self, monkeypatch):
-        _prepare_main(monkeypatch)
-        mock_cm = AsyncMock()
-        monkeypatch.setattr(app_main, "CacheManager", lambda: mock_cm)
-
-        with (
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("main.ConfigHandler") as mock_config,
-            patch("main.OnboardingWizard") as mock_wizard,
-        ):
-            mock_init.return_value = {
-                "success": False,
-                "error": "db_init_failed",
-                "detail": "error",
-            }
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            container = page.controls[0]
-            col = container.content
-            row = col.controls[-1]
-            reconfigure_btn = row.controls[1]
-            assert reconfigure_btn.on_click is not None
-
-            # Click schedules the coroutine
-            reconfigure_btn.on_click(MagicMock())
-
-            # Execute the scheduled coroutine
-            assert len(page.run_task_calls) == 1
-            coro, args = page.run_task_calls[0]
-            await coro(*args)
-
-            # Assert CacheManager.close was awaited
-            mock_cm.close.assert_awaited_once()
-
-            # Assert set_onboarding_complete(False) was called
-            mock_config.set_onboarding_complete.assert_called_once_with(False)
-
-            # Assert OnboardingWizard was created and page was populated
-            mock_wizard.assert_called_once()
-            assert len(page.controls) == 1
-
-
-class TestMainOnboardingFlow:
-    @pytest.mark.asyncio
-    async def test_onboarding_needed_shows_wizard(self, monkeypatch):
-        _prepare_main(monkeypatch)
-
-        with patch("main.check_onboarding_needed", return_value=True):
-            page = _DummyPage()
-            await app_main.main(page)
-
-            assert len(page.controls) > 0
-            container = page.controls[0]
-            assert isinstance(container, _FakeContainer)
-            assert container.padding == 40
-
-    @pytest.mark.asyncio
-    async def test_onboarding_complete_calls_init_services(self, monkeypatch):
-        _prepare_main(monkeypatch)
-
-        with (
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("main.NewsSubscriptionService") as mock_ns,
-        ):
-            mock_init.return_value = {"success": True}
-            mock_layout_instance = MagicMock()
-            mock_layout.return_value = mock_layout_instance
-            mock_ns_instance = MagicMock()
-            mock_ns.return_value = mock_ns_instance
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            mock_init.assert_awaited_once()
-            mock_layout_instance.show.assert_called_once()
-
-
-class TestMainServicesSuccess:
-    @pytest.mark.asyncio
-    async def test_services_success_starts_app_layout(self, monkeypatch):
-        _prepare_main(monkeypatch)
-
-        with (
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
-            patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("main.NewsSubscriptionService") as mock_ns,
-        ):
-            mock_init.return_value = {"success": True}
-            mock_layout_instance = MagicMock()
-            mock_layout.return_value = mock_layout_instance
-            mock_ns_instance = MagicMock()
-            mock_ns.return_value = mock_ns_instance
-
-            page = _DummyPage()
-            await app_main.main(page)
-
-            mock_layout_instance.show.assert_called_once()
-            mock_ns_instance.add_listener.assert_called_once()
 
 
 class TestMainWindowDestroyError:
@@ -537,7 +213,7 @@ class TestMainWindowDestroyError:
 
         dialog = page.current_dialog
         assert dialog is not None
-        confirm_btn = cast(_FakeTextButton, dialog.actions[1])
+        confirm_btn = dialog.actions[1]
         assert confirm_btn.on_click is not None
         confirm_btn.on_click(MagicMock())
         await asyncio.sleep(0.1)
@@ -558,11 +234,10 @@ class TestMainScheduleAsync:
             def run_task(self, coro):
                 self._run_task_called = True
 
-        with patch("main.check_onboarding_needed", return_value=False):
-            page = _PageWithRunTask()
-            await app_main.main(page)
+        page = _PageWithRunTask()
+        await app_main.main(page)
 
-            assert page.window.on_event is not None
+        assert page.window.on_event is not None
 
 
 class TestMainShowHideDialog:
@@ -592,7 +267,7 @@ class TestMainShowHideDialog:
 
         assert page.current_dialog is not None
 
-        cancel_btn = cast(_FakeTextButton, page.current_dialog.actions[0])
+        cancel_btn = page.current_dialog.actions[0]
         assert cancel_btn.on_click is not None
         cancel_btn.on_click(MagicMock())
         await asyncio.sleep(0)
@@ -649,10 +324,10 @@ class TestMainConfigHandlerCalls:
         )
 
         with (
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("app.startup_controller.check_onboarding_needed", return_value=False),
+            patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("main.NewsSubscriptionService") as mock_ns,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_ns,
         ):
             mock_init.return_value = {"success": True}
             mock_layout_instance = MagicMock()
@@ -677,10 +352,10 @@ class TestMainMaskSensitive:
         monkeypatch.setattr(app_main, "logger", logger_spy)
 
         with (
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("app.startup_controller.check_onboarding_needed", return_value=False),
+            patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init,
             patch("ui.app_layout.AppLayout") as mock_layout,
-            patch("main.NewsSubscriptionService") as mock_ns,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_ns,
         ):
             mock_init.return_value = {"success": True}
             mock_layout_instance = MagicMock()
@@ -702,15 +377,14 @@ class TestMainOnError:
         logger_spy = _LoggerSpy()
         monkeypatch.setattr(app_main, "logger", logger_spy)
 
-        with patch("main.check_onboarding_needed", return_value=False):
-            page = _DummyPage()
-            await app_main.main(page)
+        page = _DummyPage()
+        await app_main.main(page)
 
-            assert page.on_error is not None
-            test_error = RuntimeError("test error")
-            page.on_error(test_error)
+        assert page.on_error is not None
+        test_error = RuntimeError("test error")
+        page.on_error(test_error)
 
-            assert any("Unhandled UI Exception" in msg for msg in logger_spy.errors)
+        assert any("Unhandled UI Exception" in msg for msg in logger_spy.errors)
 
 
 class TestMainDisconnectCleanupDone:
@@ -725,17 +399,16 @@ class TestMainDisconnectCleanupDone:
 
         monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _CoordinatorWithCleanupDone)
 
-        with patch("main.check_onboarding_needed", return_value=False):
-            page = _DummyPage()
-            await app_main.main(page)
+        page = _DummyPage()
+        await app_main.main(page)
 
-            assert page.on_disconnect is not None
-            on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
-            await on_disconnect(MagicMock())
+        assert page.on_disconnect is not None
+        on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
+        await on_disconnect(MagicMock())
 
-            coordinator = _CoordinatorWithCleanupDone.last
-            assert coordinator is not None
-            assert coordinator.do_cleanup_calls == 1
+        coordinator = _CoordinatorWithCleanupDone.last
+        assert coordinator is not None
+        assert coordinator.do_cleanup_calls == 1
 
 
 class TestMainWindowCloseShowDialogSkipped:
@@ -746,8 +419,8 @@ class TestMainWindowCloseShowDialogSkipped:
         monkeypatch.setattr(app_main, "logger", logger_spy)
 
         with (
-            patch("main.check_onboarding_needed", return_value=False),
-            patch("main.initialize_services", new_callable=AsyncMock) as mock_init,
+            patch("app.startup_controller.check_onboarding_needed", return_value=False),
+            patch("app.startup_controller.initialize_services", new_callable=AsyncMock) as mock_init,
         ):
             mock_init.return_value = {"success": False, "error": "db_init_failed"}
             page = _DummyPage()
@@ -769,20 +442,19 @@ class TestMainHideCloseConfirmDialog:
     async def test_hide_close_confirm_dialog_when_none(self, monkeypatch):
         _prepare_main(monkeypatch)
 
-        with patch("main.check_onboarding_needed", return_value=False):
-            page = _DummyPage()
-            await app_main.main(page)
+        page = _DummyPage()
+        await app_main.main(page)
 
-            assert page.window.on_event is not None
-            on_event = cast(AsyncEventHandler, page.window.on_event)
-            await on_event(SimpleNamespace(type="close"))
+        assert page.window.on_event is not None
+        on_event = cast(AsyncEventHandler, page.window.on_event)
+        await on_event(SimpleNamespace(type="close"))
 
-            dialog = page.current_dialog
-            assert dialog is not None
+        dialog = page.current_dialog
+        assert dialog is not None
 
-            cancel_btn = cast(_FakeTextButton, dialog.actions[0])
-            assert cancel_btn.on_click is not None
-            cancel_btn.on_click(MagicMock())
-            await asyncio.sleep(0)
+        cancel_btn = dialog.actions[0]
+        assert cancel_btn.on_click is not None
+        cancel_btn.on_click(MagicMock())
+        await asyncio.sleep(0)
 
-            assert page.current_dialog is None
+        assert page.current_dialog is None

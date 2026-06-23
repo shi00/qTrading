@@ -10,30 +10,14 @@ from utils.exception_hooks import install_asyncio_handler_for_loop, install_glob
 from utils.log_decorators import UILogger
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
-from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
-from services.news_subscription_service import NewsSubscriptionService
 from ui.components.toast_manager import ToastManager
 from ui.theme import apply_page_theme
-from ui.views.onboarding_wizard import OnboardingWizard
-from app.bootstrap import check_onboarding_needed, initialize_services, mask_sensitive
+from app.bootstrap import mask_sensitive
+from app.startup_controller import StartupController
+from ui.startup_views import StartupViewRenderer
 
 logger = logging.getLogger(__name__)
-
-
-def _get_localized_detail(detail: str) -> str:
-    """Classify and return localized error message for database initialization details."""
-    if not detail:
-        return ""
-    try:
-        from utils.error_classifier import classify_error, get_error_message
-
-        classified = classify_error(Exception(detail), context="db")
-        if classified.get("message_key") != "db_err_unknown":
-            return get_error_message(classified)
-    except Exception as e:
-        logger.warning("[Main] Failed to classify and localize error detail '%s': %s", detail, e)
-    return detail
 
 
 async def main(page: ft.Page):
@@ -261,219 +245,59 @@ async def main(page: ft.Page):
 
     page.show_toast = show_toast  # type: ignore[attr-defined]
 
-    async def _init_services_and_start_app():
-        result = await initialize_services(cache_manager, show_toast_fn=show_toast)
+    # --- Startup flow: delegate to StartupController + StartupViewRenderer ---
 
-        if not result["success"]:
-            if result.get("error") == "db_upgrade_needed":
+    def _show_dialog_with_tracking(dialog):
+        """Wrap _show_dialog to track active dialog for renderer."""
+        nonlocal active_dialog
+        _show_dialog(dialog)
+        active_dialog = dialog
 
-                async def on_upgrade_click(e):
-                    in_progress_dialog = ft.AlertDialog(
-                        modal=True,
-                        title=ft.Text(I18n.get("db_upgrade_in_progress_title")),
-                        content=ft.Column(
-                            [
-                                ft.Text(I18n.get("db_upgrade_in_progress_content")),
-                                ft.ProgressBar(width=300),
-                            ],
-                            spacing=10,
-                        ),
-                        actions=[],
-                        actions_alignment=ft.MainAxisAlignment.END,
-                    )
-                    _show_dialog(in_progress_dialog)
+    def _hide_dialog_with_tracking(dialog):
+        """Wrap _hide_dialog to clear active dialog tracking."""
+        nonlocal active_dialog
+        _hide_dialog(dialog)
+        if active_dialog is dialog:
+            active_dialog = None
 
-                    try:
-                        # 通过 CacheManager.init_db 而非直接调用 DatabaseMigrator，
-                        # 确保 _schema_initialized 被正确设置
-                        await cache_manager.init_db(force=True, auto_migrate=True)
+    async def _perform_upgrade_exit():
+        """Cleanup and force exit after upgrade failure."""
+        cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=1.0)
+        if not cleanup_ok:
+            logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
+        try:
+            if not _is_web_mode():
+                page.window.prevent_close = False
+                page.window.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        coordinator._force_exit(1)
 
-                        _hide_dialog(in_progress_dialog)
+    def _run_task(coro, *args):
+        """Run a coroutine via page.run_task or asyncio fallback."""
+        if hasattr(page, "run_task"):
+            page.run_task(coro, *args)
+        else:
+            _schedule_async(coro)
 
-                        success_dialog = ft.AlertDialog(
-                            modal=True,
-                            title=ft.Text(I18n.get("db_upgrade_success_title")),
-                            content=ft.Text(I18n.get("db_upgrade_success_content")),
-                            actions=[
-                                ft.TextButton(
-                                    I18n.get("common_ok"),
-                                    on_click=lambda e: [
-                                        _hide_dialog(success_dialog),
-                                        page.run_task(_init_services_and_start_app),
-                                    ],
-                                ),
-                            ],
-                            actions_alignment=ft.MainAxisAlignment.END,
-                        )
-                        _show_dialog(success_dialog)
-                    except Exception as upgrade_error:
-                        _hide_dialog(in_progress_dialog)
+    def _on_show_toast(message_key, toast_type="info"):
+        """Wrap show_toast to resolve i18n keys before displaying."""
+        show_toast(I18n.get(message_key), toast_type)
 
-                        error_str = str(upgrade_error)
+    controller = StartupController(
+        cache_manager=cache_manager,
+        on_state_change=lambda state, ctx: renderer.on_state_change(state, ctx),
+        on_show_toast=_on_show_toast,
+        on_exit=lambda: _schedule_async(_perform_upgrade_exit),
+    )
 
-                        async def on_exit_click(e):
-                            logger.warning("[Main] User chose to exit after upgrade failure: %s", error_str)
-                            _hide_dialog(error_dialog)
-                            cleanup_ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=1.0)
-                            if not cleanup_ok:
-                                logger.error("[Main] Cleanup incomplete after upgrade failure exit.")
-                            try:
-                                if not _is_web_mode():
-                                    page.window.prevent_close = False
-                                    page.window.destroy()
-                            except Exception:  # noqa: BLE001
-                                pass
-                            coordinator._force_exit(1)
-
-                        error_dialog = ft.AlertDialog(
-                            modal=True,
-                            title=ft.Text(I18n.get("db_upgrade_error_title")),
-                            content=ft.Text(
-                                I18n.get(
-                                    "db_upgrade_error_content",
-                                )
-                            ),
-                            actions=[
-                                ft.TextButton(
-                                    I18n.get("exit_program"),
-                                    on_click=lambda e: page.run_task(on_exit_click, e),
-                                ),
-                                ft.ElevatedButton(
-                                    I18n.get("retry_upgrade"),
-                                    on_click=lambda e: [
-                                        logger.info("[Main] User chose to retry upgrade after failure."),
-                                        _hide_dialog(error_dialog),
-                                        page.run_task(on_upgrade_click, e),
-                                    ],
-                                ),
-                            ],
-                            actions_alignment=ft.MainAxisAlignment.END,
-                        )
-                        _show_dialog(error_dialog)
-
-                upgrade_dialog = ft.AlertDialog(
-                    modal=True,
-                    title=ft.Text(I18n.get("db_upgrade_needed_title")),
-                    content=ft.Text(I18n.get("db_upgrade_needed_content")),
-                    actions=[
-                        ft.ElevatedButton(
-                            I18n.get("db_upgrade_btn"),
-                            on_click=lambda e: page.run_task(on_upgrade_click, e),
-                        ),
-                    ],
-                    actions_alignment=ft.MainAxisAlignment.END,
-                )
-                _show_dialog(upgrade_dialog)
-
-            elif result.get("error") in ("db_init_failed", "db_engine_missing", "task_manager_init_failed"):
-
-                def show_loading_view():
-                    page.clean()
-                    page.add(
-                        ft.Container(
-                            content=ft.Column(
-                                [
-                                    ft.ProgressRing(width=40, height=40, stroke_width=3),
-                                    ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=16),
-                                ],
-                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                                alignment=ft.MainAxisAlignment.CENTER,
-                                spacing=20,
-                            ),
-                            expand=True,
-                            alignment=ft.alignment.center,
-                        )
-                    )
-                    page.update()
-
-                async def on_retry_click(e):
-                    show_loading_view()
-                    await _init_services_and_start_app()
-
-                async def on_reconfigure_click(e):
-                    show_loading_view()
-                    await cache_manager.close()
-                    await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
-                    page.controls.clear()
-                    wizard = OnboardingWizard(page, on_complete=on_onboarding_complete)
-                    page.add(
-                        ft.Container(
-                            content=wizard,
-                            expand=True,
-                            padding=40,
-                        ),
-                    )
-
-                def on_skip_click(e):
-                    from ui.app_layout import AppLayout
-
-                    app_layout = AppLayout(page)
-                    app_layout.show()
-                    show_toast(I18n.get("warning_skip_db"), "warning")
-
-                page.controls.clear()
-                page.add(
-                    ft.Container(
-                        content=ft.Column(
-                            [
-                                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
-                                ft.Text(
-                                    I18n.get("error_db_init_failed")
-                                    if result.get("error") != "db_engine_missing"
-                                    else I18n.get("error_db_engine_missing"),
-                                    size=20,
-                                    weight=ft.FontWeight.BOLD,
-                                ),
-                                ft.Text(
-                                    _get_localized_detail(str(result.get("detail") or ""))[:200],
-                                    color=ft.Colors.RED_400,
-                                    size=14,
-                                ),
-                                ft.Row(
-                                    [
-                                        ft.ElevatedButton(
-                                            I18n.get("retry"),
-                                            icon=ft.Icons.REFRESH,
-                                            on_click=lambda e: page.run_task(on_retry_click, e),
-                                        ),
-                                        ft.TextButton(
-                                            I18n.get("db_reconfigure"),
-                                            icon=ft.Icons.SETTINGS,
-                                            on_click=lambda e: page.run_task(on_reconfigure_click, e),
-                                        ),
-                                        ft.TextButton(
-                                            I18n.get("skip"),
-                                            on_click=on_skip_click,
-                                        ),
-                                    ],
-                                    alignment=ft.MainAxisAlignment.CENTER,
-                                    spacing=20,
-                                ),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                            spacing=10,
-                        ),
-                        expand=True,
-                        alignment=ft.alignment.center,
-                    ),
-                )
-            return
-
-        from ui.app_layout import AppLayout
-
-        app_layout = AppLayout(page)
-
-        def on_news_alert(msg):
-            if hasattr(page, "toast") and page.toast:  # type: ignore[attr-defined]
-                page.toast.show(f"📰 {msg}", toast_type="info")  # type: ignore[attr-defined]
-
-        NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
-
-        app_layout.show()
-        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, True)
-
-    async def on_onboarding_complete():
-        await _init_services_and_start_app()
+    renderer = StartupViewRenderer(
+        page=page,
+        controller=controller,
+        show_dialog_fn=_show_dialog_with_tracking,
+        hide_dialog_fn=_hide_dialog_with_tracking,
+        run_task_fn=_run_task,
+    )
 
     db_url = ConfigHandler.get_db_url()
     token = ConfigHandler.get_token()
@@ -486,17 +310,7 @@ async def main(page: ft.Page):
         f"DB_URL configured: {bool(db_url)}, Token='{masked_token}', API_Key='{masked_llm_key}', Onboarding='{onboarding_complete}'"
     )
 
-    if check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
-        wizard = OnboardingWizard(page, on_complete=on_onboarding_complete)
-        page.add(
-            ft.Container(
-                content=wizard,
-                expand=True,
-                padding=40,
-            ),
-        )
-    else:
-        await _init_services_and_start_app()
+    await controller.start(db_url, token, llm_api_key, onboarding_complete)
 
 
 if __name__ == "__main__":  # pragma: no cover

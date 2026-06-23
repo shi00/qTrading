@@ -7,7 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import app.startup_controller as startup_ctrl
 import main as app_main
+import ui.views.onboarding_wizard as onboarding_wizard_mod
 import utils.shutdown as shutdown_mod
 
 pytestmark = pytest.mark.integration
@@ -133,16 +135,7 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
-    monkeypatch.setattr(app_main, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
-    monkeypatch.setattr(app_main.ft, "Container", lambda **_kwargs: MagicMock())
-    monkeypatch.setattr(app_main.ft, "AlertDialog", _FakeAlertDialog)
-    monkeypatch.setattr(app_main.ft, "Text", lambda value, **_kwargs: value)
-    monkeypatch.setattr(
-        app_main.ft,
-        "TextButton",
-        lambda label, on_click=None, **_kwargs: _FakeTextButton(label=label, on_click=on_click),
-    )
-    monkeypatch.setattr(app_main.ft, "MainAxisAlignment", SimpleNamespace(END="end"))
+    # WindowEventType must be a string "close" so SimpleNamespace(type="close") matches
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
     monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
     monkeypatch.setattr(app_main.ProxyManager, "apply_smart_proxy_policy", lambda: None)
@@ -153,6 +146,9 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main.ConfigHandler, "is_onboarding_complete", lambda: False)
     monkeypatch.setattr(app_main.I18n, "initialize", lambda *args, **kwargs: None)
     monkeypatch.setattr(app_main.I18n, "get", lambda key, default=None: default or key)
+    # Mock startup flow to avoid real DB operations: stop at NEED_ONBOARDING by default
+    monkeypatch.setattr(startup_ctrl, "check_onboarding_needed", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(onboarding_wizard_mod, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
     if exit_spy is None:
         monkeypatch.setattr(
