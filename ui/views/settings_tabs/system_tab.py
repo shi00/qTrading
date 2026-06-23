@@ -540,7 +540,7 @@ class SystemTab(ft.Container):
             self.show_snack(I18n.get("settings_snack_theme_updated"))
         except Exception as ex:
             logger.error(f"[SystemTab] Theme | ❌ Change failed: {ex}", exc_info=True)
-            self.show_snack(f"Theme Error: {ex}", color=AppColors.ERROR)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_log_level_change(self, e):
         """Handle log level change"""
@@ -672,7 +672,7 @@ class SystemTab(ft.Container):
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
         except Exception as ex:
             self.show_snack(
-                I18n.get("sys_snack_save_err").format(error=str(ex)),
+                I18n.get("sys_snack_save_err"),
                 color=AppColors.ERROR,
             )
             logger.error(
@@ -757,8 +757,8 @@ class SystemTab(ft.Container):
                 ProxyManager.reapply_proxy_policy,
             )
 
-        except Exception as ex:
-            self.show_snack(f"Save failed: {ex}", color=AppColors.ERROR)
+        except Exception:
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     async def on_export_diagnostics(self, e=None):
         """异步导出系统诊断包"""
@@ -781,7 +781,7 @@ class SystemTab(ft.Container):
             logger.error("[SystemTab] Diagnostics | Export failed: %s", DataSanitizer.sanitize_error(ex))
             logger.debug("[SystemTab] Diagnostics | Export failed traceback", exc_info=True)
             self.show_snack(
-                I18n.get("settings_diagnostics_failed").format(error=DataSanitizer.sanitize_error(ex)),
+                I18n.get("settings_diagnostics_failed"),
                 color=AppColors.ERROR,
             )
         finally:

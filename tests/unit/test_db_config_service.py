@@ -282,7 +282,7 @@ class TestCreateDatabase:
         ):
             ok, msg = await DatabaseConfigService.create_database("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
-        assert "disk full" in msg
+        assert "创建数据库失败" in msg or "Failed to create database" in msg
 
     @pytest.mark.asyncio
     async def test_success(self):
@@ -379,7 +379,7 @@ class TestRunMigrations:
         ):
             ok, msg = await DatabaseConfigService.run_migrations("localhost", 5432, "user", "pass", "mydb")
         assert ok is False
-        assert "boom" in msg
+        assert "迁移失败" in msg or "Migration failed" in msg
 
     @pytest.mark.asyncio
     async def test_migrator_init_db_failure(self):

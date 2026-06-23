@@ -379,7 +379,7 @@ class ScreenerView(ft.Container):
                 f"[ScreenerView] Strategy | Failed to load strategies: {e}",
                 exc_info=True,
             )
-            self.status_text.value = I18n.get("screener_load_failed").format(error=e)
+            self.status_text.value = I18n.get("screener_load_failed")
             self.status_text.color = AppColors.ERROR
             self.status_text.update()
             return
@@ -1269,7 +1269,7 @@ class ScreenerView(ft.Container):
                         )
                 elif hasattr(self.page, "show_toast"):
                     self.page.show_toast(  # type: ignore[untyped]
-                        I18n.get("data_export_fail", error=error),
+                        I18n.get("data_export_fail"),
                         "error",
                     )
             except Exception as ex:

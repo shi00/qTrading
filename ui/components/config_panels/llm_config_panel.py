@@ -916,10 +916,10 @@ class LLMConfigPanel(ft.Container):
                 self.on_save()
 
         except Exception as ex:
-            from utils.error_classifier import classify_error, get_error_message
+            from utils.error_classifier import classify_error
 
-            error_info = classify_error(ex, context="llm")
-            self._show_error(f"{I18n.get('settings_save_failed')}: {get_error_message(error_info)}")
+            classify_error(ex, context="llm")
+            self._show_error(I18n.get("settings_save_failed"))
             logger.error("[LLMConfigPanel] Save config error: %s", DataSanitizer.sanitize_error(ex))
 
         self.update()

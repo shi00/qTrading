@@ -388,7 +388,7 @@ class DatabaseConfigService:
         except Exception as e:
             logger.error("Failed to create database: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Failed to create database traceback:", exc_info=True)
-            return False, I18n.get("db_err_create_failed").format(error=DataSanitizer.sanitize_error(e))
+            return False, I18n.get("db_err_create_failed")
 
     @classmethod
     def build_url(
@@ -496,7 +496,7 @@ class DatabaseConfigService:
         except Exception as e:
             logger.error("Failed to run migrations: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Failed to run migrations traceback:", exc_info=True)
-            return False, I18n.get("db_err_migration_failed").format(error=DataSanitizer.sanitize_error(e))
+            return False, I18n.get("db_err_migration_failed")
 
     @classmethod
     @log_async_operation(operation_name="db_ensure_tables", threshold_ms=PerfThreshold.DB_BULK_IO)

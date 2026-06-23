@@ -314,10 +314,9 @@ class ScreenerViewModel:
                     exc_info=True,
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
-                safe_msg = I18n.get("screener_internal_error")
                 if self.on_status:
                     self.on_status(
-                        I18n.get("screener_exec_error").format(error=safe_msg),
+                        I18n.get("screener_exec_error"),
                         "red",
                     )
                 if self.on_progress:

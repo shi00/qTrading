@@ -331,7 +331,7 @@ async def main(page: ft.Page):
                             content=ft.Text(
                                 I18n.get(
                                     "db_upgrade_error_content",
-                                ).format(error=error_str)
+                                )
                             ),
                             actions=[
                                 ft.TextButton(

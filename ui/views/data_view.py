@@ -337,7 +337,7 @@ class TableViewerTab(ft.Container):
         except Exception as e:
             logger.error(f"Error loading tables: {e}")
             if self.page:
-                self.page.show_toast(f"Error loading tables: {e}", "error")  # type: ignore[untyped]
+                self.page.show_toast(I18n.get("data_err_load_schema"), "error")  # type: ignore[untyped]
 
     async def _on_table_changed(self, e):  # pragma: no cover
         self.vm.current_table = self.table_selector.value
@@ -396,7 +396,7 @@ class TableViewerTab(ft.Container):
             logger.error(f"Error loading schema: {e}", exc_info=True)
             if self.page:
                 self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get("data_err_load_schema", error=str(e)),
+                    I18n.get("data_err_load_schema"),
                     "error",
                 )
         finally:
@@ -624,7 +624,7 @@ class TableViewerTab(ft.Container):
             logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export failed traceback", exc_info=True)
             self.page.show_toast(  # type: ignore[untyped]
-                I18n.get("data_export_fail", error=str(e)),
+                I18n.get("data_export_fail"),
                 "error",
             )
             await self._toggle_loading(False)
@@ -650,7 +650,7 @@ class TableViewerTab(ft.Container):
                 except Exception as ex:
                     logger.error(f"Export write failed: {ex}", exc_info=True)
                     self.page.show_toast(  # type: ignore[untyped]
-                        I18n.get("data_export_fail", error=str(ex)),
+                        I18n.get("data_export_fail"),
                         "error",
                     )
                 finally:
@@ -934,16 +934,13 @@ class SQLConsoleTab(ft.Container):
                 has_data = True
 
             else:
-                self.status_text.value = I18n.get("data_sql_error").format(
-                    error=result["error"],
-                )
+                self.status_text.value = I18n.get("data_sql_error")
                 self.status_text.color = AppColors.ERROR
                 self.result_table.rows = []
 
         except Exception as e:
             self.status_text.value = I18n.get(
                 "data_sys_error",
-                error=str(e),
             )
             self.status_text.color = AppColors.ERROR
             self.result_table.rows = []

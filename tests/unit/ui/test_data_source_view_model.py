@@ -245,7 +245,7 @@ class TestDataSourceViewModelFullDailySync:
             await factory(task_id="task_123")
 
         bound_vm.on_show_snack.assert_called_once_with(
-            I18n.get("common_op_fail").format(error=I18n.get("common_err_network")),
+            I18n.get("common_op_fail"),
             "error",
         )
         assert bound_vm.is_syncing is False
@@ -324,7 +324,7 @@ class TestDataSourceViewModelClearCache:
             await factory(task_id="task_123")
 
         bound_vm.on_show_snack.assert_called_once_with(
-            I18n.get("ds_clean_fail").format(error=I18n.get("common_err_unknown")),
+            I18n.get("ds_clean_fail"),
             "error",
         )
 
@@ -372,7 +372,7 @@ class TestDataSourceViewModelInitHistorical:
 
         bound_vm.on_init_sync_reset.assert_called_with(TaskStatus.FAILED)
         bound_vm.on_show_snack.assert_called_once_with(
-            I18n.get("ds_init_fail_fmt", error=I18n.get("ds_internal_error")),
+            I18n.get("ds_init_fail_fmt"),
             "error",
         )
 

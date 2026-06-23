@@ -608,10 +608,10 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     def _on_vm_health_error(self, error_msg: str):
-        self.metric_health.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR, AppColors.ERROR)
-        self.metric_storage.set_value(I18n.get("common_check_fail").format(error=""), ft.Icons.ERROR, AppColors.ERROR)
+        self.metric_health.set_value(I18n.get("common_check_fail"), ft.Icons.ERROR, AppColors.ERROR)
+        self.metric_storage.set_value(I18n.get("common_check_fail"), ft.Icons.ERROR, AppColors.ERROR)
         self.health_summary_container.content = ft.Text(
-            f"{I18n.get('ds_health_check_error')} {error_msg}" if error_msg else I18n.get("ds_health_check_error"),
+            I18n.get("ds_health_check_error"),
             size=12,
             color=AppColors.ERROR,
         )
@@ -734,7 +734,7 @@ class DataSourceTab(ft.Container):
                 exc_info=True,
             )
             self.show_snack(
-                I18n.get("common_op_fail").format(error=ex),
+                I18n.get("common_op_fail"),
                 color=AppColors.ERROR,
             )
 

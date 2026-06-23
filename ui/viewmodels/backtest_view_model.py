@@ -186,7 +186,7 @@ class BacktestViewModel:
             except Exception as e:
                 logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
                 if self.on_status:
-                    self.on_status(I18n.get("backtest_failed").format(error=str(e)), "red")
+                    self.on_status(I18n.get("backtest_failed"), "red")
                 raise
             finally:
                 self._is_running = False

@@ -39,7 +39,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     except Exception as e:
         logger.error(f"[Bootstrap] Database initialization failed: {e}", exc_info=True)
         if show_toast_fn:
-            show_toast_fn(f"{I18n.get('error_db_init_failed')}: {e}", "error")
+            show_toast_fn(I18n.get("error_db_init_failed"), "error")
         return {"success": False, "error": "db_init_failed", "detail": str(e), "current_rev": None, "head_rev": None}
 
     MetaDataManager.preload_aliases()
@@ -55,7 +55,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     except Exception as e:
         logger.error(f"[Bootstrap] TaskManager init failed: {e}", exc_info=True)
         if show_toast_fn:
-            show_toast_fn(f"{I18n.get('error_task_manager_init_failed')}: {e}", "error")
+            show_toast_fn(I18n.get("error_task_manager_init_failed"), "error")
         return {
             "success": False,
             "error": "task_manager_init_failed",

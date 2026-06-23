@@ -209,10 +209,10 @@ class DataSourceViewModel:
                     )
                 raise
             except Exception as ex:
-                error_info = classify_error(ex, context="general")
+                classify_error(ex, context="general")
                 if self.on_show_snack:
                     self.on_show_snack(
-                        I18n.get("common_op_fail").format(error=get_error_message(error_info)),
+                        I18n.get("common_op_fail"),
                         "error",
                     )
                 raise
@@ -258,10 +258,10 @@ class DataSourceViewModel:
                     )
                 raise
             except Exception as ex:
-                error_info = classify_error(ex, context="general")
+                classify_error(ex, context="general")
                 if self.on_show_snack:
                     self.on_show_snack(
-                        I18n.get("common_op_fail").format(error=get_error_message(error_info)),
+                        I18n.get("common_op_fail"),
                         "error",
                     )
                 raise
@@ -304,10 +304,10 @@ class DataSourceViewModel:
                     self.on_cache_cleared()
                 return I18n.get("ds_cache_clear_done")
             except Exception as ex:
-                error_info = classify_error(ex, context="general")
+                classify_error(ex, context="general")
                 if self.on_show_snack:
                     self.on_show_snack(
-                        I18n.get("ds_clean_fail").format(error=get_error_message(error_info)),
+                        I18n.get("ds_clean_fail"),
                         "error",
                     )
                 raise
@@ -378,7 +378,7 @@ class DataSourceViewModel:
                     self.on_show_snack(msg, "error")
                 raise RuntimeError(msg) from e
             except Exception as e:
-                msg = I18n.get("ds_init_fail_fmt", error=I18n.get("ds_internal_error"))
+                msg = I18n.get("ds_init_fail_fmt")
                 logger.error(f"[DataSourceVM] Init sync failed: {e}", exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 if self.on_show_snack:

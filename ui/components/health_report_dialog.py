@@ -628,8 +628,8 @@ class HealthScanDialog(ft.AlertDialog):
                 progress_callback=on_progress,
             )
             self.show_results(result)
-        except Exception as e:
-            self.status_text.value = I18n.get("db_err_format").format(error=e)
+        except Exception:
+            self.status_text.value = I18n.get("db_err_format")
             self.page_ref.update()
 
     async def _update_progress(self, current, total, msg):

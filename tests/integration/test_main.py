@@ -130,10 +130,11 @@ class _FakeProgressBar:
 
 
 class _FakeColumn:
-    def __init__(self, controls=None, spacing=10, horizontal_alignment=None):
+    def __init__(self, controls=None, spacing=10, horizontal_alignment=None, alignment=None):
         self.controls = controls or []
         self.spacing = spacing
         self.horizontal_alignment = horizontal_alignment
+        self.alignment = alignment
 
 
 class _FakeRow:
