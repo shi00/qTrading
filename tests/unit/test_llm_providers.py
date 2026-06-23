@@ -187,12 +187,12 @@ class TestGetDisplayTag:
     def test_string_tag_returned_as_is(self):
         from utils.llm_providers import get_display_tag
 
-        assert get_display_tag("旗舰") == "旗舰"
+        assert get_display_tag("tag_flagship") == "tag_flagship"
 
     def test_list_tag_returns_first_non_internal(self):
         from utils.llm_providers import get_display_tag
 
-        assert get_display_tag(["旗舰", "reasoning"]) == "旗舰"
+        assert get_display_tag(["tag_flagship", "reasoning"]) == "tag_flagship"
 
     def test_list_tag_only_internal_returns_empty(self):
         from utils.llm_providers import get_display_tag
@@ -202,7 +202,7 @@ class TestGetDisplayTag:
     def test_list_tag_single_element(self):
         from utils.llm_providers import get_display_tag
 
-        assert get_display_tag(["推荐"]) == "推荐"
+        assert get_display_tag(["tag_recommend"]) == "tag_recommend"
 
     def test_empty_list_returns_empty(self):
         from utils.llm_providers import get_display_tag
@@ -214,22 +214,22 @@ class TestIsRecommendedModel:
     def test_string_tag_recommended(self):
         from utils.llm_providers import is_recommended_model
 
-        assert is_recommended_model({"id": "x", "tag": "推荐"}) is True
+        assert is_recommended_model({"id": "x", "tag": "tag_recommend"}) is True
 
     def test_string_tag_not_recommended(self):
         from utils.llm_providers import is_recommended_model
 
-        assert is_recommended_model({"id": "x", "tag": "旗舰"}) is False
+        assert is_recommended_model({"id": "x", "tag": "tag_flagship"}) is False
 
     def test_list_tag_contains_recommended(self):
         from utils.llm_providers import is_recommended_model
 
-        assert is_recommended_model({"id": "x", "tag": ["推荐", "reasoning"]}) is True
+        assert is_recommended_model({"id": "x", "tag": ["tag_recommend", "reasoning"]}) is True
 
     def test_list_tag_no_recommended(self):
         from utils.llm_providers import is_recommended_model
 
-        assert is_recommended_model({"id": "x", "tag": ["旗舰", "reasoning"]}) is False
+        assert is_recommended_model({"id": "x", "tag": ["tag_flagship", "reasoning"]}) is False
 
     def test_no_tag_field(self):
         from utils.llm_providers import is_recommended_model
