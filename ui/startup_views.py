@@ -192,7 +192,7 @@ class StartupViewRenderer:
                             weight=ft.FontWeight.BOLD,
                         ),
                         ft.Text(
-                            _get_localized_detail(str(context.detail or ""))[:200],
+                            _get_localized_detail(context.detail or "")[:200],
                             color=ft.Colors.RED_400,
                             size=14,
                         ),

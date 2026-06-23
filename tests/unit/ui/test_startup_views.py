@@ -20,6 +20,32 @@ def _trigger_click(button):
     button.on_click(MagicMock())  # type: ignore[reportArgumentType, reportOptionalCall]
 
 
+def _find_controls(control, control_type):
+    """Recursively find all controls of a given type in a control tree."""
+    found = []
+    if isinstance(control, control_type):
+        found.append(control)
+    # Check standard container properties
+    if hasattr(control, "controls") and isinstance(control.controls, list):
+        for child in control.controls:
+            found.extend(_find_controls(child, control_type))
+    if hasattr(control, "content") and control.content:
+        found.extend(_find_controls(control.content, control_type))
+    if hasattr(control, "actions") and isinstance(control.actions, list):
+        for child in control.actions:
+            found.extend(_find_controls(child, control_type))
+    return found
+
+
+def _find_button_by_text(root, text: str):
+    """Find a button with the given text recursively."""
+    buttons = _find_controls(root, (ft.ElevatedButton, ft.TextButton))
+    for btn in buttons:
+        if getattr(btn, "text", "") == text:
+            return btn
+    return None
+
+
 def test_get_localized_detail_empty():
     assert _get_localized_detail("") == ""
     assert _get_localized_detail(None) == ""  # type: ignore[reportArgumentType]
@@ -198,10 +224,14 @@ def test_render_error_view_db_init_failed(mock_page, mock_controller, mock_i18n)
     with patch("ui.startup_views.I18n", mock_i18n):
         renderer._render_error_view(context)
 
-    # Check buttons in row
-    container = mock_page.controls[-1]
-    row = container.content.controls[-1]
-    btn_retry, btn_reconfig, btn_skip = row.controls
+    # Use robust traversal helpers to find controls instead of brittle index access
+    btn_retry = _find_button_by_text(mock_page, "retry")
+    btn_reconfig = _find_button_by_text(mock_page, "db_reconfigure")
+    btn_skip = _find_button_by_text(mock_page, "skip")
+
+    assert btn_retry is not None
+    assert btn_reconfig is not None
+    assert btn_skip is not None
 
     _trigger_click(btn_retry)
     run_task.assert_any_call(mock_controller.retry)
@@ -221,10 +251,10 @@ def test_render_error_view_engine_missing(mock_page, mock_controller, mock_i18n)
     with patch("ui.startup_views.I18n", mock_i18n):
         renderer._render_error_view(context)
 
-    # Check that error msg text is error_db_engine_missing
-    container = mock_page.controls[-1]
-    title_text = container.content.controls[1]
-    assert title_text.value == "error_db_engine_missing"
+    # Check that error msg text is error_db_engine_missing using robust traversal helper
+    texts = _find_controls(mock_page, ft.Text)
+    text_values = {t.value for t in texts if hasattr(t, "value")}
+    assert "error_db_engine_missing" in text_values
 
 
 def test_render_onboarding(mock_page, mock_controller):
