@@ -160,6 +160,7 @@ class TestStartupInitServices:
 
         assert ctrl.state == StartupState.INIT_FAILED
         assert ctrl.context.error == "init_exception"
+        assert ctrl.context.detail is not None
         assert "unexpected error" in ctrl.context.detail
 
 
@@ -252,6 +253,7 @@ class TestStartupUpgrade:
 
         assert ctrl.state == StartupState.UPGRADE_FAILED
         assert ctrl.context.error == "db_upgrade_failed"
+        assert ctrl.context.detail is not None
         assert "migration error" in ctrl.context.detail
 
     @pytest.mark.asyncio
@@ -321,6 +323,7 @@ class TestStartupUpgrade:
         cache_manager.init_db.side_effect = RuntimeError("migration conflict")
         await controller.upgrade()
         assert controller.state == StartupState.UPGRADE_FAILED
+        assert controller.context.detail is not None
         assert "migration conflict" in controller.context.detail
 
         cache_manager.init_db.side_effect = None
