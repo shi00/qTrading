@@ -76,6 +76,11 @@ class ToastManager:
         if not self.page or self._is_stopping:
             return
 
+        # Defensive guard: showing animated overlays on an empty page crashes Flet's Dart renderer.
+        if not self.page.controls:
+            logger.warning(f"[ToastManager] Suppressed toast notification because page has no controls: {message}")
+            return
+
         # Determine colors and icon (Layer 2 custom colors)
         color_map = {
             "success": (AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE),

@@ -367,14 +367,34 @@ async def main(page: ft.Page):
 
             elif result.get("error") in ("db_init_failed", "db_engine_missing", "task_manager_init_failed"):
 
-                async def on_retry_click(e):
+                def show_loading_view():
                     page.clean()
+                    page.add(
+                        ft.Container(
+                            content=ft.Column(
+                                [
+                                    ft.ProgressRing(width=40, height=40, stroke_width=3),
+                                    ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=16),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                spacing=20,
+                            ),
+                            expand=True,
+                            alignment=ft.alignment.center,
+                        )
+                    )
+                    page.update()
+
+                async def on_retry_click(e):
+                    show_loading_view()
                     await _init_services_and_start_app()
 
                 async def on_reconfigure_click(e):
-                    page.clean()
+                    show_loading_view()
                     await cache_manager.close()
                     await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_onboarding_complete, False)
+                    page.controls.clear()
                     wizard = OnboardingWizard(page, on_complete=on_onboarding_complete)
                     page.add(
                         ft.Container(
@@ -385,13 +405,13 @@ async def main(page: ft.Page):
                     )
 
                 def on_skip_click(e):
-                    page.clean()
-                    show_toast(I18n.get("warning_skip_db"), "warning")
                     from ui.app_layout import AppLayout
 
                     app_layout = AppLayout(page)
                     app_layout.show()
+                    show_toast(I18n.get("warning_skip_db"), "warning")
 
+                page.controls.clear()
                 page.add(
                     ft.Container(
                         content=ft.Column(
