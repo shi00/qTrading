@@ -71,13 +71,13 @@ def _get_index_names(engine, table_name: str) -> set[str]:
     return {idx["name"] for idx in inspector.get_indexes(table_name) if idx["name"]}
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def pg_params():
     """Provide PostgreSQL connection parameters."""
     return _get_pg_connection_params()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def metadata_db_engine(pg_params):
     """Create an isolated database and initialize with metadata.create_all()."""
     db_name = f"meta_test_{uuid.uuid4().hex[:8]}"
@@ -115,11 +115,11 @@ def metadata_db_engine(pg_params):
         await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
         await conn.close()
 
-    asyncio.run(_drop_db())
     engine.dispose()
+    asyncio.run(_drop_db())
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def alembic_db_engine(pg_params):
     """Create an isolated database and initialize with Alembic migrations."""
     db_name = f"alembic_test_{uuid.uuid4().hex[:8]}"
@@ -164,8 +164,8 @@ def alembic_db_engine(pg_params):
         await conn.execute(f'DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)')
         await conn.close()
 
-    asyncio.run(_drop_db())
     engine.dispose()
+    asyncio.run(_drop_db())
 
 
 class TestMetadataVsAlembicConsistency:

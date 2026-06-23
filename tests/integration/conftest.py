@@ -169,9 +169,8 @@ def _reset_thread_pool():
 async def db_schema_ready(request, test_engine):
     """Ensure database schema is ready before each test.
 
-    Skip for tests that use isolated database fixtures (migrated_db_engine,
-    partial_db_engine, empty_status_db_engine, fresh_db_engine) to avoid
-    conflicting with their own database setup.
+    Skip for tests that use isolated database fixtures (e.g., migrated_db_engine,
+    metadata_db_engine, etc.) to avoid conflicting with their own database setup.
     """
     # Skip for tests that use isolated database fixtures
     isolated_fixtures = {
@@ -179,6 +178,14 @@ async def db_schema_ready(request, test_engine):
         "partial_db_engine",
         "empty_status_db_engine",
         "fresh_db_engine",
+        "head_db_engine",
+        "concurrent_db_engine",
+        "corrupted_db_engine",
+        "metadata_db_engine",
+        "alembic_db_engine",
+        "consistency_engine",
+        "db_via_init_db",
+        "db_via_alembic",
     }
     fixture_names = set(request.fixturenames)
     if not (isolated_fixtures & fixture_names):
