@@ -44,7 +44,8 @@ class TestSchedulerServiceSingleton:
         assert SchedulerService._instance is None
         assert SchedulerService._initialized is False
 
-    def test_scheduler_singleton_reset_shuts_down_running_scheduler(self):
+    @pytest.mark.asyncio
+    async def test_scheduler_singleton_reset_shuts_down_running_scheduler(self):
         """Test that _reset_singleton properly shuts down running scheduler to prevent ghost threads."""
         SchedulerService, instance = self._make_real_instance()
 
@@ -58,7 +59,8 @@ class TestSchedulerServiceSingleton:
         assert SchedulerService._instance is None
         assert SchedulerService._initialized is False
 
-    def test_scheduler_singleton_reset_handles_non_running_scheduler(self):
+    @pytest.mark.asyncio
+    async def test_scheduler_singleton_reset_handles_non_running_scheduler(self):
         """Test that _reset_singleton handles non-running scheduler gracefully."""
         SchedulerService, instance = self._make_real_instance()
 
@@ -72,7 +74,8 @@ class TestSchedulerServiceSingleton:
         assert SchedulerService._instance is None
         assert SchedulerService._initialized is False
 
-    def test_scheduler_singleton_reset_handles_shutdown_exception(self):
+    @pytest.mark.asyncio
+    async def test_scheduler_singleton_reset_handles_shutdown_exception(self):
         """Test that _reset_singleton handles shutdown exceptions gracefully."""
         SchedulerService, instance = self._make_real_instance()
 
