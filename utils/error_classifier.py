@@ -220,6 +220,12 @@ def classify_error(e: Exception, context: str = "general") -> dict:
                 "message_key": "db_err_not_found",
                 "format_args": {"database": db_name or "目标数据库"},
             }
+        if "can't locate revision" in error_str or "no such revision" in error_str:
+            return {
+                "code": "orphaned_revision",
+                "message_key": "db_err_orphaned_revision",
+                "format_args": {"error": str(e)},
+            }
         if "refused" in error_str or "connect" in error_str:
             return {"code": "refused", "message_key": "db_err_refused"}
         return {"code": "unknown", "message_key": "db_err_unknown"}

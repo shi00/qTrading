@@ -710,3 +710,54 @@ class TestMigrationInterruptionRecovery:
                 result = await conn.execute(text("SELECT version_num FROM alembic_version"))
                 version = result.fetchone()[0]
                 assert version == head_rev
+
+
+class TestOrphanedRevisionHeal:
+    @pytest_asyncio.fixture
+    async def orphaned_test_engine(self, pg_params):
+        db_name = f"migrator_orphaned_{uuid.uuid4().hex[:8]}"
+        params = pg_params
+        await _create_isolated_db(params, db_name)
+        _, async_url = build_db_urls(params, db_name)
+        engine = create_async_engine(async_url)
+        yield engine
+        await engine.dispose()
+        await _drop_isolated_db(params, db_name)
+
+    async def test_heal_orphaned_revision_auto_recovery(self, orphaned_test_engine: AsyncEngine) -> None:
+        """Test that an orphaned revision is detected and healed automatically."""
+        # 1. Run normal upgrade to head
+        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+        head_rev = await DatabaseMigrator._get_head_revision()
+
+        # 2. Corrupt the revision to a non-existent one
+        async with orphaned_test_engine.connect() as conn:
+            await conn.execute(text("UPDATE alembic_version SET version_num = '9999_orphaned'"))
+            await conn.commit()
+
+        # 3. Init DB again - should auto heal
+        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+
+        # 4. Verify it's back to head
+        async with orphaned_test_engine.connect() as conn:
+            result = await conn.execute(text("SELECT version_num FROM alembic_version"))
+            version = result.fetchone()[0]
+            assert version == head_rev
+
+    async def test_heal_orphaned_revision_fresh_db_no_op(self, orphaned_test_engine: AsyncEngine) -> None:
+        """Test that _heal_orphaned_revision is a no-op on a fresh database."""
+        await DatabaseMigrator._heal_orphaned_revision(orphaned_test_engine)
+        current_rev = await DatabaseMigrator._get_current_revision(orphaned_test_engine)
+        assert current_rev is None
+
+    async def test_heal_orphaned_revision_valid_revision_no_op(self, orphaned_test_engine: AsyncEngine) -> None:
+        """Test that _heal_orphaned_revision is a no-op on a database with valid revision."""
+        # Setup to head
+        await DatabaseMigrator.init_db(orphaned_test_engine, auto_migrate=True)
+        head_rev = await DatabaseMigrator._get_head_revision()
+
+        # Heal should do nothing
+        await DatabaseMigrator._heal_orphaned_revision(orphaned_test_engine)
+
+        current_rev = await DatabaseMigrator._get_current_revision(orphaned_test_engine)
+        assert current_rev == head_rev

@@ -109,6 +109,11 @@ class DatabaseMigrator:
             await cls._run_alembic_upgrade(engine)
             return
 
+        # Heal orphaned revision before checking head
+        await cls._heal_orphaned_revision(engine)
+        # Re-read current_rev after potential heal
+        current_rev = await cls._get_current_revision(engine)
+
         # Existing database: check for pending migrations
         head_rev = await cls._get_head_revision()
 
@@ -126,6 +131,61 @@ class DatabaseMigrator:
             raise DatabaseMigrationNeeded(current_rev, head_rev)
 
         await cls._run_alembic_upgrade(engine)
+
+    @classmethod
+    async def _heal_orphaned_revision(cls, engine: typing.Any) -> None:
+        """Detect and fix orphaned alembic revision.
+
+        When a migration script is deleted from alembic/versions/ but the
+        database still records that revision in alembic_version, Alembic
+        will crash with 'Can't locate revision'. This method detects that
+        condition and stamps the database to the current head revision.
+
+        重要假设：本项目采用严格线性的单链迁移策略（0001 → 0002 → …），
+        因此被删除的孤立版本必然是当前 head 的后代，拨回 head 后数据库
+        schema 是 head 的超集，跳过升级是安全的。如果未来引入 Alembic
+        多分支（Multiple Heads），此方法的"直接拨回 head"逻辑需要重新
+        评估，以防 schema 漂移。
+        """
+        current_rev = await cls._get_current_revision(engine)
+        if current_rev is None:
+            return  # Fresh database, nothing to heal
+
+        cfg = cls._get_alembic_config()
+        script_dir = ScriptDirectory.from_config(cfg)
+        known_revisions = {rev.revision for rev in script_dir.walk_revisions()}
+
+        if current_rev in known_revisions:
+            return  # Revision is valid, no healing needed
+
+        head_rev = script_dir.get_current_head() or ""
+        logger.warning(
+            "[DatabaseMigrator] Orphaned revision detected: database is at '%s' "
+            "which does not exist in alembic/versions/. "
+            "Known revisions: %s. Auto-stamping to head '%s'.",
+            current_rev,
+            sorted(known_revisions),
+            head_rev,
+        )
+
+        # 采用精准的外科手术式更新，只修改出错的特定游标，避免在未来多分支场景下误删其他健康分支
+        async with engine.begin() as conn:
+            if head_rev:
+                await conn.execute(
+                    text("UPDATE alembic_version SET version_num = :head WHERE version_num = :current"),
+                    {"head": head_rev, "current": current_rev},
+                )
+            else:
+                await conn.execute(
+                    text("DELETE FROM alembic_version WHERE version_num = :current"),
+                    {"current": current_rev},
+                )
+
+        logger.info(
+            "[DatabaseMigrator] Orphaned revision healed: '%s' -> '%s' (stamped).",
+            current_rev,
+            head_rev,
+        )
 
     @classmethod
     def _get_sync_database_url(cls, engine: typing.Any) -> str:

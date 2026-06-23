@@ -160,6 +160,12 @@ class TestClassifyErrorDBContext:
         assert result["code"] == "unknown"
         assert result["message_key"] == "db_err_unknown"
 
+    def test_orphaned_revision(self):
+        result = classify_error(Exception("Can't locate revision identified by '0004'"), context="db")
+        assert result["code"] == "orphaned_revision"
+        assert result["message_key"] == "db_err_orphaned_revision"
+        assert result["format_args"] == {"error": "Can't locate revision identified by '0004'"}
+
 
 class TestClassifyErrorChartContext:
     def test_timeout(self):
