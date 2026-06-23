@@ -33,6 +33,8 @@ def _make_mock_dp(*, is_cancelled: bool = False, trade_date: str | None = None) 
     dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
     dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
+    dp.cache.get_macro_economy = AsyncMock(return_value=None)
+    dp.cache.get_shibor_latest = AsyncMock(return_value=None)
     dp.get_latest_trade_date = AsyncMock(return_value=trade_date or "20240118")
     dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
     return dp

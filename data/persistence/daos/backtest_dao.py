@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import datetime
 import logging
+from typing import Any
 
 import pandas as pd
 import sqlalchemy as sa
@@ -11,6 +13,22 @@ from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 from data.persistence.models import BacktestResultModel, get_model_columns
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_jsonb_value(value: Any) -> Any:
+    """递归将 date/datetime 转为 ISO 字符串，确保 JSONB 列可被 json.dumps 序列化。
+
+    datetime.datetime 是 datetime.date 的子类，必须先判断 datetime。
+    """
+    if isinstance(value, datetime.datetime):
+        return value.isoformat()
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _serialize_jsonb_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_serialize_jsonb_value(v) for v in value]
+    return value
 
 
 class BacktestDAO(BaseDao):
@@ -32,17 +50,17 @@ class BacktestDAO(BaseDao):
         nav_curve_data = []
         nav_curve = result.get("nav_curve")
         if nav_curve is not None and not nav_curve.is_empty():
-            nav_curve_data = nav_curve.to_dicts()
+            nav_curve_data = [_serialize_jsonb_value(row) for row in nav_curve.to_dicts()]
 
         trades_data = []
         trades = result.get("trades")
         if trades is not None and not trades.is_empty():
-            trades_data = trades.to_dicts()
+            trades_data = [_serialize_jsonb_value(row) for row in trades.to_dicts()]
 
         period_stats_data = []
         period_stats = result.get("period_stats")
         if period_stats is not None and not period_stats.is_empty():
-            period_stats_data = period_stats.to_dicts()
+            period_stats_data = [_serialize_jsonb_value(row) for row in period_stats.to_dicts()]
 
         config = result.get("config")
         metrics = result.get("metrics", {})

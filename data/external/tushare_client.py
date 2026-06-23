@@ -786,7 +786,7 @@ class TushareClient:
             page += 1
 
         if page >= max_pages:
-            logger.error(
+            logger.warning(
                 "[API] Pagination hit max_pages=%s (offset=%s). Results are INCOMPLETE. Consider increasing max_pages or using date range filters.",
                 max_pages,
                 offset,
@@ -922,6 +922,8 @@ class TushareClient:
         Note: This is the raw API wrapper. For is_trading_day checks, use is_trading_day()
         which implements optimized year-based caching.
         """
+        if not self.pro:
+            raise Exception("Tushare Token not set. Please set your token in settings.")
         kwargs = dict(exchange=exchange, start_date=start_date, end_date=end_date)
         if is_open is not None:
             kwargs["is_open"] = str(is_open)

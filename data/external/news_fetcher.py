@@ -394,7 +394,7 @@ class NewsFetcher:
                         _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
                         count = _SINA_CONSECUTIVE_EMPTY["us_api"]
                         if count >= _SINA_EMPTY_THRESHOLD:
-                            logger.error(
+                            logger.warning(
                                 "[News] Sina US API returned empty data %d consecutive times. Data source may be degraded.",
                                 count,
                             )
@@ -572,7 +572,7 @@ class NewsFetcher:
             _SINA_CONSECUTIVE_FAILURES["concept"] = 0
             count = _SINA_CONSECUTIVE_EMPTY["concept"]
             if count >= _SINA_EMPTY_THRESHOLD:
-                logger.error(
+                logger.warning(
                     "[News] Concept boards data empty %d consecutive times. Data source may be degraded.",
                     count,
                 )

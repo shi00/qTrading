@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -1257,6 +1258,33 @@ class TestGetUsMajorMovesDirectExecution:
 
     @pytest.mark.asyncio
     @patch("data.external.news_fetcher.requests.get")
+    async def test_sina_consecutive_empty_threshold_logs_warning(self, mock_get, caplog):
+        """Empty-data degradation threshold must log WARNING, not ERROR (CLAUDE.md §5.4)."""
+        _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
+        mock_resp = MagicMock()
+        mock_resp.text = 'IO({"data": []});'
+        mock_get.return_value = mock_resp
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_us_major_moves()
+        assert isinstance(result, str)
+        assert _SINA_CONSECUTIVE_EMPTY["us_api"] >= _SINA_EMPTY_THRESHOLD
+        degraded_records = [
+            r
+            for r in caplog.records
+            if "Sina US API returned empty data" in r.getMessage() and "Data source may be degraded" in r.getMessage()
+        ]
+        assert degraded_records, "Expected a degraded data-source log record"
+        assert all(r.levelno == logging.WARNING for r in degraded_records)
+        assert not any(r.levelno == logging.ERROR for r in degraded_records)
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.requests.get")
     async def test_us_moves_processing_exception(self, mock_get):
         mock_resp = MagicMock()
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
@@ -1303,6 +1331,31 @@ class TestGetHotConceptsDirectExecution:
             result = await NewsFetcher.get_hot_concepts(limit=3)
         assert result == []
         assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
+
+    @pytest.mark.asyncio
+    @patch("data.external.news_fetcher.ak")
+    async def test_concept_consecutive_empty_threshold_logs_warning(self, mock_ak, caplog):
+        """Empty-data degradation threshold must log WARNING, not ERROR (CLAUDE.md §5.4)."""
+        _SINA_CONSECUTIVE_EMPTY["concept"] = _SINA_EMPTY_THRESHOLD - 1
+        mock_ak.stock_sector_spot.return_value = pd.DataFrame()
+
+        with patch("data.external.news_fetcher.ThreadPoolManager") as mock_tpm:
+            mock_tpm_instance = MagicMock()
+            mock_tpm.return_value = mock_tpm_instance
+            mock_tpm_instance.run_async = AsyncMock(side_effect=lambda tt, fn, *a, **kw: fn())
+
+            with caplog.at_level(logging.DEBUG, logger="data.external.news_fetcher"):
+                result = await NewsFetcher.get_hot_concepts(limit=3)
+        assert result == []
+        assert _SINA_CONSECUTIVE_EMPTY["concept"] >= _SINA_EMPTY_THRESHOLD
+        degraded_records = [
+            r
+            for r in caplog.records
+            if "Concept boards data empty" in r.getMessage() and "Data source may be degraded" in r.getMessage()
+        ]
+        assert degraded_records, "Expected a degraded data-source log record"
+        assert all(r.levelno == logging.WARNING for r in degraded_records)
+        assert not any(r.levelno == logging.ERROR for r in degraded_records)
 
 
 class TestEnsureDataframe:

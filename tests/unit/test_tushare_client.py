@@ -229,6 +229,23 @@ class TestTushareClientHandleApiCallPaginated:
         assert len(result) == 10
 
     @pytest.mark.asyncio
+    async def test_max_pages_logs_warning(self, tushare_client_mocks, caplog):
+        """Pagination hitting max_pages is a degraded path — should log WARNING, not ERROR."""
+        import logging
+
+        client, _, _ = tushare_client_mocks
+        df = pd.DataFrame({"a": list(range(10))})
+
+        async def mock_handle(func, **kwargs):
+            return df
+
+        client._handle_api_call = mock_handle
+        with caplog.at_level(logging.WARNING, logger="data.external.tushare_client"):
+            await client._handle_api_call_paginated(MagicMock(), max_pages=1)
+        assert any("max_pages" in rec.message and rec.levelno == logging.WARNING for rec in caplog.records)
+        assert not any(rec.levelno == logging.ERROR for rec in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_multi_page_concat(self, tushare_client_mocks):
         """多页拼接：首页满页 + 次页部分页，验证 pd.concat 拼接与 returned_len < full_page_size 中断逻辑。"""
         client, _, _ = tushare_client_mocks
@@ -836,6 +853,22 @@ class TestTushareClientHandleApiCallErrors:
 
 class TestTushareClientGetTradeCal:
     """Coverage for get_trade_cal with/without is_open parameter."""
+
+    @pytest.mark.asyncio
+    async def test_no_pro_raises(self):
+        """get_trade_cal should raise a clear error when pro is None (token not set)."""
+        with (
+            patch("data.external.tushare_client.ts"),
+            patch("data.external.tushare_client.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_token.return_value = ""
+            mock_ch.get_tushare_timeout.return_value = 30
+            mock_ch.get_request_max_retries.return_value = 3
+            mock_ch.get_tushare_api_limit.return_value = 0
+            mock_ch.get_tushare_point_tier.return_value = "custom"
+            client = TushareClient()
+            with pytest.raises(Exception, match="Tushare Token not set"):
+                await client.get_trade_cal("20240601", "20240630")
 
     @pytest.mark.asyncio
     async def test_with_is_open(self, tushare_client_mocks):

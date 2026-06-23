@@ -255,6 +255,43 @@ class TestScreenerViewModelAIStreaming:
         assert len(vm._full_results) == 2
         assert vm._full_results.iloc[0]["name"] == "S1"
 
+    @pytest.mark.asyncio
+    async def test_flush_ai_buffer_missing_ai_reason_column(self, vm):
+        """AI 结果只返回 ai_score 而无 ai_reason 时，flush 不应抛 KeyError，并补齐空 ai_reason 列。"""
+        vm.on_update = MagicMock()
+        vm.on_log = MagicMock()
+        vm._full_results = pd.DataFrame(columns=["name", "ai_score"])
+        vm._main_loop = asyncio.get_running_loop()
+
+        vm._on_ai_result_stream({"name": "S1", "ai_score": 90})
+
+        await vm._flush_ai_buffer()
+
+        assert "ai_reason" in vm._full_results.columns
+        assert len(vm._full_results) == 1
+        assert vm._full_results.iloc[0]["ai_reason"] == ""
+        # ai_score 仍被正确置顶排序
+        assert vm._full_results.iloc[0]["ai_score"] == 90
+
+    @pytest.mark.asyncio
+    async def test_flush_ai_buffer_with_both_ai_columns(self, vm):
+        """ai_score 与 ai_reason 同时存在时，flush 正常工作且保留 ai_reason 原值。"""
+        vm.on_update = MagicMock()
+        vm.on_log = MagicMock()
+        vm._full_results = pd.DataFrame(columns=["name", "ai_score", "ai_reason"])
+        vm._main_loop = asyncio.get_running_loop()
+
+        vm._on_ai_result_stream({"name": "S1", "ai_score": 90, "ai_reason": "good"})
+        vm._on_ai_result_stream({"name": "S2", "ai_score": 80, "ai_reason": "ok"})
+
+        await vm._flush_ai_buffer()
+
+        assert len(vm._full_results) == 2
+        # 按 ai_score 降序，S1 在前
+        assert vm._full_results.iloc[0]["name"] == "S1"
+        assert vm._full_results.iloc[0]["ai_reason"] == "good"
+        assert vm._full_results.iloc[1]["ai_reason"] == "ok"
+
 
 class TestScreenerViewModelExport:
     def test_get_export_data_none_when_empty(self, vm):

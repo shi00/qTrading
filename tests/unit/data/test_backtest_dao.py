@@ -8,7 +8,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from data.persistence.daos.backtest_dao import BacktestDAO
+from data.persistence.daos.backtest_dao import BacktestDAO, _serialize_jsonb_value
 from data.persistence.daos.base_dao import EngineDisposedError
 from strategies.backtest.config import BacktestConfig, BacktestResult
 
@@ -359,3 +359,144 @@ class TestBacktestDAO:
 
         with pytest.raises(RuntimeError, match="Engine not initialized"):
             await dao.delete_result("test_run_001")
+
+
+class TestBacktestDAOJsonbSerialization:
+    """JSONB date/datetime 序列化测试"""
+
+    @pytest.mark.asyncio
+    async def test_save_result_serializes_dates_and_datetimes(
+        self,
+        dao: BacktestDAO,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        """nav_curve 的 date 列与 trades 的 datetime 列应转为 ISO 字符串。"""
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        result = {
+            "run_id": "test_serialization",
+            "strategy_name": "test_strategy",
+            "config": backtest_config,
+            "metrics": {},
+            "nav_curve": pl.DataFrame(
+                {
+                    "trade_date": [date(2024, 1, 1), date(2024, 1, 2)],
+                    "nav": [1_000_000.0, 1_010_000.0],
+                }
+            ),
+            "trades": pl.DataFrame(
+                {
+                    "trade_time": [datetime(2024, 1, 1, 10, 30, 0)],
+                    "ts_code": ["000001.SZ"],
+                }
+            ),
+            "period_stats": pl.DataFrame(
+                {
+                    "period": ["2024-01"],
+                    "return": [0.01],
+                }
+            ),
+            "duration_ms": 100,
+        }
+
+        await dao.save_result(result)
+
+        call_args = dao._save_upsert.call_args
+        df = call_args[0][0]
+        record = df.iloc[0]
+
+        nav_curve_json = record["nav_curve_json"]
+        assert len(nav_curve_json) == 2
+        for row in nav_curve_json:
+            assert isinstance(row["trade_date"], str)
+        assert nav_curve_json[0]["trade_date"] == "2024-01-01"
+        assert nav_curve_json[1]["trade_date"] == "2024-01-02"
+
+        trades_json = record["trades_json"]
+        assert len(trades_json) == 1
+        assert isinstance(trades_json[0]["trade_time"], str)
+        assert trades_json[0]["trade_time"] == "2024-01-01T10:30:00"
+
+    @pytest.mark.asyncio
+    async def test_save_result_empty_data_unaffected(
+        self,
+        dao: BacktestDAO,
+        empty_result: BacktestResult,
+    ) -> None:
+        """nav_curve/trades/period_stats 为空时 JSONB 列保持空列表。"""
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        await dao.save_result(_result_to_dict(empty_result))
+
+        call_args = dao._save_upsert.call_args
+        df = call_args[0][0]
+        record = df.iloc[0]
+
+        assert record["nav_curve_json"] == []
+        assert record["trades_json"] == []
+        assert record["period_stats_json"] == []
+
+    @pytest.mark.asyncio
+    async def test_save_result_none_data_unaffected(
+        self,
+        dao: BacktestDAO,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        """nav_curve/trades/period_stats 为 None 时 JSONB 列保持空列表。"""
+        dao._save_upsert = AsyncMock(return_value=1)
+
+        result = {
+            "run_id": "test_none",
+            "strategy_name": "test_strategy",
+            "config": backtest_config,
+            "metrics": {},
+            "nav_curve": None,
+            "trades": None,
+            "period_stats": None,
+            "duration_ms": 100,
+        }
+
+        await dao.save_result(result)
+
+        call_args = dao._save_upsert.call_args
+        df = call_args[0][0]
+        record = df.iloc[0]
+
+        assert record["nav_curve_json"] == []
+        assert record["trades_json"] == []
+        assert record["period_stats_json"] == []
+
+    def test_serialize_jsonb_value_plain_data_unchanged(self) -> None:
+        """int/float/str/None/bool 等基础类型应原样返回。"""
+        assert _serialize_jsonb_value(1) == 1
+        assert _serialize_jsonb_value(1.5) == 1.5
+        assert _serialize_jsonb_value("str") == "str"
+        assert _serialize_jsonb_value(None) is None
+        assert _serialize_jsonb_value(True) is True
+
+    def test_serialize_jsonb_value_converts_date_and_datetime(self) -> None:
+        """date 转为 'YYYY-MM-DD'，datetime 转为 ISO 8601 带时间。"""
+        assert _serialize_jsonb_value(date(2024, 1, 1)) == "2024-01-01"
+        assert _serialize_jsonb_value(datetime(2024, 1, 1, 12, 0, 0)) == "2024-01-01T12:00:00"
+
+    def test_serialize_jsonb_value_recurses_nested_structures(self) -> None:
+        """嵌套 dict/list 中的 date/datetime 应递归转换。"""
+        value = {
+            "date": date(2024, 1, 1),
+            "datetime": datetime(2024, 1, 1, 12, 0, 0),
+            "nested": {
+                "list": [date(2024, 1, 2), {"inner": date(2024, 1, 3)}],
+                "scalar": 42,
+            },
+        }
+
+        result = _serialize_jsonb_value(value)
+
+        assert result == {
+            "date": "2024-01-01",
+            "datetime": "2024-01-01T12:00:00",
+            "nested": {
+                "list": ["2024-01-02", {"inner": "2024-01-03"}],
+                "scalar": 42,
+            },
+        }
