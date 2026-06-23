@@ -31,7 +31,7 @@ from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
-from utils.time_utils import get_now
+from utils.time_utils import get_now, to_date
 
 logger = logging.getLogger(__name__)
 
@@ -329,10 +329,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
         BATCH_SIZE = 20
         counter_lock = asyncio.Lock()
 
-        async def sync_one_day(date: datetime.date):
+        async def sync_one_day(date: datetime.date | str):
             nonlocal abort_sync, processed_count, consecutive_failures
             if self._shutdown_event.is_set() or abort_sync:
                 return
+
+            date_obj = to_date(date)
 
             async with semaphore:
                 async with counter_lock:
@@ -351,7 +353,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         return
 
                 try:
-                    await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
+                    await self.sync_daily_market_snapshot(date_obj, force=True, sync_result=result)
                     async with counter_lock:
                         processed_count += 1
                         result.added += 1
@@ -360,18 +362,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         progress_callback(
                             processed_count,
                             total_days,
-                            I18n.get("progress_sync_market").format(date=date.strftime("%Y%m%d")),
+                            I18n.get("progress_sync_market").format(date=date_obj.strftime("%Y%m%d")),
                         )
                 except EngineDisposedError:
                     raise
                 except Exception as e:
                     logger.warning(
-                        f"[HistoricalSync] DaySync | ⚠️ Failed {date}: {e}",
+                        f"[HistoricalSync] DaySync | ⚠️ Failed {date_obj}: {e}",
                         exc_info=True,
                     )
                     async with counter_lock:
                         consecutive_failures += 1
-                        failed_dates.append(date)
+                        failed_dates.append(date_obj)
 
         # Batch Processing
         for batch_start in range(0, len(trade_dates), BATCH_SIZE):
@@ -419,12 +421,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 failed_dates = []
                 retry_sem = asyncio.Semaphore(2)
 
-                async def retry_one(date: str, sem: asyncio.Semaphore, failed_list: list):
+                async def retry_one(date: datetime.date | str, sem: asyncio.Semaphore, failed_list: list):
                     if self._shutdown_event.is_set():
                         return
                     async with sem:
                         try:
-                            await self.sync_daily_market_snapshot(date, force=True, sync_result=result)  # type: ignore[arg-type]
+                            await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
                             logger.debug(
                                 f"[HistoricalSync] Retry | ✅ Recovered {date}",
                             )
@@ -472,13 +474,16 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
     async def sync_daily_market_snapshot(
         self,
-        trade_date: datetime.date | None,
+        trade_date: datetime.date | str | None,
         force: bool = False,
         sync_result: SyncResult | None = None,
     ):
         """
         Sync ALL data types for a single day.
         """
+        if trade_date is not None:
+            trade_date = to_date(trade_date)
+
         # Check cache (Test compatibility & Efficiency)
         if not force:
             # Check ALL synced tables exist before skipping

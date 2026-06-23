@@ -87,6 +87,22 @@ class TestHistoricalSyncRun:
         result = await strategy.run(days=5)
         assert result.status == "failed"
 
+    @pytest.mark.asyncio
+    async def test_run_with_progress_callback_and_str_dates(self):
+        ctx = make_ctx()
+        ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240614", "20240613"])
+        strategy = HistoricalSyncStrategy(ctx)
+
+        callback_called = []
+
+        def progress_callback(current, total, msg):
+            callback_called.append(msg)
+
+        result = await strategy.run(days=5, progress_callback=progress_callback)
+        assert result.status == "success"
+        assert len(callback_called) > 0
+        assert any("20240614" in msg for msg in callback_called)
+
 
 class TestHistoricalSyncDailySnapshot:
     @pytest.mark.asyncio
