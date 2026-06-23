@@ -1,4 +1,6 @@
 from unittest.mock import patch, MagicMock
+import os
+
 from utils import config_handler as cfg_mod
 from utils.config_handler import ConfigHandler
 import pytest
@@ -803,7 +805,8 @@ class TestGetMaxIoWorkersUsesDefaultConfig:
             cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_connection_pool_size"]
             + cfg_mod.ConfigHandler.DEFAULT_CONFIG["db_max_overflow"]
         )
-        assert result == min(cfg_mod.ConfigHandler.DEFAULT_CONFIG["max_io_workers"], db_capacity)
+        # Default max_io_workers is 0 (auto), so result = min(cpu_count, db_capacity)
+        assert result == min(os.cpu_count() or 4, db_capacity)
 
     @patch.object(
         cfg_mod.ConfigHandler,
@@ -817,6 +820,20 @@ class TestGetMaxIoWorkersUsesDefaultConfig:
     def test_custom_io_workers_within_db_capacity(self, mock_load):
         result = cfg_mod.ConfigHandler.get_max_io_workers()
         assert result == 5
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "load_config",
+        return_value={
+            "max_io_workers": 16,
+            "db_connection_pool_size": 10,
+            "db_max_overflow": 5,
+        },
+    )
+    def test_explicit_io_workers_exceeding_db_capacity_capped(self, mock_load):
+        """User explicitly sets max_io_workers=16 but db_capacity=15 → capped to 15."""
+        result = cfg_mod.ConfigHandler.get_max_io_workers()
+        assert result == 15
 
 
 class TestMultiProviderCredentials:

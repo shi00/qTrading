@@ -22,6 +22,22 @@ class ConcreteStrategy(AIStrategyMixin):
         return f"Test context for {row.get('ts_code', '?')}"
 
 
+def _make_mock_dp(*, is_cancelled: bool = False, trade_date: str | None = None) -> MagicMock:
+    """创建完整的 mock DataProcessor，所有 cache 异步方法均设为 AsyncMock。"""
+    dp = MagicMock()
+    dp.is_cancelled = MagicMock(return_value=is_cancelled)
+    dp.cache = MagicMock()
+    dp.cache.get_concepts = AsyncMock(return_value={})
+    dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
+    dp.get_latest_trade_date = AsyncMock(return_value=trade_date or "20240118")
+    dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+    return dp
+
+
 class TestPreFetchedContext:
     def test_default_values(self):
         ctx = PreFetchedContext()
@@ -465,10 +481,7 @@ class TestRunAiAnalysis:
     @pytest.mark.asyncio
     async def test_with_cancellation(self):
         s = ConcreteStrategy()
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=True)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
+        dp = _make_mock_dp(is_cancelled=True)
         context = {"data_processor": dp}
         candidates = pd.DataFrame(
             {
@@ -639,11 +652,7 @@ class TestAIStrategyMixinAnalyzeSingle:
 
     @pytest.fixture
     def mock_dp(self):
-        dp = MagicMock()
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        return dp
+        return _make_mock_dp()
 
     @pytest.fixture
     def mock_ai_client(self):
@@ -1965,11 +1974,7 @@ class TestStructuredResultSentinel:
     async def test_multi_period_invalid_not_injected_into_financials(self):
         """多周期财务数据无效（is_valid=False）时，不注入到 financials_text。"""
         s = ConcreteStrategy()
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=False)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+        dp = _make_mock_dp()
 
         # Mock _build_multi_period_financials 返回无效结果
         with patch.object(
@@ -1999,11 +2004,7 @@ class TestStructuredResultSentinel:
     async def test_multi_period_valid_injected_into_financials(self):
         """多周期财务数据有效（is_valid=True）时，注入到 financials_text。"""
         s = ConcreteStrategy()
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=False)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+        dp = _make_mock_dp()
 
         with patch.object(
             s,
@@ -2029,11 +2030,7 @@ class TestStructuredResultSentinel:
     async def test_auxiliary_invalid_not_injected_into_financials(self):
         """辅助数据无效（is_valid=False）时，不注入到 financials_text。"""
         s = ConcreteStrategy()
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=False)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+        dp = _make_mock_dp()
 
         with patch.object(
             s,
@@ -2058,11 +2055,7 @@ class TestStructuredResultSentinel:
     async def test_auxiliary_valid_injected_into_financials(self):
         """辅助数据有效（is_valid=True）时，注入到 financials_text。"""
         s = ConcreteStrategy()
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=False)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+        dp = _make_mock_dp()
 
         with patch.object(
             s,
@@ -2092,11 +2085,7 @@ class TestStructuredResultSentinel:
         # 注册一个返回 (text, True) 的 builder
         s.register_context_builder("valid_builder", lambda r, p: ("应被注入的文本", True))
 
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=False)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+        dp = _make_mock_dp()
 
         ai_client = MagicMock()
         ai_client.analyze_stock = AsyncMock(return_value={"score": 50, "summary": "test", "decision": "Hold"})
@@ -2114,11 +2103,7 @@ class TestStructuredResultSentinel:
         s = ConcreteStrategy()
         s.register_context_builder("empty_builder", lambda r, p: ("", True))
 
-        dp = MagicMock()
-        dp.is_cancelled = MagicMock(return_value=False)
-        dp.cache = MagicMock()
-        dp.cache.get_concepts = AsyncMock(return_value={})
-        dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+        dp = _make_mock_dp()
 
         ai_client = MagicMock()
         ai_client.analyze_stock = AsyncMock(return_value={"score": 50, "summary": "test", "decision": "Hold"})

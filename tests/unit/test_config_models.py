@@ -53,7 +53,7 @@ class TestAppConfig:
         assert cfg.theme_name == "dark"
         assert cfg.locale == "zh"
         assert cfg.log_level == "INFO"
-        assert cfg.max_io_workers == 16
+        assert cfg.max_io_workers == 0
         assert cfg.onboarding_complete is False
         assert cfg.ts_token == ""
         assert cfg.config_version == 1

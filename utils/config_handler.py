@@ -1404,19 +1404,19 @@ class ConfigHandler:
     @staticmethod
     def get_max_io_workers():
         """Get max IO threads from config, capped by DB connection pool capacity."""
+        db_pool_size = ConfigHandler.get_typed("db_connection_pool_size", int, 10)
+        db_max_overflow = ConfigHandler.get_typed("db_max_overflow", int, 5)
+        db_capacity = db_pool_size + db_max_overflow
+
         config = ConfigHandler.load_config()
-        val = config.get("max_io_workers", 16)
+        val = config.get("max_io_workers", 0)
         try:
             io_workers = int(val)
         except (ValueError, TypeError):
             return 0
 
         if io_workers <= 0:
-            io_workers = os.cpu_count() or 4
-
-        db_pool_size = ConfigHandler.get_typed("db_connection_pool_size", int, 10)
-        db_max_overflow = ConfigHandler.get_typed("db_max_overflow", int, 5)
-        db_capacity = db_pool_size + db_max_overflow
+            io_workers = min(os.cpu_count() or 4, db_capacity)
 
         if io_workers > db_capacity:
             logger.warning(

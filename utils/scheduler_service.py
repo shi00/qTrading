@@ -59,14 +59,29 @@ class SchedulerService:
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
             if cls._instance is not None and hasattr(cls._instance, "scheduler"):
-                try:
-                    if cls._instance.scheduler.running:
-                        cls._instance.scheduler.shutdown(wait=False)
-                        logger.info("[Scheduler] Shutdown completed during reset")
-                except Exception as e:
-                    logger.warning(f"[Scheduler] Error during shutdown: {e}")
+                cls._safe_shutdown_scheduler(cls._instance.scheduler, context="reset")
             cls._instance = None
             cls._initialized = False
+
+    @staticmethod
+    def _safe_shutdown_scheduler(scheduler, *, context: str) -> None:
+        """Safely shutdown AsyncIOScheduler, checking event loop availability.
+
+        Args:
+            scheduler: The AsyncIOScheduler instance to shutdown.
+            context: Description of the calling context for logging (e.g. "reset", "atexit").
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_closed():
+                raise RuntimeError("Event loop already closed")
+            if scheduler.running:
+                scheduler.shutdown(wait=False)
+                logger.info("[Scheduler] Shutdown completed during %s", context)
+        except RuntimeError:
+            logger.debug("[Scheduler] Event loop unavailable during %s, skipping graceful shutdown", context)
+        except Exception as e:
+            logger.warning("[Scheduler] Error during shutdown (%s): %s", context, e)
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -76,11 +91,7 @@ class SchedulerService:
         """
         inst = cls._instance
         if inst is not None and hasattr(inst, "scheduler"):
-            try:
-                if inst.scheduler.running:
-                    inst.scheduler.shutdown(wait=False)
-            except Exception as e:
-                logger.warning("Scheduler initialization failed: %s", e, exc_info=True)
+            cls._safe_shutdown_scheduler(inst.scheduler, context="atexit")
 
     def __init__(self):
         if self._initialized:
@@ -229,11 +240,7 @@ class SchedulerService:
         """Stop the scheduler"""
         logger.info(f"Stopping scheduler... (running={self.scheduler.running})")
         if self.scheduler.running:
-            try:
-                self.scheduler.shutdown(wait=False)
-                logger.info("Scheduler shutdown initiated.")
-            except Exception as e:
-                logger.error(f"Error shutting down scheduler: {e}")
+            self._safe_shutdown_scheduler(self.scheduler, context="stop")
         else:
             logger.info("Scheduler was not running.")
 

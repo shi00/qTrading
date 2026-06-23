@@ -555,13 +555,13 @@ class TradeCalendarService:
                 return None
 
             dt = end_dt
-            for _ in range(10):
+            for _ in range(20):
                 if self._offline.is_trading_day(dt):
                     return dt
                 dt -= datetime.timedelta(days=1)
 
             logger.error(
-                "[TradeCalendarService] get_latest_trade_date: OfflineCalendar found no trading day in 10-day window. Returning None.",
+                "[TradeCalendarService] get_latest_trade_date: OfflineCalendar found no trading day in 20-day window. Returning None.",
             )
             return None
 

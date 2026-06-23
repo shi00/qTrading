@@ -124,6 +124,12 @@ class TestDataProcessorAtexitCleanup:
 
 
 class TestSchedulerServiceAtexitCleanup:
+    def _mock_loop(self):
+        """Helper: create a mock event loop that reports as not closed."""
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = False
+        return mock_loop
+
     def test_shutdown_running_scheduler(self):
         """_atexit_cleanup calls scheduler.shutdown(wait=False) when running."""
         svc = SchedulerService.__new__(SchedulerService)
@@ -132,7 +138,8 @@ class TestSchedulerServiceAtexitCleanup:
         svc.scheduler = mock_scheduler
 
         SchedulerService._instance = svc
-        SchedulerService._atexit_cleanup()
+        with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=self._mock_loop()):
+            SchedulerService._atexit_cleanup()
 
         mock_scheduler.shutdown.assert_called_once_with(wait=False)
 
@@ -144,7 +151,8 @@ class TestSchedulerServiceAtexitCleanup:
         svc.scheduler = mock_scheduler
 
         SchedulerService._instance = svc
-        SchedulerService._atexit_cleanup()
+        with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=self._mock_loop()):
+            SchedulerService._atexit_cleanup()
 
         mock_scheduler.shutdown.assert_not_called()
 
@@ -170,4 +178,20 @@ class TestSchedulerServiceAtexitCleanup:
         svc.scheduler = mock_scheduler
 
         SchedulerService._instance = svc
-        SchedulerService._atexit_cleanup()  # should not raise
+        with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=self._mock_loop()):
+            SchedulerService._atexit_cleanup()  # should not raise
+
+    def test_skips_shutdown_when_loop_closed(self):
+        """_atexit_cleanup skips shutdown when event loop is already closed."""
+        svc = SchedulerService.__new__(SchedulerService)
+        mock_scheduler = MagicMock()
+        mock_scheduler.running = True
+        svc.scheduler = mock_scheduler
+
+        SchedulerService._instance = svc
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = True
+        with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
+            SchedulerService._atexit_cleanup()  # should not raise
+
+        mock_scheduler.shutdown.assert_not_called()

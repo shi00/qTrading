@@ -155,7 +155,7 @@ class AppConfig(BaseModel):
     log_max_mb: int = Field(default=5, ge=1, le=100)
     log_backup_count: int = Field(default=5, ge=1, le=20)
 
-    max_io_workers: int = Field(default=16, ge=0)
+    max_io_workers: int = Field(default=0, ge=0)
     max_cpu_workers: int = Field(default=4, ge=0)
     max_concurrent_tasks: int = Field(default=0, ge=0)
 

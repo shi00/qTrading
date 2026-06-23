@@ -77,7 +77,10 @@ class TestSchedulerServiceStop:
         svc = SchedulerService()
         svc.scheduler = MagicMock()
         svc.scheduler.running = True
-        svc.stop()
+        mock_loop = MagicMock()
+        mock_loop.is_closed.return_value = False
+        with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
+            svc.stop()
         svc.scheduler.shutdown.assert_called_once_with(wait=False)
 
     @patch("utils.scheduler_service.ConfigHandler")
@@ -293,7 +296,10 @@ class TestSchedulerServiceSingleton:
             svc = SchedulerService()
             type(svc.scheduler).running = PropertyMock(return_value=True)
             svc.scheduler.shutdown = MagicMock()
-            SchedulerService._reset_singleton()
+            mock_loop = MagicMock()
+            mock_loop.is_closed.return_value = False
+            with patch("utils.scheduler_service.asyncio.get_running_loop", return_value=mock_loop):
+                SchedulerService._reset_singleton()
             svc.scheduler.shutdown.assert_called_once_with(wait=False)
 
     def test_reset_singleton_sets_instance_to_none(self):
