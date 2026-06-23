@@ -21,7 +21,7 @@ class StepResult:
 
 _CLEANUP_STEPS = [
     ("Step 0", "_step0_cancel_tasks", True, 4.0),
-    ("Step 1", "_step1_stop_services", True, 3.0),
+    ("Step 1", "_step1_stop_services", True, 5.0),
     ("Step 2", "_step2_flush_db_writes", True, 2.0),
     ("Step 3", "_step3_close_processor", True, 3.0),
     ("Step 4", "_step4_clear_toast", False, 1.0),
@@ -301,7 +301,7 @@ class ShutdownCoordinator:
 
         if NewsSubscriptionService._instance is not None:
             logger.info("[Shutdown]   - NewsSubscriptionService")
-            await NewsSubscriptionService._instance.stop_async()
+            await NewsSubscriptionService._instance.stop_async(drain_timeout=2.0)
 
         if MarketDataService._instance is not None:
             logger.info("[Shutdown]   - MarketDataService")
