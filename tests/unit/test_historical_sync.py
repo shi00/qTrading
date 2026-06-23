@@ -13,7 +13,7 @@ pytestmark = pytest.mark.unit
 
 def make_ctx():
     ctx = MagicMock()
-    ctx.api = MagicMock()
+    ctx.api = AsyncMock()
     ctx.cache = MagicMock()
     ctx.processor = MagicMock()
     ctx.processor.trade_calendar = MagicMock()

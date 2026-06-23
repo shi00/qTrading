@@ -15,7 +15,7 @@ pytestmark = pytest.mark.unit
 def make_ctx():
     ctx = MagicMock()
     ctx.api = AsyncMock()
-    ctx.cache = MagicMock()
+    ctx.cache = AsyncMock()
     ctx.processor = MagicMock()
     ctx.processor.trade_calendar = MagicMock()
     ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
@@ -35,6 +35,11 @@ def make_ctx():
     ctx.cache.save_financial_reports = AsyncMock(return_value=1)
     ctx.cache.mark_stock_step4_completed = AsyncMock()
     ctx.cache.update_sync_status = AsyncMock()
+    # Async context manager for financial_transaction (used by _run_full_sync)
+    mock_tx_conn = AsyncMock()
+    ctx.cache.financial_transaction = MagicMock()
+    ctx.cache.financial_transaction.return_value.__aenter__ = AsyncMock(return_value=mock_tx_conn)
+    ctx.cache.financial_transaction.return_value.__aexit__ = AsyncMock(return_value=None)
     ctx.cache.save_fina_forecast = AsyncMock(return_value=1)
     ctx.cache.save_dividend = AsyncMock(return_value=1)
     ctx.cache.save_repurchase = AsyncMock(return_value=1)
@@ -66,6 +71,10 @@ def make_ctx():
     ctx.api.get_fina_mainbz = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_fina_audit = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_disclosure_date = AsyncMock(return_value=None)
+    # FINANCIAL_BATCH_TABLES API methods (used by _sync_corporate_actions_by_date via getattr)
+    ctx.api.get_forecast = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+    ctx.api.get_dividend = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+    ctx.api.get_repurchase = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
     # Inject zero delay to avoid asyncio.sleep blocking in tests
     ctx.request_delay_provider = lambda is_heavy: 0.0
     return ctx
