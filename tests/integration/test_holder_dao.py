@@ -6,6 +6,7 @@
 - L2: 批量预取避免 N+1 查询
 """
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -17,7 +18,9 @@ pytestmark = pytest.mark.integration
 
 
 class TestHolderDaoIntegrity:
-    """测试股东数据完整性检查方法"""
+    """测试股东数据完整性检查方法（基于 MVD 真实数据）"""
+
+    pytestmark = pytest.mark.usefixtures("mvd_data")
 
     @pytest.fixture
     def holder_dao(self, test_engine):
@@ -25,15 +28,21 @@ class TestHolderDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_top10_holders_batch(self, holder_dao):
-        """
-        L2 测试：批量获取前十大股东
-        """
+        """Level 2: 验证批量前十大股东查询"""
         ts_codes = ["000001.SZ", "600000.SH"]
         df = await holder_dao.get_top10_holders_batch(ts_codes)
 
-        if df is not None and not df.empty:
-            assert "ts_code" in df.columns
-            assert "holder_name" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "ts_code" in df.columns
+        assert "holder_name" in df.columns
+        # Level 2: 验证 000001.SZ 的记录数
+        # 注意：get_top10_holders_batch 使用 DISTINCT ON (ts_code, end_date)，
+        # MVD 中 000001.SZ 的 3 条记录 end_date 均为 2025-12-31，仅返回 1 条（见约束 4）
+        rows = df[df["ts_code"] == "000001.SZ"]
+        assert len(rows) == 1
+        # 返回的是 hold_ratio 最大的那条
+        assert rows["hold_ratio"].iloc[0] == Decimal("2.5")
 
     @pytest.mark.asyncio
     async def test_get_top10_holders_batch_empty(self, holder_dao):
@@ -47,25 +56,30 @@ class TestHolderDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_stk_holdernumber(self, holder_dao):
-        """
-        测试获取股东人数历史
-        """
+        """Level 2: 验证股东人数历史查询"""
         df = await holder_dao.get_stk_holdernumber("000001.SZ")
 
-        if df is not None and not df.empty:
-            assert "ts_code" in df.columns
-            assert "holder_num" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "ts_code" in df.columns
+        assert "holder_num" in df.columns
+        # Level 2: 验证有 2 期数据
+        assert len(df) == 2
 
     @pytest.mark.asyncio
     async def test_get_top10_holders(self, holder_dao):
-        """
-        测试获取单只股票前十大股东
-        """
+        """Level 2: 验证单只股票前十大股东查询"""
         df = await holder_dao.get_top10_holders("000001.SZ")
 
-        if df is not None and not df.empty:
-            assert "holder_name" in df.columns
-            assert "hold_ratio" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "holder_name" in df.columns
+        assert "hold_ratio" in df.columns
+        # Level 2: 验证持股比例合计 = 2.5 + 1.8 + 1.2 = 5.5
+        # 注意：get_top10_holders（非 batch）无 DISTINCT ON，返回全部 3 条记录
+        assert len(df) == 3
+        total_ratio = df["hold_ratio"].sum()
+        assert total_ratio == Decimal("5.5")
 
 
 class TestHolderDaoBatchPerformance:

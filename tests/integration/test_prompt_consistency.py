@@ -1,4 +1,3 @@
-import os
 import string
 
 import pytest
@@ -10,12 +9,7 @@ from strategies.prompt_validator import (
 )
 from strategies.strategy_prompts import STRATEGY_PROMPTS
 
-pytestmark = pytest.mark.integration
-
-_SKIP_NO_DATA = pytest.mark.skipif(
-    os.environ.get("SKIP_DATA_CONSISTENCY") == "1",
-    reason="SKIP_DATA_CONSISTENCY=1: CI has no pre-filled data",
-)
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("prompt_data_set")]
 
 
 def test_template_placeholders_are_valid():
@@ -61,12 +55,9 @@ def test_template_no_undefined_placeholders():
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_prompt_data_consistency():
     results = await validate_prompt_declarations(get_declarations())
     missing = [name for name, valid in results.items() if not valid]
-    if len(missing) == len(results):
-        pytest.skip("All declarations missing — database appears empty, skipping consistency check")
     if missing:
         report = generate_declaration_report(get_declarations())
         pytest.fail(f"以下 Prompt 声明的数据未注入: {missing}\n\n{report}")
@@ -80,90 +71,91 @@ async def test_prompt_declaration_report():
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_multi_period_roe_available():
+    """Level 1+2: 验证多期 ROE 数据存在且可查询"""
     from strategies.prompt_validator import check_multi_period_data
+    from data.cache.cache_manager import CacheManager
 
+    # Level 1: prompt_validator 声明校验通过
     result = await check_multi_period_data("roe")
-    assert isinstance(result, bool)
+    assert result is True
+
+    # Level 2: 验证底层数据确实有 8 期 ROE
+    cache = CacheManager()
+    df = await cache.get_financial_reports_history("000001.SZ", periods=8)
+    assert df is not None
+    assert len(df) == 8
+    assert "roe" in df.columns
+    assert not df["roe"].isna().any()
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_cashflow_field_exists():
     from strategies.prompt_validator import check_field_exists
 
     result = await check_field_exists("n_cashflow_act")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_audit_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("fina_audit")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_dividend_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("dividend")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_pledge_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("pledge_stat")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_macro_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
-    result = await check_table_has_data("cn_m")
-    assert isinstance(result, bool)
+    result = await check_table_has_data("macro_economy")
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_shibor_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("shibor_daily")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_holders_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("top10_holders")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_holder_number_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("stk_holdernumber")
-    assert isinstance(result, bool)
+    assert result is True
 
 
 @pytest.mark.asyncio
-@_SKIP_NO_DATA
 async def test_mainbz_table_has_data():
     from strategies.prompt_validator import check_table_has_data
 
     result = await check_table_has_data("fina_mainbz")
-    assert isinstance(result, bool)
+    assert result is True

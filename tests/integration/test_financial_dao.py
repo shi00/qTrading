@@ -7,6 +7,7 @@
 - L2: 批量预取避免 N+1 查询
 """
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -18,7 +19,9 @@ pytestmark = pytest.mark.integration
 
 
 class TestFinancialDaoIntegrity:
-    """测试财务数据完整性检查方法"""
+    """测试财务数据完整性检查方法（基于 MVD 真实数据）"""
+
+    pytestmark = pytest.mark.usefixtures("mvd_data")
 
     @pytest.fixture
     def financial_dao(self, test_engine):
@@ -26,14 +29,19 @@ class TestFinancialDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_financial_reports_history(self, financial_dao):
-        """
-        F1 测试：获取多期财务报告历史（含 n_cashflow_act）
-        """
+        """Level 2: 验证多期财报查询返回正确行数和字段值"""
         df = await financial_dao.get_financial_reports_history("000001.SZ", periods=8)
 
-        if df is not None and not df.empty:
-            assert "roe" in df.columns
-            assert "n_income_attr_p" in df.columns
+        assert df is not None
+        assert len(df) == 8
+        assert "roe" in df.columns
+        assert "n_income_attr_p" in df.columns
+        assert "n_cashflow_act" in df.columns
+        # Level 2: 验证第一期与最新期 ROE 值
+        # 注意：DAO 使用 ORDER BY end_date DESC，显式按 end_date ASC 排序后再断言（见约束 3）
+        df_sorted = df.sort_values("end_date", ascending=True).reset_index(drop=True)
+        assert df_sorted["roe"].iloc[0] == Decimal("12.5")  # 第一期（2024Q1）
+        assert df_sorted["roe"].iloc[-1] == Decimal("16.0")  # 最新期（2025Q4）
 
     @pytest.mark.asyncio
     async def test_get_financial_reports_history_empty(self, financial_dao):
@@ -47,15 +55,18 @@ class TestFinancialDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_fina_audit_batch(self, financial_dao):
-        """
-        L2 测试：批量获取审计意见
-        """
+        """Level 2: 验证批量审计意见查询"""
         ts_codes = ["000001.SZ", "000002.SZ", "600000.SH"]
         df = await financial_dao.get_fina_audit_batch(ts_codes)
 
-        if df is not None and not df.empty:
-            assert "ts_code" in df.columns
-            assert "audit_result" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "ts_code" in df.columns
+        assert "audit_result" in df.columns
+        # Level 2: 验证 000001.SZ 的审计意见（DISTINCT ON (ts_code) 仅返回 1 条）
+        row = df[df["ts_code"] == "000001.SZ"]
+        assert len(row) == 1
+        assert row["audit_result"].iloc[0] == "标准无保留意见"
 
     @pytest.mark.asyncio
     async def test_get_fina_audit_batch_empty(self, financial_dao):
@@ -69,37 +80,43 @@ class TestFinancialDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_dividend_batch(self, financial_dao):
-        """
-        L2 测试：批量获取分红记录
-        """
+        """Level 2: 验证批量分红记录查询"""
         ts_codes = ["000001.SZ", "000002.SZ", "600000.SH"]
         df = await financial_dao.get_dividend_batch(ts_codes)
 
-        if df is not None and not df.empty:
-            assert "ts_code" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "ts_code" in df.columns
+        # Level 2: 验证 000001.SZ 有分红记录
+        row = df[df["ts_code"] == "000001.SZ"]
+        assert len(row) >= 1
 
     @pytest.mark.asyncio
     async def test_get_pledge_stat_batch(self, financial_dao):
-        """
-        L2 测试：批量获取质押比例
-        """
+        """Level 2: 验证批量质押比例查询"""
         ts_codes = ["000001.SZ", "000002.SZ", "600000.SH"]
         df = await financial_dao.get_pledge_stat_batch(ts_codes)
 
-        if df is not None and not df.empty:
-            assert "ts_code" in df.columns
-            assert "pledge_ratio" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "ts_code" in df.columns
+        assert "pledge_ratio" in df.columns
+        # Level 2: 验证 000001.SZ 的质押比例（DISTINCT ON (ts_code) 仅返回 1 条）
+        row = df[df["ts_code"] == "000001.SZ"]
+        assert len(row) == 1
+        assert row["pledge_ratio"].iloc[0] == Decimal("10.5")
 
     @pytest.mark.asyncio
     async def test_get_fina_mainbz(self, financial_dao):
-        """
-        测试获取主营业务构成
-        """
+        """Level 2: 验证主营业务构成查询"""
         df = await financial_dao.get_fina_mainbz("000001.SZ")
 
-        if df is not None and not df.empty:
-            assert "bz_item" in df.columns
-            assert "bz_sales" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "bz_item" in df.columns
+        assert "bz_sales" in df.columns
+        # Level 2: 验证主营业务项（MVD 仅 1 条，iloc[0] 即该条）
+        assert df["bz_item"].iloc[0] == "利息收入"
 
 
 class TestFinancialDaoBatchPerformance:

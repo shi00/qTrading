@@ -216,7 +216,6 @@ jobs:
           TEST_DB_USER: postgres
           TEST_DB_PASSWORD: ${{ env.CI_PG_PASSWORD }}
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
-          SKIP_DATA_CONSISTENCY: 1
         run: |
           set -e
           python -m pytest tests/integration/ -n auto -v --tb=short --cov --cov-report=term-missing --cov-append --junitxml=junit-integration.xml

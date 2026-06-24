@@ -8,8 +8,8 @@ P1-15 fix (rewritten): 测试 prompt_validator DataDeclaration 完整性 + promp
 3. 每条 prompt 模板不含静态数据枚举
 """
 
+import asyncio
 import logging
-import os
 
 import pytest
 from strategies.prompt_validator import get_declarations
@@ -17,12 +17,7 @@ from strategies.strategy_prompts import STRATEGY_PROMPTS, FORBIDDEN_STATIC_HEADE
 
 logger = logging.getLogger(__name__)
 
-pytestmark = pytest.mark.integration
-
-_SKIP_NO_DATA = pytest.mark.skipif(
-    os.environ.get("SKIP_DATA_CONSISTENCY") == "1",
-    reason="SKIP_DATA_CONSISTENCY=1: CI has no pre-filled data",
-)
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("prompt_data_set")]
 
 
 class TestPromptTemplateConsistency:
@@ -68,19 +63,19 @@ class TestPromptTemplateConsistency:
                     f"策略 '{key}' 仍含静态数据枚举表头「{header}」，应改用 <available_data> 运行时清单"
                 )
 
-    @_SKIP_NO_DATA
     @pytest.mark.asyncio
     async def test_declarations_injectors_are_callable(self):
-        import asyncio
-
+        """Level 2: 验证所有 injector 可调用且返回 True（MVD 数据已就绪）"""
         declarations = get_declarations()
         errors: list[str] = []
         for decl in declarations:
             try:
                 result = decl.injector()
                 if asyncio.iscoroutine(result):
-                    await result
+                    result = await result
+                # Level 2: 不仅验证不抛异常，还验证返回 True
+                if result is not True:
+                    errors.append(f"{decl.name}: injector returned {result!r}, expected True")
             except Exception as e:
-                logger.warning("[PromptTemplate] injector %s failed: %s", decl.name, e, exc_info=True)
                 errors.append(f"{decl.name}: {type(e).__name__}: {e}")
-        assert not errors, f"Declaration injector 调用失败: {errors}"
+        assert not errors, f"Declaration injector 校验失败: {errors}"

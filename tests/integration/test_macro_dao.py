@@ -7,6 +7,8 @@
 - L3: Shibor 利率注入
 """
 
+import datetime
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pandas as pd
@@ -18,7 +20,9 @@ pytestmark = pytest.mark.integration
 
 
 class TestMacroDaoIntegrity:
-    """测试宏观经济数据完整性检查方法"""
+    """测试宏观经济数据完整性检查方法（基于 MVD 真实数据）"""
+
+    pytestmark = pytest.mark.usefixtures("mvd_data")
 
     @pytest.fixture
     def macro_dao(self, test_engine):
@@ -26,41 +30,54 @@ class TestMacroDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest(self, macro_dao):
-        """
-        L3 测试：获取最新 Shibor 利率
-        """
+        """Level 2: 验证最新 Shibor 利率查询"""
         df = await macro_dao.get_shibor_latest()
 
-        if df is not None and not df.empty:
-            assert "on" in df.columns or "1w" in df.columns or "3m" in df.columns
+        assert df is not None
+        assert not df.empty
+        # Level 2: 验证字段存在和具体值
+        # 注意：返回列名是数据库列名（on/1w/2w/1m/3m/6m/9m/1y），非 Python 属性名（见约束 6）
+        assert "on" in df.columns
+        assert "1y" in df.columns
+        assert df["on"].iloc[0] == Decimal("1.85")
+        assert df["1y"].iloc[0] == Decimal("2.50")
 
     @pytest.mark.asyncio
     async def test_get_macro_economy_latest(self, macro_dao):
-        """
-        F3 测试：获取最新宏观经济指标
-        """
+        """Level 2: 验证最新宏观经济指标查询"""
         df = await macro_dao.get_macro_economy_latest()
 
-        if df is not None and not df.empty:
-            assert "m2_yoy" in df.columns or "cpi" in df.columns or "ppi" in df.columns
+        assert df is not None
+        assert not df.empty
+        assert "m2_yoy" in df.columns
+        assert "cpi" in df.columns
+        assert "ppi" in df.columns
+        # Level 2: 验证具体值
+        assert df["m2_yoy"].iloc[0] == Decimal("8.5")
+        assert df["cpi"].iloc[0] == Decimal("1.8")
+        assert df["ppi"].iloc[0] == Decimal("-1.2")
 
     @pytest.mark.asyncio
     async def test_get_macro_latest_date(self, macro_dao):
-        """
-        测试获取宏观经济数据最新日期
-        """
+        """Level 2: 验证宏观经济数据最新日期"""
         result = await macro_dao.get_macro_latest_date()
 
-        assert result is None or isinstance(result, str)
+        # Level 2: MVD 注入了 2026-05-31，应返回该日期
+        # 注意：返回 datetime.date 对象，非 str（见约束 5）
+        assert result is not None
+        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2026, 5, 31)
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest_date(self, macro_dao):
-        """
-        测试获取 Shibor 数据最新日期
-        """
+        """Level 2: 验证 Shibor 数据最新日期"""
         result = await macro_dao.get_shibor_latest_date()
 
-        assert result is None or isinstance(result, str)
+        # Level 2: MVD 注入了 2026-06-24，应返回该日期
+        # 注意：返回 datetime.date 对象，非 str（见约束 5）
+        assert result is not None
+        assert isinstance(result, datetime.date)
+        assert result == datetime.date(2026, 6, 24)
 
 
 class TestMacroDaoEdgeCases:
