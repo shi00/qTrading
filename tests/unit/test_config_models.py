@@ -376,6 +376,26 @@ class TestPromptDefaultsSingleSource:
         assert "分析框架" in DEFAULT_AI_PROMPT
         assert "技术面" in DEFAULT_AI_PROMPT
 
+    def test_news_category_map_is_single_source_of_truth(self):
+        """NEWS_CATEGORY_MAP 必须包含所有 L1/L2 code，且 Prompt 由其动态生成。"""
+        from utils.config_models import NEWS_CATEGORY_MAP, DEFAULT_NEWS_PROMPT
+
+        # 所有 L1 code 必须出现在 Prompt 中
+        for l1_code in NEWS_CATEGORY_MAP:
+            assert l1_code in DEFAULT_NEWS_PROMPT, f"L1 code '{l1_code}' missing in prompt"
+
+        # 所有 L2 code 必须出现在 Prompt 中
+        all_l2 = [l2 for l2_list in NEWS_CATEGORY_MAP.values() for l2 in l2_list]
+        for l2_code in all_l2:
+            assert l2_code in DEFAULT_NEWS_PROMPT, f"L2 code '{l2_code}' missing in prompt"
+
+    def test_news_category_map_l2_codes_are_unique(self):
+        """L2 code 不得跨 L1 重复，否则反向映射会冲突。"""
+        from utils.config_models import NEWS_CATEGORY_MAP
+
+        all_l2 = [l2 for l2_list in NEWS_CATEGORY_MAP.values() for l2 in l2_list]
+        assert len(all_l2) == len(set(all_l2)), "Duplicate L2 codes found across L1 categories"
+
 
 class TestTusharePointTier:
     def test_point_tier_default_is_custom(self):

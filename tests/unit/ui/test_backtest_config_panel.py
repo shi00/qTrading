@@ -15,6 +15,8 @@ pytestmark = pytest.mark.unit
 def mock_page() -> MagicMock:
     page = MagicMock()
     page.open_dialog = MagicMock()
+    page.open = MagicMock()
+    page.overlay = []
     return page
 
 
@@ -328,3 +330,37 @@ class TestBacktestConfigPanel:
         assert config["stamp_duty_rate"] is None
 
         del type(panel.stamp_duty_slider).value
+
+    def test_did_mount_and_unmount(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
+        panel.page = mock_page
+
+        # Test did_mount mounts pickers
+        panel.did_mount()
+        assert panel.start_date_picker in mock_page.overlay
+        assert panel.end_date_picker in mock_page.overlay
+        mock_page.update.assert_called_once()
+        mock_page.update.reset_mock()
+
+        # Test will_unmount unmounts pickers
+        panel.start_date_picker.open = True
+        panel.will_unmount()
+        assert not panel.start_date_picker.open
+        assert panel.start_date_picker not in mock_page.overlay
+        assert panel.end_date_picker not in mock_page.overlay
+        mock_page.update.assert_called_once()
+
+    def test_show_start_picker(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
+        panel.page = mock_page
+        mock_event = MagicMock()
+
+        panel._show_start_picker(mock_event)
+
+        mock_page.open.assert_called_once_with(panel.start_date_picker)
+
+    def test_show_end_picker(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
+        panel.page = mock_page
+        mock_event = MagicMock()
+
+        panel._show_end_picker(mock_event)
+
+        mock_page.open.assert_called_once_with(panel.end_date_picker)

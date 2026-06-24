@@ -1452,6 +1452,7 @@
     "news_l2_financial_sector": "金融板块",
     "news_l2_livelihood": "民生",
     "news_l2_entertainment": "娱乐",
+    "news_fallback_category": "资讯",
     "task_type_backtest": "历史回测",
     "backtest_config_title": "回测配置",
     "backtest_date_range": "日期范围",
@@ -1587,5 +1588,8 @@
     "tag_reasoning": "推理",
     "tag_reasoning_plus": "推理增强",
     "tag_latest_flagship": "最新旗舰",
-    "tag_coding": "代码专用"
+    "tag_coding": "代码专用",
+    "date_picker_help": "选择日期",
+    "date_picker_error_format": "格式无效",
+    "date_picker_error_invalid": "日期超出范围"
 }

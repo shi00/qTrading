@@ -309,6 +309,27 @@ class TestSystemTabLanguageChange:
         call_args = snack.call_args
         assert call_args.kwargs.get("color") == self.mock_ac.ERROR
 
+    def test_on_language_change_success_updates_locale_configuration(self, mock_page):
+        import flet as ft
+
+        mock_page.locale_configuration = MagicMock()
+        mock_page.locale_configuration.current_locale = ft.Locale("zh", "CN")
+        mock_page.update = MagicMock()
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.show_snack = MagicMock()
+        self.mock_ch.set_locale.return_value = True
+        tab.language_dropdown.value = "en_US"
+        self.mock_i18n.current_locale.return_value = "en_US"
+
+        tab.on_language_change(None)
+
+        self.mock_i18n.set_locale.assert_called_once_with("en_US")
+        assert mock_page.locale_configuration.current_locale.language_code == "en"
+        assert mock_page.locale_configuration.current_locale.country_code == "US"
+        mock_page.update.assert_called_once()
+        tab.show_snack.assert_called_once_with("settings_language_changed")
+
 
 class TestSystemTabLogLevelChange:
     """日志级别切换测试"""

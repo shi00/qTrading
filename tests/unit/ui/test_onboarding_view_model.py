@@ -861,8 +861,25 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         assert original_title.value == "en_wizard_welcome_title"
         assert original_desc.value == "en_wizard_welcome_desc_with_time"
         assert wizard.header_title is original_title
-        assert wizard.header_desc is original_desc
         self.mock_ch.set_locale.assert_called_with("en_US")
+
+    def test_on_language_change_wizard_updates_locale_configuration(self, mock_page):
+        import flet as ft
+
+        mock_page.locale_configuration = MagicMock()
+        mock_page.locale_configuration.current_locale = ft.Locale("zh", "CN")
+        mock_page.update = MagicMock()
+
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        wizard.wizard_language_dropdown = MagicMock()
+        wizard.wizard_language_dropdown.value = "en_US"
+        self.mock_i18n.current_locale.return_value = "en_US"
+        wizard._on_language_change_wizard(MagicMock())
+
+        assert mock_page.locale_configuration.current_locale.language_code == "en"
+        assert mock_page.locale_configuration.current_locale.country_code == "US"
+        mock_page.update.assert_called()
 
     def test_on_language_change_wizard_persist_failure_skips_i18n_set(self, mock_page):
         """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown。"""

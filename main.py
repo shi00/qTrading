@@ -39,6 +39,20 @@ async def main(page: ft.Page):
 
     I18n.initialize(ConfigHandler.get_locale())
 
+    try:
+        lang, country = I18n.current_locale().split("_")
+        current_locale = ft.Locale(lang, country)
+    except (ValueError, AttributeError, IndexError):
+        current_locale = ft.Locale("zh", "CN")
+
+    page.locale_configuration = ft.LocaleConfiguration(
+        supported_locales=[
+            ft.Locale("zh", "CN"),
+            ft.Locale("en", "US"),
+        ],
+        current_locale=current_locale,
+    )
+
     cache_manager = CacheManager()
 
     page.title = I18n.get("app_title")

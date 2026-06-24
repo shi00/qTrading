@@ -40,12 +40,22 @@ class BacktestConfigPanel(ft.Container):
             last_date=today,
             current_date=one_year_ago,
             on_change=self._on_start_date_change,
+            help_text=I18n.get("date_picker_help"),
+            cancel_text=I18n.get("common_cancel"),
+            confirm_text=I18n.get("common_ok"),
+            error_format_text=I18n.get("date_picker_error_format"),
+            error_invalid_text=I18n.get("date_picker_error_invalid"),
         )
         self.end_date_picker = ft.DatePicker(
             first_date=date(2020, 1, 1),
             last_date=today,
             current_date=today,
             on_change=self._on_end_date_change,
+            help_text=I18n.get("date_picker_help"),
+            cancel_text=I18n.get("common_cancel"),
+            confirm_text=I18n.get("common_ok"),
+            error_format_text=I18n.get("date_picker_error_format"),
+            error_invalid_text=I18n.get("date_picker_error_invalid"),
         )
 
         self.start_date_value = one_year_ago
@@ -54,13 +64,13 @@ class BacktestConfigPanel(ft.Container):
         self.start_date_btn = ft.OutlinedButton(
             text=one_year_ago.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
-            on_click=lambda e: e.control.page.open_dialog(self.start_date_picker),
+            on_click=self._show_start_picker,
             width=AppStyles.CONTROL_WIDTH_SM,
         )
         self.end_date_btn = ft.OutlinedButton(
             text=today.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
-            on_click=lambda e: e.control.page.open_dialog(self.end_date_picker),
+            on_click=self._show_end_picker,
             width=AppStyles.CONTROL_WIDTH_SM,
         )
 
@@ -151,6 +161,40 @@ class BacktestConfigPanel(ft.Container):
         )
 
         self.content = self._build_content()
+
+    def did_mount(self):
+        """挂载时：将对话框安全地绑定到全局 overlay"""
+        super().did_mount()
+        if self.page:
+            if self.start_date_picker not in self.page.overlay:
+                self.page.overlay.append(self.start_date_picker)
+            if self.end_date_picker not in self.page.overlay:
+                self.page.overlay.append(self.end_date_picker)
+            self.page.update()
+
+    def will_unmount(self):
+        """卸载时：确保关闭并清理对话框"""
+        super().will_unmount()
+        if not self.page:
+            return
+
+        needs_update = False
+        for picker in (self.start_date_picker, self.end_date_picker):
+            if getattr(self, "page", None) and picker in self.page.overlay:
+                picker.open = False  # 确保合规关闭，避免前端撕裂
+                self.page.overlay.remove(picker)
+                needs_update = True
+
+        if needs_update:
+            self.page.update()
+
+    def _show_start_picker(self, e):
+        if getattr(self, "page", None):
+            self.page.open(self.start_date_picker)
+
+    def _show_end_picker(self, e):
+        if getattr(self, "page", None):
+            self.page.open(self.end_date_picker)
 
     def _build_content(self) -> ft.Column:
         return ft.Column(

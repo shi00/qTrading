@@ -434,6 +434,16 @@ class SystemTab(ft.Container):
                     self._safe_update()
                     return
                 I18n.set_locale(new_locale)
+                if self.page and getattr(self.page, "locale_configuration", None):
+                    try:
+                        normalized = I18n.current_locale()
+                        parts = normalized.split("_")
+                        lang = parts[0]
+                        country = parts[1] if len(parts) > 1 else None
+                        self.page.locale_configuration.current_locale = ft.Locale(lang, country)
+                        self.page.update()
+                    except Exception as ex:
+                        logger.debug("[SystemTab] Failed to update page locale configuration: %s", ex, exc_info=True)
                 self.show_snack(I18n.get("settings_language_changed"))
         except Exception as ex:
             logger.error("[SystemTab] Language | Change failed: %s", DataSanitizer.sanitize_error(ex))

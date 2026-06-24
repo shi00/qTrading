@@ -1452,6 +1452,7 @@
     "news_l2_financial_sector": "Financial Sector",
     "news_l2_livelihood": "Livelihood",
     "news_l2_entertainment": "Entertainment",
+    "news_fallback_category": "Other",
     "task_type_backtest": "Historical Backtest",
     "backtest_config_title": "Backtest Configuration",
     "backtest_date_range": "Date Range",
@@ -1587,5 +1588,8 @@
     "tag_reasoning": "Reasoning",
     "tag_reasoning_plus": "Reasoning+",
     "tag_latest_flagship": "Latest Flagship",
-    "tag_coding": "Coding"
+    "tag_coding": "Coding",
+    "date_picker_help": "Select date",
+    "date_picker_error_format": "Invalid format",
+    "date_picker_error_invalid": "Out of range"
 }

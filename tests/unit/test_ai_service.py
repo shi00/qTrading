@@ -649,7 +649,8 @@ class TestAIServiceParseNewsResult:
         assert result["sentiment"] == "Neutral"
 
     @patch("services.ai_service.ConfigHandler")
-    def test_unknown_code_falls_back_to_code(self, mock_ch):
+    def test_unknown_code_falls_back_to_info(self, mock_ch):
+        """AI 返回完全无效的 L1/L2 code 时，降级为本地化"资讯"，不暴露英文编码。"""
         mock_ch.get_ai_provider.return_value = "cloud"
         mock_ch.get_llm_config.return_value = {
             "api_key": "key",
@@ -662,9 +663,61 @@ class TestAIServiceParseNewsResult:
         mock_ch.get_setting.return_value = False
         svc = AIService()
         with patch("core.i18n.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, default=None: default if default is not None else key
+            mock_i18n.get.side_effect = lambda key, default=None: {
+                "news_fallback_category": "资讯",
+            }.get(key, default if default is not None else key)
             result = svc._parse_news_result({"category_L1": "unknown_l1", "category_L2": "unknown_l2"})
-        assert result["category"] == "unknown_l1-unknown_l2"
+        assert result["category"] == "资讯"
+
+    @patch("services.ai_service.ConfigHandler")
+    def test_news_classification_fallback_and_autocorrect(self, mock_ch):
+        """覆盖 AI 幻觉场景：L1/L2 错位、全无效、L1 有效 L2 无效、大小写波动、空白字符。"""
+        mock_ch.get_ai_provider.return_value = "cloud"
+        mock_ch.get_llm_config.return_value = {"api_key": "key", "provider": "test", "base_url": "http://api.test.com"}
+        mock_ch.get_ai_model.return_value = "test-model"
+        mock_ch.get_setting.return_value = False
+        svc = AIService()
+        with patch("core.i18n.I18n") as mock_i18n:
+            mock_i18n.get.side_effect = lambda key, default=None: {
+                "news_l1_finance": "金融核心",
+                "news_l1_industry": "行业产业",
+                "news_l2_macro_data": "宏观数据",
+                "news_l2_macro_policy": "宏观政策",
+                "news_l2_tech": "科技板块",
+                "news_fallback_category": "资讯",
+            }.get(key, default if default is not None else key)
+
+            # 场景1：AI 错将 L2 (macro_policy) 放到了 L1，L2 (macro_data) 正确
+            res1 = svc._parse_news_result({"category_L1": "macro_policy", "category_L2": "macro_data"})
+            assert res1["category"] == "金融核心-宏观数据"
+
+            # 场景2：L1 完全幻觉无效，L2 也完全无效。两个都无效时，退回通用兜底。
+            res2 = svc._parse_news_result({"category_L1": "invalid_l1", "category_L2": "invalid_l2"})
+            assert res2["category"] == "资讯"
+
+            # 场景3：L1 有效，但 L2 幻觉无效。保留 L1，丢弃 L2。
+            res3 = svc._parse_news_result({"category_L1": "finance", "category_L2": "invalid_l2"})
+            assert res3["category"] == "金融核心"
+
+            # 场景4：L1 无效，但 L2 有效。通过 L2 推导 L1。
+            res4 = svc._parse_news_result({"category_L1": "garbage", "category_L2": "tech"})
+            assert res4["category"] == "行业产业-科技板块"
+
+            # 场景5：大小写波动 — AI 返回 "Finance" 而非 "finance"
+            res5 = svc._parse_news_result({"category_L1": "Finance", "category_L2": "macro_data"})
+            assert res5["category"] == "金融核心-宏观数据"
+
+            # 场景6：空白字符 — AI 返回 " finance " 带前后空白
+            res6 = svc._parse_news_result({"category_L1": " finance ", "category_L2": " macro_data "})
+            assert res6["category"] == "金融核心-宏观数据"
+
+            # 场景7：L1 和 L2 均为空字符串
+            res7 = svc._parse_news_result({"category_L1": "", "category_L2": ""})
+            assert res7["category"] == "资讯"
+
+            # 场景8：L1 和 L2 均为 None (AI 返回 null)
+            res8 = svc._parse_news_result({"category_L1": None, "category_L2": None})
+            assert res8["category"] == "资讯"
 
 
 class TestAIServiceVerifyConnection:

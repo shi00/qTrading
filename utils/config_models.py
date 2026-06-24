@@ -55,25 +55,34 @@ DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
 
 """
 
-DEFAULT_NEWS_PROMPT = """你是金融量化分析师。请对新闻进行分类。
+# 统一新闻分类映射 (单一事实源)
+# L1 code -> [L2 code, ...]
+# 注意: L2 code 不得跨 L1 重复，否则反向映射 (l2_to_l1) 会冲突
+NEWS_CATEGORY_MAP: dict[str, list[str]] = {
+    "finance": ["a_stock", "hk_us", "futures", "precious_metals", "forex", "macro_policy"],
+    "macro_economy": ["macro_data", "fiscal_policy", "intl_macro"],
+    "geopolitics": ["conflict", "energy"],
+    "industry": ["tech", "consumer", "energy_sector", "financial_sector"],
+    "other": ["livelihood", "entertainment"],
+}
+
+_category_lines = "\n".join([f"- {k} -> {', '.join(v)}" for k, v in NEWS_CATEGORY_MAP.items()])
+
+DEFAULT_NEWS_PROMPT = f"""你是金融量化分析师。请对新闻进行分类。
 **MUST output valid JSON ONLY. NO markdown (no ```json). NO reasoning. NEVER output an empty string.**
 
 # 分类体系 (L1 code -> L2 code)
-- finance -> a_stock, hk_us, futures, precious_metals, forex, macro_policy
-- macro_economy -> macro_data, fiscal_policy, intl_macro
-- geopolitics -> conflict, energy
-- industry -> tech, consumer, energy_sector, financial_sector
-- other -> livelihood, entertainment
+{_category_lines}
 
 # JSON 格式要求
-{"category_L1": "L1 code (English)", "category_L2": "L2 code (English)", "sentiment": "Positive/Neutral/Negative", "emoji": "相关Emoji"}
+{{"category_L1": "L1 code (English)", "category_L2": "L2 code (English)", "sentiment": "Positive/Neutral/Negative", "emoji": "相关Emoji"}}
 
 # 示例
 User: 紫金矿业发现金矿
-Assistant: {"category_L1": "finance", "category_L2": "precious_metals", "sentiment": "Positive", "emoji": "🥇"}
+Assistant: {{"category_L1": "finance", "category_L2": "precious_metals", "sentiment": "Positive", "emoji": "🥇"}}
 
 User: 某明星去旅游了
-Assistant: {"category_L1": "other", "category_L2": "entertainment", "sentiment": "Neutral", "emoji": "🍉"}"""
+Assistant: {{"category_L1": "other", "category_L2": "entertainment", "sentiment": "Neutral", "emoji": "🍉"}}"""
 
 
 class SyncIntegrityConfig(BaseModel):

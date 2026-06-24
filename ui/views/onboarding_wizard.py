@@ -1041,6 +1041,17 @@ class OnboardingWizard(ft.Container):
                 return
             I18n.set_locale(new_locale)
 
+            if self.app_page and getattr(self.app_page, "locale_configuration", None):
+                try:
+                    normalized = I18n.current_locale()
+                    parts = normalized.split("_")
+                    lang = parts[0]
+                    country = parts[1] if len(parts) > 1 else None
+                    self.app_page.locale_configuration.current_locale = ft.Locale(lang, country)
+                    self.app_page.update()
+                except Exception as ex:
+                    logger.debug("[OnboardingWizard] Failed to update page locale configuration: %s", ex, exc_info=True)
+
             if hasattr(self, "header_title"):
                 self.header_title.value = I18n.get("wizard_welcome_title")
             if hasattr(self, "header_desc"):

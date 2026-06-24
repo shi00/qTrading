@@ -14,6 +14,7 @@ import pandas as pd
 from core.i18n import I18n
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
+from utils.config_models import NEWS_CATEGORY_MAP
 from utils.loop_local import get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
@@ -1295,23 +1296,61 @@ class AIService:
         Handles the L1/L2 category logic to provide a clean 'category' string for UI.
         L1/L2 codes are English enum values returned by the AI prompt,
         translated to locale-specific display names via I18n.
+
+        防御性策略 (不信任 AI 响应):
+        1. 输入归一化: strip + lower，应对 AI 大小写/空白波动
+        2. 词典校验: L1 必须在 NEWS_CATEGORY_MAP，L2 必须在反向映射中
+        3. 错位纠正: AI 将 L2 放到 L1 位置时，通过反向映射推导正确 L1
+        4. L2 推导 L1: L1 无效但 L2 有效时，通过 L2 反推 L1
+        5. 安全兜底: 任何无效层级不暴露英文编码，降级为本地化"资讯"
         """
         from core.i18n import I18n
 
-        l1_code = raw_result.get("category_L1", "")
-        l2_code = raw_result.get("category_L2", "")
+        # 1. 输入归一化 (None 值经 `or ""` 转为空串，避免 str(None)="none" 被当作无效编码处理)
+        l1_code = (raw_result.get("category_L1") or "").strip().lower()
+        l2_code = (raw_result.get("category_L2") or "").strip().lower()
 
+        # 2. 构建反向映射 (L2 -> L1)
+        l2_to_l1_map: dict[str, str] = {}
+        for l1, l2_list in NEWS_CATEGORY_MAP.items():
+            for l2 in l2_list:
+                l2_to_l1_map[l2] = l1
+
+        is_valid_l1 = l1_code in NEWS_CATEGORY_MAP
+        is_valid_l2 = l2_code in l2_to_l1_map
+
+        # 3. 错位纠正: AI 错把 L2 作为 L1 输出 (例如 category_L1="macro_policy")
+        if l1_code and l1_code in l2_to_l1_map and not is_valid_l1:
+            if not l2_code:
+                l2_code = l1_code
+            l1_code = l2_to_l1_map[l1_code]
+            is_valid_l1 = True
+            is_valid_l2 = l2_code in l2_to_l1_map
+
+        # 4. L2 推导 L1: L1 彻底错乱但 L2 合法
+        if is_valid_l2 and not is_valid_l1:
+            l1_code = l2_to_l1_map[l2_code]
+            is_valid_l1 = True
+
+        # 5. 翻译为本地化展示名
         l1_display = I18n.get(f"news_l1_{l1_code}", l1_code) if l1_code else ""
         l2_display = I18n.get(f"news_l2_{l2_code}", l2_code) if l2_code else ""
 
+        # 6. 安全兜底隔离: L1 非法或缺少语言包退回原始英文 → 降级为"资讯"
+        if not is_valid_l1 or (l1_code and l1_display == l1_code):
+            l1_display = I18n.get("news_fallback_category", "Other")
+
+        # 7. 安全兜底隔离: L2 非法或缺少语言包退回原始英文 → 完全剔除
+        if not is_valid_l2 or (l2_code and l2_display == l2_code):
+            l2_display = ""
+
+        # 8. 拼接返回
         if l2_display and l1_display:
             final_category = f"{l1_display}-{l2_display}"
-        elif l2_display:
-            final_category = l2_display
         elif l1_display:
             final_category = l1_display
         else:
-            final_category = ""
+            final_category = I18n.get("news_fallback_category", "Other")
 
         raw_result["category"] = final_category
         if "emoji" not in raw_result:
