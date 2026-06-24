@@ -447,7 +447,7 @@ class TestLoopLocalFallbackMigration:
 class TestShutdownCoordinatorContinuesOnCriticalFailure:
     """P0-4: Verify that critical step failure does NOT skip remaining steps.
 
-    After the fix, all 7 cleanup steps always execute regardless of
+    After the fix, all 8 cleanup steps always execute regardless of
     individual step failures. The overall result is False if any critical
     step failed, but resource-release steps (thread pools, AI model) still run.
     """
@@ -470,7 +470,7 @@ class TestShutdownCoordinatorContinuesOnCriticalFailure:
         assert ok is False
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
-        assert len(coordinator.step_results) == 7
+        assert len(coordinator.step_results) == 8
 
     @pytest.mark.asyncio
     async def test_non_critical_failure_still_returns_ok(self):
@@ -488,7 +488,7 @@ class TestShutdownCoordinatorContinuesOnCriticalFailure:
             ok = await coordinator.do_cleanup(timeout_s=5.0, step_timeout_s=2.0)
 
         assert ok is True
-        assert len(coordinator.step_results) == 7
+        assert len(coordinator.step_results) == 8
 
 
 class TestScheduleAsyncGcProtection:

@@ -1002,6 +1002,10 @@ class OnboardingWizard(ft.Container):
     async def _cleanup_vm(self):  # pragma: no cover
         if self.vm.sync_in_progress:
             await self.vm.cancel_sync()
+        # 清理未提交的验证状态
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager.cancel_verification_if_active()
         self.vm.dispose()
 
     def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover

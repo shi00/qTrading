@@ -463,7 +463,7 @@ class LocalModelConfigPanel(ft.Container):
         gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value or 0)
 
         try:
-            ConfigHandler.save_local_ai_config(
+            success = ConfigHandler.save_local_ai_config(
                 model_path=model_path,
                 timeout=timeout,
                 n_threads=int(self.threads_input.value or 4),
@@ -475,6 +475,14 @@ class LocalModelConfigPanel(ft.Container):
         except (ValueError, TypeError) as e:
             logger.error(f"[LocalModelConfigPanel] Invalid config values: {e}")
             return False
+
+        if not success:
+            return False
+
+        # 提交验证模式（如果活跃）—— 仅 Onboarding 流程走此路径
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager.commit_verification_if_active()
 
         return True
 
@@ -556,6 +564,11 @@ class LocalModelConfigPanel(ft.Container):
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
             logger.debug("[LocalModelConfigPanel] Unsubscribed from locale changes")
+
+        # 清理未提交的验证状态
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager.cancel_verification_if_active()
 
     def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
         try:

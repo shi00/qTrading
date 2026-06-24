@@ -1,5 +1,6 @@
 import multiprocessing
 import queue
+import time
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -1714,3 +1715,186 @@ class TestModelIntegritySha256:
         mgr._model_sha256 = "abc123"
         assert mgr.get_loaded_model_md5() == "abc123"
         assert mgr.get_loaded_model_sha256() == "abc123"
+
+
+class TestLocalModelVerificationMode:
+    """验证模式状态机测试。"""
+
+    @pytest.mark.asyncio
+    async def test_verification_mode_flow(self):
+        """验证成功并提交：_verification_mode 重置，模型保留。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model(
+                    "/path/to/model.gguf",
+                    config={"n_threads": 2},
+                    is_verification=True,
+                )
+                assert result is True
+                assert mgr._verification_mode is True
+                mgr.commit_verification()
+                assert mgr._verification_mode is False
+                assert mgr._model_path == "/path/to/model.gguf"
+
+    @pytest.mark.asyncio
+    async def test_inference_raises_in_verification_mode(self):
+        """验证期间推理抛出 RuntimeError。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._verification_mode = True
+            mgr._verification_start_time = time.monotonic()
+            with patch("services.local_model_manager.ConfigHandler") as mock_ch:
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/fake/model.gguf",
+                    "local_model_timeout": 30,
+                }
+                with pytest.raises(RuntimeError, match="verification in progress"):
+                    await mgr.run_inference("test prompt")
+
+    @pytest.mark.asyncio
+    async def test_verification_failure_resets_mode(self):
+        """加载异常时 _verification_mode 恢复为 False（finally 块清理）。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=False),
+            ):
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                result = await mgr.load_model(
+                    "/path/to/model.gguf",
+                    config={"n_threads": 2},
+                    is_verification=True,
+                )
+                assert result is False
+                assert mgr._verification_mode is False
+
+    @pytest.mark.asyncio
+    async def test_verification_resets_on_llama_cpp_missing(self):
+        """_HAS_LLAMA_CPP=False 时验证，_verification_mode 保持 False（早期返回，未设置）。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", False):
+            mgr = LocalModelManager()
+            result = await mgr.load_model(
+                "/path/to/model.gguf",
+                config={"n_threads": 2},
+                is_verification=True,
+            )
+            assert result is False
+            assert mgr._verification_mode is False
+
+    @pytest.mark.asyncio
+    async def test_verification_resets_on_file_not_found(self):
+        """文件不存在时验证，_verification_mode 保持 False（早期返回，未设置）。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with patch("os.path.exists", return_value=False):
+                result = await mgr.load_model(
+                    "/path/to/model.gguf",
+                    config={"n_threads": 2},
+                    is_verification=True,
+                )
+                assert result is False
+                assert mgr._verification_mode is False
+
+    @pytest.mark.asyncio
+    async def test_verification_timeout_auto_cancels(self):
+        """模拟超时后 run_inference 自动调用 cancel_verification，状态被清理。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            mgr._verification_mode = True
+            mgr._verification_start_time = time.monotonic() - 301
+            with (
+                patch.object(mgr, "unload_model") as mock_unload,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=False),
+            ):
+                mock_ch.get_local_ai_config.return_value = {
+                    "local_model_path": "/fake/model.gguf",
+                    "local_model_timeout": 30,
+                }
+                with pytest.raises(RuntimeError, match="failed to start"):
+                    await mgr.run_inference("test prompt")
+                assert mgr._verification_mode is False
+                mock_unload.assert_called_once()
+
+    def test_commit_verification_clears_flag(self):
+        """commit_verification 后 _verification_mode=False，模型仍保留。"""
+        mgr = LocalModelManager()
+        mgr._verification_mode = True
+        mgr._model_path = "/fake"
+        mgr.commit_verification()
+        assert mgr._verification_mode is False
+        assert mgr._model_path == "/fake"
+
+    def test_cancel_verification_unloads_model(self):
+        """cancel_verification 后 _verification_mode=False 且 unload_model 被调用。"""
+        mgr = LocalModelManager()
+        mgr._verification_mode = True
+        mgr._model_path = "/fake"
+        with patch.object(mgr, "unload_model") as mock_unload:
+            mgr.cancel_verification()
+            assert mgr._verification_mode is False
+            mock_unload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_verify_same_model_already_loaded(self):
+        """已加载模型 A 时验证模型 A，load_model 提前返回，验证模式正确设置。"""
+        with patch("services.local_model_manager._HAS_LLAMA_CPP", True):
+            mgr = LocalModelManager()
+            with (
+                patch("os.path.exists", return_value=True),
+                # spec omitted: os.stat_result constructor is incompatible with MagicMock keyword args
+                patch("os.stat", return_value=MagicMock(st_mtime=100, st_size=999)),
+                patch.object(LocalModelManager, "_get_load_lock"),
+                patch("services.local_model_manager.ThreadPoolManager") as mock_tpm,
+                patch("services.local_model_manager.ConfigHandler") as mock_ch,
+                patch.object(mgr, "_ensure_worker", return_value=True),
+                patch.object(mgr, "_await_worker_ready", return_value=True),
+            ):
+                mock_ch.get_typed.return_value = ""
+                mock_tpm.return_value.run_async = AsyncMock(return_value="abc123")
+                # 第一次正常加载模型 A
+                result1 = await mgr.load_model(
+                    "/path/to/model.gguf",
+                    config={"n_threads": 2},
+                )
+                assert result1 is True
+                assert mgr._model_path == "/path/to/model.gguf"
+                # 第二次以验证模式加载同一模型，应提前返回 True
+                result2 = await mgr.load_model(
+                    "/path/to/model.gguf",
+                    config={"n_threads": 2},
+                    is_verification=True,
+                )
+                assert result2 is True
+                assert mgr._verification_mode is True
+                mgr.commit_verification()
+                assert mgr._verification_mode is False
+
+    def test_commit_if_active_noop_when_no_instance(self):
+        """commit_verification_if_active() 在 _instance=None 时不报错。"""
+        LocalModelManager._instance = None
+        LocalModelManager.commit_verification_if_active()
+
+    def test_cancel_if_active_noop_when_no_instance(self):
+        """cancel_verification_if_active() 在 _instance=None 时不报错。"""
+        LocalModelManager._instance = None
+        LocalModelManager.cancel_verification_if_active()

@@ -430,4 +430,4 @@ class OnboardingViewModel:
         from services.local_model_manager import LocalModelManager
 
         manager = await LocalModelManager.get_instance()
-        return await manager.load_model(model_path, config)
+        return await manager.load_model(model_path, config, is_verification=True)

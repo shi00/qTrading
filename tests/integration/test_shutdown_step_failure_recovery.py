@@ -61,7 +61,7 @@ class TestShutdownStepFailureRecovery:
         assert ok is False
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
-        assert len(coordinator.step_results) == 7
+        assert len(coordinator.step_results) == 8
 
     @pytest.mark.asyncio
     async def test_step_timeout_continues_remaining_steps(self, mock_singletons):
@@ -76,7 +76,7 @@ class TestShutdownStepFailureRecovery:
         step0 = next(r for r in coordinator.step_results if r.name == "Step 0")
         assert step0.ok is False
         assert step0.timed_out is True
-        assert len(coordinator.step_results) == 7
+        assert len(coordinator.step_results) == 8
 
     @pytest.mark.asyncio
     async def test_step_result_error_message_preserved(self, mock_singletons):
@@ -98,7 +98,7 @@ class TestShutdownStepFailureRecovery:
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await coordinator.do_cleanup()
 
-        assert len(coordinator.step_results) == 7
+        assert len(coordinator.step_results) == 8
         names = [r.name for r in coordinator.step_results]
         assert names == [
             "Step 0",
@@ -108,6 +108,7 @@ class TestShutdownStepFailureRecovery:
             "Step 4",
             "Step 5",
             "Step 6",
+            "Step 7",
         ]
 
     @pytest.mark.asyncio

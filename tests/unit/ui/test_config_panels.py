@@ -44,7 +44,7 @@ def mock_config_handler_local():
             "n_gpu_layers": -1,
         }
         m.get_local_ai_timeout.return_value = 300
-        m.save_local_ai_config.return_value = None
+        m.save_local_ai_config.return_value = True
         yield m
 
 
@@ -630,6 +630,23 @@ class TestLocalModelConfigPanel:
 
         call_kwargs = mock_config_handler_local.save_local_ai_config.call_args.kwargs
         assert call_kwargs["n_gpu_layers"] == -1
+
+    def test_save_config_returns_false_when_save_fails(self, mock_config_handler_local, mock_i18n_local, mock_page):
+        """save_local_ai_config 返回 False 时 save_config 应返回 False"""
+        mock_config_handler_local.save_local_ai_config.return_value = False
+        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
+        panel.model_path_input.value = "/models/test.gguf"
+        panel.timeout_input.value = "120"
+        panel.threads_input.value = 8
+        panel.gpu_auto_switch.value = False
+        panel.gpu_layers_input.value = 2
+        panel.batch_input.value = "1024"
+        panel.ctx_input.value = "8192"
+        panel.flash_attn_switch.value = True
+
+        result = panel.save_config()
+
+        assert result is False
 
     def test_get_current_config_returns_all_fields(self, mock_config_handler_local, mock_i18n_local, mock_page):
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)

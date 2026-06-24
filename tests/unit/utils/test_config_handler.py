@@ -529,6 +529,18 @@ class TestConfigHandlerSaveLocalAiConfig:
         assert saved["local_model_path"] == "/path/to/model.gguf"
         assert saved["local_n_threads"] == 8
 
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_save_returns_bool_true(self, mock_save):
+        res = ConfigHandler.save_local_ai_config(model_path="/fake/model", timeout=60)
+        assert isinstance(res, bool)
+        assert res is True
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=False)
+    def test_save_returns_bool_false_on_failure(self, mock_save):
+        res = ConfigHandler.save_local_ai_config(model_path="/fake/model", timeout=60)
+        assert isinstance(res, bool)
+        assert res is False
+
 
 class TestConfigHandlerNoProxyDomains:
     @patch.object(

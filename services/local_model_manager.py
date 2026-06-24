@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import queue
 import threading
+import time
 import traceback
 from typing import Any
 
@@ -26,6 +27,7 @@ class LocalInferenceTimeoutError(RuntimeError):
 
 
 _SENTINEL = "__SHUTDOWN__"
+_VERIFICATION_TIMEOUT_SECONDS = 300
 
 
 def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverable by unit tests
@@ -191,7 +193,7 @@ class LocalModelManager:
                 cls._instance._initialized = True
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, *, clock=None):
         if self._initialized:
             return
         self._model_path: str = ""
@@ -205,6 +207,9 @@ class LocalModelManager:
         self._result_queue: multiprocessing.Queue | None = None
         self._worker_ready: bool = False
         self._worker_lock: threading.Lock = threading.Lock()
+        self._verification_mode: bool = False
+        self._verification_start_time: float = 0.0
+        self._clock = clock or time.monotonic
         self._initialized = True
 
     def _shutdown_worker(self):
@@ -387,7 +392,12 @@ class LocalModelManager:
         """Backward-compatible alias for calculate_file_sha256."""
         return LocalModelManager.calculate_file_sha256(file_path)
 
-    async def load_model(self, model_path: str, config: dict[str, Any] | None = None) -> bool:
+    async def load_model(
+        self,
+        model_path: str,
+        config: dict[str, Any] | None = None,
+        is_verification: bool = False,
+    ) -> bool:
         """
         Load the model by starting a persistent subprocess worker.
 
@@ -403,105 +413,116 @@ class LocalModelManager:
             logger.error(f"Model file not found: {model_path}")
             return False
 
-        if config is None:
-            config = ConfigHandler.get_local_ai_config()
+        if is_verification:
+            self._verification_mode = True
+            self._verification_start_time = self._clock()
+            logger.info("[LocalModel] Entering verification mode for: %s", model_path)
 
-        # Resolve load timeout: prefer panel's "timeout", then persisted "local_model_timeout", default 180s
-        raw_timeout = config.get("timeout")
-        if raw_timeout is None:
-            raw_timeout = config.get("local_model_timeout")
-        if raw_timeout is None:
-            raw_timeout = 180
-        load_timeout = max(1, min(int(raw_timeout), 3600))
+        try:
+            if config is None:
+                config = ConfigHandler.get_local_ai_config()
 
-        core_config = {
-            "n_threads": config.get("n_threads", 4),
-            "n_batch": config.get("n_batch", 1024),
-            "n_ctx": config.get("n_ctx", 4096),
-            "n_gpu_layers": config.get("n_gpu_layers", 0),
-            "flash_attn": config.get("flash_attn", True),
-        }
+            # Resolve load timeout: prefer panel's "timeout", then persisted "local_model_timeout", default 180s
+            raw_timeout = config.get("timeout")
+            if raw_timeout is None:
+                raw_timeout = config.get("local_model_timeout")
+            if raw_timeout is None:
+                raw_timeout = 180
+            load_timeout = max(1, min(int(raw_timeout), 3600))
 
-        async with self._get_load_lock():
-            try:
-                stat = os.stat(model_path)
-                current_stat = (stat.st_mtime, stat.st_size)
-            except OSError:
-                current_stat = (0, 0)
+            core_config = {
+                "n_threads": config.get("n_threads", 4),
+                "n_batch": config.get("n_batch", 1024),
+                "n_ctx": config.get("n_ctx", 4096),
+                "n_gpu_layers": config.get("n_gpu_layers", 0),
+                "flash_attn": config.get("flash_attn", True),
+            }
 
-            if (
-                self._worker_ready
-                and self._model_path == model_path
-                and self._model_stat == current_stat
-                and self._last_config == core_config
-            ):
-                return True
+            async with self._get_load_lock():
+                try:
+                    stat = os.stat(model_path)
+                    current_stat = (stat.st_mtime, stat.st_size)
+                except OSError:
+                    current_stat = (0, 0)
 
-            logger.info(
-                f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})...",
-            )
+                if (
+                    self._worker_ready
+                    and self._model_path == model_path
+                    and self._model_stat == current_stat
+                    and self._last_config == core_config
+                ):
+                    return True
 
-            self._is_loading = True
-            self._cancel_event.clear()
-            start_time = asyncio.get_running_loop().time()
-
-            try:
-                logger.info("[LocalModel] Verifying file integrity (SHA-256)...")
-                target_sha256 = await ThreadPoolManager().run_async(
-                    TaskType.IO,
-                    self.calculate_file_sha256,
-                    model_path,
+                logger.info(
+                    f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})...",
                 )
 
-                # Integrity check: compare with stored SHA-256 if available for this path
-                try:
-                    stored_path = ConfigHandler.get_typed("local_model_sha256_path", str, "")
-                    stored_sha256 = ConfigHandler.get_typed("local_model_sha256", str, "")
-                except (ValueError, OSError, RuntimeError):
-                    stored_path = ""
-                    stored_sha256 = ""
+                self._is_loading = True
+                self._cancel_event.clear()
+                start_time = asyncio.get_running_loop().time()
 
-                if stored_path == model_path and stored_sha256 and target_sha256 and stored_sha256 != target_sha256:
-                    raise RuntimeError(
-                        f"Model file integrity check failed: SHA-256 mismatch for {model_path}",
+                try:
+                    logger.info("[LocalModel] Verifying file integrity (SHA-256)...")
+                    target_sha256 = await ThreadPoolManager().run_async(
+                        TaskType.IO,
+                        self.calculate_file_sha256,
+                        model_path,
                     )
 
-                logger.info("[LocalModel] Starting persistent subprocess worker...")
-                if not self._ensure_worker(model_path, core_config):
-                    return False
-                if not await self._await_worker_ready(timeout=float(load_timeout)):
-                    return False
-
-                self._model_path = model_path
-                self._model_sha256 = target_sha256
-                self._model_stat = current_stat
-                self._last_config = core_config
-
-                # Persist SHA-256 for future integrity verification
-                if target_sha256:
+                    # Integrity check: compare with stored SHA-256 if available for this path
                     try:
-                        ConfigHandler.save_config(
-                            {
-                                "local_model_sha256": target_sha256,
-                                "local_model_sha256_path": model_path,
-                            }
-                        )
-                    except (ValueError, OSError, RuntimeError) as e:
-                        logger.warning(f"[LocalModel] Failed to persist model SHA-256: {e}")
+                        stored_path = ConfigHandler.get_typed("local_model_sha256_path", str, "")
+                        stored_sha256 = ConfigHandler.get_typed("local_model_sha256", str, "")
+                    except (ValueError, OSError, RuntimeError):
+                        stored_path = ""
+                        stored_sha256 = ""
 
-                elapsed = asyncio.get_running_loop().time() - start_time
-                logger.info(
-                    f"[LocalModel] Model loaded via subprocess in {elapsed:.2f}s.",
-                )
-                return True
-            except Exception as e:
-                self._model_path = ""
-                self._model_stat = (0, 0)
-                self._last_config = {}
-                logger.error(f"[LocalModel] Failed to load model: {e}", exc_info=True)
-                return False
-            finally:
-                self._is_loading = False
+                    if stored_path == model_path and stored_sha256 and target_sha256 and stored_sha256 != target_sha256:
+                        raise RuntimeError(
+                            f"Model file integrity check failed: SHA-256 mismatch for {model_path}",
+                        )
+
+                    logger.info("[LocalModel] Starting persistent subprocess worker...")
+                    if not self._ensure_worker(model_path, core_config):
+                        return False
+                    if not await self._await_worker_ready(timeout=float(load_timeout)):
+                        return False
+
+                    self._model_path = model_path
+                    self._model_sha256 = target_sha256
+                    self._model_stat = current_stat
+                    self._last_config = core_config
+
+                    # Persist SHA-256 for future integrity verification
+                    if target_sha256:
+                        try:
+                            ConfigHandler.save_config(
+                                {
+                                    "local_model_sha256": target_sha256,
+                                    "local_model_sha256_path": model_path,
+                                }
+                            )
+                        except (ValueError, OSError, RuntimeError) as e:
+                            logger.warning(f"[LocalModel] Failed to persist model SHA-256: {e}")
+
+                    elapsed = asyncio.get_running_loop().time() - start_time
+                    logger.info(
+                        f"[LocalModel] Model loaded via subprocess in {elapsed:.2f}s.",
+                    )
+                    return True
+                except Exception as e:
+                    self._model_path = ""
+                    self._model_stat = (0, 0)
+                    self._last_config = {}
+                    logger.error(f"[LocalModel] Failed to load model: {e}", exc_info=True)
+                    return False
+                finally:
+                    self._is_loading = False
+        finally:
+            if is_verification and self._model_path != model_path:
+                self._verification_mode = False
+                self._verification_start_time = 0.0
+                logger.warning("[LocalModel] Verification failed, exiting verification mode.")
 
     async def run_inference(
         self,
@@ -530,6 +551,19 @@ class LocalModelManager:
 
         if not path:
             raise RuntimeError("Model not configured (no path set).")
+
+        if self._verification_mode:
+            elapsed = self._clock() - self._verification_start_time
+            if elapsed < _VERIFICATION_TIMEOUT_SECONDS:
+                raise RuntimeError(
+                    f"Local inference blocked: model verification in progress "
+                    f"({elapsed:.0f}s elapsed). Falling back to cloud."
+                )
+            logger.warning(
+                "[LocalModel] Verification timed out after %ds, auto-cancelling.",
+                _VERIFICATION_TIMEOUT_SECONDS,
+            )
+            self.cancel_verification()
 
         core_config = {
             "n_threads": config.get("n_threads", 4),
@@ -649,3 +683,32 @@ class LocalModelManager:
         self._model_stat = (0, 0)
         self._last_config = {}
         logger.info("[LocalModel] Model unloaded (worker terminated).")
+
+    def commit_verification(self):
+        """Clear verification mode flag. The verification model becomes the official model."""
+        if self._verification_mode:
+            logger.info("[LocalModel] Verification committed, model retained: %s", self._model_path)
+            self._verification_mode = False
+            self._verification_start_time = 0.0
+
+    def cancel_verification(self):
+        """Clear verification mode flag and unload the temporary verification model."""
+        if self._verification_mode:
+            logger.info("[LocalModel] Verification cancelled, unloading temporary model.")
+            self._verification_mode = False
+            self._verification_start_time = 0.0
+            self.unload_model()
+
+    @classmethod
+    def commit_verification_if_active(cls):
+        """Synchronously commit verification. Safe to call from sync code (e.g. will_unmount)."""
+        inst = cls._instance
+        if inst is not None:
+            inst.commit_verification()
+
+    @classmethod
+    def cancel_verification_if_active(cls):
+        """Synchronously cancel verification. Safe to call from sync code (e.g. will_unmount)."""
+        inst = cls._instance
+        if inst is not None:
+            inst.cancel_verification()

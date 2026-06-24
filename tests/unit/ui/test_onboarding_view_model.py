@@ -499,7 +499,7 @@ class TestOnboardingVMServiceDelegation:
             mock_mgr_cls.get_instance = AsyncMock(return_value=mock_mgr)
             result = await OnboardingViewModel.verify_local_model("/path/model.gguf", {"ctx": 2048})
             assert result is True
-            mock_mgr.load_model.assert_awaited_once_with("/path/model.gguf", {"ctx": 2048})
+            mock_mgr.load_model.assert_awaited_once_with("/path/model.gguf", {"ctx": 2048}, is_verification=True)
 
 
 # =====================================================================

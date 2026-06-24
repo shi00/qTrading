@@ -378,6 +378,10 @@ class AIBrainTab(ft.Container):
             I18n.unsubscribe(self._locale_subscription_id)  # pragma: no cover
             self._locale_subscription_id = None  # pragma: no cover
             logger.debug("[AIBrainTab] Unsubscribed from locale changes")  # pragma: no cover
+        # 清理未提交的验证状态
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager.cancel_verification_if_active()  # pragma: no cover
 
     # =========================================================================
     # Helper Methods
@@ -459,7 +463,7 @@ class AIBrainTab(ft.Container):
         from services.local_model_manager import LocalModelManager
 
         manager = await LocalModelManager.get_instance()
-        return await manager.load_model(model_path, config)
+        return await manager.load_model(model_path, config, is_verification=True)
 
     def _validate_prompt_or_warn(self, prompt: str) -> bool:
         """验证 Prompt 安全性，不合法时显示警告并返回 False"""
@@ -651,6 +655,9 @@ class AIBrainTab(ft.Container):
 
             # 保存成功后更新 panel 状态标志（在事件循环中安全访问 UI 属性）
             self.llm_config_panel._api_key_modified = False
+
+            # 提交验证模式（如果活跃）—— 验证模型成为正式模型
+            LocalModelManager.commit_verification_if_active()
 
             # ========== 阶段 4: 统一重载 AIService 配置 ==========
 

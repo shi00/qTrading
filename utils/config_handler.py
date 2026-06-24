@@ -1212,7 +1212,7 @@ class ConfigHandler:
         }
 
     @staticmethod
-    def save_local_ai_config(model_path: str, timeout: int = 30, **kwargs):
+    def save_local_ai_config(model_path: str, timeout: int = 30, **kwargs) -> bool:
         """Save local AI configuration"""
         # Build config dict
         cfg = {"local_model_path": model_path, "local_model_timeout": timeout}
@@ -1229,7 +1229,7 @@ class ConfigHandler:
         if "n_gpu_layers" in kwargs:
             cfg["local_n_gpu_layers"] = kwargs["n_gpu_layers"]
 
-        ConfigHandler.save_config(cfg)
+        return ConfigHandler.save_config(cfg)
 
     @staticmethod
     def get_ai_system_prompt():
