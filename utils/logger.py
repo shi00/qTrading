@@ -90,6 +90,7 @@ def setup_logging(name="astock_screener"):
 
     has_app_log = False
     has_error_log = False
+    has_latest_log = False
 
     for h in logger.handlers:
         if isinstance(h, RotatingFileHandler):
@@ -98,6 +99,11 @@ def setup_logging(name="astock_screener"):
                 h.setLevel(logging_level)
             elif "error.log" in h.baseFilename:
                 has_error_log = True
+        # 精确匹配常规的 FileHandler (排除子类 RotatingFileHandler)
+        elif type(h) is logging.FileHandler:
+            if "latest.log" in h.baseFilename:
+                has_latest_log = True
+                h.setLevel(logging_level)
 
     formatter = _get_formatter(use_json)
 
@@ -156,7 +162,23 @@ def setup_logging(name="astock_screener"):
         except (OSError, ValueError) as e:
             sys.stderr.write(f"Failed to setup error logging: {e}\n")
 
-    # 6. Suppress noisy third-party logs
+    # 6. Latest Log File Handler (Overwrite on startup, mode='w')
+    if not has_latest_log:
+        latest_log_path = os.path.join(LOG_DIR, "latest.log")
+        try:
+            latest_handler = logging.FileHandler(
+                latest_log_path,
+                mode="w",
+                encoding="utf-8",
+            )
+            latest_handler.setLevel(logging_level)
+            latest_handler.setFormatter(formatter)
+            latest_handler.addFilter(correlation_filter)
+            logger.addHandler(latest_handler)
+        except Exception as e:
+            sys.stderr.write(f"Failed to setup latest file logging: {e}\n")
+
+    # 7. Suppress noisy third-party logs
     noisy_libs = [
         "urllib3",
         "requests",

@@ -50,7 +50,7 @@ class TestLogger(unittest.TestCase):
             logger = setup_logging("test_logger")
 
             # Check handlers
-            self.assertEqual(len(logger.handlers), 3)  # Console, App File, Error File
+            self.assertEqual(len(logger.handlers), 4)  # Console, App File, Error File, Latest File
 
             # Check file handlers properties
             file_handler = [
@@ -416,3 +416,110 @@ class TestLogFormatSelection:
         ]
         assert len(file_handlers) == 1
         assert not isinstance(file_handlers[0].formatter, JSONFormatter)
+
+
+class TestLatestLog:
+    """latest.log 覆写机制与运行时行为验证"""
+
+    def setup_method(self):
+        self.root_logger = logging.getLogger()
+        self.original_handlers = self.root_logger.handlers[:]
+        self.root_logger.handlers = []
+
+    def teardown_method(self):
+        self.root_logger.handlers = self.original_handlers
+
+    def test_latest_log_overwritten_on_startup(self, tmp_path):
+        """验证启动时 latest.log 总是被覆写（清空），不保留历史日志"""
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+        latest_log = log_dir / "latest.log"
+        latest_log.write_text("old latest log content\n", encoding="utf-8")
+
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("latest_overwrite_test")
+
+        # 验证原 latest.log 内容被清空，只包含本次启动的日志
+        content = latest_log.read_text(encoding="utf-8")
+        assert "old latest log content" not in content
+        assert "--- Log Session Started" in content
+
+    def test_latest_log_receives_log_writes(self, tmp_path):
+        """验证 latest.log 实际接收日志写入，且内容与 app.log 一致"""
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("latest_write_test")
+            logger = get_logger()
+            logger.info("unique_latest_log_marker_12345")
+
+        latest_content = (log_dir / "latest.log").read_text(encoding="utf-8")
+        app_content = (log_dir / "app.log").read_text(encoding="utf-8")
+        assert "unique_latest_log_marker_12345" in latest_content
+        assert "unique_latest_log_marker_12345" in app_content
+
+    def test_update_log_level_affects_latest_log(self, tmp_path):
+        """验证 update_log_level 运行时更新会同步作用于 latest.log handler"""
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("latest_level_update_test")
+            latest_handler = [
+                h
+                for h in logging.getLogger().handlers
+                if type(h) is logging.FileHandler and "latest.log" in h.baseFilename
+            ][0]
+            assert latest_handler.level == logging.INFO
+
+            update_log_level("WARNING")
+            assert latest_handler.level == logging.WARNING
+
+    def test_latest_log_failure_writes_to_stderr(self, tmp_path, capsys):
+        """latest.log handler 初始化失败时必须写入 stderr，不得静默吞没"""
+        log_dir = str(tmp_path / "test_logs")
+
+        class FailingFileHandler(logging.FileHandler):
+            def __init__(self, *args, **kwargs):
+                raise OSError("permission denied")
+
+        with (
+            patch("utils.logger.LOG_DIR", log_dir),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+            patch("utils.logger.logging.FileHandler", FailingFileHandler),
+        ):
+            setup_logging("latest_log_stderr_test")
+
+        captured = capsys.readouterr()
+        assert "Failed to setup latest file logging" in captured.err
+        assert "permission denied" in captured.err
