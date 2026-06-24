@@ -195,3 +195,29 @@ async def db_schema_ready(request, test_engine):
             await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
 
     yield
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def cleanup_singletons_session():
+    """Ensure all registered singletons with async close() are cleaned up at session teardown.
+
+    This avoids synchronous connection pool disposal warnings (MissingGreenlet) at exit.
+    """
+    yield
+    import inspect
+    import logging
+    from utils.singleton_registry import _registry, reset_all_singletons
+
+    logger = logging.getLogger(__name__)
+
+    # Clean up singletons in reverse order of registration
+    for cls in reversed(list(_registry)):
+        if hasattr(cls, "_instance"):
+            inst = cls._instance
+            if inst is not None:
+                if hasattr(inst, "close") and inspect.iscoroutinefunction(inst.close):
+                    try:
+                        await inst.close()
+                    except Exception as e:
+                        logger.warning(f"Failed to async close singleton {cls.__name__} during session teardown: {e}")
+    reset_all_singletons()
