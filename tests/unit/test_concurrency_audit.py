@@ -189,6 +189,53 @@ class TestMarketDataServiceStopBehavior:
     @patch("data.domain_services.market_data_service.TushareClient")
     @patch("data.domain_services.market_data_service.CacheManager")
     @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_stop_async_handles_timeout_when_task_unresponsive(self, mock_tc, mock_cache, mock_api):
+        """C-P1-3: stop_async 在 wait_for 超时抛 TimeoutError 时不应中断 shutdown。
+
+        根因：原实现 ``contextlib.suppress(asyncio.CancelledError)`` 无法捕获
+        ``asyncio.wait_for`` 超时抛出的 ``TimeoutError``（Python 3.13 中超时
+        抛 ``TimeoutError`` 而非 ``CancelledError``），导致 shutdown 流程中断。
+
+        通过 mock ``asyncio.wait_for`` 抛 ``TimeoutError`` 模拟 task 不响应
+        cancel 的超时场景，验证：
+        1. ``stop_async`` 不抛 ``TimeoutError``；
+        2. ``_task`` 被置 None；
+        3. 打印 warning 日志描述超时。
+        """
+        svc = MarketDataService()
+        svc._running = True
+        poll_task = asyncio.create_task(asyncio.sleep(100))
+        svc._task = poll_task
+
+        # mock wait_for 抛 TimeoutError 模拟超时分支
+        async def _fake_wait_for(awaitable, timeout=None, **kwargs):
+            raise TimeoutError()
+
+        with (
+            patch(
+                "data.domain_services.market_data_service.asyncio.wait_for",
+                side_effect=_fake_wait_for,
+            ),
+            patch(
+                "data.domain_services.market_data_service.logger.warning",
+            ) as mock_warning,
+        ):
+            await svc.stop_async(timeout=0.1)
+            assert svc._task is None
+            assert svc._cached_data is None
+            # 验证 warning 日志被调用（描述超时）
+            warning_calls = [str(c) for c in mock_warning.call_args_list]
+            assert any("timeout" in c.lower() for c in warning_calls), f"Expected timeout warning, got: {warning_calls}"
+
+        # 清理：poll_task 已被 cancel，确保其完成
+        poll_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poll_task
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
     async def test_stop_async_after_stop_completes(self, mock_tc, mock_cache, mock_api):
         svc = MarketDataService()
         svc._running = True

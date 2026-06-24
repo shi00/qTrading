@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import hashlib
 import inspect
 import logging
@@ -154,8 +153,10 @@ class NewsSubscriptionService:
 
         if self._current_fetch_task and not self._current_fetch_task.done():
             self._current_fetch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._current_fetch_task
+            try:
+                await asyncio.wait_for(self._current_fetch_task, timeout=drain_timeout)
+            except (asyncio.CancelledError, TimeoutError):
+                pass
             self._current_fetch_task = None
 
         if self.processing_queue is not None:
@@ -168,8 +169,10 @@ class NewsSubscriptionService:
         if self._processing_task:
             if not self._processing_task.done():
                 self._processing_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._processing_task
+                try:
+                    await asyncio.wait_for(self._processing_task, timeout=drain_timeout)
+                except (asyncio.CancelledError, TimeoutError):
+                    pass
             self._processing_task = None
 
         # 清理状态，确保下次 start() 时能正确执行首次同步

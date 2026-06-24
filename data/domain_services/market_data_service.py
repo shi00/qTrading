@@ -6,7 +6,6 @@ UI 只从内存缓存读取，类似 NewsSubscriptionService 架构。
 """
 
 import asyncio
-import contextlib
 import datetime
 import logging
 import math
@@ -161,12 +160,18 @@ class MarketDataService:
         if self._task:
             if not self._task.done():
                 self._task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
+                try:
                     await asyncio.wait_for(self._task, timeout=timeout)
+                except asyncio.CancelledError:
+                    pass  # 任务被正常取消
+                except TimeoutError:
+                    logger.warning(
+                        "[MarketDataService] stop_async timeout (%.1fs), poll loop task did not finish",
+                        timeout,
+                    )
             self._task = None
 
         self._cached_data = None
-
         logger.info("[MarketDataService] Stopped market data polling service (async graceful)")
 
     def get_cached_data(self) -> dict:

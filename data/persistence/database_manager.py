@@ -1,6 +1,7 @@
 import logging
 import re
 import typing
+import weakref
 
 import pandas as pd
 import sqlalchemy as sa
@@ -31,11 +32,36 @@ class DatabaseManager:
 
     Lazy Initialization: Engine is created on first use, not in __init__.
     This allows the application to start without a configured database URL.
+
+    Resource Lifecycle: Instances are tracked via a weak reference registry
+    so that ShutdownCoordinator can close all engines during graceful shutdown
+    (View will_unmount is not triggered on app exit).
     """
+
+    # 弱引用注册表：跟踪所有存活实例，供 shutdown 时统一关闭
+    _registry: weakref.WeakSet = weakref.WeakSet()
 
     def __init__(self):
         self._engine = None
         self._initialized = False
+        DatabaseManager._registry.add(self)
+
+    @classmethod
+    def close_all(cls) -> None:
+        """关闭所有注册实例的同步引擎，供 ShutdownCoordinator 调用。
+
+        幂等：多次调用安全。跳过未初始化的实例。
+        """
+        for instance in list(cls._registry):
+            try:
+                instance.close()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[DatabaseManager] close_all() failed for instance: %s", e)
+
+    @classmethod
+    def _get_instances(cls) -> list:
+        """返回当前所有存活实例（主要用于测试）。"""
+        return list(cls._registry)
 
     def _ensure_engine(self):
         """

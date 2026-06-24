@@ -90,6 +90,62 @@ class TestClose:
         assert dm._engine is None
 
 
+class TestCloseAll:
+    """验证 DatabaseManager.close_all() 关闭所有注册实例。
+
+    根因：DatabaseManager 是非单例普通类，每个 DataExplorerView 实例化时
+    创建独立实例持有同步 SQLAlchemy 引擎。shutdown 流程不触发 View 的
+    will_unmount，导致同步引擎未被显式关闭。
+
+    修复方案：DatabaseManager 维护弱引用注册表（WeakSet），shutdown 新增
+    Step 7 调用 close_all() 遍历注册表关闭所有实例。
+    """
+
+    def teardown_method(self):
+        """每个测试后清理注册表，避免跨测试污染。"""
+        DatabaseManager.close_all()
+
+    def test_close_all_closes_all_registered_instances(self):
+        """close_all() 应关闭所有已初始化实例的引擎。"""
+        dm1 = _make_dm()
+        dm2 = _make_dm()
+        engine1 = dm1._engine
+        engine2 = dm2._engine
+
+        DatabaseManager.close_all()
+
+        engine1.dispose.assert_called_once()  # type: ignore[union-attr]
+        engine2.dispose.assert_called_once()  # type: ignore[union-attr]
+        assert dm1._engine is None
+        assert dm2._engine is None
+        assert dm1._initialized is False
+        assert dm2._initialized is False
+
+    def test_close_all_skips_uninitialized_instances(self):
+        """close_all() 应跳过未初始化的实例（_engine is None），不抛异常。"""
+        dm = DatabaseManager()  # _engine is None, 未初始化
+        DatabaseManager.close_all()  # 不应抛异常
+        assert dm._engine is None
+
+    def test_close_all_is_idempotent(self):
+        """close_all() 幂等：多次调用不抛异常。"""
+        dm = _make_dm()
+        DatabaseManager.close_all()
+        DatabaseManager.close_all()  # 第二次调用不抛异常
+        assert dm._engine is None
+
+    def test_instance_auto_removed_from_registry_after_gc(self):
+        """实例被 GC 后自动从弱引用注册表移除。"""
+        import gc
+
+        initial_count = len(DatabaseManager._get_instances())
+        dm = DatabaseManager()
+        assert len(DatabaseManager._get_instances()) == initial_count + 1
+        del dm
+        gc.collect()
+        assert len(DatabaseManager._get_instances()) == initial_count
+
+
 class TestGetAllTables:
     def test_success(self):
         dm = _make_dm()

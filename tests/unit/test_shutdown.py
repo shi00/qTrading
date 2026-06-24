@@ -4,7 +4,7 @@
 - StepResult 数据结构与默认值
 - _CLEANUP_STEPS 步骤定义、超时预算与执行顺序
 - ShutdownCoordinator 初始化、看门狗、单步执行与完整清理流程
-- 各清理步骤 (step0~step6) 的实例存在/缺失分支
+- 各清理步骤 (step0~step7) 的实例存在/缺失分支
 - 看门狗强制退出、日志记录与 step_results 上报
 - main.py 使用的清理超时配置
 """
@@ -57,7 +57,7 @@ class TestCleanupSteps:
     """验证 _CLEANUP_STEPS 步骤定义的结构、超时预算与顺序约束。"""
 
     def test_steps_defined(self):
-        assert len(_CLEANUP_STEPS) == 7
+        assert len(_CLEANUP_STEPS) == 8
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
@@ -406,6 +406,23 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_tpm._instance = mock_instance
             await coord._step6_shutdown_thread_pools()
 
+    @pytest.mark.asyncio
+    async def test_step7_close_database_managers_calls_close_all(self):
+        """Step 7 应调用 DatabaseManager.close_all() 关闭所有同步引擎。"""
+        coord = ShutdownCoordinator()
+        with patch("data.persistence.database_manager.DatabaseManager") as mock_dm:
+            await coord._step7_close_database_managers()
+            mock_dm.close_all.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_step7_close_database_managers_no_exception(self):
+        """Step 7 即使 close_all 抛异常也不应传播（close_all 内部已 try/except）。"""
+        coord = ShutdownCoordinator()
+        with patch("data.persistence.database_manager.DatabaseManager") as mock_dm:
+            mock_dm.close_all = MagicMock()  # 正常调用不抛
+            await coord._step7_close_database_managers()
+            mock_dm.close_all.assert_called_once()
+
 
 class TestShutdownCoordinatorDoCleanup:
     """验证 do_cleanup 的幂等性、完整流程与并发任务复用行为。"""
@@ -735,7 +752,7 @@ class TestShutdownStepOrdering:
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
 
     def test_shutdown_pools_is_last_step(self):
-        assert _CLEANUP_STEPS[-1][1] == "_step6_shutdown_thread_pools"
+        assert _CLEANUP_STEPS[-1][1] == "_step7_close_database_managers"
 
     def test_step2_is_flush_db_writes(self):
         assert _CLEANUP_STEPS[2][1] == "_step2_flush_db_writes"

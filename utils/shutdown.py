@@ -27,6 +27,7 @@ _CLEANUP_STEPS = [
     ("Step 4", "_step4_clear_toast", False, 1.0),
     ("Step 5", "_step5_unload_ai_model", True, 2.0),
     ("Step 6", "_step6_shutdown_thread_pools", True, 2.0),
+    ("Step 7", "_step7_close_database_managers", True, 1.0),
 ]
 
 
@@ -375,3 +376,20 @@ class ShutdownCoordinator:
             logger.info("[Shutdown]   - Thread pools shut down.")
         else:
             logger.info("[Shutdown]   - Thread pools not initialized, skipping.")
+
+    async def _step7_close_database_managers(self):
+        """关闭 DataExplorerView 持有的同步 SQLAlchemy 引擎。
+
+        DatabaseManager 是非单例普通类，View 的 will_unmount 在应用退出时
+        不会被触发，导致同步引擎未被显式关闭。通过弱引用注册表统一关闭。
+        """
+        logger.info("[Shutdown] Step 7: Closing DatabaseManager instances...")
+        # 关机路径专用，不依赖 ThreadPoolManager（避免关机时与池关闭竞态）
+        await asyncio.to_thread(self._step7_close_database_managers_sync)
+
+    def _step7_close_database_managers_sync(self):
+        # lazy import to avoid circular dependency
+        from data.persistence.database_manager import DatabaseManager
+
+        DatabaseManager.close_all()
+        logger.info("[Shutdown]   - DatabaseManager instances closed.")

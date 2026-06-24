@@ -870,6 +870,80 @@ class TestNewsSubscriptionServiceStopAsync:
         assert svc._last_news_time is None
         assert svc._last_news_content is None
 
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_async_handles_fetch_task_timeout(self, mock_cache, mock_ai):
+        """C-P1-2: fetch_task 不响应 cancel 时 stop_async 不应阻塞。
+
+        根因：原实现 ``await self._current_fetch_task`` 无超时保护，
+        task 不响应 cancel 时会无限阻塞 shutdown 流程。
+
+        通过自定义 awaitable 模拟 task 在 cancel 后抛 ``TimeoutError``
+        （而非 ``CancelledError``），验证：
+        1. 原代码 ``contextlib.suppress(asyncio.CancelledError)`` 无法捕获
+           ``TimeoutError``，导致异常传播（RED）；
+        2. 修复后 ``except (CancelledError, TimeoutError)`` 正确捕获（GREEN）；
+        3. ``_current_fetch_task`` 被置 None。
+        """
+
+        class _TaskRaisingTimeout:
+            """模拟不响应 cancel 的 task：await 时抛 TimeoutError。"""
+
+            def done(self):
+                return False
+
+            def cancel(self):
+                return True
+
+            def __await__(self):
+                raise TimeoutError()
+                yield  # 使其成为 generator
+
+        svc = NewsSubscriptionService()
+        svc._running = True
+        svc._current_fetch_task = _TaskRaisingTimeout()  # type: ignore[assignment]
+        svc._processing_task = None
+        svc.processing_queue = None
+
+        await svc.stop_async(drain_timeout=0.1)
+        assert svc._current_fetch_task is None
+        assert svc._running is False
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_async_handles_processing_task_timeout(self, mock_cache, mock_ai):
+        """C-P1-2: processing_task 不响应 cancel 时 stop_async 不应阻塞。
+
+        根因：原实现 ``await self._processing_task`` 无超时保护，
+        task 不响应 cancel 时会无限阻塞 shutdown 流程。
+
+        通过自定义 awaitable 模拟 task 在 cancel 后抛 ``TimeoutError``，
+        验证修复后 ``except (CancelledError, TimeoutError)`` 正确捕获，
+        ``_processing_task`` 被置 None。
+        """
+
+        class _TaskRaisingTimeout:
+            def done(self):
+                return False
+
+            def cancel(self):
+                return True
+
+            def __await__(self):
+                raise TimeoutError()
+                yield
+
+        svc = NewsSubscriptionService()
+        svc._running = True
+        svc._current_fetch_task = None
+        svc._processing_task = _TaskRaisingTimeout()  # type: ignore[assignment]
+        svc.processing_queue = None
+
+        await svc.stop_async(drain_timeout=0.1)
+        assert svc._processing_task is None
+
 
 class TestNewsSubscriptionServiceStopWithRunningLoop:
     @pytest.mark.asyncio
