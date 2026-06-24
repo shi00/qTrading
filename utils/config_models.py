@@ -142,7 +142,7 @@ class AppConfig(BaseModel):
     local_n_batch: int = Field(default=512, ge=1)
     local_n_ctx: int = Field(default=2048, ge=512)
     local_flash_attn: bool = True
-    local_n_gpu_layers: int = Field(default=0, ge=0)
+    local_n_gpu_layers: int = Field(default=0, ge=-1)
 
     sync_max_concurrent_heavy: int = Field(default=3, ge=1, le=10)
     sync_concurrency_light: int = Field(default=20, ge=1)

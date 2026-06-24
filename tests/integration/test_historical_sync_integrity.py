@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 import pytest_asyncio
+from tests.conftest import singleton_state as _singleton_state_ctx
 
 from data.sync.base import SyncResult
 from strategies.prompt_validator import (
@@ -1501,16 +1502,17 @@ class TestM6CacheManagerCheckTableHasData:
         """创建 CacheManager 实例"""
         from data.cache.cache_manager import CacheManager
 
-        with patch("data.cache.cache_manager.CacheManager.__init__", return_value=None):
-            cache = CacheManager()
-            # 构建默认 mock engine（有数据场景）
-            engine, conn = self._make_mock_engine(execute_return_value=(1,))
-            cache.engine = engine
-            cache._mock_conn = conn  # 暴露给测试用例做断言
-            cache._maintenance_mode = False
-            cache._maintenance_cv = MagicMock()
-            cache._maintenance_cv.wait = AsyncMock()
-            return cache
+        with _singleton_state_ctx(CacheManager, extra_attrs=["_initialized"]):
+            with patch("data.cache.cache_manager.CacheManager.__init__", return_value=None):
+                cache = CacheManager()
+                # 构建默认 mock engine（有数据场景）
+                engine, conn = self._make_mock_engine(execute_return_value=(1,))
+                cache.engine = engine
+                cache._mock_conn = conn  # 暴露给测试用例做断言
+                cache._maintenance_mode = False
+                cache._maintenance_cv = MagicMock()
+                cache._maintenance_cv.wait = AsyncMock()
+                yield cache
 
     @pytest.mark.asyncio
     async def test_check_table_has_data_allowed_table(self, cache_manager):
@@ -1568,11 +1570,12 @@ class TestCacheManagerGetIncompleteFinancialStocks:
         """创建 CacheManager 实例"""
         from data.cache.cache_manager import CacheManager
 
-        with patch("data.cache.cache_manager.CacheManager.__init__", return_value=None):
-            cache = CacheManager()
-            cache.financial_dao = MagicMock()
-            cache.financial_dao.get_incomplete_financial_stocks = AsyncMock(return_value={"000001.SZ"})
-            return cache
+        with _singleton_state_ctx(CacheManager, extra_attrs=["_initialized"]):
+            with patch("data.cache.cache_manager.CacheManager.__init__", return_value=None):
+                cache = CacheManager()
+                cache.financial_dao = MagicMock()
+                cache.financial_dao.get_incomplete_financial_stocks = AsyncMock(return_value={"000001.SZ"})
+                yield cache
 
     @pytest.mark.asyncio
     async def test_get_incomplete_financial_stocks_default_params(self, cache_manager):
