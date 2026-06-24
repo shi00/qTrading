@@ -500,6 +500,42 @@ class TestLatestLog:
             update_log_level("WARNING")
             assert latest_handler.level == logging.WARNING
 
+    def test_latest_log_not_duplicated_on_reinit(self, tmp_path):
+        """验证重复调用 setup_logging 不会重复添加 latest.log handler，也不会二次截断文件"""
+        log_dir = tmp_path / "test_logs"
+        log_dir.mkdir()
+        latest_log = log_dir / "latest.log"
+
+        with (
+            patch("utils.logger.LOG_DIR", str(log_dir)),
+            patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
+            patch("utils.config_handler.ConfigHandler.get_log_max_mb", return_value=5),
+            patch(
+                "utils.config_handler.ConfigHandler.get_log_backup_count",
+                return_value=5,
+            ),
+        ):
+            setup_logging("reinit_first")
+            logger = get_logger()
+            logger.info("first_session_marker")
+            first_content = latest_log.read_text(encoding="utf-8")
+            assert "first_session_marker" in first_content
+
+            # 第二次调用：不应重建 handler，不应截断已写入内容
+            setup_logging("reinit_second")
+            latest_handlers = [
+                h
+                for h in logging.getLogger().handlers
+                if type(h) is logging.FileHandler and "latest.log" in h.baseFilename
+            ]
+            assert len(latest_handlers) == 1  # 唯一性：未重复添加
+
+            logger.info("second_session_marker")
+            second_content = latest_log.read_text(encoding="utf-8")
+            # 第一次的内容必须保留（证明未二次截断）
+            assert "first_session_marker" in second_content
+            assert "second_session_marker" in second_content
+
     def test_latest_log_failure_writes_to_stderr(self, tmp_path, capsys):
         """latest.log handler 初始化失败时必须写入 stderr，不得静默吞没"""
         log_dir = str(tmp_path / "test_logs")
@@ -508,6 +544,8 @@ class TestLatestLog:
             def __init__(self, *args, **kwargs):
                 raise OSError("permission denied")
 
+        # patch logging.FileHandler 仅影响 latest.log 的直接构造；
+        # RotatingFileHandler 的 MRO 在类定义时已绑定原始 FileHandler，不受此 patch 影响。
         with (
             patch("utils.logger.LOG_DIR", log_dir),
             patch("utils.config_handler.ConfigHandler.get_log_level", return_value="INFO"),
