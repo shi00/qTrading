@@ -10,7 +10,7 @@ from utils.error_classifier import classify_error, classify_severity, get_error_
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 
-from data.persistence.database_manager import DatabaseManager
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,16 +26,16 @@ class DataExplorerViewModel:
     """ViewModel for DataExplorerView (MVVM-001 fix).
 
     Holds all business state for both TableViewerTab and SQLConsoleTab.
-    No Flet dependencies. All DB access goes through DatabaseManager
+    No Flet dependencies. All DB access goes through DataExplorerQueryClient
     dispatched to ThreadPoolManager.
     """
 
     def __init__(
         self,
-        db_manager: DatabaseManager | None = None,
+        db_manager: DataExplorerQueryClient | None = None,
         thread_pool: ThreadPoolManager | None = None,
     ):
-        self._db = db_manager or DatabaseManager()
+        self._db = db_manager or DataExplorerQueryClient()
         self._tp = thread_pool or ThreadPoolManager()
 
         # Table Explorer State

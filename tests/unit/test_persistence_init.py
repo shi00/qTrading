@@ -5,16 +5,15 @@ import unittest.mock
 pytestmark = pytest.mark.unit
 
 
-def test_persistence_init_getattr_database_manager():
-    # Ensure it's not already imported
+def test_persistence_init_getattr_data_explorer_query_client():
     if "data.persistence" in sys.modules:
         del sys.modules["data.persistence"]
     import data.persistence
 
-    assert hasattr(data.persistence, "DatabaseManager")
-    from data.persistence.database_manager import DatabaseManager
+    assert hasattr(data.persistence, "DataExplorerQueryClient")
+    from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
-    assert data.persistence.DatabaseManager is DatabaseManager
+    assert data.persistence.DataExplorerQueryClient is DataExplorerQueryClient
 
 
 def test_persistence_init_getattr_base():

@@ -378,18 +378,18 @@ class ShutdownCoordinator:
             logger.info("[Shutdown]   - Thread pools not initialized, skipping.")
 
     async def _step7_close_database_managers(self):
-        """关闭 DataExplorerView 持有的同步 SQLAlchemy 引擎。
+        """关闭 DataExplorerView 持有的共享同步 SQLAlchemy 引擎。
 
-        DatabaseManager 是非单例普通类，View 的 will_unmount 在应用退出时
-        不会被触发，导致同步引擎未被显式关闭。通过弱引用注册表统一关闭。
+        DataExplorerQueryClient 使用类级别共享引擎，View 的 will_unmount 在应用退出时
+        不会被触发，通过 close_all() 统一关闭共享引擎。
         """
-        logger.info("[Shutdown] Step 7: Closing DatabaseManager instances...")
+        logger.info("[Shutdown] Step 7: Closing DataExplorerQueryClient shared engine...")
         # 关机路径专用，不依赖 ThreadPoolManager（避免关机时与池关闭竞态）
         await asyncio.to_thread(self._step7_close_database_managers_sync)
 
     def _step7_close_database_managers_sync(self):
         # lazy import to avoid circular dependency
-        from data.persistence.database_manager import DatabaseManager
+        from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
-        DatabaseManager.close_all()
-        logger.info("[Shutdown]   - DatabaseManager instances closed.")
+        DataExplorerQueryClient.close_all()
+        logger.info("[Shutdown]   - DataExplorerQueryClient shared engine closed.")

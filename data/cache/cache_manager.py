@@ -27,6 +27,7 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.sync_dao import SyncDao
 from utils.config_handler import ConfigHandler
+from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.time_utils import get_now
@@ -124,40 +125,14 @@ class CacheManager:
     def _create_engine(self, connection_string: str):
         """Create async engine and update DAO references."""
         self._disposed = False
-        try:
-            db_pool_size = int(ConfigHandler.get_db_connection_pool_size())
-        except (TypeError, ValueError):
-            db_pool_size = 10
 
-        try:
-            db_max_overflow = int(ConfigHandler.get_db_max_overflow())
-        except (TypeError, ValueError):
-            db_max_overflow = 5
-
-        try:
-            db_pool_timeout = int(ConfigHandler.get_db_pool_timeout())
-        except (TypeError, ValueError):
-            db_pool_timeout = 30
-
-        try:
-            db_pool_recycle = int(ConfigHandler.get_db_pool_recycle())
-        except (TypeError, ValueError):
-            db_pool_recycle = 1800
-
-        try:
-            db_pool_pre_ping = ConfigHandler.get_db_pool_pre_ping()
-        except (TypeError, ValueError):
-            db_pool_pre_ping = True
+        pool_config = get_db_pool_config()
 
         self.engine = create_async_engine(
             connection_string,
             echo=False,
-            pool_size=db_pool_size,
-            max_overflow=db_max_overflow,
-            pool_timeout=db_pool_timeout,
-            pool_recycle=db_pool_recycle,
-            pool_pre_ping=db_pool_pre_ping,
             future=True,
+            **pool_config,
         )
 
         self.stock_dao.engine = self.engine

@@ -408,9 +408,9 @@ class TestShutdownCoordinatorCleanupSteps:
 
     @pytest.mark.asyncio
     async def test_step7_close_database_managers_calls_close_all(self):
-        """Step 7 应调用 DatabaseManager.close_all() 关闭所有同步引擎。"""
+        """Step 7 应调用 DataExplorerQueryClient.close_all() 关闭所有同步引擎。"""
         coord = ShutdownCoordinator()
-        with patch("data.persistence.database_manager.DatabaseManager") as mock_dm:
+        with patch("data.persistence.data_explorer_query_client.DataExplorerQueryClient") as mock_dm:
             await coord._step7_close_database_managers()
             mock_dm.close_all.assert_called_once()
 
@@ -418,7 +418,7 @@ class TestShutdownCoordinatorCleanupSteps:
     async def test_step7_close_database_managers_no_exception(self):
         """Step 7 即使 close_all 抛异常也不应传播（close_all 内部已 try/except）。"""
         coord = ShutdownCoordinator()
-        with patch("data.persistence.database_manager.DatabaseManager") as mock_dm:
+        with patch("data.persistence.data_explorer_query_client.DataExplorerQueryClient") as mock_dm:
             mock_dm.close_all = MagicMock()  # 正常调用不抛
             await coord._step7_close_database_managers()
             mock_dm.close_all.assert_called_once()

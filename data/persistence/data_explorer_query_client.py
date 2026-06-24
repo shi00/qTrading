@@ -1,13 +1,14 @@
 import logging
 import re
+import threading
 import typing
-import weakref
 
 import pandas as pd
 import sqlalchemy as sa
 import sqlparse
 
 from utils.config_handler import ConfigHandler
+from utils.db_utils import get_db_pool_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ _OP_MAP = {
 }
 
 
-class DatabaseManager:
+class DataExplorerQueryClient:
     """
     Manages database interactions for the Data Explorer feature.
     Provides read-only access (with safety checks) to the PostgreSQL database.
@@ -33,92 +34,67 @@ class DatabaseManager:
     Lazy Initialization: Engine is created on first use, not in __init__.
     This allows the application to start without a configured database URL.
 
-    Resource Lifecycle: Instances are tracked via a weak reference registry
-    so that ShutdownCoordinator can close all engines during graceful shutdown
-    (View will_unmount is not triggered on app exit).
+    Resource Lifecycle: A shared class-level engine is used across all
+    instances. ShutdownCoordinator can close it via close_all() during
+    graceful shutdown (View will_unmount is not triggered on app exit).
     """
 
-    # 弱引用注册表：跟踪所有存活实例，供 shutdown 时统一关闭
-    _registry: weakref.WeakSet = weakref.WeakSet()
+    # 类级别共享引擎：所有实例共用，受 _engine_lock 保护（双重检查锁定）
+    _shared_engine: sa.Engine | None = None
+    _engine_lock = threading.Lock()
 
     def __init__(self):
-        self._engine = None
-        self._initialized = False
-        DatabaseManager._registry.add(self)
+        pass
 
     @classmethod
     def close_all(cls) -> None:
-        """关闭所有注册实例的同步引擎，供 ShutdownCoordinator 调用。
+        """关闭共享的同步引擎，供 ShutdownCoordinator 调用。
 
-        幂等：多次调用安全。跳过未初始化的实例。
+        幂等：多次调用安全。
         """
-        for instance in list(cls._registry):
-            try:
-                instance.close()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[DatabaseManager] close_all() failed for instance: %s", e)
-
-    @classmethod
-    def _get_instances(cls) -> list:
-        """返回当前所有存活实例（主要用于测试）。"""
-        return list(cls._registry)
+        with cls._engine_lock:
+            if cls._shared_engine is not None:
+                try:
+                    cls._shared_engine.dispose()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[DataExplorerQueryClient] close_all() failed: %s", e)
+                cls._shared_engine = None
 
     def _ensure_engine(self):
         """
-        Lazy initialization of the database engine.
+        Lazy initialization of the shared database engine (double-checked locking).
         Raises RuntimeError if database URL is not configured.
         """
-        if self._engine is not None:
+        if DataExplorerQueryClient._shared_engine is not None:
             return
 
-        db_url_async = ConfigHandler.get_db_url()
-        if not db_url_async:
-            raise RuntimeError("Database URL is not configured. Please complete the onboarding wizard first.")
+        with DataExplorerQueryClient._engine_lock:
+            if DataExplorerQueryClient._shared_engine is None:
+                db_url_async = ConfigHandler.get_db_url()
+                if not db_url_async:
+                    raise RuntimeError("Database URL is not configured. Please complete the onboarding wizard first.")
 
-        db_url_sync = db_url_async.replace("+asyncpg", "")
+                db_url_sync = db_url_async.replace("+asyncpg", "")
+                pool_config = get_db_pool_config()
 
-        try:
-            pool_size = int(ConfigHandler.get_db_connection_pool_size())
-        except (TypeError, ValueError):
-            pool_size = 10
+                DataExplorerQueryClient._shared_engine = sa.create_engine(
+                    db_url_sync,
+                    echo=False,
+                    **pool_config,
+                )
 
-        try:
-            max_overflow = int(ConfigHandler.get_db_max_overflow())
-        except (TypeError, ValueError):
-            max_overflow = 5
-
-        try:
-            pool_timeout = int(ConfigHandler.get_db_pool_timeout())
-        except (TypeError, ValueError):
-            pool_timeout = 30
-
-        try:
-            pool_recycle = int(ConfigHandler.get_db_pool_recycle())
-        except (TypeError, ValueError):
-            pool_recycle = 1800
-
-        try:
-            pool_pre_ping = ConfigHandler.get_db_pool_pre_ping()
-        except (TypeError, ValueError):
-            pool_pre_ping = True
-
-        self._engine = sa.create_engine(
-            db_url_sync,
-            echo=False,
-            pool_size=pool_size,
-            max_overflow=max_overflow,
-            pool_pre_ping=pool_pre_ping,
-            pool_recycle=pool_recycle,
-            pool_timeout=pool_timeout,
-        )
-        self._initialized = True
+    @property
+    def _engine(self) -> sa.Engine | None:
+        """只读属性，返回类级别共享引擎。"""
+        return DataExplorerQueryClient._shared_engine
 
     def close(self):
-        """Disposes the SQLAlchemy engine connection pool, releasing file locks."""
-        if hasattr(self, "_engine") and self._engine:
-            self._engine.dispose()
-            self._engine = None
-            self._initialized = False
+        """实例级 close 为空操作。
+
+        共享引擎的生命周期由 close_all() 统一管理。
+        此方法仅保留接口兼容性，供 DataExplorerViewModel.dispose() 调用。
+        """
+        pass
 
     def get_all_tables(self):
         """
@@ -198,7 +174,7 @@ class DatabaseManager:
             # Whitelist validation: reject columns not in schema (mirrors sort_col check)
             if schema_cols and col_name not in schema_cols:
                 logger.warning(
-                    f"[DatabaseManager] Filter column '{col_name}' not in schema, skipped.",
+                    f"[DataExplorerQueryClient] Filter column '{col_name}' not in schema, skipped.",
                 )
                 continue
             op_func = _OP_MAP.get(op)

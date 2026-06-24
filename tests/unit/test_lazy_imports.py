@@ -100,13 +100,13 @@ class TestExternalInit:
 
 
 class TestPersistenceInit:
-    def test_getattr_database_manager(self):
+    def test_getattr_data_explorer_query_client(self):
         import data.persistence
 
-        result = data.persistence.DatabaseManager
-        from data.persistence.database_manager import DatabaseManager
+        result = data.persistence.DataExplorerQueryClient
+        from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
-        assert result is DatabaseManager
+        assert result is DataExplorerQueryClient
 
     def test_getattr_base(self):
         import data.persistence

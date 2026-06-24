@@ -4,7 +4,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from data.persistence.database_manager import DatabaseManager
+    from data.persistence.data_explorer_query_client import DataExplorerQueryClient
     from data.persistence.models import Base
 
 # Subpackages that should be importable via attribute access on this module.
@@ -14,10 +14,10 @@ _SUBPACKAGES = frozenset({"daos"})
 
 
 def __getattr__(name):
-    if name == "DatabaseManager":
-        from data.persistence.database_manager import DatabaseManager
+    if name == "DataExplorerQueryClient":
+        from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
-        return DatabaseManager
+        return DataExplorerQueryClient
     if name == "Base":
         from data.persistence.models import Base
 
@@ -38,4 +38,4 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["DatabaseManager", "Base"]
+__all__ = ["DataExplorerQueryClient", "Base"]

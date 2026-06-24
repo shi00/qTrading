@@ -3,72 +3,62 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import sqlalchemy as sa
 
-from data.persistence.database_manager import DatabaseManager
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 
 pytestmark = pytest.mark.unit
 
 
 def _make_dm():
-    dm = DatabaseManager()
-    dm._engine = MagicMock()
-    dm._initialized = True
-    return dm
+    """创建带 mock 引擎的 DataExplorerQueryClient 实例。
+
+    注意：_engine 是只读 property，返回类级别 _shared_engine。
+    必须设置 DataExplorerQueryClient._shared_engine 而非实例属性。
+    """
+    DataExplorerQueryClient._shared_engine = MagicMock()
+    return DataExplorerQueryClient()
 
 
-class TestDatabaseManagerInit:
+class TestDataExplorerQueryClientInit:
     def test_init(self):
-        dm = DatabaseManager()
-        assert dm._engine is None
-        assert dm._initialized is False
+        dm = DataExplorerQueryClient()
+        assert dm._engine is None  # _shared_engine 为 None
 
 
 class TestEnsureEngine:
-    @patch("data.persistence.database_manager.ConfigHandler")
+    @patch("data.persistence.data_explorer_query_client.ConfigHandler")
     def test_no_db_url(self, mock_ch):
         mock_ch.get_db_url.return_value = None
-        dm = DatabaseManager()
+        dm = DataExplorerQueryClient()
         with pytest.raises(RuntimeError, match="not configured"):
             dm._ensure_engine()
 
-    @patch("data.persistence.database_manager.ConfigHandler")
+    @patch("data.persistence.data_explorer_query_client.ConfigHandler")
     def test_empty_string_db_url(self, mock_ch):
         """get_db_url() 返回空字符串（非 None）也应抛 RuntimeError"""
         mock_ch.get_db_url.return_value = ""
-        dm = DatabaseManager()
+        dm = DataExplorerQueryClient()
         with pytest.raises(RuntimeError, match="not configured"):
             dm._ensure_engine()
 
-    @patch("data.persistence.database_manager.sa.create_engine")
-    @patch("data.persistence.database_manager.ConfigHandler")
-    def test_success(self, mock_ch, mock_create):
+    @patch("data.persistence.data_explorer_query_client.get_db_pool_config")
+    @patch("data.persistence.data_explorer_query_client.sa.create_engine")
+    @patch("data.persistence.data_explorer_query_client.ConfigHandler")
+    def test_success(self, mock_ch, mock_create, mock_pool_config):
         mock_ch.get_db_url.return_value = "postgresql+asyncpg://user:pass@host/db"
-        mock_ch.get_db_connection_pool_size.return_value = 10
-        mock_ch.get_db_max_overflow.return_value = 5
-        mock_ch.get_db_pool_timeout.return_value = 30
-        mock_ch.get_db_pool_recycle.return_value = 1800
-        mock_ch.get_db_pool_pre_ping.return_value = True
+        mock_pool_config.return_value = {
+            "pool_size": 10,
+            "max_overflow": 5,
+            "pool_timeout": 30,
+            "pool_recycle": 1800,
+            "pool_pre_ping": True,
+        }
         mock_create.return_value = MagicMock()
-        dm = DatabaseManager()
+        dm = DataExplorerQueryClient()
         dm._ensure_engine()
-        assert dm._initialized is True
         # Verify sync URL is used (asyncpg driver stripped)
         mock_create.assert_called_once()
         call_url = mock_create.call_args[0][0]
         assert "+asyncpg" not in call_url
-
-    @patch("data.persistence.database_manager.sa.create_engine")
-    @patch("data.persistence.database_manager.ConfigHandler")
-    def test_invalid_pool_size(self, mock_ch, mock_create):
-        mock_ch.get_db_url.return_value = "postgresql+asyncpg://user:pass@host/db"
-        mock_ch.get_db_connection_pool_size.return_value = "invalid"
-        mock_ch.get_db_max_overflow.return_value = "invalid"
-        mock_ch.get_db_pool_timeout.return_value = "invalid"
-        mock_ch.get_db_pool_recycle.return_value = "invalid"
-        mock_ch.get_db_pool_pre_ping.side_effect = TypeError("bad")
-        mock_create.return_value = MagicMock()
-        dm = DatabaseManager()
-        dm._ensure_engine()
-        assert dm._initialized is True
 
     def test_already_initialized(self):
         dm = _make_dm()
@@ -78,72 +68,48 @@ class TestEnsureEngine:
 
 
 class TestClose:
-    def test_close(self):
+    def test_close_is_noop_does_not_dispose_shared_engine(self):
+        """close() 是空操作，不释放共享引擎（由 close_all 统一管理）。"""
         dm = _make_dm()
+        engine = dm._engine
         dm.close()
-        assert dm._engine is None
-        assert dm._initialized is False
+        # 引擎仍然存在
+        assert dm._engine is engine
 
     def test_close_no_engine(self):
-        dm = DatabaseManager()
-        dm.close()
-        assert dm._engine is None
+        """无引擎时 close() 不抛异常。"""
+        dm = DataExplorerQueryClient()
+        dm.close()  # 不应抛异常
 
 
 class TestCloseAll:
-    """验证 DatabaseManager.close_all() 关闭所有注册实例。
-
-    根因：DatabaseManager 是非单例普通类，每个 DataExplorerView 实例化时
-    创建独立实例持有同步 SQLAlchemy 引擎。shutdown 流程不触发 View 的
-    will_unmount，导致同步引擎未被显式关闭。
-
-    修复方案：DatabaseManager 维护弱引用注册表（WeakSet），shutdown 新增
-    Step 7 调用 close_all() 遍历注册表关闭所有实例。
-    """
+    """验证 DataExplorerQueryClient.close_all() 关闭共享引擎。"""
 
     def teardown_method(self):
-        """每个测试后清理注册表，避免跨测试污染。"""
-        DatabaseManager.close_all()
+        DataExplorerQueryClient.close_all()
 
-    def test_close_all_closes_all_registered_instances(self):
-        """close_all() 应关闭所有已初始化实例的引擎。"""
-        dm1 = _make_dm()
-        dm2 = _make_dm()
-        engine1 = dm1._engine
-        engine2 = dm2._engine
-
-        DatabaseManager.close_all()
-
-        engine1.dispose.assert_called_once()  # type: ignore[union-attr]
-        engine2.dispose.assert_called_once()  # type: ignore[union-attr]
-        assert dm1._engine is None
-        assert dm2._engine is None
-        assert dm1._initialized is False
-        assert dm2._initialized is False
-
-    def test_close_all_skips_uninitialized_instances(self):
-        """close_all() 应跳过未初始化的实例（_engine is None），不抛异常。"""
-        dm = DatabaseManager()  # _engine is None, 未初始化
-        DatabaseManager.close_all()  # 不应抛异常
-        assert dm._engine is None
-
-    def test_close_all_is_idempotent(self):
-        """close_all() 幂等：多次调用不抛异常。"""
+    def test_close_all_disposes_shared_engine(self):
+        """close_all() 应 dispose 共享引擎并置为 None。"""
         dm = _make_dm()
-        DatabaseManager.close_all()
-        DatabaseManager.close_all()  # 第二次调用不抛异常
-        assert dm._engine is None
+        engine = DataExplorerQueryClient._shared_engine
 
-    def test_instance_auto_removed_from_registry_after_gc(self):
-        """实例被 GC 后自动从弱引用注册表移除。"""
-        import gc
+        DataExplorerQueryClient.close_all()
 
-        initial_count = len(DatabaseManager._get_instances())
-        dm = DatabaseManager()
-        assert len(DatabaseManager._get_instances()) == initial_count + 1
-        del dm
-        gc.collect()
-        assert len(DatabaseManager._get_instances()) == initial_count
+        engine.dispose.assert_called_once()  # type: ignore[union-attr]
+        assert DataExplorerQueryClient._shared_engine is None
+        assert dm._engine is None  # property 返回 None
+
+    def test_close_all_idempotent(self):
+        """close_all() 幂等：多次调用不抛异常。"""
+        _make_dm()
+        DataExplorerQueryClient.close_all()
+        DataExplorerQueryClient.close_all()  # 第二次调用不抛异常
+        assert DataExplorerQueryClient._shared_engine is None
+
+    def test_close_all_no_engine(self):
+        """无引擎时 close_all() 不抛异常。"""
+        DataExplorerQueryClient.close_all()  # 不应抛异常
+        assert DataExplorerQueryClient._shared_engine is None
 
 
 class TestGetAllTables:
@@ -151,14 +117,14 @@ class TestGetAllTables:
         dm = _make_dm()
         mock_insp = MagicMock()
         mock_insp.get_table_names.return_value = ["stock_basic", "daily_quotes"]
-        with patch("data.persistence.database_manager.sa.inspect", return_value=mock_insp):
+        with patch("data.persistence.data_explorer_query_client.sa.inspect", return_value=mock_insp):
             result = dm.get_all_tables()
             assert result == ["daily_quotes", "stock_basic"]
 
     def test_exception(self):
         dm = _make_dm()
         with patch(
-            "data.persistence.database_manager.sa.inspect",
+            "data.persistence.data_explorer_query_client.sa.inspect",
             side_effect=Exception("error"),
         ):
             result = dm.get_all_tables()
@@ -175,7 +141,7 @@ class TestGetTableSchema:
         ]
         with (
             patch.object(dm, "_validate_table_name"),
-            patch("data.persistence.database_manager.sa.inspect", return_value=mock_insp),
+            patch("data.persistence.data_explorer_query_client.sa.inspect", return_value=mock_insp),
         ):
             result = dm.get_table_schema("stock_basic")
             assert len(result) == 2
@@ -192,7 +158,7 @@ class TestGetTableSchema:
         with (
             patch.object(dm, "_validate_table_name"),
             patch(
-                "data.persistence.database_manager.sa.inspect",
+                "data.persistence.data_explorer_query_client.sa.inspect",
                 side_effect=Exception("error"),
             ),
         ):
@@ -302,43 +268,43 @@ class TestValidateTableName:
 class TestApplyFilters:
     def test_no_filters(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, None)
+        result = DataExplorerQueryClient._apply_filters(stmt, None)
         assert result is stmt
 
     def test_empty_filters(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, [])
+        result = DataExplorerQueryClient._apply_filters(stmt, [])
         assert result is stmt
 
     def test_with_eq_filter(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, [("ts_code", "=", "000001.SZ")])
+        result = DataExplorerQueryClient._apply_filters(stmt, [("ts_code", "=", "000001.SZ")])
         assert result is not None
 
     def test_with_like_filter(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, [("name", "LIKE", "银行")])
+        result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "银行")])
         assert result is not None
 
     def test_with_like_already_has_wildcard(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, [("name", "LIKE", "%银行%")])
+        result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "%银行%")])
         assert result is not None
 
     def test_unsupported_operator(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, [("col", "XOR", "val")])
+        result = DataExplorerQueryClient._apply_filters(stmt, [("col", "XOR", "val")])
         assert result is stmt
 
     def test_schema_col_whitelist(self):
         stmt = sa.select(sa.text("*"))
-        result = DatabaseManager._apply_filters(stmt, [("invalid_col", "=", "val")], schema_cols={"ts_code"})
+        result = DataExplorerQueryClient._apply_filters(stmt, [("invalid_col", "=", "val")], schema_cols={"ts_code"})
         assert result is stmt
 
     def test_all_operators(self):
         for op in [">", "<", ">=", "<=", "!="]:
             stmt = sa.select(sa.text("*"))
-            result = DatabaseManager._apply_filters(stmt, [("col", op, "val")], schema_cols={"col"})
+            result = DataExplorerQueryClient._apply_filters(stmt, [("col", op, "val")], schema_cols={"col"})
             assert result is not None
 
 
@@ -447,7 +413,7 @@ class TestQueryTable:
 
 class TestExecuteSql:
     def test_no_engine(self):
-        dm = DatabaseManager()
+        dm = DataExplorerQueryClient()
         with patch.object(dm, "_ensure_engine", side_effect=RuntimeError("not configured")):
             result = dm.execute_sql("SELECT 1")
             assert result["success"] is False
@@ -502,7 +468,7 @@ class TestExecuteSql:
     def test_sql_parse_error(self):
         dm = _make_dm()
         with patch(
-            "data.persistence.database_manager.sqlparse.parse",
+            "data.persistence.data_explorer_query_client.sqlparse.parse",
             side_effect=Exception("parse error"),
         ):
             result = dm.execute_sql("SELECT 1")

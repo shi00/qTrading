@@ -1,7 +1,7 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from data.persistence.database_manager import DatabaseManager
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 from tests.integration.test_infra_base import TEST_DB_URL, TestDatabaseBase
 import pytest
 
@@ -9,13 +9,13 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-class TestDatabaseManager(TestDatabaseBase):
-    """Test database manager using test_astock PostgreSQL database."""
+class TestDataExplorerQueryClient(TestDatabaseBase):
+    """Test data explorer query client using test_astock PostgreSQL database."""
 
     async def asyncSetUp(self):
         await super().asyncSetUp()
 
-        self.db_manager = DatabaseManager()
+        self.db_manager = DataExplorerQueryClient()
 
         self._ddl_engine = create_async_engine(TEST_DB_URL, echo=False)
 
@@ -41,6 +41,7 @@ class TestDatabaseManager(TestDatabaseBase):
             await conn.execute(text("DROP TABLE IF EXISTS test_daily_quotes"))
         if hasattr(self, "db_manager"):
             self.db_manager.close()
+        DataExplorerQueryClient.close_all()
         if hasattr(self, "_ddl_engine"):
             await self._ddl_engine.dispose()
         await super().asyncTearDown()

@@ -58,7 +58,7 @@ def vm(mock_db, mock_tp):
 
 class TestInit:
     def test_default_dependencies_created(self):
-        """When no args passed, ViewModel creates default DatabaseManager and ThreadPoolManager."""
+        """When no args passed, ViewModel creates default DataExplorerQueryClient and ThreadPoolManager."""
         vm = DataExplorerViewModel()
         assert vm._db is not None
         assert vm._tp is not None

@@ -34,6 +34,6 @@ if os.path.isdir(_tiktoken_cache):
 # If not set, the onboarding wizard will guide users to configure it.
 DB_URL = os.environ.get("DATABASE_URL") or None
 
-# Synchronous connection URL (for DatabaseManager read-only queries)
+# Synchronous connection URL (for DataExplorerQueryClient read-only queries)
 # Safe handling: DB_URL_SYNC is None when DB_URL is None
 DB_URL_SYNC = DB_URL.replace("+asyncpg", "") if DB_URL else None

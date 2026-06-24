@@ -126,7 +126,7 @@ astock_screener/
 │   │   │   └── backtest_dao.py # 回测结果存储
 │   │   ├── models.py           # SQLAlchemy ORM 模型
 │   │   ├── db_migrator.py      # 数据库迁移管理
-│   │   ├── database_manager.py # 数据库连接管理（同步引擎）
+│   │   ├── data_explorer_query_client.py # 数据库连接管理（同步引擎）
 │   │   ├── db_config_service.py # 数据库配置服务
 │   │   ├── metadata_manager.py # 元数据管理
 │   │   ├── review_manager.py   # AI 回顾管理器

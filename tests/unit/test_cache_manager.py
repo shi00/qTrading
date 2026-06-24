@@ -48,57 +48,53 @@ def _make_mgr():
 
 class TestCacheManagerCreateEngine:
     @patch("data.cache.cache_manager.create_async_engine")
-    @patch(
-        "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
-        return_value="10",
-    )
-    @patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value="5")
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value="30")
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value="1800")
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_pre_ping", return_value=True)
+    @patch("data.cache.cache_manager.get_db_pool_config")
     def test_create_engine_defaults(
         self,
-        mock_ping,
-        mock_recycle,
-        mock_timeout,
-        mock_overflow,
-        mock_pool_size,
+        mock_get_config,
         mock_create,
     ):
+        mock_get_config.return_value = {
+            "pool_size": 10,
+            "max_overflow": 5,
+            "pool_timeout": 30,
+            "pool_recycle": 1800,
+            "pool_pre_ping": True,
+        }
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
         mgr._create_engine("postgresql+asyncpg://user:pass@localhost/testdb")
+        mock_get_config.assert_called_once_with()
         mock_create.assert_called_once_with(
             "postgresql+asyncpg://user:pass@localhost/testdb",
             echo=False,
+            future=True,
             pool_size=10,
             max_overflow=5,
             pool_timeout=30,
             pool_recycle=1800,
             pool_pre_ping=True,
-            future=True,
         )
         assert mgr.engine == mock_engine
 
     @patch("data.cache.cache_manager.create_async_engine")
-    @patch(
-        "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
-        return_value="invalid",
-    )
-    @patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value="invalid")
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value="invalid")
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value="invalid")
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_pre_ping", side_effect=TypeError)
+    @patch("data.cache.cache_manager.get_db_pool_config")
     def test_create_engine_invalid_config(
         self,
-        mock_ping,
-        mock_recycle,
-        mock_timeout,
-        mock_overflow,
-        mock_pool_size,
+        mock_get_config,
         mock_create,
     ):
+        # When ConfigHandler returns invalid values, get_typed (used internally
+        # by get_db_pool_config) falls back to defaults. _create_engine just
+        # passes the config dict through to create_async_engine.
+        mock_get_config.return_value = {
+            "pool_size": 10,
+            "max_overflow": 5,
+            "pool_timeout": 30,
+            "pool_recycle": 1800,
+            "pool_pre_ping": True,
+        }
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
@@ -106,35 +102,30 @@ class TestCacheManagerCreateEngine:
         mock_create.assert_called_once_with(
             "postgresql+asyncpg://user:pass@localhost/testdb",
             echo=False,
+            future=True,
             pool_size=10,
             max_overflow=5,
             pool_timeout=30,
             pool_recycle=1800,
             pool_pre_ping=True,
-            future=True,
         )
 
     @patch("data.cache.cache_manager.create_async_engine")
-    @patch(
-        "utils.config_handler.ConfigHandler.get_db_connection_pool_size",
-        return_value=None,
-    )
-    @patch("utils.config_handler.ConfigHandler.get_db_max_overflow", return_value=None)
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_timeout", return_value=None)
-    @patch("utils.config_handler.ConfigHandler.get_db_pool_recycle", return_value=None)
-    @patch(
-        "utils.config_handler.ConfigHandler.get_db_pool_pre_ping",
-        side_effect=ValueError,
-    )
+    @patch("data.cache.cache_manager.get_db_pool_config")
     def test_create_engine_none_config(
         self,
-        mock_ping,
-        mock_recycle,
-        mock_timeout,
-        mock_overflow,
-        mock_pool_size,
+        mock_get_config,
         mock_create,
     ):
+        # When ConfigHandler returns None, get_typed (used internally by
+        # get_db_pool_config) falls back to defaults.
+        mock_get_config.return_value = {
+            "pool_size": 10,
+            "max_overflow": 5,
+            "pool_timeout": 30,
+            "pool_recycle": 1800,
+            "pool_pre_ping": True,
+        }
         mock_engine = MagicMock()
         mock_create.return_value = mock_engine
         mgr = _make_mgr()
@@ -142,12 +133,12 @@ class TestCacheManagerCreateEngine:
         mock_create.assert_called_once_with(
             "postgresql+asyncpg://user:pass@localhost/testdb",
             echo=False,
+            future=True,
             pool_size=10,
             max_overflow=5,
             pool_timeout=30,
             pool_recycle=1800,
             pool_pre_ping=True,
-            future=True,
         )
 
 
