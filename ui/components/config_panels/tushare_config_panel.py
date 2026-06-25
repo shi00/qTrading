@@ -291,7 +291,8 @@ class TushareConfigPanel(ft.Container):
             import tushare as ts
 
             ts.set_token(token)
-            temp_pro = ts.pro_api()
+            # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
+            temp_pro = ts.pro_api(token=token, timeout=ConfigHandler.get_tushare_timeout())
             await asyncio.to_thread(
                 temp_pro.trade_cal,
                 exchange="SSE",

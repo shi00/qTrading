@@ -302,8 +302,9 @@ class TushareClient:
             if self.token:
                 ts.set_token(self.token)
                 # Pass timeout to requests via tushare SDK
+                # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
                 # tushare SDK has no type stubs; cast to Protocol for typed access
-                self.pro = typing.cast(TushareProApi, ts.pro_api(timeout=self.timeout))
+                self.pro = typing.cast(TushareProApi, ts.pro_api(token=self.token, timeout=self.timeout))
                 logger.info(
                     f"[API] Tushare Client initialized with timeout={self.timeout}s",
                 )
@@ -366,7 +367,8 @@ class TushareClient:
             old_token = self.token
             self.token = token
             ts.set_token(token)
-            self.pro = ts.pro_api(timeout=self.timeout) if token else None
+            # 显式传 token，避免依赖 tushare SDK 全局状态
+            self.pro = ts.pro_api(token=token, timeout=self.timeout) if token else None
 
             self._rate_limiter, self._api_limiters = self._build_rate_limiters()
 

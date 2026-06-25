@@ -1109,6 +1109,7 @@ class ConfigHandler:
 
         custom_models = config.get("llm_custom_models", {})
         provider_models = custom_models.get(provider, cred.get("models", []))
+
         return {
             "api_key": api_key,
             "base_url": base_url,
