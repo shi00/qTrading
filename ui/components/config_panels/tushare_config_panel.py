@@ -330,7 +330,10 @@ class TushareConfigPanel(ft.Container):
                             f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}"
                         )
                 except Exception as probe_exc:
-                    logger.warning(f"[TushareConfigPanel] Capability probe failed (non-critical): {probe_exc}")
+                    logger.warning(
+                        f"[TushareConfigPanel] Capability probe failed (non-critical): {probe_exc}",
+                        exc_info=True,
+                    )
                     self._show_success(f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}")
             else:
                 self._show_success(I18n.get("tushare_verify_success"))
@@ -345,7 +348,11 @@ class TushareConfigPanel(ft.Container):
 
             error_info = classify_error(e, context="token")
             self._show_error(get_error_message(error_info))
-            logger.error("[TushareConfigPanel] Token verification failed: %s", DataSanitizer.sanitize_error(e))
+            logger.error(
+                "[TushareConfigPanel] Token verification failed: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return False
 
         finally:

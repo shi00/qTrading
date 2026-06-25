@@ -407,6 +407,10 @@ class ConfigHandler:
 
     @staticmethod
     def save_token(token):
+        # 环境变量优先：若 TS_TOKEN 已存在，跳过 keyring 读写（get_token 会优先读环境变量）
+        if os.environ.get(ENV_FALLBACK_MAP["ts_token"]):
+            return True
+
         if not token:
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "ts_token")
@@ -586,6 +590,9 @@ class ConfigHandler:
         """Save database password to keyring."""
         if not password:
             return False
+        # 环境变量优先：若 DB_PASSWORD 已存在，跳过 keyring 写入（get_db_password 会优先读环境变量）
+        if os.environ.get(ENV_FALLBACK_MAP["db_password"]):
+            return True
         try:
             keyring.set_password(KEYRING_SERVICE_NAME, "db_password", password)
             ConfigHandler.save_config({"db_password_encrypted": ""})
@@ -794,7 +801,8 @@ class ConfigHandler:
             return False
 
         if api_key is not None:
-            if api_key:
+            # 环境变量优先：若 AI_API_KEY 已存在，跳过 keyring 写入（get_llm_config 会优先读环境变量）
+            if api_key and not os.environ.get(ENV_FALLBACK_MAP["ai_api_key"]):
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                 except Exception as e:
@@ -813,7 +821,7 @@ class ConfigHandler:
                     except Exception as enc_err:
                         logger.error("Failed to encrypt ai_api_key: %s", DataSanitizer.sanitize_error(enc_err))
                         return False
-            else:
+            elif not api_key and not os.environ.get(ENV_FALLBACK_MAP["ai_api_key"]):
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
                 except Exception:

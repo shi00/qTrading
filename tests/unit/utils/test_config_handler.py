@@ -738,6 +738,66 @@ class TestSaveLlmConfigKeyringDeleteLogsDebug:
             assert len(debug_calls) >= 1
 
 
+class TestSaveTokenEnvShortCircuit:
+    """M2: save_token 在 TS_TOKEN 环境变量存在时跳过 keyring 读写（含空值分支 delete_password 隔离）"""
+
+    @patch.dict(cfg_mod.os.environ, {"TS_TOKEN": "env_token"}, clear=False)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_empty_token_skips_keyring_delete_when_env_exists(self, mock_set, mock_del):
+        """TS_TOKEN 存在时，save_token("") 不删除 keyring"""
+        result = cfg_mod.ConfigHandler.save_token("")
+        assert result is True
+        mock_del.assert_not_called()
+        mock_set.assert_not_called()
+
+    @patch.dict(cfg_mod.os.environ, {"TS_TOKEN": "env_token"}, clear=False)
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_nonempty_token_skips_keyring_write_when_env_exists(self, mock_set):
+        """TS_TOKEN 存在时，save_token("valid") 不写入 keyring"""
+        result = cfg_mod.ConfigHandler.save_token("valid_token")
+        assert result is True
+        mock_set.assert_not_called()
+
+
+class TestSaveLlmConfigEnvShortCircuit:
+    """M3: save_llm_config 在 AI_API_KEY 环境变量存在时跳过 keyring 读写（含空值分支 delete_password 隔离）"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.dict(cfg_mod.os.environ, {"AI_API_KEY": "env_key"}, clear=False)
+    @patch.object(cfg_mod.keyring, "delete_password")
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_empty_api_key_skips_keyring_delete_when_env_exists(self, mock_set, mock_del, mock_save):
+        """AI_API_KEY 存在时，save_llm_config(api_key="") 不删除 keyring，但仍持久化 provider/model/base_url"""
+        result = cfg_mod.ConfigHandler.save_llm_config(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="",
+        )
+        assert result is True
+        mock_del.assert_not_called()
+        mock_set.assert_not_called()
+        # M2: 验证非敏感配置字段仍被持久化（环境变量短路仅保护 keyring，不跳过 save_config）
+        mock_save.assert_called_once()
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    @patch.dict(cfg_mod.os.environ, {"AI_API_KEY": "env_key"}, clear=False)
+    @patch.object(cfg_mod.keyring, "set_password")
+    def test_nonempty_api_key_skips_keyring_write_when_env_exists(self, mock_set, mock_save):
+        """AI_API_KEY 存在时，save_llm_config(api_key="valid") 不写入 keyring，但仍持久化 provider/model/base_url"""
+        result = cfg_mod.ConfigHandler.save_llm_config(
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            api_key="new_key",
+        )
+        assert result is True
+        mock_set.assert_not_called()
+        # M2: 验证非敏感配置字段仍被持久化（环境变量短路仅保护 keyring，不跳过 save_config）
+        mock_save.assert_called_once()
+
+
 class TestGetLlmConfigCustomModelsIsolation:
     """R3-1: get_llm_config() must return a deep copy of custom_models,
     not a reference to DEFAULT_CONFIG, to prevent mutation of defaults."""

@@ -7,8 +7,43 @@ import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import MagicMock
+from urllib.parse import unquote_plus, urlparse
 
 import pytest
+
+# Session 级 keyring mock — 隔离 E2E 测试对宿主机 keyring 的污染
+# 必须在任何可能 import keyring 的项目模块之前生效（参考 tests/conftest.py 的 _MOCK_KEYRING）
+# utils/config_handler.py 在模块顶层 import keyring，而本文件通过 strategies/data 间接导入它，
+# 故必须在项目 import 之前完成 sys.modules["keyring"] 替换
+_E2E_KEYRING_STORE: dict[str, str] = {}
+_E2E_ORIGINAL_KEYRING = sys.modules.get("keyring")
+
+
+def _create_e2e_mock_keyring() -> MagicMock:
+    """创建内存 mock keyring，提供 get/set/delete_password 接口。"""
+
+    def get_password(service_name: str, username: str) -> str | None:
+        return _E2E_KEYRING_STORE.get(f"{service_name}:{username}")
+
+    def set_password(service_name: str, username: str, password: str) -> None:
+        _E2E_KEYRING_STORE[f"{service_name}:{username}"] = password
+
+    def delete_password(service_name: str, username: str) -> None:
+        _E2E_KEYRING_STORE.pop(f"{service_name}:{username}", None)
+
+    mock_kr = MagicMock()
+    mock_kr.get_password = get_password
+    mock_kr.set_password = set_password
+    mock_kr.delete_password = delete_password
+    mock_kr.errors = MagicMock()
+    mock_kr.errors.NoKeyringError = type("NoKeyringError", (Exception,), {})
+    mock_kr.errors.PasswordDeleteError = type("PasswordDeleteError", (Exception,), {})
+    return mock_kr
+
+
+_E2E_MOCK_KEYRING = _create_e2e_mock_keyring()
+sys.modules["keyring"] = _E2E_MOCK_KEYRING
 
 from tests.e2e.helpers.app_launcher import start_flet_app
 from tests.e2e.helpers.flet_page import FletPage
@@ -21,6 +56,21 @@ TEST_DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get(
     "E2E_DATABASE_URL",
     _get_test_db_url(),
 )
+
+
+def _extract_db_password_from_url(url: str) -> str:
+    """从 DATABASE_URL 中解析密码，用于 E2E 子进程环境变量注入。
+
+    ConfigHandler.save_db_password 在 DB_PASSWORD 环境变量存在时会跳过 keyring 写入，
+    避免子进程（独立 Python 进程，不受测试进程 mock 影响）污染宿主机 keyring。
+    """
+    parsed = urlparse(url)
+    if parsed.password:
+        return unquote_plus(parsed.password)
+    return ""
+
+
+_E2E_DB_PASSWORD = _extract_db_password_from_url(TEST_DATABASE_URL)
 BROWSER_CHANNEL = os.environ.get("E2E_BROWSER_CHANNEL", "chromium")
 if not BROWSER_CHANNEL:
     BROWSER_CHANNEL = None
@@ -177,6 +227,31 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
     setattr(item, f"rep_{rep.when}", rep)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def mock_keyring():
+    """Session 级 keyring mock：隔离 E2E 测试对宿主机 keyring 的污染。
+
+    模块加载时已替换 sys.modules["keyring"]，此处 reinforce 并在 session 结束时
+    防御性清理 AStockScreener 服务下的凭证残留，避免 mock 失效场景下的污染扩散。
+    """
+    sys.modules["keyring"] = _E2E_MOCK_KEYRING
+    yield
+    # 防御性兜底：清理 AStockScreener 服务下的凭证残留
+    # 直接操作 _E2E_KEYRING_STORE，避免 import keyring 间接引用可能操作到真实 keyring
+    _service = "AStockScreener"
+    for _username in ("ts_token", "db_password", "ai_api_key"):
+        _E2E_KEYRING_STORE.pop(f"{_service}:{_username}", None)
+    # 遍历清理 ai_api_key_* 形式的 provider 凭证（mock store 可枚举）
+    for _key in list(_E2E_KEYRING_STORE):
+        if _key.startswith(f"{_service}:ai_api_key_"):
+            _E2E_KEYRING_STORE.pop(_key, None)
+    # 恢复原始 keyring
+    if _E2E_ORIGINAL_KEYRING is not None:
+        sys.modules["keyring"] = _E2E_ORIGINAL_KEYRING
+    else:
+        sys.modules.pop("keyring", None)
 
 
 def _spawn(tmp_path_factory, config: dict, env_overrides: dict) -> tuple:
@@ -633,6 +708,12 @@ def flet_app(tmp_path_factory, seed_e2e_data):
             "TS_TOKEN": "e2e-dummy-token",
             "AI_API_KEY": "e2e-dummy-key",
             "DATABASE_URL": TEST_DATABASE_URL,
+            "DB_PASSWORD": _E2E_DB_PASSWORD,
+            # keyring 25.7.0 原生支持 PYTHON_KEYRING_BACKEND 指定后端。
+            # null 后端：set/delete 为 no-op，get 返回 None。
+            # 一劳永逸隔离子进程所有 keyring 操作，覆盖 save_provider_credential、
+            # _migrate_custom_models_credentials 等无法用 AI_API_KEY 短路的 per-provider 路径。
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
         },
     )
     app = AppServer(proc, url, cfg_file)
@@ -645,7 +726,13 @@ def wizard_app(tmp_path_factory):
     proc, url, cfg_file = _spawn(
         tmp_path_factory,
         config={"locale": "zh"},
-        env_overrides={"DATABASE_URL": TEST_DATABASE_URL},
+        env_overrides={
+            "TS_TOKEN": "e2e-dummy-token",
+            "AI_API_KEY": "e2e-dummy-key",
+            "DATABASE_URL": TEST_DATABASE_URL,
+            "DB_PASSWORD": _E2E_DB_PASSWORD,
+            "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
+        },
     )
     app = AppServer(proc, url, cfg_file)
     yield app
