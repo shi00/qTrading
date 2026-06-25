@@ -50,6 +50,7 @@ class AppLayout(ft.Container):
         self.DEBOUNCE_MS = 50
         self._resize_debounce_task = None
         self.RESIZE_DEBOUNCE_MS = 100
+        self._nav_collapsed = False
 
         # UI Components Placeholders
         self.nav_rail = None
@@ -100,6 +101,14 @@ class AppLayout(ft.Container):
             except Exception as e:
                 logger.debug(f"[AppLayout] Resize handler error: {e}", exc_info=True)
 
+    def _toggle_nav(self, e):  # pragma: no cover
+        """切换 NavigationRail 折叠/展开状态。"""
+        self._nav_collapsed = not self._nav_collapsed
+        self.nav_rail.extended = not self._nav_collapsed
+        self.collapse_btn.selected = self._nav_collapsed
+        self.brand_text.visible = not self._nav_collapsed
+        self.nav_rail.update()
+
     def _init_ui(self):  # pragma: no cover
         """Initialize all UI components"""  # pragma: no cover
 
@@ -107,21 +116,31 @@ class AppLayout(ft.Container):
         logger.debug("[AppLayout] >>> Initializing Layout")  # pragma: no cover
 
         # 2. Brand Header — uses semantic token, auto-updates with theme  # pragma: no cover
+        self.collapse_btn = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.MENU_OPEN,  # pragma: no cover
+            selected=False,  # pragma: no cover
+            selected_icon=ft.Icons.MENU,  # pragma: no cover
+            on_click=self._toggle_nav,  # pragma: no cover
+            tooltip=I18n.get("nav_toggle_collapse"),  # pragma: no cover
+            icon_size=20,  # pragma: no cover
+        )  # pragma: no cover
+        self.brand_text = ft.Text(  # pragma: no cover
+            I18n.get("app_brand"),  # pragma: no cover
+            size=14,  # pragma: no cover
+            weight=ft.FontWeight.BOLD,  # pragma: no cover
+            color=ft.Colors.ON_SURFACE,  # pragma: no cover
+        )  # pragma: no cover
         brand_header = ft.Container(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
+                    self.collapse_btn,  # pragma: no cover
                     ft.Image(  # pragma: no cover
                         src="/icon.png",  # pragma: no cover
                         width=48,  # pragma: no cover
                         height=48,  # pragma: no cover
                         fit=ft.ImageFit.CONTAIN,  # pragma: no cover
                     ),  # pragma: no cover
-                    ft.Text(  # pragma: no cover
-                        I18n.get("app_brand"),  # pragma: no cover
-                        size=14,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                        color=ft.Colors.ON_SURFACE,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.brand_text,  # pragma: no cover
                 ],  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
                 spacing=5,  # pragma: no cover
@@ -133,6 +152,7 @@ class AppLayout(ft.Container):
         self.nav_rail = ft.NavigationRail(  # pragma: no cover
             selected_index=int(self._current_tab_index),  # pragma: no cover
             label_type=ft.NavigationRailLabelType.ALL,  # pragma: no cover
+            extended=True,  # pragma: no cover
             min_width=80,  # pragma: no cover
             min_extended_width=180,  # pragma: no cover
             bgcolor=ft.Colors.SURFACE,  # pragma: no cover

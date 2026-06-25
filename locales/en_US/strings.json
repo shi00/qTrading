@@ -8,6 +8,7 @@
     "data_tab_explorer": "Data Explorer",
     "nav_settings": "Settings",
     "nav_tasks": "Task Center",
+    "nav_toggle_collapse": "Collapse sidebar",
     "task_clear_finished": "Clear Finished",
     "task_col_type": "Type",
     "task_col_name": "Name & Description",

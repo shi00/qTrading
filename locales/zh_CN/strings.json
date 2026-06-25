@@ -9,6 +9,7 @@
     "data_tab_sql": "SQL 控制台",
     "nav_settings": "系统设置",
     "nav_tasks": "任务中心",
+    "nav_toggle_collapse": "折叠侧边栏",
     "task_clear_finished": "清除已完成",
     "task_col_type": "类型",
     "task_col_name": "名称与描述",

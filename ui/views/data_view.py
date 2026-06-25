@@ -243,6 +243,7 @@ class TableViewerTab(ft.Container):
             ],  # pragma: no cover
             alignment=ft.MainAxisAlignment.START,  # pragma: no cover
             spacing=10,  # pragma: no cover
+            scroll=ft.ScrollMode.AUTO,  # pragma: no cover
         )  # pragma: no cover
 
         # Update visuals for inputs to be 'Dense'

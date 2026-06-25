@@ -91,20 +91,19 @@ class BacktestView(ft.Container):
                 ),
                 ft.Row([self.progress_bar, self.progress_text, self.cancel_button], spacing=8),
                 ft.Container(height=16),
-                ft.ResponsiveRow(
+                ft.Row(
                     [
                         ft.Container(
                             content=self.config_panel,
-                            col=AppStyles.COL_THIRD,
+                            expand=1,
                         ),
                         ft.Container(
                             content=self.result_panel,
-                            col=AppStyles.COL_TWO_THIRDS,
+                            expand=2,
                         ),
                     ],
                     expand=True,
                     spacing=AppStyles.SPACING_MD,
-                    run_spacing=AppStyles.SPACING_MD,
                 ),
             ],
             spacing=12,
