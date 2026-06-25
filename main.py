@@ -214,6 +214,19 @@ async def main(page: ft.Page):
     if not _is_web_mode():
         page.window.on_event = _on_window_event
 
+    async def _on_resize(e):
+        """窗口 resize 回调 — 委托给 AppLayout 防抖处理。"""
+        if not page.controls:
+            return
+        layout = page.controls[0]
+        # 启动期间 page.controls[0] 可能是 StartupView，需 isinstance 守卫
+        from ui.app_layout import AppLayout
+
+        if isinstance(layout, AppLayout):
+            layout.schedule_resize()
+
+    page.on_resize = _on_resize
+
     async def _on_disconnect(e):
         coordinator.start_watchdog(25)
         cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)

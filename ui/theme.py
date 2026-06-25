@@ -436,6 +436,20 @@ class AppStyles:
     CONTROL_WIDTH_MD = 200  # 中型控件：Dropdown 下拉框、单行选择
     CONTROL_WIDTH_LG = 400  # 大型控件：Token/URL 输入框
 
+    # --- Spacing Tokens (统一间距，消除魔术数字) ---
+    SPACING_XS = 4
+    SPACING_SM = 8
+    SPACING_MD = 12
+    SPACING_LG = 16
+    SPACING_XL = 20
+
+    # --- Responsive Column Configs (标准栅格配置，消除各视图重复硬编码 col={...}) ---
+    COL_FULL = {"xs": 12}
+    COL_HALF = {"xs": 12, "sm": 6}
+    COL_THIRD = {"xs": 12, "sm": 6, "md": 4}
+    COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
+    COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
+
     @staticmethod
     def card(
         padding: int = 15,

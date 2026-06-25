@@ -43,7 +43,7 @@ class BacktestView(ft.Container):
         )
 
         self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)
-        self.progress_bar = ft.ProgressBar(visible=False, width=400)
+        self.progress_bar = ft.ProgressBar(visible=False, expand=True)
         self.progress_text = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
 
         self.cancel_button = ft.ElevatedButton(
@@ -91,21 +91,20 @@ class BacktestView(ft.Container):
                 ),
                 ft.Row([self.progress_bar, self.progress_text, self.cancel_button], spacing=8),
                 ft.Container(height=16),
-                ft.Row(
+                ft.ResponsiveRow(
                     [
                         ft.Container(
                             content=self.config_panel,
-                            width=400,
-                            expand=False,
+                            col=AppStyles.COL_THIRD,
                         ),
-                        ft.VerticalDivider(width=1, color=AppColors.DIVIDER),
                         ft.Container(
                             content=self.result_panel,
-                            expand=True,
+                            col=AppStyles.COL_TWO_THIRDS,
                         ),
                     ],
                     expand=True,
-                    vertical_alignment=ft.CrossAxisAlignment.START,
+                    spacing=AppStyles.SPACING_MD,
+                    run_spacing=AppStyles.SPACING_MD,
                 ),
             ],
             spacing=12,

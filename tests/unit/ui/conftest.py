@@ -53,7 +53,7 @@ def mock_app_styles():
         if attr.startswith("_"):
             continue
         val = getattr(AppStyles, attr, None)
-        if isinstance(val, (str, int, float)):
+        if isinstance(val, (str, int, float, dict)):
             setattr(m, attr, val)
     # 样式工厂方法返回真实 ButtonStyle/dict，避免组件渲染时类型不匹配
     m.primary_button = MagicMock(return_value=ft.ButtonStyle())

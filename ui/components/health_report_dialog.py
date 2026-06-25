@@ -426,6 +426,9 @@ class HealthReportDialog(ft.AlertDialog):
         self.page_ref = page
         self.report = report
 
+        # 缓存对话框尺寸（打开时计算一次，不随 resize 变化）
+        self._cached_width, self._cached_height = self._dialog_size()
+
         # LOG REPORT SUMMARY FOR DEBUGGING
         try:
             r_status = report.get("status", "unknown")
@@ -460,6 +463,16 @@ class HealthReportDialog(ft.AlertDialog):
             actions_padding=10,
             shape=ft.RoundedRectangleBorder(radius=8),
         )
+
+    def _dialog_size(self) -> tuple[int, int]:
+        """基于窗口尺寸计算对话框宽高，加上限约束。"""
+        if not self.page_ref:
+            return 600, 600
+        win_w = int(self.page_ref.window.width or 1280)
+        win_h = int(self.page_ref.window.height or 800)
+        w = min(max(win_w - 80, 480), 600)
+        h = min(max(win_h - 80, 400), 600)
+        return w, h
 
     def close_dialog(self, e=None):  # pragma: no cover
         try:
@@ -521,8 +534,8 @@ class HealthReportDialog(ft.AlertDialog):
 
         # Assemble
         return ft.Container(
-            width=600,
-            height=600,
+            width=self._cached_width,
+            height=self._cached_height,
             padding=20,
             content=ft.Column(
                 controls=[
@@ -573,6 +586,8 @@ class HealthScanDialog(ft.AlertDialog):
     def __init__(self, page, data_processor: DataProcessor):  # pragma: no cover
         self.page_ref = page
         self._data_processor = data_processor
+        # 缓存对话框尺寸
+        self._cached_width, self._cached_height = self._dialog_size()
         self.progress_bar = ft.ProgressBar(
             width=400,
             color=AppColors.PRIMARY,
@@ -589,8 +604,8 @@ class HealthScanDialog(ft.AlertDialog):
             modal=True,
             title=ft.Text(I18n.get("scan_title"), size=16, weight=ft.FontWeight.BOLD),
             content=ft.Container(
-                width=450,
-                height=300,
+                width=self._cached_width,
+                height=self._cached_height,
                 content=ft.Column(
                     [
                         ft.Container(height=20),
@@ -605,6 +620,16 @@ class HealthScanDialog(ft.AlertDialog):
             ],
             actions_padding=10,
         )
+
+    def _dialog_size(self) -> tuple[int, int]:
+        """基于窗口尺寸计算对话框宽高，加上限约束。"""
+        if not self.page_ref:
+            return 450, 300
+        win_w = int(self.page_ref.window.width or 1280)
+        win_h = int(self.page_ref.window.height or 800)
+        w = min(max(win_w - 80, 360), 450)
+        h = min(max(win_h - 80, 240), 300)
+        return w, h
 
     def close_dialog(self, e=None):  # pragma: no cover
         if hasattr(self.page_ref, "close"):

@@ -174,6 +174,7 @@ class TaskCenterView(ft.Container):
                 self.scroll_area,
                 self.pagination_row,
             ],
+            expand=True,
         )
         self.padding = ft.padding.all(20)
 

@@ -69,9 +69,16 @@ class StockDetailDialog(ft.AlertDialog):
     Stock detail popup dialog showing comprehensive stock information.
     """
 
-    def __init__(self, stock_data: dict = None, data_processor=None):  # type: ignore[untyped]
+    def __init__(self, stock_data: dict = None, data_processor=None, page: ft.Page = None):  # type: ignore[untyped]
         self.stock_data = stock_data or {}
         self.data_processor = data_processor
+        self._page_ref = page
+
+        # 缓存对话框尺寸（打开时计算一次，不随 resize 变化）
+        self._cached_width, self._cached_height = self._dialog_size()
+        # K 线图尺寸基于对话框尺寸推算
+        self._chart_width = max(self._cached_width - 40, 600)  # 减 padding
+        self._chart_height = 340
 
         super().__init__(
             modal=True,
@@ -82,6 +89,16 @@ class StockDetailDialog(ft.AlertDialog):
             ],
             actions_alignment=ft.MainAxisAlignment.END,
         )
+
+    def _dialog_size(self) -> tuple[int, int]:
+        """基于窗口尺寸计算对话框宽高，加上限约束。"""
+        if not self._page_ref:
+            return 900, 700  # 回退默认值
+        win_w = int(self._page_ref.window.width or 1280)
+        win_h = int(self._page_ref.window.height or 800)
+        w = min(max(win_w - 80, 600), 900)
+        h = min(max(win_h - 80, 500), 700)
+        return w, h
 
     def _build_title(self):
         code = self.stock_data.get("ts_code", "")
@@ -380,8 +397,8 @@ class StockDetailDialog(ft.AlertDialog):
                 ],  # pragma: no cover
                 scroll=ft.ScrollMode.AUTO,  # pragma: no cover
             ),  # pragma: no cover
-            width=900,  # pragma: no cover
-            height=700,  # pragma: no cover
+            width=self._cached_width,  # pragma: no cover
+            height=self._cached_height,  # pragma: no cover
         )  # pragma: no cover
 
     def _info_chip(self, label, value, color=None):  # pragma: no cover
@@ -489,14 +506,14 @@ class StockDetailDialog(ft.AlertDialog):
                 generate_kline_png,
                 df,
                 title=chart_title,
-                width=880,
-                height=340,
+                width=self._chart_width,
+                height=self._chart_height,
             )
 
             self.chart_container.content = ft.Image(
                 src_base64=b64_png,
                 fit=ft.ImageFit.CONTAIN,
-                width=880,
+                expand=True,
             )
             self.chart_container.update()
 

@@ -181,7 +181,7 @@ class TestBacktestResultPanel:
         card = panel._metric_card("Test Label", "Test Value", AppColors.SUCCESS)
 
         assert isinstance(card, ft.Container)
-        assert card.width == 150
+        assert card.width is None  # 移除固定宽度，改用 ResponsiveRow col
 
     def test_get_color_for_value_positive(self, panel: BacktestResultPanel) -> None:
         color = panel._get_color_for_value(0.1)

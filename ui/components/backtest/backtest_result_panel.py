@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 import flet as ft
 
 from ui.i18n import I18n
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 
 if TYPE_CHECKING:
     from strategies.backtest.config import BacktestResult
@@ -108,58 +108,82 @@ class BacktestResultPanel(ft.Container):
         )
 
     def _build_metrics_section(self, metrics: dict) -> ft.Column:
-        row1 = ft.Row(
+        row1 = ft.ResponsiveRow(
             [
-                self._metric_card(
-                    I18n.get("backtest_metric_total_return"),
-                    f"{metrics.get('total_return', 0) * 100:.2f}%",
-                    self._get_color_for_value(metrics.get("total_return", 0)),
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_total_return"),
+                        f"{metrics.get('total_return', 0) * 100:.2f}%",
+                        self._get_color_for_value(metrics.get("total_return", 0)),
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
-                self._metric_card(
-                    I18n.get("backtest_metric_annual_return"),
-                    f"{metrics.get('annualized_return', 0) * 100:.2f}%",
-                    self._get_color_for_value(metrics.get("annualized_return", 0)),
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_annual_return"),
+                        f"{metrics.get('annualized_return', 0) * 100:.2f}%",
+                        self._get_color_for_value(metrics.get("annualized_return", 0)),
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
-                self._metric_card(
-                    I18n.get("backtest_metric_sharpe"),
-                    f"{metrics.get('sharpe_ratio', 0):.2f}",
-                    self._get_color_for_sharpe(metrics.get("sharpe_ratio", 0)),
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_sharpe"),
+                        f"{metrics.get('sharpe_ratio', 0):.2f}",
+                        self._get_color_for_sharpe(metrics.get("sharpe_ratio", 0)),
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
-                self._metric_card(
-                    I18n.get("backtest_metric_max_dd"),
-                    f"{metrics.get('max_drawdown', 0) * 100:.2f}%",
-                    AppColors.ERROR if metrics.get("max_drawdown", 0) > 0.2 else AppColors.WARNING,
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_max_dd"),
+                        f"{metrics.get('max_drawdown', 0) * 100:.2f}%",
+                        AppColors.ERROR if metrics.get("max_drawdown", 0) > 0.2 else AppColors.WARNING,
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
             ],
-            spacing=12,
-            wrap=True,
+            spacing=AppStyles.SPACING_MD,
+            run_spacing=AppStyles.SPACING_MD,
         )
 
-        row2 = ft.Row(
+        row2 = ft.ResponsiveRow(
             [
-                self._metric_card(
-                    I18n.get("backtest_metric_profit_factor"),
-                    f"{metrics.get('profit_factor', 0):.2f}",
-                    AppColors.SUCCESS if metrics.get("profit_factor", 0) > 1 else AppColors.ERROR,
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_profit_factor"),
+                        f"{metrics.get('profit_factor', 0):.2f}",
+                        AppColors.SUCCESS if metrics.get("profit_factor", 0) > 1 else AppColors.ERROR,
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
-                self._metric_card(
-                    I18n.get("backtest_metric_ic_mean"),
-                    f"{metrics.get('ic_mean', 0):.4f}",
-                    self._get_color_for_ic(metrics.get("ic_mean", 0)),
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_ic_mean"),
+                        f"{metrics.get('ic_mean', 0):.4f}",
+                        self._get_color_for_ic(metrics.get("ic_mean", 0)),
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
-                self._metric_card(
-                    I18n.get("backtest_metric_ic_ir"),
-                    f"{metrics.get('ic_ir', 0):.2f}",
-                    self._get_color_for_ic(metrics.get("ic_ir", 0)),
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_ic_ir"),
+                        f"{metrics.get('ic_ir', 0):.2f}",
+                        self._get_color_for_ic(metrics.get("ic_ir", 0)),
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
-                self._metric_card(
-                    I18n.get("backtest_metric_total_trades"),
-                    f"{metrics.get('total_trades', 0)}",
-                    AppColors.TEXT_PRIMARY,
+                ft.Container(
+                    content=self._metric_card(
+                        I18n.get("backtest_metric_total_trades"),
+                        f"{metrics.get('total_trades', 0)}",
+                        AppColors.TEXT_PRIMARY,
+                    ),
+                    col=AppStyles.COL_QUARTER,
                 ),
             ],
-            spacing=12,
-            wrap=True,
+            spacing=AppStyles.SPACING_MD,
+            run_spacing=AppStyles.SPACING_MD,
         )
 
         return ft.Column(
@@ -188,7 +212,6 @@ class BacktestResultPanel(ft.Container):
             padding=12,
             bgcolor=AppColors.CARD_BG,
             border_radius=8,
-            width=150,
         )
 
     def _get_color_for_value(self, value: float) -> str:

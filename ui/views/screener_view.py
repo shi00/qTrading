@@ -317,6 +317,12 @@ class ScreenerView(ft.Container):
         # Load Strategies Async
         self.page.run_task(self._load_strategies)  # type: ignore[untyped]
 
+    def handle_resize(self):
+        """窗口 resize 通知 — 刷新虚拟表格视口。"""
+        table = getattr(self, "result_table", None)
+        if table and hasattr(table, "refresh_viewport"):
+            table.refresh_viewport()
+
     def will_unmount(self):  # pragma: no cover
         self.vm.unsubscribe_task_manager()
         self.vm.dispose()
@@ -1304,6 +1310,7 @@ class ScreenerView(ft.Container):
             self.detail_dialog = StockDetailDialog(
                 stock_data=raw_data,
                 data_processor=self.vm.data_processor,
+                page=self.page,
             )
             self.page.overlay.append(self.detail_dialog)
         else:

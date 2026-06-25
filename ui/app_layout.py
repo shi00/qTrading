@@ -48,6 +48,8 @@ class AppLayout(ft.Container):
         self._pending_tab_index = None
         self._debounce_task = None
         self.DEBOUNCE_MS = 50
+        self._resize_debounce_task = None
+        self.RESIZE_DEBOUNCE_MS = 100
 
         # UI Components Placeholders
         self.nav_rail = None
@@ -65,8 +67,38 @@ class AppLayout(ft.Container):
         AppColors.subscribe(self.update_theme)
 
     def will_unmount(self):
+        if self._resize_debounce_task:
+            self._resize_debounce_task.cancel()
+            self._resize_debounce_task = None
         I18n.unsubscribe(self._on_locale_change)
         AppColors.unsubscribe(self.update_theme)
+
+    def schedule_resize(self):
+        """从同步 on_resize 回调入口，调度防抖处理。"""
+        if self._resize_debounce_task:
+            self._resize_debounce_task.cancel()
+        self._resize_debounce_task = self.page.run_task(self._handle_resize)
+
+    async def _handle_resize(self):
+        """防抖后实际执行 resize 派发。"""
+        try:
+            await asyncio.sleep(self.RESIZE_DEBOUNCE_MS / 1000)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+
+        if not self.page:
+            return
+
+        current_view = self._view_cache.get(self._current_tab_index)
+        if current_view is None:
+            return
+
+        # 鸭子类型：视图自愿实现 handle_resize 即被通知
+        if hasattr(current_view, "handle_resize"):
+            try:
+                current_view.handle_resize()  # type: ignore[untyped]
+            except Exception as e:
+                logger.debug(f"[AppLayout] Resize handler error: {e}", exc_info=True)
 
     def _init_ui(self):  # pragma: no cover
         """Initialize all UI components"""  # pragma: no cover
@@ -94,7 +126,7 @@ class AppLayout(ft.Container):
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.only(top=20, bottom=10),  # pragma: no cover
+            padding=ft.padding.only(top=10, bottom=10),  # pragma: no cover
         )  # pragma: no cover
 
         # 3. Navigation Rail — uses semantic tokens  # pragma: no cover
