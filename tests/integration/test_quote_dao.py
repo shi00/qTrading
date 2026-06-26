@@ -33,7 +33,11 @@ pytestmark = pytest.mark.integration
 
 @pytest_asyncio.fixture(autouse=True)
 async def clean_db(test_engine: AsyncEngine):
-    """每个测试前清理相关表，避免数据残留干扰断言。"""
+    """每个测试前后清理相关表，避免数据残留干扰断言。
+
+    双重清理（setup + teardown）：teardown 后清理确保末尾测试不残留 stock_basic 数据，
+    避免 xdist 下后续 mvd_data fixture INSERT 时 UniqueViolationError。
+    """
     tables = [
         "daily_quotes",
         "stock_basic",
@@ -41,11 +45,16 @@ async def clean_db(test_engine: AsyncEngine):
         "daily_indicators",
         "financial_reports",
     ]
-    async with test_engine.begin() as conn:
-        for table in tables:
-            with contextlib.suppress(Exception):
-                await conn.execute(text(f"DELETE FROM {table}"))
+
+    async def _cleanup():
+        async with test_engine.begin() as conn:
+            for table in tables:
+                with contextlib.suppress(Exception):
+                    await conn.execute(text(f"DELETE FROM {table}"))
+
+    await _cleanup()
     yield
+    await _cleanup()
 
 
 @pytest_asyncio.fixture

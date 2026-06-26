@@ -251,6 +251,110 @@ class TestNewsSubscriptionServiceFetchAndNotify:
             await svc._fetch_and_notify()
             svc._notify_listeners.assert_called_once()
 
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_non_initial_sync_updates_last_news_time(self, mock_cache, mock_ai):
+        # 非首次同步分支应用 news_list[0] 更新 _last_news_time（BUG 修复）
+        svc = NewsSubscriptionService()
+        svc._last_news_time = "2024-06-15 10:00:00"
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        svc._queue_put_lock = asyncio.Lock()
+        mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
+        svc.cache.save_market_news = AsyncMock()
+        with (
+            patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_config.return_value = False
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[
+                    {"content": "new news", "time": "2024-06-15 10:05:00"},
+                ]
+            )
+            svc._notify_listeners = AsyncMock()
+            await svc._fetch_and_notify()
+            assert svc._last_news_time == "2024-06-15 10:05:00"
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_last_news_time_monotonic_no_regression(self, mock_cache, mock_ai):
+        # 水位线单调性保护：CLS 返回旧数据时不倒退 _last_news_time
+        svc = NewsSubscriptionService()
+        svc._last_news_time = "2024-06-15 10:30:00"
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        svc._queue_put_lock = asyncio.Lock()
+        mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
+        svc.cache.save_market_news = AsyncMock()
+        with (
+            patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_config.return_value = False
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[
+                    {"content": "stale news", "time": "2024-06-15 09:00:00"},
+                ]
+            )
+            svc._notify_listeners = AsyncMock()
+            await svc._fetch_and_notify()
+            assert svc._last_news_time == "2024-06-15 10:30:00"
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_timestamp_fallback_skips_older_items(self, mock_cache, mock_ai):
+        # 时间戳兜底去重：current_time <= _last_news_time 时跳过，不入库、不通知
+        svc = NewsSubscriptionService()
+        svc._last_news_time = "2024-06-15 10:30:00"
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        svc._queue_put_lock = asyncio.Lock()
+        mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
+        svc.cache.save_market_news = AsyncMock()
+        with (
+            patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_config.return_value = False
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[
+                    {"content": "old news", "time": "2024-06-15 10:00:00"},
+                ]
+            )
+            svc._notify_listeners = AsyncMock()
+            await svc._fetch_and_notify()
+            svc._notify_listeners.assert_not_called()
+            svc.cache.save_market_news.assert_not_called()
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_get_hash_normalization(self, mock_cache, mock_ai):
+        # get_hash 归一化（去 URL、折叠空白、html.unescape）后两条 content hash 一致，第二条被去重
+        svc = NewsSubscriptionService()
+        svc._last_news_time = "2024-06-15 09:00:00"
+        svc.processing_queue = asyncio.Queue(maxsize=10)
+        svc._queue_put_lock = asyncio.Lock()
+        mock_cache.normalize_news_item = MagicMock(return_value={"content": "test"})
+        svc.cache.save_market_news = AsyncMock()
+        with (
+            patch("data.external.news_fetcher.NewsFetcher") as mock_fetcher,
+            patch("services.news_subscription_service.ConfigHandler") as mock_ch,
+        ):
+            mock_ch.get_config.return_value = False
+            mock_fetcher.get_latest_global_news = AsyncMock(
+                return_value=[
+                    {"content": "看 http://example.com 详情 &quot;测试&quot;", "time": "2024-06-15 10:00:00"},
+                    {"content": '看  详情 "测试"', "time": "2024-06-15 10:00:00"},
+                ]
+            )
+            svc._notify_listeners = AsyncMock()
+            await svc._fetch_and_notify()
+            # 两条归一化后均变为 `看 详情 "测试"`（URL 去除、空白折叠、实体解码），hash 一致
+            # reversed 先处理 item2，item1 命中 _seen_hashes 去重，仅入库 1 条
+            svc.cache.save_market_news.assert_called_once()
+
 
 class TestNewsSubscriptionServiceSeenHashes:
     @patch("services.news_subscription_service.AIService")

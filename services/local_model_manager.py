@@ -231,6 +231,7 @@ class LocalModelManager:
                 if self._worker_proc.is_alive():
                     self._worker_proc.kill()
                     self._worker_proc.join(timeout=2)
+            logger.info("[LocalModel] Persistent worker shut down.")
 
         if self._request_queue is not None:
             try:
@@ -249,7 +250,6 @@ class LocalModelManager:
         self._request_queue = None
         self._result_queue = None
         self._worker_ready = False
-        logger.info("[LocalModel] Persistent worker shut down.")
 
     def _ensure_worker(self, model_path: str, core_config: dict) -> bool:
         """Start a persistent worker subprocess with the given model.

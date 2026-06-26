@@ -89,7 +89,13 @@ PERMISSION_DENIED_KEYWORDS = (
     "permission denied",
     "没有权限",
     "无权访问",
+    # Tushare 网关对未授权接口的伪装报错（实际是权限不足，但消息不含"权限"字样）
+    "请指定正确的接口名",
 )
+
+# Token 认证失败关键字：触发全局熔断，避免无效 token 下每个 API 独立重试刷屏。
+# 注意：必须与 PERMISSION_DENIED_KEYWORDS 严格分离，避免"积分不足"等 per-API 错误误触发全局熔断。
+TOKEN_INVALID_KEYWORDS = ("您的token不对",)
 
 
 from utils.singleton_registry import register_singleton
@@ -187,6 +193,9 @@ class TushareClient:
                     for t in cls._instance._bg_tasks:
                         t.cancel()
                     cls._instance._bg_tasks.clear()
+                # 显式重置熔断标志，符合 _bg_tasks 显式清理风格（虽实例销毁后冗余，但防御性写法）
+                if hasattr(cls._instance, "_token_invalid"):
+                    cls._instance._token_invalid = False
             cls._instance = None
             cls._initialized = False
 
@@ -292,6 +301,9 @@ class TushareClient:
             self._capability_cache: dict[str, bool] = {}
             self._capability_cache_lock = threading.Lock()
             self._bg_tasks: set[asyncio.Task] = set()
+            # 全局 token 熔断标志：token 失效时置 True，阻止后续 API 调用避免无效重试刷屏。
+            # 由 set_token() 重置，_reset_singleton() 销毁实例时随实例回收。
+            self._token_invalid: bool = False
 
             self.token = token or self._get_token()
             self.timeout = self._get_tushare_timeout()
@@ -361,6 +373,10 @@ class TushareClient:
         """
         with self._lock:
             if token == self.token:
+                # 同 token 提交时也重置熔断标志：用户可能在 Tushare 官网修复了 token 权限但 token 字符串不变
+                if self._token_invalid:
+                    self._token_invalid = False
+                    logger.info("[API] Token breaker reset (same token resubmitted)")
                 logger.debug("[API] Token unchanged, skipping cache clear")
                 return False
 
@@ -374,6 +390,8 @@ class TushareClient:
 
             cache_size = len(self._capability_cache)
             self._capability_cache.clear()
+            # 新 token 提交，重置熔断标志
+            self._token_invalid = False
 
             logger.info(
                 "[API] Token updated: %s -> %s. Cache cleared (%d entries).",
@@ -623,6 +641,16 @@ class TushareClient:
                 "[tushare_api] api_name='%s' -> api_limiter active (%.0f/min)", api_name, api_limiter.rate * 60
             )
 
+        # 全局 token 熔断：token 已失效时快速失败，避免每个 API 独立重试刷屏。
+        # 注意：_token_invalid 的读写未持锁（async 路径不能持 threading.Lock），
+        # 与 set_token 的有锁写入存在极窄竞态窗口；最坏情况是 set_token 后被旧协程
+        # 覆盖为 True 导致持续误熔断，需用户再次 set_token 自愈。
+        if self._token_invalid:
+            raise TushareAPIPermissionError(
+                api_name,
+                "Token marked invalid; call set_token() to reset after updating",
+            )
+
         for i in range(self.max_retries):
             if api_limiter:
                 await api_limiter.consume_async(1)
@@ -663,7 +691,10 @@ class TushareClient:
 
                 error_msg = str(e)
                 error_msg_lower = error_msg.lower()
-                is_permission_error = any(k in error_msg_lower for k in PERMISSION_DENIED_KEYWORDS)
+                # token 认证失败独立判定：真实 Tushare 报错"您的token不对"不含权限关键字，
+                # 必须独立触发全局熔断，不能被 is_permission_error 门控。
+                is_token_invalid = any(k in error_msg_lower for k in TOKEN_INVALID_KEYWORDS)
+                is_permission_error = is_token_invalid or any(k in error_msg_lower for k in PERMISSION_DENIED_KEYWORDS)
                 is_rate_limit = (
                     "每分钟最多访问" in error_msg_lower
                     or "抱歉" in error_msg_lower
@@ -681,6 +712,14 @@ class TushareClient:
 
                 if is_permission_error:
                     self.mark_api_unavailable(api_name)
+                    # 仅 token 认证失败触发全局熔断；per-API 权限错误（如积分不足）不熔断
+                    # is_token_invalid 已在上方独立计算（覆盖纯 token 报错不含权限关键字的情况）
+                    if is_token_invalid:
+                        self._token_invalid = True
+                        logger.error(
+                            "[tushare_api] TOKEN_INVALID (%s): global breaker engaged — subsequent calls will fast-fail",
+                            api_name,
+                        )
                     try:
                         t = asyncio.create_task(self._persist_capability_safely())
                         self._bg_tasks.add(t)

@@ -1,7 +1,9 @@
 import asyncio
 import hashlib
+import html
 import inspect
 import logging
+import re
 import threading
 import typing
 from collections import OrderedDict
@@ -445,6 +447,13 @@ class NewsSubscriptionService:
 
                 def get_hash(item: dict):
                     content = item.get("content", "").strip()
+                    # 归一化：去除 URL、折叠连续空白、HTML 实体解码（复用标准库，幂等且覆盖全部实体）
+                    content = re.sub(r"https?://\S+", "", content)
+                    content = re.sub(r"\s+", " ", content)
+                    content = html.unescape(content)
+                    # 边界保护：归一化后 content 为空（如纯链接新闻）回退原始 content，避免误判重复
+                    if not content:
+                        content = item.get("content", "").strip()
                     time_str = item.get("time", "")
                     return hashlib.sha256(f"{time_str}_{content}".encode()).hexdigest()
 
@@ -457,6 +466,9 @@ class NewsSubscriptionService:
                         len(news_list),
                     )
                     for item in reversed(news_list):
+                        current_time = item.get("time", "")
+                        if self._last_news_time and current_time <= self._last_news_time:
+                            continue
                         h = get_hash(item)
                         if h not in self._seen_hashes:
                             self._seen_hashes[h] = None
@@ -472,7 +484,10 @@ class NewsSubscriptionService:
                             await self._safe_queue_put(item)  # type: ignore[misc]
 
                     latest_item = news_list[0]
-                    self._last_news_time = latest_item.get("time", "")
+                    new_time = latest_item.get("time", self._last_news_time)
+                    # 水位线单调性保护：CLS 偶发返回旧数据时不应倒退水位线
+                    if not self._last_news_time or (new_time and new_time > self._last_news_time):
+                        self._last_news_time = new_time
                     self._last_news_content = latest_item.get("content", "")
 
                     logger.info(
@@ -485,6 +500,9 @@ class NewsSubscriptionService:
                 new_items_found = False
                 new_items = []
                 for item in reversed(news_list):
+                    current_time = item.get("time", "")
+                    if self._last_news_time and current_time <= self._last_news_time:
+                        continue
                     h = get_hash(item)
                     if h not in self._seen_hashes:
                         self._seen_hashes[h] = None
@@ -532,6 +550,11 @@ class NewsSubscriptionService:
                                     logger.error(
                                         "[NewsService] Alert listener error: %s", DataSanitizer.sanitize_error(e)
                                     )
+
+                # 水位线单调性保护：CLS 偶发返回旧数据时不应倒退水位线
+                new_time = news_list[0].get("time", self._last_news_time)
+                if not self._last_news_time or (new_time and new_time > self._last_news_time):
+                    self._last_news_time = new_time
 
                 if new_items_found:
                     await self._notify_listeners(

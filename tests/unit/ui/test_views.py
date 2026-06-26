@@ -745,9 +745,13 @@ class TestAppLayout:
         self.mock_ac.unsubscribe.assert_called_once_with(layout.update_theme)
 
     def test_will_unmount_unsubscribes_i18n(self, mock_page):
+        """will_unmount 用 subscription_id 反订阅（§5.8 规范 1）"""
         layout = self._make_layout(mock_page)
+        layout.did_mount()  # 先订阅获得 subscription_id
         layout.will_unmount()
-        self.mock_i18n.unsubscribe.assert_called_once_with(layout._on_locale_change)
+        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
+        assert layout._locale_subscription_id is None
+        assert layout._mounted is False
 
     def test_on_nav_change_calls_change_tab(self, mock_page):
         layout = self._make_layout(mock_page)
@@ -775,9 +779,21 @@ class TestAppLayout:
             layout.change_tab(1)
         first_task.cancel.assert_called_once()
 
-    def test_subscribe_events_subscribes_i18n(self, mock_page):
+    def test_did_mount_subscribes_i18n(self, mock_page):
+        """构造时不订阅，did_mount 后才订阅（§5.8 规范 1：在 did_mount 中订阅）"""
         layout = self._make_layout(mock_page)
-        self.mock_i18n.subscribe.assert_called_with(layout._on_locale_change)
+        # 构造完不订阅
+        self.mock_i18n.subscribe.assert_not_called()
+        layout.did_mount()
+        self.mock_i18n.subscribe.assert_called_once_with(layout._on_locale_change)
+        assert layout._locale_subscription_id == "sub_id"
+
+    def test_did_mount_is_idempotent(self, mock_page):
+        """did_mount 幂等守卫：多次调用不重复订阅"""
+        layout = self._make_layout(mock_page)
+        layout.did_mount()
+        layout.did_mount()
+        assert self.mock_i18n.subscribe.call_count == 1
 
     @pytest.mark.asyncio
     async def test_execute_tab_switch_changes_tab(self, mock_page):

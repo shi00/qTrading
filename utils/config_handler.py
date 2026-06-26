@@ -41,6 +41,7 @@ class ConfigHandler:
     _config_cache = None
     _last_load_time = 0
     _lock = rwlock.RWLockFair()
+    _io_workers_cap_warned: bool = False
 
     DEFAULT_CONFIG = get_default_config()
 
@@ -1428,12 +1429,27 @@ class ConfigHandler:
             io_workers = min(os.cpu_count() or 4, db_capacity)
 
         if io_workers > db_capacity:
-            logger.warning(
-                f"[Config] IO workers ({io_workers}) exceeds DB connection capacity ({db_capacity}). Capping to {db_capacity}.",
-            )
+            # Deduplicate warning via class-level flag (R7-compliant, RWLockFair-protected).
+            # check-then-set is atomic under the write lock; logging happens outside
+            # the lock to minimize hold time.
+            should_warn = False
+            with ConfigHandler._lock.gen_wlock():
+                if not ConfigHandler._io_workers_cap_warned:
+                    ConfigHandler._io_workers_cap_warned = True
+                    should_warn = True
+            if should_warn:
+                logger.warning(
+                    f"[Config] IO workers ({io_workers}) exceeds DB connection capacity ({db_capacity}). Capping to {db_capacity}.",
+                )
             io_workers = db_capacity
 
         return io_workers
+
+    @classmethod
+    def _reset_io_cap_warning(cls):
+        """Reset IO workers cap warning flag. Called by ThreadPoolManager.reload_config."""
+        with cls._lock.gen_wlock():
+            cls._io_workers_cap_warned = False
 
     @staticmethod
     def set_max_io_workers(count):

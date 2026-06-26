@@ -44,19 +44,29 @@ def make_clean_db_fixture(tables: list[str] | None = None):
 
     Args:
         tables: 指定表名列表；若为 None 则从 ORM metadata 动态生成（排除 alembic_version）。
+
+    清理时机：setup 前 + teardown 后双重清理。
+    - setup 前清理：确保当前测试拿到干净库
+    - teardown 后清理：确保末尾测试不残留数据，避免影响同 worker 后续不同 fixture 的测试
+      （根因：test_quote_dao 的 clean_db 仅 setup 清理，末尾测试残留 stock_basic 导致
+      后续 mvd_data fixture INSERT 时 UniqueViolationError）
     """
     table_list = tables if tables is not None else TABLE_NAMES
 
-    @pytest_asyncio.fixture(autouse=True)
-    async def clean_db(test_engine: AsyncEngine):
-        """每个测试前清理数据库表（容错处理表不存在）。"""
+    async def _cleanup(test_engine: AsyncEngine):
         async with test_engine.begin() as conn:
             for table in table_list:
                 try:
                     await conn.execute(text(f"DELETE FROM {table}"))
                 except Exception as e:  # noqa: BLE001
                     logger.warning("[TestDB] DELETE %s failed: %s", table, e, exc_info=True)
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def clean_db(test_engine: AsyncEngine):
+        """每个测试前后清理数据库表（容错处理表不存在）。"""
+        await _cleanup(test_engine)
         yield
+        await _cleanup(test_engine)
 
     return clean_db
 

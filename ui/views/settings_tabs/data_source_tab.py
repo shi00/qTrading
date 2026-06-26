@@ -198,6 +198,8 @@ class DataSourceTab(ft.Container):
             icon_color=AppColors.ACCENT,  # pragma: no cover
             title_key="settings_token",  # pragma: no cover
             subtitle_key="settings_token_desc",  # pragma: no cover
+            left_col={"xs": 12, "sm": 12, "md": 5, "lg": 4},  # pragma: no cover
+            right_col={"xs": 12, "sm": 12, "md": 7, "lg": 8},  # pragma: no cover
         )  # pragma: no cover
         self.connection_card = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
@@ -254,6 +256,7 @@ class DataSourceTab(ft.Container):
                         [self.history_years_dropdown, self.sync_button],  # pragma: no cover
                         alignment=ft.MainAxisAlignment.END,  # pragma: no cover
                         spacing=10,  # pragma: no cover
+                        wrap=True,  # pragma: no cover
                     ),  # pragma: no cover
                     ft.Row(  # pragma: no cover
                         [  # pragma: no cover

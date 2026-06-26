@@ -322,7 +322,18 @@ class SettingRow(ft.ResponsiveRow):
     and gracefully wraps to next line on mobile.
     """
 
-    def __init__(self, icon, title, subtitle, control, icon_color=None, title_key=None, subtitle_key=None):
+    def __init__(
+        self,
+        icon,
+        title,
+        subtitle,
+        control,
+        icon_color=None,
+        title_key=None,
+        subtitle_key=None,
+        left_col: dict | None = None,
+        right_col: dict | None = None,
+    ):
         super().__init__()
         self.vertical_alignment = ft.CrossAxisAlignment.CENTER
         self.title_key = title_key
@@ -375,8 +386,8 @@ class SettingRow(ft.ResponsiveRow):
         )
 
         self.controls = [
-            ft.Container(content=left_side, col={"xs": 12, "sm": 7, "md": 7}),
-            ft.Container(content=right_side, col={"xs": 12, "sm": 5, "md": 5}),
+            ft.Container(content=left_side, col=left_col if left_col is not None else {"xs": 12, "sm": 7, "md": 7}),
+            ft.Container(content=right_side, col=right_col if right_col is not None else {"xs": 12, "sm": 5, "md": 5}),
         ]
 
     def update_locale(self):

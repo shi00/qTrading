@@ -406,6 +406,106 @@ class TestRuntimePermissionPersistence:
             t.cancel()
         client._bg_tasks.clear()
 
+    @pytest.mark.asyncio
+    async def test_token_invalid_keyword_triggers_breaker(self, tushare_client_mocks):
+        """TOKEN_INVALID_KEYWORDS 命中时触发全局熔断。"""
+        client, _, _ = tushare_client_mocks
+        client._bg_tasks = set()
+
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+            patch.object(client, "_persist_capability_safely", new_callable=AsyncMock),
+        ):
+            mock_func = MagicMock()
+            mock_func.__name__ = "moneyflow_hsgt"
+            mock_func.side_effect = Exception("您的token不对，请确认。")
+
+            with pytest.raises(TushareAPIPermissionError):
+                await client._handle_api_call(mock_func, trade_date="20240101")
+
+            assert client._token_invalid is True
+
+        for t in list(client._bg_tasks):
+            t.cancel()
+        client._bg_tasks.clear()
+
+    @pytest.mark.asyncio
+    async def test_breaker_fast_fails_subsequent_calls(self, tushare_client_mocks):
+        """熔断开启时 _handle_api_call 快速失败，不触达 func / self.pro。"""
+        client, _, _ = tushare_client_mocks
+        client._token_invalid = True
+        client._bg_tasks = set()
+
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+        ):
+            mock_func = MagicMock()
+            mock_func.__name__ = "moneyflow_hsgt"
+
+            with pytest.raises(TushareAPIPermissionError):
+                await client._handle_api_call(mock_func, trade_date="20240101")
+
+            # 熔断快速失败路径在调用 func 之前抛出
+            mock_func.assert_not_called()
+
+    def test_set_token_new_token_resets_breaker(self, tushare_client_mocks):
+        """set_token 传入新 token 时重置熔断标志。"""
+        client, _, _ = tushare_client_mocks
+        client._token_invalid = True
+
+        client.set_token("new_token_xxx")
+
+        assert client._token_invalid is False
+
+    def test_set_token_same_token_resets_breaker(self, tushare_client_mocks):
+        """set_token 传入相同 token 时也重置熔断标志。"""
+        client, _, _ = tushare_client_mocks
+        client._token_invalid = True
+
+        client.set_token(client.token)
+
+        assert client._token_invalid is False
+
+    @pytest.mark.asyncio
+    async def test_permission_denied_not_triggers_breaker(self, tushare_client_mocks):
+        """per-API 权限错误（积分不足 / 接口名错误）不触发全局熔断。"""
+        client, _, _ = tushare_client_mocks
+        client._bg_tasks = set()
+
+        with (
+            patch.object(client, "pro", MagicMock()),
+            patch.object(client, "_rate_limiter", None),
+            patch.object(client, "_api_limiters", {}),
+            patch.object(client, "_persist_capability_safely", new_callable=AsyncMock),
+        ):
+            # 积分不足：per-API 权限错误，不熔断
+            mock_func = MagicMock()
+            mock_func.__name__ = "moneyflow_hsgt"
+            mock_func.side_effect = Exception("权限不足，积分不够")
+
+            with pytest.raises(TushareAPIPermissionError):
+                await client._handle_api_call(mock_func, trade_date="20240101")
+
+            assert client._token_invalid is False
+
+            # 接口名错误（伪装报错）：同样不触发全局熔断
+            mock_func2 = MagicMock()
+            mock_func2.__name__ = "daily"
+            mock_func2.side_effect = Exception("请指定正确的接口名")
+
+            with pytest.raises(TushareAPIPermissionError):
+                await client._handle_api_call(mock_func2, trade_date="20240101")
+
+            assert client._token_invalid is False
+
+        for t in list(client._bg_tasks):
+            t.cancel()
+        client._bg_tasks.clear()
+
 
 class TestBlockTradeStrategyRequiredApis:
     def test_block_trade_strategy_has_required_apis(self, tushare_client_mocks):

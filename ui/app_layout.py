@@ -60,18 +60,32 @@ class AppLayout(ft.Container):
         # Lazy Loading Cache
         self._view_cache: dict[int, ft.Control] = {}
 
+        # I18n subscription id (set in did_mount, cleared in will_unmount)
+        self._locale_subscription_id = None
+        self._mounted = False
+
         # Initialize
         self._init_ui()
-        self._subscribe_events()
 
         # Subscribe to Theme Changes (for custom business colors only)
+        # AppColors.subscribe 不立即触发回调，在 __init__ 中订阅安全
         AppColors.subscribe(self.update_theme)
+
+    def did_mount(self):
+        """挂载后订阅 I18n，避免未入 page 时 sync_immediately 触发回调失败（§5.8 规范 1）"""
+        if self._mounted:
+            return
+        self._mounted = True
+        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
 
     def will_unmount(self):
         if self._resize_debounce_task:
             self._resize_debounce_task.cancel()
             self._resize_debounce_task = None
-        I18n.unsubscribe(self._on_locale_change)
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+        self._mounted = False
         AppColors.unsubscribe(self.update_theme)
 
     def schedule_resize(self):
@@ -275,10 +289,6 @@ class AppLayout(ft.Container):
         self.page.clean()  # type: ignore[untyped]  # pragma: no cover
         self.page.add(self)  # type: ignore[untyped]  # pragma: no cover
         self.page.update()  # type: ignore[untyped]  # pragma: no cover
-
-    def _subscribe_events(self):
-        """Subscribe to global events"""
-        I18n.subscribe(self._on_locale_change)
 
     def _on_locale_change(self):
         """Handle i18n locale change"""

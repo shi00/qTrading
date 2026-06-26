@@ -1,5 +1,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import flet as ft
 import pytest
 
 from ui.components.config_panels.database_config_panel import DatabaseConfigPanel
@@ -261,6 +262,28 @@ class TestTushareConfigPanel:
     def test_save_button_hidden_when_disabled(self, mock_ch_for_panels, mock_i18n, mock_page):
         panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=False)
         assert panel.save_button.visible is False
+
+    def test_standard_ui_inner_row_has_wrap_true(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """standard UI 模式下包含 token_input 和按钮的 Row 必须 wrap=True"""
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=False)
+        # _build_standard_ui 返回 ft.Row，其 controls[0] 是 ft.Column
+        # Column.controls[0] 是包含 token_input + buttons 的 ft.Row
+        outer_row = panel.content
+        inner_col = outer_row.controls[0]
+        token_buttons_row = inner_col.controls[0]
+        assert token_buttons_row.wrap is True
+
+    def test_compact_ui_not_affected_by_standard_ui_change(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """compact 模式下 _build_compact_ui 不应包含 wrap=True 的 token+按钮 Row（确保智能向导不受影响）"""
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)
+        # compact 模式 content 是 ft.Column
+        assert isinstance(panel.content, ft.Column)
+        # token_input 应直接作为 Column 子项（不在 wrap=True 的 Row 中）
+        assert panel.token_input in panel.content.controls
+        # 遍历所有 Row 子项，确认没有 wrap=True 的 token+按钮组合 Row
+        for ctrl in panel.content.controls:
+            if isinstance(ctrl, ft.Row):
+                assert ctrl.wrap is False or ctrl.wrap is None
 
 
 class TestLLMConfigPanel:

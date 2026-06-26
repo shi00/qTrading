@@ -289,6 +289,7 @@ class SystemTab(ft.Container):
                     self.save_thread_pool_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
+                wrap=True,  # pragma: no cover
             ),  # pragma: no cover
             title_key="sys_thread_pool_title",  # pragma: no cover
             subtitle_key="sys_thread_pool_desc",  # pragma: no cover
@@ -314,6 +315,7 @@ class SystemTab(ft.Container):
                     self.save_db_pool_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
+                wrap=True,  # pragma: no cover
             ),  # pragma: no cover
             title_key="settings_db_pool",  # pragma: no cover
             subtitle_key="settings_pool_desc",  # pragma: no cover
@@ -338,6 +340,7 @@ class SystemTab(ft.Container):
                     self.save_rate_limit_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
+                wrap=True,  # pragma: no cover
             ),  # pragma: no cover
             title_key="sys_tushare_limit",  # pragma: no cover
             subtitle_key="sys_tushare_limit_desc",  # pragma: no cover

@@ -168,6 +168,39 @@ async def test_engine():
             pass
 
 
+async def _cleanup_mvd_data(test_engine: AsyncEngine):
+    """清理 mvd_data 注入的所有数据，保证 setup 幂等且 teardown 完整。
+
+    被 mvd_data fixture 在 setup（插入前）和 teardown（测试后）两次调用：
+    - setup 前清理：防止上一个测试残留数据导致 UniqueViolationError（根因修复）
+    - teardown 后清理：防止本测试数据影响下一个测试
+    """
+    async with test_engine.begin() as conn:
+        # L4（无 ts_code，全表清理；MVD 仅注入少量数据，安全）
+        await conn.execute(delete(MarketNews))
+        await conn.execute(delete(ShiborDaily))
+        await conn.execute(delete(MacroEconomy))
+        # L3
+        await conn.execute(delete(TopList).where(TopList.ts_code == "000001.SZ"))
+        await conn.execute(delete(BlockTrade).where(BlockTrade.ts_code == "000001.SZ"))
+        await conn.execute(delete(StkHoldernumber).where(StkHoldernumber.ts_code == "000001.SZ"))
+        await conn.execute(delete(Top10Holders).where(Top10Holders.ts_code == "000001.SZ"))
+        await conn.execute(delete(PledgeStat).where(PledgeStat.ts_code == "000001.SZ"))
+        # L2
+        await conn.execute(delete(Dividend).where(Dividend.ts_code == "000001.SZ"))
+        await conn.execute(delete(FinaMainbz).where(FinaMainbz.ts_code == "000001.SZ"))
+        await conn.execute(delete(FinaAudit).where(FinaAudit.ts_code == "000001.SZ"))
+        await conn.execute(delete(FinancialReports).where(FinancialReports.ts_code == "000001.SZ"))
+        # L1
+        await conn.execute(delete(NorthboundHolding).where(NorthboundHolding.ts_code == "000001.SZ"))
+        await conn.execute(delete(MoneyflowDaily).where(MoneyflowDaily.ts_code == "000001.SZ"))
+        await conn.execute(delete(DailyIndicators).where(DailyIndicators.ts_code.in_(["000001.SZ", "600000.SH"])))
+        await conn.execute(delete(DailyQuotes).where(DailyQuotes.ts_code.in_(["000001.SZ", "600000.SH"])))
+        # L0
+        await conn.execute(delete(TradeCal).where(TradeCal.exchange == "SSE"))
+        await conn.execute(delete(StockBasic).where(StockBasic.ts_code.in_(["000001.SZ", "600000.SH"])))
+
+
 @pytest_asyncio.fixture
 async def mvd_data(test_engine):
     """
@@ -177,6 +210,10 @@ async def mvd_data(test_engine):
 
     同时负责将 CacheManager 单例的引擎指向 TEST_DB_URL，
     使 prompt_validator / Level 3 测试中的 CacheManager() 能读到 MVD 数据。
+
+    幂等保证：setup 插入前先调用 _cleanup_mvd_data 清理可能残留的同主键数据，
+    避免 xdist 下上一个测试（如 test_quote_dao 的 clean_db 无 teardown）残留导致
+    UniqueViolationError。try/finally 包裹确保 setup 失败时 CacheManager 单例仍被清理。
     """
     from contextlib import ExitStack
 
@@ -186,66 +223,44 @@ async def mvd_data(test_engine):
         # --- Setup: 重置 CacheManager 单例并重新创建 ---
         CacheManager._reset_singleton()
         cache = CacheManager()
-        # init_db 幂等：db_schema_ready autouse fixture 已建表，此处仅设置 _schema_initialized
-        await cache.init_db(auto_migrate=True)
-
-        # --- Setup: 插入 MVD 数据并 commit ---
-        async with test_engine.begin() as conn:
-            # L0 基础层
-            await conn.execute(insert(StockBasic), MVD_STOCK_BASIC)
-            await conn.execute(insert(TradeCal), MVD_TRADE_CAL)
-            # L1 行情层
-            await conn.execute(insert(DailyQuotes), MVD_DAILY_QUOTES)
-            await conn.execute(insert(DailyIndicators), MVD_DAILY_INDICATORS)
-            await conn.execute(insert(MoneyflowDaily).values(MVD_MONEYFLOW_DAILY))
-            await conn.execute(insert(NorthboundHolding).values(MVD_NORTHBOUND_HOLDING))
-            # L2 财务层
-            await conn.execute(insert(FinancialReports), MVD_FINANCIAL_REPORTS)
-            await conn.execute(insert(FinaAudit).values(MVD_FINA_AUDIT))
-            await conn.execute(insert(FinaMainbz).values(MVD_FINA_MAINBZ))
-            await conn.execute(insert(Dividend).values(MVD_DIVIDEND))
-            # L3 辅助层
-            await conn.execute(insert(PledgeStat).values(MVD_PLEDGE_STAT))
-            await conn.execute(insert(Top10Holders), MVD_TOP10_HOLDERS)
-            await conn.execute(insert(StkHoldernumber), MVD_STK_HOLDERNUMBER)
-            await conn.execute(insert(BlockTrade).values(MVD_BLOCK_TRADE))
-            await conn.execute(insert(TopList).values(MVD_TOP_LIST))
-            # L4 宏观层
-            await conn.execute(insert(MacroEconomy).values(MVD_MACRO_ECONOMY))
-            await conn.execute(insert(ShiborDaily).values(MVD_SHIBOR_DAILY))
-            await conn.execute(insert(MarketNews).values(MVD_MARKET_NEWS))
-
         try:
+            # init_db 幂等：db_schema_ready autouse fixture 已建表，此处仅设置 _schema_initialized
+            await cache.init_db(auto_migrate=True)
+
+            # --- Setup: 幂等清理（防止上一个测试残留数据导致主键冲突）---
+            await _cleanup_mvd_data(test_engine)
+
+            # --- Setup: 插入 MVD 数据并 commit ---
+            async with test_engine.begin() as conn:
+                # L0 基础层
+                await conn.execute(insert(StockBasic), MVD_STOCK_BASIC)
+                await conn.execute(insert(TradeCal), MVD_TRADE_CAL)
+                # L1 行情层
+                await conn.execute(insert(DailyQuotes), MVD_DAILY_QUOTES)
+                await conn.execute(insert(DailyIndicators), MVD_DAILY_INDICATORS)
+                await conn.execute(insert(MoneyflowDaily).values(MVD_MONEYFLOW_DAILY))
+                await conn.execute(insert(NorthboundHolding).values(MVD_NORTHBOUND_HOLDING))
+                # L2 财务层
+                await conn.execute(insert(FinancialReports), MVD_FINANCIAL_REPORTS)
+                await conn.execute(insert(FinaAudit).values(MVD_FINA_AUDIT))
+                await conn.execute(insert(FinaMainbz).values(MVD_FINA_MAINBZ))
+                await conn.execute(insert(Dividend).values(MVD_DIVIDEND))
+                # L3 辅助层
+                await conn.execute(insert(PledgeStat).values(MVD_PLEDGE_STAT))
+                await conn.execute(insert(Top10Holders), MVD_TOP10_HOLDERS)
+                await conn.execute(insert(StkHoldernumber), MVD_STK_HOLDERNUMBER)
+                await conn.execute(insert(BlockTrade).values(MVD_BLOCK_TRADE))
+                await conn.execute(insert(TopList).values(MVD_TOP_LIST))
+                # L4 宏观层
+                await conn.execute(insert(MacroEconomy).values(MVD_MACRO_ECONOMY))
+                await conn.execute(insert(ShiborDaily).values(MVD_SHIBOR_DAILY))
+                await conn.execute(insert(MarketNews).values(MVD_MARKET_NEWS))
+
             yield
         finally:
             # --- Teardown: 显式定向删除数据并 commit ---
             try:
-                async with test_engine.begin() as conn:
-                    # L4（无 ts_code，全表清理；MVD 仅注入 1 条，安全）
-                    await conn.execute(delete(MarketNews))
-                    await conn.execute(delete(ShiborDaily))
-                    await conn.execute(delete(MacroEconomy))
-                    # L3
-                    await conn.execute(delete(TopList).where(TopList.ts_code == "000001.SZ"))
-                    await conn.execute(delete(BlockTrade).where(BlockTrade.ts_code == "000001.SZ"))
-                    await conn.execute(delete(StkHoldernumber).where(StkHoldernumber.ts_code == "000001.SZ"))
-                    await conn.execute(delete(Top10Holders).where(Top10Holders.ts_code == "000001.SZ"))
-                    await conn.execute(delete(PledgeStat).where(PledgeStat.ts_code == "000001.SZ"))
-                    # L2
-                    await conn.execute(delete(Dividend).where(Dividend.ts_code == "000001.SZ"))
-                    await conn.execute(delete(FinaMainbz).where(FinaMainbz.ts_code == "000001.SZ"))
-                    await conn.execute(delete(FinaAudit).where(FinaAudit.ts_code == "000001.SZ"))
-                    await conn.execute(delete(FinancialReports).where(FinancialReports.ts_code == "000001.SZ"))
-                    # L1
-                    await conn.execute(delete(NorthboundHolding).where(NorthboundHolding.ts_code == "000001.SZ"))
-                    await conn.execute(delete(MoneyflowDaily).where(MoneyflowDaily.ts_code == "000001.SZ"))
-                    await conn.execute(
-                        delete(DailyIndicators).where(DailyIndicators.ts_code.in_(["000001.SZ", "600000.SH"]))
-                    )
-                    await conn.execute(delete(DailyQuotes).where(DailyQuotes.ts_code.in_(["000001.SZ", "600000.SH"])))
-                    # L0
-                    await conn.execute(delete(TradeCal).where(TradeCal.exchange == "SSE"))
-                    await conn.execute(delete(StockBasic).where(StockBasic.ts_code.in_(["000001.SZ", "600000.SH"])))
+                await _cleanup_mvd_data(test_engine)
             except Exception as e:
                 logger.warning("[mvd_data] teardown data deletion failed: %s", e)
             # --- Teardown: 关闭 CacheManager 引擎并重置单例 ---

@@ -561,6 +561,65 @@ class TestSettingRow:
         right = row.controls[1]
         assert right.col == {"xs": 12, "sm": 5, "md": 5}
 
+    def test_init_default_left_col_when_not_provided(self):
+        """未传 left_col 时回退到默认 {xs:12, sm:7, md:7}"""
+        row = SettingRow(
+            icon=ft.Icons.SETTINGS,
+            title="API Key",
+            subtitle="Enter your key",
+            control=ft.TextField(),
+        )
+        assert row.controls[0].col == {"xs": 12, "sm": 7, "md": 7}
+
+    def test_init_default_right_col_when_not_provided(self):
+        """未传 right_col 时回退到默认 {xs:12, sm:5, md:5}"""
+        row = SettingRow(
+            icon=ft.Icons.SETTINGS,
+            title="API Key",
+            subtitle="Enter your key",
+            control=ft.TextField(),
+        )
+        assert row.controls[1].col == {"xs": 12, "sm": 5, "md": 5}
+
+    def test_init_accepts_custom_left_col(self):
+        """传入自定义 left_col 时生效"""
+        custom = {"xs": 12, "sm": 12, "md": 5, "lg": 4}
+        row = SettingRow(
+            icon=ft.Icons.SETTINGS,
+            title="API Key",
+            subtitle="Enter your key",
+            control=ft.TextField(),
+            left_col=custom,
+        )
+        assert row.controls[0].col == custom
+
+    def test_init_accepts_custom_right_col(self):
+        """传入自定义 right_col 时生效"""
+        custom = {"xs": 12, "sm": 12, "md": 7, "lg": 8}
+        row = SettingRow(
+            icon=ft.Icons.SETTINGS,
+            title="API Key",
+            subtitle="Enter your key",
+            control=ft.TextField(),
+            right_col=custom,
+        )
+        assert row.controls[1].col == custom
+
+    def test_init_accepts_both_custom_cols(self):
+        """同时传入 left_col 和 right_col 时均生效"""
+        left = {"xs": 12, "sm": 12, "md": 5, "lg": 4}
+        right = {"xs": 12, "sm": 12, "md": 7, "lg": 8}
+        row = SettingRow(
+            icon=ft.Icons.SETTINGS,
+            title="API Key",
+            subtitle="Enter your key",
+            control=ft.TextField(),
+            left_col=left,
+            right_col=right,
+        )
+        assert row.controls[0].col == left
+        assert row.controls[1].col == right
+
 
 class TestPaginatedTable:
     def test_init_has_no_columns(self):

@@ -104,6 +104,9 @@ class ThreadPoolManager:
         """Reload pools with new configuration. Swaps pools first to minimize downtime."""
         logger.info("Reloading Thread Pool Configuration...")
 
+        # Reset IO workers cap warning so it can fire again after a user-initiated config change.
+        ConfigHandler._reset_io_cap_warning()
+
         # 1. Create NEW pools first
         io_workers = ConfigHandler.get_max_io_workers()
         cpu_workers = ConfigHandler.get_max_cpu_workers()

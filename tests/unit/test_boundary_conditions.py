@@ -28,6 +28,7 @@ class TestTushareClientBoundaryConditions:
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
         client._bg_tasks = set()
+        client._token_invalid = False
 
         failing_func = MagicMock(side_effect=Exception("unknown error"))
 
@@ -51,6 +52,7 @@ class TestTushareClientBoundaryConditions:
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
         client._bg_tasks = set()
+        client._token_invalid = False
 
         network_error = ConnectionError("connection refused")
         failing_func = MagicMock(side_effect=network_error)
@@ -75,6 +77,7 @@ class TestTushareClientBoundaryConditions:
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
         client._bg_tasks = set()
+        client._token_invalid = False
 
         perm_error = Exception("没有权限访问该接口")
         failing_func = MagicMock(side_effect=perm_error)
@@ -97,6 +100,7 @@ class TestTushareClientBoundaryConditions:
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
         client._bg_tasks = set()
+        client._token_invalid = False
 
         mock_limiter = MagicMock()
         mock_limiter.consume_async = AsyncMock()
@@ -191,6 +195,7 @@ class TestTushareClientBoundaryConditions:
         client._capability_cache = {}
         client._capability_cache_lock = MagicMock()
         client._bg_tasks = set()
+        client._token_invalid = False
 
         network_error = ConnectionError("connection refused")
         failing_func = MagicMock(side_effect=network_error)

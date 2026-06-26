@@ -194,6 +194,7 @@ class TushareConfigPanel(ft.Container):
                             [self.token_input] + buttons,
                             alignment=ft.MainAxisAlignment.START,
                             spacing=10,
+                            wrap=True,
                         ),
                         ft.Row(
                             [self.status_icon, self.status_text],
