@@ -214,7 +214,7 @@ class HomeView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[HomeView] refresh_locale failed: {e}")
+            logger.warning(f"[HomeView] refresh_locale failed: {e}", exc_info=True)
 
     def update_theme(self):  # pragma: no cover
         try:

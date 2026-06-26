@@ -76,6 +76,12 @@ class BacktestView(ft.Container):
         self._load_strategies()
 
     def did_mount(self):
+        super().did_mount()
+        if self.page:
+            try:
+                self.update()
+            except Exception as ex:
+                logger.warning(f"[BacktestView] did_mount update skipped: {ex}", exc_info=True)
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
     def will_unmount(self):
@@ -100,7 +106,7 @@ class BacktestView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[BacktestView] refresh_locale error: {e}")
+            logger.warning(f"[BacktestView] refresh_locale error: {e}", exc_info=True)
 
     def _build_content(self) -> ft.Column:
         return ft.Column(
@@ -147,8 +153,6 @@ class BacktestView(ft.Container):
             self.strategy_dropdown.value = first_key
             self._selected_strategy = first_key
             self.config_panel.set_strategy_key(first_key)
-        if self.page:
-            self.update()
 
     def _on_strategy_change(self, e):
         """策略选择变更。"""

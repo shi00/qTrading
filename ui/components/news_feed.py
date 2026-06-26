@@ -89,10 +89,13 @@ class NewsFeed(ft.Container):
         try:
             self.empty_text.value = I18n.get("home_news_empty")
             self.load_more_btn.content.content.value = I18n.get("news_load_more")  # type: ignore[untyped]
+            # 重建已渲染新闻项，刷新 tag 翻译（_translate_tag 在渲染时固化，与 update_theme 一致）
+            if not self._cached_news.empty:
+                self.set_news(self._cached_news, self._cached_has_more)
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[NewsFeed] update_locale failed: {e}")
+            logger.warning(f"[NewsFeed] update_locale failed: {e}", exc_info=True)
 
     def update_theme(self):
         """Re-render list on theme change"""

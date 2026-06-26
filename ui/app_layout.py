@@ -392,17 +392,27 @@ class AppLayout(ft.Container):
         self._current_tab_index = index
         self.nav_rail.selected_index = index  # type: ignore[untyped]
 
+        # 先挂载到 Flutter，再触发 locale 兜底（避免控件未挂载时调 update 触发 Null check）
+        try:
+            self.body.update()  # type: ignore[untyped]
+        except Exception as ex:
+            logger.error(f"[AppLayout] body.update() failed during tab switch: {ex}", exc_info=True)
+            try:
+                if self.page:
+                    self.page.update()
+            except Exception:
+                pass
+
+        self.nav_rail.update()  # type: ignore[untyped]
+
         # 生命周期兜底：缓存的视图可能错过 I18n 通知（例如视图未挂载时收到语言切换），
-        # 切换到时显式调用 refresh_locale，确保文案与当前 locale 一致。
+        # 挂载完成后再显式调用 refresh_locale，确保文案与当前 locale 一致。
         refresh_fn = getattr(new_view, "refresh_locale", None) or getattr(new_view, "_on_locale_change", None)
         if callable(refresh_fn):
             try:
                 refresh_fn()
             except Exception as ex:
                 logger.debug(f"[AppLayout] View locale refresh skipped: {ex}")
-
-        self.body.update()  # type: ignore[untyped]
-        self.nav_rail.update()  # type: ignore[untyped]
         logger.debug(
             f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms",
         )

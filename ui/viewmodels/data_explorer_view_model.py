@@ -73,6 +73,7 @@ class DataExplorerViewModel:
         self.tables_list = []
         self.table_columns = []
         self.numeric_cols = set()
+        self.tables_loaded = False
         if self._db is not None:
             self._db.close()
             self._db = None  # type: ignore[assignment]

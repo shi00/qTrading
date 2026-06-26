@@ -358,11 +358,12 @@ class TableViewerTab(ft.Container):
             else:
                 # 加载占位文案
                 self.data_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_loading")))]
+                self.data_table.rows = []
 
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[TableViewerTab] refresh_locale error: {e}")
+            logger.warning(f"[TableViewerTab] refresh_locale error: {e}", exc_info=True)
 
     async def did_mount_async(self):  # pragma: no cover
         # Skip re-loading if tables already loaded (switching back to this view)
@@ -919,7 +920,7 @@ class SQLConsoleTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[SQLConsoleTab] refresh_locale error: {e}")
+            logger.warning(f"[SQLConsoleTab] refresh_locale error: {e}", exc_info=True)
 
     def _set_sql(self, sql):  # pragma: no cover
         self.sql_editor.value = sql
@@ -1156,7 +1157,7 @@ class DataExplorerView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[DataExplorerView] refresh_locale error: {e}")
+            logger.warning(f"[DataExplorerView] refresh_locale error: {e}", exc_info=True)
 
     async def did_mount_async(self):  # pragma: no cover
         import time as _time

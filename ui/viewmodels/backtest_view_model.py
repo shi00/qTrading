@@ -193,7 +193,9 @@ class BacktestViewModel:
                 if self.on_progress:
                     self.on_progress(1.0, I18n.get("backtest_done"))
 
-        strategy_name = get_strategy_registry().get(strategy_key, object).__name__
+        strategy_obj = get_strategy_registry().get(strategy_key)
+        name_key = getattr(strategy_obj, "name_key", None) if strategy_obj else None
+        strategy_name = I18n.get(name_key) if name_key else strategy_key
         task_id = TaskManager().submit_task(
             name=f"{TASK_NAME_PREFIX}: {strategy_name}",
             task_type=I18n.get("task_type_backtest"),

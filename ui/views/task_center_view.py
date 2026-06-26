@@ -189,7 +189,7 @@ class TaskCenterView(ft.Container):
         self._mounted = True
         self.task_manager.subscribe(self._on_tasks_updated)
         self._refresh_ui(self.task_manager.get_all_tasks())
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale, sync_immediately=False)
 
     def will_unmount(self):
         self._mounted = False
@@ -211,10 +211,11 @@ class TaskCenterView(ft.Container):
             total = len(self._all_tasks)
             running = sum(1 for t in self._all_tasks if t.status == TaskStatus.RUNNING)
             self.stats_text.value = I18n.get("task_stats_fmt").format(total=total, running=running)
+            self._refresh_ui(self._all_tasks)
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[TaskCenterView] refresh_locale error: {e}")
+            logger.warning(f"[TaskCenterView] refresh_locale error: {e}", exc_info=True)
 
     def _on_tasks_updated(self, current_tasks):
         if not self._mounted:
