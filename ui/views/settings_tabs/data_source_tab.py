@@ -31,6 +31,12 @@ class DataSourceTab(ft.Container):
         self._tm = TaskManager()  # pragma: no cover
         self.vm = DataSourceViewModel()  # pragma: no cover
 
+        # Health check i18n state tracking (for refresh_locale)
+        self._health_checked: bool = False
+        self._health_status_key: str | None = None
+        self._storage_status_key: str | None = None
+        self._last_health_result: dict | None = None
+
         # --- UI Components ---
 
         # 1. Health Status Dashboard
@@ -387,6 +393,25 @@ class DataSourceTab(ft.Container):
             self.metric_health.set_label(I18n.get("ds_sys_health"))
             self.metric_storage.set_label(I18n.get("ds_storage_usage"))
 
+            # MetricCard values: 刷新 i18n 文本值（初始占位值或健康检查状态文本）
+            if not self._health_checked:
+                # 未执行健康检查：刷新初始占位值
+                self.metric_sync.set_value(f"{I18n.get('time_today')} 15:30", ft.Icons.ACCESS_TIME, AppColors.PRIMARY)
+                self.metric_coverage.set_value(
+                    I18n.get("ds_val_placeholder_count"), ft.Icons.DATA_USAGE, AppColors.INFO
+                )
+                self.metric_health.set_value(I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, AppColors.WARNING)
+                self.metric_storage.set_value(I18n.get("ds_status_calc"), ft.Icons.STORAGE, AppColors.TEXT_HINT)
+            else:
+                # 已执行健康检查：用记录的 key 重新翻译状态文本
+                if self._health_status_key:
+                    self.metric_health.set_value(I18n.get(self._health_status_key))
+                if self._storage_status_key:
+                    self.metric_storage.set_value(I18n.get(self._storage_status_key))
+                # 有完整结果时重建健康摘要
+                if self._last_health_result:
+                    self._rebuild_health_summary(self._last_health_result)
+
             # ActionChip title/subtitle
             self.action_full_sync.set_text(
                 I18n.get("settings_full_sync"),
@@ -564,6 +589,8 @@ class DataSourceTab(ft.Container):
         self.btn_check_health.disabled = True
         self.metric_health.set_value(I18n.get("ds_status_checking"), ft.Icons.HOURGLASS_TOP, AppColors.INFO)
         self.metric_storage.set_value(I18n.get("ds_status_calc"), ft.Icons.HOURGLASS_TOP, AppColors.TEXT_HINT)
+        self._health_status_key = "ds_status_checking"
+        self._storage_status_key = "ds_status_calc"
         self.health_summary_container.content = ft.Text(
             I18n.get("health_checking"), size=12, color=AppColors.TEXT_SECONDARY
         )
@@ -572,10 +599,13 @@ class DataSourceTab(ft.Container):
     def _on_vm_health_result(self, result: dict):
         status = result.get("status", "red")
         if status == "yellow":
+            self._health_status_key = "ds_health_lag"
             self.metric_health.set_value(I18n.get("ds_health_lag"), ft.Icons.WARNING, AppColors.WARNING)
         elif status == "red":
+            self._health_status_key = "ds_health_error"
             self.metric_health.set_value(I18n.get("ds_health_error"), ft.Icons.ERROR, AppColors.ERROR)
         else:
+            self._health_status_key = "ds_health_ok"
             self.metric_health.set_value(I18n.get("ds_health_ok"), ft.Icons.CHECK_CIRCLE, AppColors.SUCCESS)
 
         market_info = result.get("market", {})
@@ -587,7 +617,20 @@ class DataSourceTab(ft.Container):
         cov_val = details.get("financial_coverage", 0)
         cov_str = f"{cov_val:.1f}%" if isinstance(cov_val, (int, float)) else str(cov_val)
         self.metric_coverage.set_value(cov_str, ft.Icons.DATA_USAGE, AppColors.INFO)
+        self._storage_status_key = "common_normal"
         self.metric_storage.set_value(I18n.get("common_normal"), ft.Icons.STORAGE, AppColors.SUCCESS)
+
+        self._last_health_result = result
+        self._health_checked = True
+        self._rebuild_health_summary(result)
+        self._safe_update()
+
+    def _rebuild_health_summary(self, result: dict):
+        """从健康检查结果重建 health_summary_container 内容（供 _on_vm_health_result 和 refresh_locale 共用）。"""
+        market_info = result.get("market", {})
+        details = result.get("details", {})
+        cov_val = details.get("financial_coverage", 0)
+        cov_str = f"{cov_val:.1f}%" if isinstance(cov_val, (int, float)) else str(cov_val)
 
         miss_critical = details.get("missing_critical", 0)
         miss_depth = details.get("missing_depth", 0)
@@ -638,9 +681,11 @@ class DataSourceTab(ft.Container):
             ],
             spacing=6,
         )
-        self._safe_update()
 
     def _on_vm_health_error(self, error_msg: str):
+        self._health_status_key = "common_check_fail"
+        self._storage_status_key = "common_check_fail"
+        self._health_checked = True
         self.metric_health.set_value(I18n.get("common_check_fail"), ft.Icons.ERROR, AppColors.ERROR)
         self.metric_storage.set_value(I18n.get("common_check_fail"), ft.Icons.ERROR, AppColors.ERROR)
         self.health_summary_container.content = ft.Text(
@@ -651,6 +696,9 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     def _on_vm_health_cancelled(self):
+        self._health_status_key = "ds_health_cancelled"
+        self._storage_status_key = "ds_health_cancelled"
+        self._health_checked = True
         self.metric_health.set_value(I18n.get("ds_health_cancelled"), ft.Icons.CANCEL_OUTLINED, AppColors.WARNING)
         self.metric_storage.set_value(I18n.get("ds_health_cancelled"), ft.Icons.CANCEL_OUTLINED, AppColors.WARNING)
         self.health_summary_container.content = ft.Text(

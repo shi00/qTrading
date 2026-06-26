@@ -33,6 +33,7 @@ class _FakeActionChip:
 
     def __init__(self):
         self.set_loading = MagicMock()
+        self.set_text = MagicMock()
         self.opacity = 1.0
         self.disabled = False
 
@@ -85,6 +86,11 @@ def _make_tab() -> DataSourceTab:
     tab.health_summary_container = MagicMock()  # spec omitted: Flet Container, complex __init__
     tab.health_summary_container.content = None
 
+    tab.health_summary_text = MagicMock()  # spec omitted: Flet Text, instance attrs set in __init__
+    tab.health_summary_text.value = ""
+
+    tab.btn_health_report = _make_mock_button()
+
     tab.progress_bar = MagicMock()  # spec omitted: Flet ProgressBar, complex __init__
     tab.progress_bar.visible = False
     tab.progress_bar.value = 0
@@ -107,6 +113,12 @@ def _make_tab() -> DataSourceTab:
     tab.header_console = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
     tab.header_api = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
     tab.header_init = MagicMock()  # spec omitted: SectionHeader, instance attrs set in __init__
+
+    # Health check i18n state tracking
+    tab._health_checked = False
+    tab._health_status_key = None
+    tab._storage_status_key = None
+    tab._last_health_result = None
 
     tab.update = MagicMock()  # spec omitted: method mock on DataSourceTab instance
     return tab
@@ -566,3 +578,56 @@ class TestOnUnmount:
             mock_i18n.unsubscribe.assert_called_once()
             tab._tm.unsubscribe.assert_called_once()
             tab.vm.dispose.assert_called_once()
+
+
+# --- Test: refresh_locale MetricCard value refresh ---
+
+
+class TestRefreshLocaleMetricValues:
+    def test_refresh_locale_refreshes_placeholder_values_before_health_check(self, tab):
+        """未执行健康检查时，refresh_locale 应刷新 4 个 MetricCard 的占位 value"""
+        tab._health_checked = False
+        tab.refresh_locale()
+        # 4 个 MetricCard 的 set_value 都应被调用
+        tab.metric_sync.set_value.assert_called()
+        tab.metric_coverage.set_value.assert_called()
+        tab.metric_health.set_value.assert_called()
+        tab.metric_storage.set_value.assert_called()
+
+    def test_refresh_locale_uses_status_keys_after_health_result(self, tab):
+        """健康检查后，refresh_locale 应使用记录的 i18n key 重新翻译状态文本"""
+        tab._health_checked = True
+        tab._health_status_key = "ds_health_ok"
+        tab._storage_status_key = "common_normal"
+        tab._last_health_result = None
+        tab.refresh_locale()
+        tab.metric_health.set_value.assert_called()
+        tab.metric_storage.set_value.assert_called()
+
+    def test_refresh_locale_rebuilds_health_summary_with_last_result(self, tab):
+        """有 _last_health_result 时，refresh_locale 应调用 _rebuild_health_summary"""
+        tab._health_checked = True
+        tab._health_status_key = "ds_health_ok"
+        tab._storage_status_key = "common_normal"
+        tab._last_health_result = {
+            "status": "green",
+            "market": {"latest_local": "2025-01-01", "lag_days": 0},
+            "details": {
+                "financial_coverage": 95.0,
+                "missing_critical": 0,
+                "missing_depth": 0,
+                "missing_breadth": 0,
+            },
+        }
+        with patch.object(tab, "_rebuild_health_summary") as mock_rebuild:
+            tab.refresh_locale()
+            mock_rebuild.assert_called_once_with(tab._last_health_result)
+
+    def test_refresh_locale_skips_value_refresh_when_health_checked_but_no_keys(self, tab):
+        """健康检查后但无 status key 时，refresh_locale 不应崩溃"""
+        tab._health_checked = True
+        tab._health_status_key = None
+        tab._storage_status_key = None
+        tab._last_health_result = None
+        # 不应抛异常
+        tab.refresh_locale()

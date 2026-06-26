@@ -368,6 +368,7 @@ class ScreenerView(ft.Container):
             self.strategy_dropdown.label = I18n.get("select_strategy")
             saved_strategy = self.strategy_dropdown.value
             try:
+                self.vm.strategy_mgr.invalidate_dependency_cache()
                 strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
                 options = []
                 for key, info in strategies_with_dep.items():
@@ -481,7 +482,11 @@ class ScreenerView(ft.Container):
 
             options = []
             for key, info in strategies_with_dep.items():
-                name = info["name"]
+                strategy_obj = self.vm.strategy_mgr.get_strategy(key)
+                if strategy_obj and hasattr(strategy_obj, "name_key"):
+                    name = I18n.get(strategy_obj.name_key)
+                else:
+                    name = info["name"]
                 if info.get("missing_apis"):
                     name = f"{name} ⚠️"
                 options.append(ft.dropdown.Option(key, name))

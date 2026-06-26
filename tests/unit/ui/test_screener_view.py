@@ -1135,3 +1135,31 @@ class TestScreenerView:
         mod.MetaDataManager.invalidate_cache.reset_mock()
         view.refresh_locale()
         mod.MetaDataManager.invalidate_cache.assert_called_once()
+
+    def test_refresh_locale_calls_invalidate_dependency_cache(self, mock_page):
+        """§5.8 规范 8：refresh_locale 必须使 StrategyManager 依赖缓存失效，确保策略名用新 locale 重算"""
+        view = self._make_view(mock_page)
+        # 清除 __init__ 期间的调用记录，仅观察 refresh_locale 的副作用
+        self.mock_vm.strategy_mgr.invalidate_dependency_cache.reset_mock()
+        view.refresh_locale()
+        self.mock_vm.strategy_mgr.invalidate_dependency_cache.assert_called_once()
+
+    def test_load_strategies_uses_name_key_translation(self, mock_page):
+        """_load_strategies 应通过 strategy_obj.name_key 重新翻译策略名称，不直接用缓存中的 info["name"]"""
+        view = self._make_view(mock_page)
+
+        # 构造 mock 策略数据
+        mock_strategy = MagicMock()
+        mock_strategy.name_key = "strategy_value_name"
+        self.mock_vm.strategy_mgr.get_strategy.return_value = mock_strategy
+        self.mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {
+            "value": {"name": "旧语言名称", "missing_apis": []},
+        }
+
+        # 运行 _load_strategies（需要 async）
+        asyncio.run(view._load_strategies())
+
+        # 验证 get_strategy 被调用（说明使用了 name_key 路径）
+        self.mock_vm.strategy_mgr.get_strategy.assert_called_with("value")
+        # 验证 I18n.get 被调用获取 name_key 的翻译
+        self.mock_i18n.get.assert_any_call("strategy_value_name")
