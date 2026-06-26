@@ -38,6 +38,7 @@
   - [语言切换响应 (I18n Hot Reload)](#语言切换响应-i18n-hot-reload)
   - [标准开发工作流 (How-To)](#标准开发工作流-how-to)
   - [排查典型问题](#排查典型问题)
+  - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
 
 ---
 
@@ -69,6 +70,13 @@
 - 使用场景
 - 可能的实现方案
 
+### 代码复用与避免重复造轮子
+
+在开始编写新代码前，请务必遵循**复用优先**原则，避免重复造轮子：
+1. **优先复用工程已有代码**：开发新功能前，先全局搜索项目中是否已有类似的工具函数、基础类、UI 组件或业务逻辑。
+2. **优先使用成熟开源库**：若需引入常见的基础功能，优先采用业界广泛使用、维护活跃的稳定开源库，而非自行实现。
+3. **避免无谓的封装**：如果已有成熟库提供了所需功能，请直接使用，不要对其进行单薄的二次封装，除非这种封装能带来明显的业务价值（如统一鉴权、异常转换等）。
+
 ### 提交代码
 
 1. Fork 本仓库
@@ -88,79 +96,10 @@
 
 ### PR 描述模板
 
-PR 创建时 GitHub 会自动加载 `.github/PULL_REQUEST_TEMPLATE.md`，模板内容如下（以实际文件为准）：
+提交 PR 时，GitHub 会自动加载项目预设的模板内容。
+为了避免文档与实际模板内容的漂移不一致，请直接查阅实际文件：[`.github/PULL_REQUEST_TEMPLATE.md`](./.github/PULL_REQUEST_TEMPLATE.md)。
 
-```markdown
-## 🎯 PR 概述
-<!-- 一句话说明本次修改目标、解决什么问题/实现什么功能 -->
-
-## 🔗 关联工单/Issue
-Closes #XXX
-Relates to #XXX
-<!-- 关闭工单用Closes，关联参考用Relates -->
-
-## 📌 修改类型（删除无关项）
-- [ ] feat：新增业务功能
-- [ ] fix：线上/测试Bug修复（P0/P1/P2分级标注）
-- [ ] refactor：代码重构、架构调整、逻辑优化（无功能变更）
-- [ ] docs：README/CONTRIBUTING/CLAUDE/SECURITY/CHANGELOG文档更新
-- [ ] test：单元/集成/E2E测试新增、修复、优化
-- [ ] perf：性能、并发、数据库查询优化
-- [ ] ci：GitHub Actions、pre-commit、流水线调整
-- [ ] db：数据表迁移、字段/索引、约束变更（需附alembic脚本）
-- [ ] chore：依赖升级、配置调整、清理死代码
-
-## 📝 详细变更清单
-<!-- 逐条列出文件、模块、核心改动，区分产品代码/测试/文档 -->
-- 模块：xxx，文件：xxx.py，改动：
-- 文档：xxx.md，同步更新内容：
-- 数据库：alembic版本：xxx，变更说明：
-
-## 🧪 测试覆盖（必须全部勾选验证）
-### 自动化测试
-- [ ] 单元测试：新增/更新用例，覆盖率达标
-- [ ] 集成测试：DAO/Service层链路验证
-- [ ] E2E测试(Playwright)：UI流程验证，无超时/断言失败
-- [ ] 静态检查：ruff + pyright 无报错
-- [ ] CI流水线全部通过（lint / test / build / windows e2e）
-
-### 手动验证
-- [ ] 本地完整启动项目验证正向流程
-- [ ] 边界场景、异常分支、并发场景验证
-- [ ] 数据库迁移回滚验证（如有DDL变更）
-- [ ] UI变更附前后截图/GIF（无UI可删除本段）
-
-## ⚠️ 风险与兼容说明
-1. 是否存在**破坏性变更**（旧接口/旧数据不兼容）：
-2. 是否需要上线前执行数据库迁移脚本：
-3. 是否影响定时调度、后台异步任务、自托管Runner：
-4. 安全相关变更：密钥/加密/输入校验/LLM权限调整说明：
-
-## 📖 文档同步校验（适配文档检视规范）
-- [ ] README.md 同步更新功能/URL/配置/版本
-- [ ] CLAUDE.md 架构、单例、策略规范同步对齐
-- [ ] CONTRIBUTING.md 流程、安装命令、测试步骤同步
-- [ ] SECURITY.md 支持版本、依赖CVE更新
-- [ ] CHANGELOG.md 由release-please自动生成，无手动修改
-
-## ✅ 提交前自检清单（强制全部核对）
-- [ ] 代码符合 CLAUDE.md 架构红线、分层规范、单例约束
-- [ ] 无硬编码密钥、数据库密码、Token、隐私信息
-- [ ] 无废弃死代码、注释掉的临时调试代码
-- [ ] 所有新增分支、边界逻辑配套对应测试用例
-- [ ] 国际化文案统一使用I18n，无中文硬编码
-- [ ] 并发逻辑增加锁/信号量，无pd.options全局竞态污染
-- [ ] 数据库新增字段补充索引、非空、默认约束
-- [ ] 本次修改引入的新问题已全部自查修复
-- [ ] 已对照docs/code-review.md复核历史遗留缺陷
-
-## 👀 评审重点提示
-<!-- 告诉评审人重点检查模块、风险点、容易忽略的链路 -->
-
-## 补充备注
-```
-
-> **注意**：上述模板仅供参考，实际内容以 `.github/PULL_REQUEST_TEMPLATE.md` 为准。提交 PR 时无需手动复制，GitHub 会自动加载。
+> **注意**：提交 PR 时无需手动复制该模板，只需在 GitHub 自动生成的草稿基础上如实勾选与填写。请务必确认满足“提交前自检清单（强制全部核对）”项。
 
 ## 代码审查与合并
 
@@ -682,8 +621,7 @@ except Exception as e:
 
 - **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
 - **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。
-- **事件循环策略**: Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 为 `session` 级。
-  > **已知技术债（P1-2）**：session 级事件循环导致 loop-local 缓存（`asyncio.Event`/`Lock`/`Semaphore`）跨测试泄漏，由 `tests/conftest.py` 的 `reset_loop_local_cache` autouse fixture 维持隔离。中期应降为 `function` 作用域以从根因消除泄漏，降级后可删除该 fixture。探测测试见 `tests/unit/test_infra_loop_isolation.py`。
+- **事件循环策略**: Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 为 `session` 级。*(注：这引入了测试态特有的已知泄漏问题，详见本手册底部的「已知架构技术债」)*
 - **配置隔离**: 测试使用临时配置文件 (`tempfile.mkdtemp`)，通过 `pytest_configure` 在 import 之前重写 `utils.config_handler.CONFIG_FILE`。
 - **DB 隔离**: 集成测试连接 `test_astock` 数据库 (CI 通过 service container 启动 PostgreSQL 16)，通过 `TEST_DB_*` 环境变量配置。
 
@@ -857,6 +795,27 @@ class MyView(ft.Container):
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
 
+    async def _on_action(self, e: ft.ControlEvent):
+        """UI 按钮点击事件处理示例"""
+        # [防阻塞规范 (CLAUDE.md R16)] 
+        # Flet 支持 async def 事件处理器。对于耗时的 IO/CPU 操作，必须提交到 ThreadPoolManager，避免阻塞 UI 渲染。
+        from utils.thread_pool import ThreadPoolManager, TaskType
+        
+        self.action_btn.disabled = True
+        self.update()
+        
+        try:
+            # 耗时操作必须抛到外部线程池执行，例如：
+            # result = await ThreadPoolManager.run_async(TaskType.IO, my_service.fetch_data)
+            pass
+        except Exception as err:
+            logger.error("Action failed", exc_info=True)
+            # 处理错误并展示 toast...
+        finally:
+            self.action_btn.disabled = False
+            if self.page:  # [防崩溃规范] 异步结束更新UI前必须判空，防止组件在等待期间已被卸载
+                self.update()
+
     def refresh_locale(self):
         # 规范 9：整个方法体 try/except 包裹
         try:
@@ -1005,6 +964,14 @@ def _rebuild_steps_after_locale_change(self):
 | Ruff `UP*` 报错 | 使用了过时语法 | 跑 `ruff check . --fix` 自动升级 |
 | Tushare 限流 | 短时调用过多 | 看 `utils/rate_limiter.py` 配置；考虑加缓存 |
 | 优雅停机卡住/超时 | `CancelledError` 被吞没 | 搜索 `except asyncio.CancelledError` 后无 `raise`；参见 [CLAUDE.md R2](./CLAUDE.md#31--绝对禁止) |
+
+## 已知架构技术债 (Known Technical Debt)
+
+项目开发演进过程中产生了一些需要明确跟踪的技术债与设计限制，请在排查深层问题时参考：
+
+| 级别 | 问题描述 | 产生背景与现状 | 期望的最终解法 |
+|------|---------|---------------|--------------|
+| **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
 
 ---
 

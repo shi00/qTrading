@@ -60,7 +60,7 @@
 
 - **拒绝占位符**：提供完整、可运行的代码，不要使用 `// ... 现有代码 ...` 或 `# TODO` 省略逻辑（除非明确要求）。
 - **自我检查**：在输出代码前，主动思考是否违反了 §3 "关键约束与红线"。
-- **复用优先**：实现任何功能前，必须先搜索确认项目中是否已有可复用代码（工具函数、基类方法、混入类、现有组件）；若需引入新功能，优先采用业界广泛使用、维护活跃的稳定开源库，而非自行实现；已有成熟库提供的功能不得再封装薄包装，除非能证明该封装带来实质性价值。
+- **复用优先（避免重复造轮子）**：实现任何功能前，必须先搜索确认项目中是否已有可复用代码（工具函数、基类方法、混入类、现有组件）；若需引入新功能，优先采用业界广泛使用、维护活跃的稳定开源库，而非自行实现；已有成熟库提供的功能不得再封装薄包装，除非能证明该封装带来实质性价值。
 
 ### 1.7 调试与问题排查
 
@@ -150,13 +150,18 @@ pre-commit run --all-files  # 全量 hook 检查
 
 - 所有异步操作的 CPU/IO 任务必须通过 `ThreadPoolManager` 提交到对应线程池 (`TaskType.IO` / `TaskType.CPU`)。
 - `BaseDao` 的批量写入必须使用 `_save_upsert()`，分块大小见 `base_dao.py` 的 `_UPSERT_CHUNK_SIZE`。
+- **数据质量门控**：业务逻辑前必须经过 `@require_quality` 指定所需质量等级（普通策略使用该装饰器；而向量化 `PolarsBaseStrategy` 必须且只能通过类属性 `required_quality_tier` 覆盖默认等级）。
 - Pre-commit hooks 必须在提交前执行并保持通过。
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。
 - 涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
-- **复用优先**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
+- **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
 - **UI 语言切换响应**：新增/修改 UI 视图或组件必须遵守 [CONTRIBUTING.md「语言切换响应 (I18n Hot Reload)」](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload) 的 9 条规范（订阅机制、回调命名、纯 UI 操作、options 重建、实例属性提取、子组件级联、生命周期兜底、MetaDataManager 缓存失效、异常降级）。
+
+### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
+
+- **Windows 测试泄漏 (P1-2)**: 测试环境下由于 Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 被妥协为 `session` 级，会导致 loop-local 缓存（如 `asyncio.Event`）跨测试泄漏。目前通过 autouse fixture 维持隔离，排查多线程并发测试问题时需格外关注。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
 
 ---
 
