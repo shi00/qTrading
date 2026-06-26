@@ -134,6 +134,40 @@ class TestDataExplorerView:
         assert not hasattr(view, "table_tab")
         assert view._ui_built is False
 
+    def test_refresh_locale_cascades_to_invalidate_cache(self, mock_page):
+        """§5.8 规范 8：refresh_locale 通过级联调用子 tab 使 MetaDataManager 缓存失效。
+
+        DataExplorerView 自身不直接调用 invalidate_cache，而是通过级联调用
+        table_tab.refresh_locale() 与 sql_tab.refresh_locale() 触发；子 tab 的
+        refresh_locale 内部各自调用一次 invalidate_cache（见 data_view.py:323/911）。
+        本测试用 side_effect 模拟子 tab 的真实行为，验证级联路径生效。
+        """
+        import ui.views.data_view as mod
+
+        view = self._make_view()
+        set_page(view, mock_page)
+        # 构造 refresh_locale 依赖的最小 UI 状态
+        view._loading_text = MagicMock()
+        view.tabs = MagicMock()
+        view.tabs.tabs = [MagicMock(), MagicMock()]
+
+        # 让子 tab 的 refresh_locale 真正调用 invalidate_cache（模拟真实行为）
+        def _cascade_invalidate():
+            mod.MetaDataManager.invalidate_cache()
+
+        view.table_tab = MagicMock()
+        view.table_tab.refresh_locale.side_effect = _cascade_invalidate
+        view.sql_tab = MagicMock()
+        view.sql_tab.refresh_locale.side_effect = _cascade_invalidate
+
+        mod.MetaDataManager.invalidate_cache.reset_mock()
+        view.refresh_locale()
+
+        view.table_tab.refresh_locale.assert_called_once()
+        view.sql_tab.refresh_locale.assert_called_once()
+        # 子 tab 各调用一次，共 2 次
+        assert mod.MetaDataManager.invalidate_cache.call_count == 2
+
 
 class TestTableViewerTab:
     patches: list

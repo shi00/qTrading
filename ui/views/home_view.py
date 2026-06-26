@@ -69,16 +69,17 @@ class HomeView(ft.Container):
 
     def _build_header(self):  # pragma: no cover
         self.date_text = ft.Text("--", size=12, color=ft.Colors.GREY)
+        self.refresh_btn = ft.IconButton(
+            ft.Icons.REFRESH,
+            on_click=self._refresh_clicked,
+            tooltip=I18n.get("home_refresh"),
+        )
         return ft.Row(
             [
                 self.header_title,
                 ft.Container(expand=True),
                 self.date_text,
-                ft.IconButton(
-                    ft.Icons.REFRESH,
-                    on_click=self._refresh_clicked,
-                    tooltip=I18n.get("home_refresh"),
-                ),
+                self.refresh_btn,
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -197,15 +198,23 @@ class HomeView(ft.Container):
             news_df = pd.DataFrame(rows)
             self.news_feed.prepend_news(news_df)
 
-    def refresh_locale(self):  # pragma: no cover
+    def refresh_locale(self):
         try:
             self.header_title.value = I18n.get("home_title")
             self.news_header.value = I18n.get("home_live_news")
+            self.refresh_btn.tooltip = I18n.get("home_refresh")
+            # 重新格式化 date_text（不触发网络请求，复用 vm 缓存的 last_market_data）
+            data = self.vm.last_market_data or {}
+            date_str = data.get("date", "--")
+            stale = data.get("stale", False)
+            suffix = f" ({I18n.get('home_data_updating')})" if stale else ""
+            self.date_text.value = I18n.get("home_data_date").format(date=date_str) + suffix
             self.dashboard.update_locale()
             self.news_feed.update_locale()
-            self.update()
+            if self.page:
+                self.update()
         except Exception as e:
-            logger.error(f"[HomeView] Locale | ❌ Refresh failed: {e}", exc_info=True)
+            logger.warning(f"[HomeView] refresh_locale failed: {e}")
 
     def update_theme(self):  # pragma: no cover
         try:

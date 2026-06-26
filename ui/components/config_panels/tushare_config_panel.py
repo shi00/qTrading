@@ -128,6 +128,13 @@ class TushareConfigPanel(ft.Container):
             ),
         )
 
+        # 提前创建 no_token_text 实例属性，便于 refresh_locale 引用
+        self.no_token_text = ft.Text(
+            I18n.get("tushare_no_token"),
+            size=12,
+            color=AppColors.TEXT_SECONDARY,
+        )
+
     def reload_config(self):
         saved_token = ConfigHandler.get_token() or ""
         self.token_input.value = saved_token
@@ -160,11 +167,7 @@ class TushareConfigPanel(ft.Container):
                     ft.Container(height=15),
                     ft.Row(
                         [
-                            ft.Text(
-                                I18n.get("tushare_no_token"),
-                                size=12,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
+                            self.no_token_text,
                             self.register_link,
                         ],
                         alignment=ft.MainAxisAlignment.CENTER,
@@ -375,13 +378,17 @@ class TushareConfigPanel(ft.Container):
         self._safe_update()
 
     def refresh_locale(self):
-        self.token_input.label = I18n.get("tushare_token_label")
-        if self._compact:
-            self.token_input.hint_text = I18n.get("tushare_token_hint")
-        self.verify_button.text = I18n.get("tushare_verify")
-        self.save_button.text = I18n.get("tushare_save")
-        self.register_link.text = I18n.get("tushare_register")
-        self._safe_update()
+        try:
+            self.token_input.label = I18n.get("tushare_token_label")
+            if self._compact:
+                self.token_input.hint_text = I18n.get("tushare_token_hint")
+            self.verify_button.text = I18n.get("tushare_verify")
+            self.save_button.text = I18n.get("tushare_save")
+            self.register_link.text = I18n.get("tushare_register")
+            self.no_token_text.value = I18n.get("tushare_no_token")
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[TushareConfigPanel] refresh_locale failed: {e}")
 
     def did_mount(self):
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)

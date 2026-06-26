@@ -1,11 +1,12 @@
 import asyncio
+import logging
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-from ui.components.market_dashboard import MarketDashboard
-from ui.components.news_feed import NewsFeed
+from ui.components.market_dashboard import MarketDashboard, logger as dashboard_logger
+from ui.components.news_feed import NewsFeed, logger as news_feed_logger
 from ui.components.toast_manager import ToastCard, ToastManager
 
 pytestmark = pytest.mark.unit
@@ -660,6 +661,24 @@ class TestNewsFeed:
 
         await feed._handle_load_more(None)
 
+    def test_update_locale_swallows_i18n_exception(self, caplog):
+        """update_locale 中 I18n.get 抛异常时不应抛出，应降级为 logger.warning。"""
+        feed = NewsFeed()
+        original_text = feed.empty_text.value
+
+        with patch(
+            "ui.components.news_feed.I18n.get",
+            side_effect=RuntimeError("i18n boom"),
+        ):
+            with caplog.at_level(logging.WARNING, logger=news_feed_logger.name):
+                # 不应抛出异常
+                feed.update_locale()
+
+        # 异常被吞掉，empty_text 保持原值（赋值发生在异常之前已无法完成）
+        assert feed.empty_text.value == original_text
+        # 必须有 warning 日志
+        assert any("update_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
+
 
 class TestMarketDashboard:
     def test_init_shows_default_values(self):
@@ -952,3 +971,21 @@ class TestMarketDashboard:
         dashboard.update_data(data_three)
 
         assert len(dashboard.concepts_row.controls) == 3
+
+    def test_update_locale_swallows_i18n_exception(self, caplog):
+        """update_locale 中 I18n.get 抛异常时不应抛出，应降级为 logger.warning。"""
+        dashboard = MarketDashboard()
+        original_title = dashboard.sh_title.value
+
+        with patch(
+            "ui.components.market_dashboard.I18n.get",
+            side_effect=RuntimeError("i18n boom"),
+        ):
+            with caplog.at_level(logging.WARNING, logger=dashboard_logger.name):
+                # 不应抛出异常
+                dashboard.update_locale()
+
+        # 异常被吞掉，sh_title 保持原值（赋值发生在异常之前已无法完成）
+        assert dashboard.sh_title.value == original_title
+        # 必须有 warning 日志
+        assert any("update_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)

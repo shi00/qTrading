@@ -1,5 +1,6 @@
 """BacktestView 单元测试"""
 
+import logging
 from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
@@ -8,7 +9,7 @@ import polars as pl
 import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
-from ui.views.backtest_view import BacktestView
+from ui.views.backtest_view import BacktestView, logger as view_logger
 
 pytestmark = pytest.mark.unit
 
@@ -398,3 +399,66 @@ class TestBacktestView:
         view.dispose()
 
         mock_vm.dispose.assert_called_once()
+
+    @patch("ui.views.backtest_view.BacktestViewModel")
+    @patch("ui.views.backtest_view.BacktestConfigPanel")
+    @patch("ui.views.backtest_view.BacktestResultPanel")
+    @patch("ui.views.backtest_view.I18n.get")
+    def test_refresh_locale_cascades_to_sub_panels(
+        self,
+        mock_i18n: MagicMock,
+        mock_result_panel_cls: MagicMock,
+        mock_config_panel_cls: MagicMock,
+        mock_vm_cls: MagicMock,
+        mock_page: MagicMock,
+    ) -> None:
+        """§5.8 规范 6：refresh_locale 必须级联调用 config_panel 与 result_panel 的 refresh_locale。"""
+        mock_i18n.return_value = "mock_text"
+        mock_vm = MagicMock()
+        mock_vm_cls.return_value = mock_vm
+        mock_vm.get_available_strategies.return_value = {}
+
+        mock_config_panel = MagicMock()
+        mock_config_panel_cls.return_value = mock_config_panel
+        mock_result_panel = MagicMock()
+        mock_result_panel_cls.return_value = mock_result_panel
+
+        view = BacktestView(mock_page)
+        view.page = mock_page
+        view.update = MagicMock()
+
+        view.refresh_locale()
+
+        mock_config_panel.refresh_locale.assert_called_once()
+        mock_result_panel.refresh_locale.assert_called_once()
+        view.update.assert_called_once()
+
+    @patch("ui.views.backtest_view.BacktestViewModel")
+    @patch("ui.views.backtest_view.BacktestConfigPanel")
+    @patch("ui.views.backtest_view.BacktestResultPanel")
+    @patch("ui.views.backtest_view.I18n.get")
+    def test_refresh_locale_swallows_exception(
+        self,
+        mock_i18n: MagicMock,
+        mock_result_panel_cls: MagicMock,
+        mock_config_panel_cls: MagicMock,
+        mock_vm_cls: MagicMock,
+        mock_page: MagicMock,
+        caplog,
+    ) -> None:
+        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
+        mock_i18n.return_value = "mock_text"
+        mock_vm = MagicMock()
+        mock_vm_cls.return_value = mock_vm
+        mock_vm.get_available_strategies.return_value = {}
+
+        view = BacktestView(mock_page)
+        view.page = mock_page
+        # 实例化完成后再让 I18n.get 抛异常，触发 refresh_locale 的 try/except
+        mock_i18n.side_effect = RuntimeError("i18n boom")
+
+        with caplog.at_level(logging.WARNING, logger=view_logger.name):
+            # 不应抛出异常
+            view.refresh_locale()
+
+        assert any("refresh_locale error" in r.message and "i18n boom" in r.message for r in caplog.records)

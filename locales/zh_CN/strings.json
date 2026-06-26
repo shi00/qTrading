@@ -574,6 +574,7 @@
     "db_info": "数据库信息",
     "db_test_connection": "测试连接",
     "settings_db_title": "数据库配置",
+    "settings_db_saved": "数据库配置已保存",
     "settings_tab_database": "数据库",
     "wizard_token_label": "请输入您的 Tushare Pro Token",
     "wizard_token_hint": "可在 tushare.pro 个人中心获取",

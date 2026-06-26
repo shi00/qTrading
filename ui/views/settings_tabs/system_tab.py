@@ -246,6 +246,12 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # 3. Concurrency Item  # pragma: no cover
+        self.save_concurrency_btn = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
+            icon_color=AppColors.PRIMARY,  # pragma: no cover
+            tooltip=I18n.get("settings_save_config"),  # pragma: no cover
+            on_click=self.save_concurrency,  # pragma: no cover
+        )  # pragma: no cover
         self.row_concurrency = SettingRow(  # pragma: no cover
             icon=ft.Icons.SPEED_ROUNDED,  # pragma: no cover
             icon_color=AppColors.ACCENT,  # pragma: no cover
@@ -254,12 +260,7 @@ class SystemTab(ft.Container):
             control=ft.Row(  # pragma: no cover
                 [  # pragma: no cover
                     self.concurrency_input,  # pragma: no cover
-                    ft.IconButton(  # pragma: no cover
-                        icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
-                        icon_color=AppColors.PRIMARY,  # pragma: no cover
-                        tooltip=I18n.get("settings_save_config"),  # pragma: no cover
-                        on_click=self.save_concurrency,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.save_concurrency_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
@@ -268,6 +269,14 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # 4. Thread Pool Settings (Advanced)  # pragma: no cover
+        self.save_thread_pool_btn = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
+            icon_color=AppColors.PRIMARY,  # pragma: no cover
+            tooltip=I18n.get("settings_save_config"),  # pragma: no cover
+            on_click=lambda e: (
+                self.page.run_task(self.save_thread_pool_settings, e) if self.page else None
+            ),  # pragma: no cover
+        )  # pragma: no cover
         self.row_thread_pool = SettingRow(  # pragma: no cover
             icon=ft.Icons.MEMORY_ROUNDED,  # pragma: no cover
             icon_color=ft.Colors.INDIGO,  # pragma: no cover
@@ -277,14 +286,7 @@ class SystemTab(ft.Container):
                 [  # pragma: no cover
                     self.io_workers_input,  # pragma: no cover
                     self.cpu_workers_input,  # pragma: no cover
-                    ft.IconButton(  # pragma: no cover
-                        icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
-                        icon_color=AppColors.PRIMARY,  # pragma: no cover
-                        tooltip=I18n.get("settings_save_config"),  # pragma: no cover
-                        on_click=lambda e: (
-                            self.page.run_task(self.save_thread_pool_settings, e) if self.page else None
-                        ),  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.save_thread_pool_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
@@ -293,6 +295,12 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # 5. DB Connection Pool  # pragma: no cover
+        self.save_db_pool_btn = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
+            icon_color=AppColors.PRIMARY,  # pragma: no cover
+            tooltip=I18n.get("settings_save_config"),  # pragma: no cover
+            on_click=self.save_db_pool_settings,  # pragma: no cover
+        )  # pragma: no cover
         self.row_db_pool = SettingRow(  # pragma: no cover
             icon=ft.Icons.STORAGE_ROUNDED,  # pragma: no cover
             icon_color=ft.Colors.ORANGE,  # pragma: no cover
@@ -303,12 +311,7 @@ class SystemTab(ft.Container):
                     self.pool_size_input,  # pragma: no cover
                     self.db_overflow_input,  # pragma: no cover
                     self.db_timeout_input,  # pragma: no cover
-                    ft.IconButton(  # pragma: no cover
-                        icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
-                        icon_color=AppColors.PRIMARY,  # pragma: no cover
-                        tooltip=I18n.get("settings_save_config"),  # pragma: no cover
-                        on_click=self.save_db_pool_settings,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.save_db_pool_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
@@ -317,6 +320,12 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # 6. API Rate Limit Item  # pragma: no cover
+        self.save_rate_limit_btn = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
+            icon_color=AppColors.PRIMARY,  # pragma: no cover
+            tooltip=I18n.get("settings_save_config"),  # pragma: no cover
+            on_click=self.save_rate_limit,  # pragma: no cover
+        )  # pragma: no cover
         self.row_limit = SettingRow(  # pragma: no cover
             icon=ft.Icons.SPEED,  # pragma: no cover
             icon_color=ft.Colors.CYAN,  # pragma: no cover
@@ -326,12 +335,7 @@ class SystemTab(ft.Container):
                 [  # pragma: no cover
                     self.point_tier_dropdown,  # pragma: no cover
                     self.rate_limit_input,  # pragma: no cover
-                    ft.IconButton(  # pragma: no cover
-                        icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
-                        icon_color=AppColors.PRIMARY,  # pragma: no cover
-                        tooltip=I18n.get("settings_save_config"),  # pragma: no cover
-                        on_click=self.save_rate_limit,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.save_rate_limit_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
@@ -340,6 +344,12 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # 7. No-Proxy Domains  # pragma: no cover
+        self.save_no_proxy_btn = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
+            icon_color=AppColors.PRIMARY,  # pragma: no cover
+            tooltip=I18n.get("common_save"),  # pragma: no cover
+            on_click=self.save_no_proxy_domains,  # pragma: no cover
+        )  # pragma: no cover
         self.row_proxy = SettingRow(  # pragma: no cover
             icon=ft.Icons.PUBLIC_OFF_ROUNDED,  # pragma: no cover
             icon_color=ft.Colors.TEAL,  # pragma: no cover
@@ -348,12 +358,7 @@ class SystemTab(ft.Container):
             control=ft.Row(  # pragma: no cover
                 [  # pragma: no cover
                     self.no_proxy_input,  # pragma: no cover
-                    ft.IconButton(  # pragma: no cover
-                        icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
-                        icon_color=AppColors.PRIMARY,  # pragma: no cover
-                        tooltip=I18n.get("common_save"),  # pragma: no cover
-                        on_click=self.save_no_proxy_domains,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.save_no_proxy_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
                 expand=True,  # pragma: no cover
@@ -454,6 +459,10 @@ class SystemTab(ft.Container):
         """语言变更回调 - 更新 Settings UI 文本"""
         try:
             self.language_dropdown.label = I18n.get_language_label()
+            self.language_dropdown.tooltip = I18n.get_language_label()
+            self.language_dropdown.options = [
+                ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()
+            ]
             self.theme_dropdown.label = I18n.get("settings_theme")
             self.log_level_dropdown.label = I18n.get("settings_log_level")
 
@@ -496,6 +505,14 @@ class SystemTab(ft.Container):
             self.rate_limit_input.suffix_text = I18n.get("common_times_min")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
             self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
+
+            # 刷新保存按钮的 tooltip
+            save_config_tip = I18n.get("settings_save_config")
+            self.save_concurrency_btn.tooltip = save_config_tip
+            self.save_thread_pool_btn.tooltip = save_config_tip
+            self.save_db_pool_btn.tooltip = save_config_tip
+            self.save_rate_limit_btn.tooltip = save_config_tip
+            self.save_no_proxy_btn.tooltip = I18n.get("common_save")
 
             for row in [
                 self.row_language,

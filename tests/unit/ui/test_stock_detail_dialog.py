@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import math
 from unittest.mock import MagicMock, patch
 
@@ -6,6 +7,7 @@ import pytest
 
 from data.data_processor import DataProcessor
 from tests.unit.ui.conftest import set_page
+from ui.components.stock_detail_dialog import logger as detail_logger
 
 pytestmark = pytest.mark.unit
 
@@ -219,6 +221,40 @@ class TestStockDetailDialog:
         new_data = {"ts_code": "600000.SH", "name": "浦发银行"}
         dlg.update_data(new_data)
         assert dlg.stock_data["ts_code"] == "600000.SH"
+
+    def test_refresh_locale_rebuilds_content(self, mock_page):
+        """§5.8 规范 6：refresh_locale 应正确刷新文案（重建 title/content/actions），不抛出异常。"""
+        dlg = self._make_dialog({"ts_code": "000001.SZ", "name": "平安银行"})
+        set_page(dlg, mock_page)
+        dlg.update = MagicMock()
+        original_title = dlg.title
+        original_content = dlg.content
+        original_actions = list(dlg.actions)
+
+        dlg.refresh_locale()
+
+        # title/content 被重建为新对象
+        assert dlg.title is not original_title
+        assert dlg.content is not original_content
+        # actions 列表被替换为新 TextButton
+        assert len(dlg.actions) == 1
+        assert dlg.actions[0] is not original_actions[0]
+        dlg.update.assert_called_once()
+        # I18n.get 应被调用以刷新文案
+        self.mock_i18n.get.assert_any_call("common_close")
+
+    def test_refresh_locale_swallows_exception(self, mock_page, caplog):
+        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
+        dlg = self._make_dialog({"ts_code": "000001.SZ"})
+        set_page(dlg, mock_page)
+        # 强制 I18n.get 抛异常以触发 try/except
+        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
+
+        with caplog.at_level(logging.WARNING, logger=detail_logger.name):
+            # 不应抛出异常
+            dlg.refresh_locale()
+
+        assert any("refresh_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_load_chart_no_processor(self, mock_page):

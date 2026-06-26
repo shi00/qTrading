@@ -169,8 +169,18 @@ class I18n:
             logger.warning(f"[I18n] Attempted to set unsupported locale: {locale}")
 
     @classmethod
-    def subscribe(cls, callback):
+    def subscribe(cls, callback, *, sync_immediately: bool = True):
         """Subscribe to locale changes.
+
+        Args:
+            callback: Zero-arg callable (bound method or closure) invoked on
+                locale change. Project convention: all callbacks must take no
+                arguments other than the bound ``self``.
+            sync_immediately: If True, fire ``callback`` once immediately upon
+                subscription so that late-mounted components sync to the current
+                global locale instead of rendering with the stale locale captured
+                in their ``__init__``. Defaults to True. Pass False explicitly
+                for the rare case where the caller must not refresh yet.
 
         Returns:
             The callback itself (can be used as subscription_id for unsubscribe)
@@ -179,6 +189,11 @@ class I18n:
             cls._listeners = []
         if callback not in cls._listeners:
             cls._listeners.append(callback)
+            if sync_immediately:
+                try:
+                    callback()
+                except Exception as e:
+                    logger.error(f"[I18n] Immediate sync error: {e}", exc_info=True)
         return callback
 
     @classmethod

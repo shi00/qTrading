@@ -632,7 +632,7 @@ class ScreenerViewModel:
             )
         return tree
 
-    async def load_history_data(self, trade_date: str, strategy_name: str = None, run_id: str = None):  # type: ignore[untyped]
+    async def load_history_data(self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None):  # type: ignore[untyped]
         """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name."""
         cache = CacheManager()
         df = await cache.get_history_records(trade_date, strategy_name, run_id)

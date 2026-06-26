@@ -160,29 +160,48 @@ class TestQuickParameterFunctionality:
 
     @pytest.mark.asyncio
     async def test_quick_mode_skips_historical_and_financial_data(self):
-        """Test that quick=True skips steps 3 and 4"""
+        """Test that quick=True skips sync_historical_data and sync_comprehensive_fundamentals"""
+        import datetime
+
         from data.data_processor import DataProcessor
 
-        mock_dp = MagicMock(spec=DataProcessor)
-        mock_dp.sync_stock_basic = AsyncMock(return_value=100)
-        mock_dp.sync_concepts = AsyncMock()
-        mock_dp.ensure_trade_cal = AsyncMock(return_value=True)
-        mock_dp.sync_historical_data = AsyncMock()
-        mock_dp.sync_comprehensive_fundamentals = AsyncMock()
-        mock_dp.strategies = {
-            "macro": MagicMock(run=AsyncMock(return_value=MagicMock(status="success"))),
-            "holder": MagicMock(run=AsyncMock(return_value=MagicMock(status="success"))),
-        }
-        mock_dp.check_data_health = AsyncMock(return_value={})
-        mock_dp.is_cancelled = MagicMock(return_value=False)
-        mock_dp.clear_cancel = MagicMock()
-        mock_dp._cancel_requested = False
+        # 重置单例后用 mock 替换外部依赖，避免真实 IO
+        DataProcessor._reset_singleton()
+        with (
+            patch("data.data_processor.CacheManager"),
+            patch("data.data_processor.TushareClient"),
+            patch("data.data_processor.TradeCalendarService"),
+            patch("data.data_processor.ConfigHandler") as mock_ch_init,
+        ):
+            mock_ch_init.get_token.return_value = "test_token"
+            dp = DataProcessor()
 
-        quick_mode_skips = True
-        full_mode_includes = True
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock()
+        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.sync_historical_data = AsyncMock(return_value=MagicMock(status="success"))
+        dp.sync_comprehensive_fundamentals = AsyncMock(return_value=MagicMock(status="success"))
+        dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="success"))
+        dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="success"))
+        dp.check_data_health = AsyncMock(return_value={"tier": 3})
+        dp.clear_cancel()
 
-        assert quick_mode_skips is True
-        assert full_mode_includes is True
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch(
+                "data.data_processor.get_now",
+                return_value=datetime.datetime(2024, 6, 14),
+            ),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            await dp.initialize_system(quick=True)
+
+        # quick=True 必须跳过 Step 3 (historical) 与 Step 4 (financial)
+        dp.sync_historical_data.assert_not_called()
+        dp.sync_comprehensive_fundamentals.assert_not_called()
 
 
 class TestScheduleConfigCompleteness:
@@ -205,51 +224,49 @@ class TestScheduleConfigCompleteness:
         assert default_time is not None
         assert ":" in default_time
 
-    def test_schedule_time_validation_regex(self):
-        """Test that schedule time is validated with correct regex format"""
-        import re
+    def test_schedule_time_default_is_valid(self):
+        """Test that OnboardingViewModel default schedule time is '16:30'"""
+        from ui.viewmodels.onboarding_view_model import OnboardingViewModel
 
-        # 格式正确且数值合法的时间
-        valid_formats = ["16:30", "9:00", "23:59", "00:00", "0:00"]
-        # 格式正确但数值非法的时间（格式匹配但数值超限，需后续范围检查）
-        valid_format_invalid_value = ["25:00", "12:60"]
-        # 格式不正确的时间
-        invalid_formats = ["abc", "12-30", "1:2", "123:45", "", "12:3"]
+        vm = OnboardingViewModel(data_processor=None)
+        assert vm.normalized_schedule_time == "16:30"
 
-        pattern = r"^\d{1,2}:\d{2}$"
+    @pytest.mark.asyncio
+    async def test_schedule_time_validation_normalizes_invalid_to_default(self):
+        """Test that _validate_and_save_schedule normalizes invalid time to default '16:30'"""
+        from ui.viewmodels.onboarding_view_model import OnboardingViewModel
 
-        for time in valid_formats:
-            assert re.match(pattern, time), f"{time} should match format HH:MM"
+        # (输入时间, 期望规范化结果)
+        test_cases = [
+            # 格式错误 → 默认值
+            ("abc", "16:30"),
+            ("12-30", "16:30"),
+            ("1:2", "16:30"),
+            ("123:45", "16:30"),
+            ("", "16:30"),
+            ("12:3", "16:30"),
+            # 数值超限 → 默认值
+            ("25:00", "16:30"),
+            ("24:00", "16:30"),
+            ("12:60", "16:30"),
+            ("12:99", "16:30"),
+            # 有效时间 → 保持不变
+            ("16:30", "16:30"),
+            ("09:15", "09:15"),
+            ("00:00", "00:00"),
+            ("23:59", "23:59"),
+        ]
 
-        for time in valid_format_invalid_value:
-            # 格式匹配，但数值超限，应由后续范围检查拒绝
-            assert re.match(pattern, time), f"{time} matches format but has invalid values"
+        for time_str, expected in test_cases:
+            vm = OnboardingViewModel(data_processor=None)
+            vm.set_schedule_state(enabled=True, time_str=time_str)
+            with patch("ui.viewmodels.onboarding_view_model.ConfigHandler.save_config"):
+                result = await vm._validate_and_save_schedule()
 
-        for time in invalid_formats:
-            if time:
-                assert not re.match(pattern, time), f"{time} should NOT match format HH:MM"
-
-    def test_schedule_time_range_validation(self):
-        """Test that schedule time validates hour (0-23) and minute (0-59) ranges"""
-        valid_times = ["00:00", "9:00", "16:30", "23:59"]
-        invalid_times = ["25:00", "24:00", "12:60", "12:99", "-1:30"]
-
-        def is_valid_time(time_str: str) -> bool:
-            import re
-
-            if not re.match(r"^\d{1,2}:\d{2}$", time_str):
-                return False
-            try:
-                hours, minutes = map(int, time_str.split(":"))
-                return 0 <= hours <= 23 and 0 <= minutes <= 59
-            except ValueError:
-                return False
-
-        for time in valid_times:
-            assert is_valid_time(time), f"{time} should be valid time"
-
-        for time in invalid_times:
-            assert not is_valid_time(time), f"{time} should be invalid time"
+            assert result is True, f"_validate_and_save_schedule should return True for {time_str!r}"
+            assert vm.normalized_schedule_time == expected, (
+                f"{time_str!r} should normalize to {expected!r}, got {vm.normalized_schedule_time!r}"
+            )
 
 
 class TestPasswordLoading:
@@ -292,19 +309,6 @@ class TestPasswordLoading:
 class TestProgressCallbackSignature:
     """Tests for progress_callback signature consistency - Issue 3.1"""
 
-    def test_progress_callback_is_sync_function(self):
-        """Test that progress_callback should be a sync function, not async"""
-        import inspect
-
-        def sync_callback(current, total, message):
-            pass
-
-        async def async_callback(current, total, message):
-            pass
-
-        assert not inspect.iscoroutinefunction(sync_callback)
-        assert inspect.iscoroutinefunction(async_callback)
-
     def test_initialize_system_callback_signature(self):
         """Test that initialize_system expects sync callback"""
         import inspect
@@ -318,10 +322,10 @@ class TestProgressCallbackSignature:
 
 
 class TestLocaleChangeSignature:
-    """Tests for _on_locale_change signature - Issue 2.3"""
+    """Tests for _on_locale_change signature - §5.8 规范 2：零参签名"""
 
-    def test_llm_config_panel_locale_change_accepts_new_locale(self):
-        """Test that LLMConfigPanel._on_locale_change accepts new_locale parameter"""
+    def test_llm_config_panel_locale_change_is_zero_arg(self):
+        """Test that LLMConfigPanel._on_locale_change takes no args other than self (§5.8 规范 2)"""
         import inspect
 
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
@@ -329,19 +333,153 @@ class TestLocaleChangeSignature:
         sig = inspect.signature(LLMConfigPanel._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "new_locale" in params
+        assert params == ["self"]
 
-    def test_locale_change_new_locale_has_default(self):
-        """Test that new_locale parameter has default value"""
-        import inspect
-
+    def test_locale_change_callable_with_zero_args(self):
+        """Test that _on_locale_change can be called with zero args (matches I18n.subscribe contract)"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
-        sig = inspect.signature(LLMConfigPanel._on_locale_change)
-        new_locale_param = sig.parameters.get("new_locale")
+        # Should not raise TypeError about missing arguments
+        import inspect
 
-        assert new_locale_param is not None
-        assert new_locale_param.default is None
+        sig = inspect.signature(LLMConfigPanel._on_locale_change)
+        # Verify no required args beyond self
+        required = [p for p in sig.parameters.values() if p.default is inspect.Parameter.empty]
+        assert required == [sig.parameters["self"]]
+
+    # --- 本次新修复的零参签名（必须校验 params == ["self"]）---
+
+    def test_app_layout_locale_change_is_zero_arg(self):
+        """AppLayout._on_locale_change 必须零参（§5.8 规范 2）"""
+        import inspect
+
+        from ui.app_layout import AppLayout
+
+        sig = inspect.signature(AppLayout._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert params == ["self"]
+
+    def test_onboarding_wizard_locale_change_is_zero_arg(self):
+        """OnboardingWizard._on_locale_change 必须零参（§5.8 规范 2）"""
+        import inspect
+
+        from ui.views.onboarding_wizard import OnboardingWizard
+
+        sig = inspect.signature(OnboardingWizard._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert params == ["self"]
+
+    def test_ai_brain_tab_locale_change_is_zero_arg(self):
+        """AIBrainTab._on_locale_change 必须零参（§5.8 规范 2）"""
+        import inspect
+
+        from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
+
+        sig = inspect.signature(AIBrainTab._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert params == ["self"]
+
+    # --- 历史遗留签名（带可选 new_locale 参数，校验存在性与参数列表）---
+
+    def test_database_config_panel_locale_change_accepts_optional_new_locale(self):
+        """DatabaseConfigPanel._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+        import inspect
+
+        from ui.components.config_panels.database_config_panel import (
+            DatabaseConfigPanel,
+        )
+
+        assert hasattr(DatabaseConfigPanel, "_on_locale_change")
+        sig = inspect.signature(DatabaseConfigPanel._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert "self" in params
+        assert "new_locale" in params
+        # new_locale 必须有默认值（可选参数），保证零参调用兼容 I18n.subscribe
+        new_locale_param = sig.parameters["new_locale"]
+        assert new_locale_param.default is not inspect.Parameter.empty
+
+    def test_failover_config_panel_locale_change_accepts_optional_new_locale(self):
+        """FailoverConfigPanel._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+        import inspect
+
+        from ui.components.config_panels.failover_config_panel import (
+            FailoverConfigPanel,
+        )
+
+        assert hasattr(FailoverConfigPanel, "_on_locale_change")
+        sig = inspect.signature(FailoverConfigPanel._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert "self" in params
+        assert "new_locale" in params
+        new_locale_param = sig.parameters["new_locale"]
+        assert new_locale_param.default is not inspect.Parameter.empty
+
+    def test_local_model_config_panel_locale_change_accepts_optional_new_locale(self):
+        """LocalModelConfigPanel._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+        import inspect
+
+        from ui.components.config_panels.local_model_config_panel import (
+            LocalModelConfigPanel,
+        )
+
+        assert hasattr(LocalModelConfigPanel, "_on_locale_change")
+        sig = inspect.signature(LocalModelConfigPanel._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert "self" in params
+        assert "new_locale" in params
+        new_locale_param = sig.parameters["new_locale"]
+        assert new_locale_param.default is not inspect.Parameter.empty
+
+    def test_system_tab_locale_change_accepts_optional_new_locale(self):
+        """SystemTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+        import inspect
+
+        from ui.views.settings_tabs.system_tab import SystemTab
+
+        assert hasattr(SystemTab, "_on_locale_change")
+        sig = inspect.signature(SystemTab._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert "self" in params
+        assert "new_locale" in params
+        new_locale_param = sig.parameters["new_locale"]
+        assert new_locale_param.default is not inspect.Parameter.empty
+
+    def test_automation_tab_locale_change_accepts_optional_new_locale(self):
+        """AutomationTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+        import inspect
+
+        from ui.views.settings_tabs.automation_tab import AutomationTab
+
+        assert hasattr(AutomationTab, "_on_locale_change")
+        sig = inspect.signature(AutomationTab._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert "self" in params
+        assert "new_locale" in params
+        new_locale_param = sig.parameters["new_locale"]
+        assert new_locale_param.default is not inspect.Parameter.empty
+
+    def test_notifications_tab_locale_change_accepts_optional_new_locale(self):
+        """NotificationsTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+        import inspect
+
+        from ui.views.settings_tabs.automation_tab import NotificationsTab
+
+        assert hasattr(NotificationsTab, "_on_locale_change")
+        sig = inspect.signature(NotificationsTab._on_locale_change)
+        params = list(sig.parameters.keys())
+
+        assert "self" in params
+        assert "new_locale" in params
+        new_locale_param = sig.parameters["new_locale"]
+        assert new_locale_param.default is not inspect.Parameter.empty
 
 
 class TestLLMProviderSwitch:
@@ -404,9 +542,21 @@ class TestLocalModelAsyncVerification:
     @pytest.mark.asyncio
     async def test_async_verify_model_returns_false_for_empty_path(self):
         """Test that async_verify_model returns False for empty path"""
-        empty_path = ""
-        result = len(empty_path.strip()) > 0
+        from ui.components.config_panels.local_model_config_panel import (
+            LocalModelConfigPanel,
+        )
+
+        # 用 __new__ 跳过 __init__（避免 Flet 控件初始化副作用）
+        panel = LocalModelConfigPanel.__new__(LocalModelConfigPanel)
+        panel.model_path_input = MagicMock()
+        panel.model_path_input.value = ""
+        panel._show_error = MagicMock()
+
+        result = await panel.async_verify_model()
+
         assert result is False
+        # 空路径应触发错误提示
+        panel._show_error.assert_called_once()
 
 
 class TestLocalModelManagerIntegration:

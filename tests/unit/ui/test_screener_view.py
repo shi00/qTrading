@@ -1125,3 +1125,13 @@ class TestScreenerView:
         view.params_container.controls.append(row)
         params = view._collect_params()
         assert params["row_param"] == 99.5
+
+    def test_refresh_locale_calls_invalidate_cache(self, mock_page):
+        """§5.8 规范 8：refresh_locale 必须使 MetaDataManager 缓存失效，确保列别名用新 locale 重算"""
+        import ui.views.screener_view as mod
+
+        view = self._make_view(mock_page)
+        # 清除 __init__ 期间的调用记录，仅观察 refresh_locale 的副作用
+        mod.MetaDataManager.invalidate_cache.reset_mock()
+        view.refresh_locale()
+        mod.MetaDataManager.invalidate_cache.assert_called_once()

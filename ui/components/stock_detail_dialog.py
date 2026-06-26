@@ -69,10 +69,11 @@ class StockDetailDialog(ft.AlertDialog):
     Stock detail popup dialog showing comprehensive stock information.
     """
 
-    def __init__(self, stock_data: dict = None, data_processor=None, page: ft.Page = None):  # type: ignore[untyped]
+    def __init__(self, stock_data: dict | None = None, data_processor=None, page: ft.Page | None = None):  # type: ignore[untyped]
         self.stock_data = stock_data or {}
         self.data_processor = data_processor
         self._page_ref = page
+        self._locale_subscription_id: object | None = None
 
         # 缓存对话框尺寸（打开时计算一次，不随 resize 变化）
         self._cached_width, self._cached_height = self._dialog_size()
@@ -455,6 +456,37 @@ class StockDetailDialog(ft.AlertDialog):
         self.stock_data = stock_data
         self.title = self._build_title()
         self.content = self._build_content()
+
+    def did_mount(self):
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+
+    def will_unmount(self):
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """Refresh i18n text on locale change (pure UI, preserves loaded chart)."""
+        try:
+            # 保存已加载的 K 线图（避免重建 content 时丢失）
+            old_chart_content = None
+            if hasattr(self, "chart_container") and isinstance(self.chart_container.content, ft.Image):
+                old_chart_content = self.chart_container.content
+
+            self.title = self._build_title()
+            self.content = self._build_content()
+            self.actions = [
+                ft.TextButton(I18n.get("common_close"), on_click=self._close),
+            ]
+
+            # 恢复已加载的 K 线图
+            if old_chart_content is not None:
+                self.chart_container.content = old_chart_content
+
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[StockDetailDialog] refresh_locale failed: {e}")
 
     async def load_chart(self, ts_code: str):
         """Asynchronously load history data and render an inline K-line chart."""

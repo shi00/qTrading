@@ -118,7 +118,7 @@ class MetricTile(ft.Container):
         label: str,
         value: str,
         trend_color: str = AppColors.TEXT_PRIMARY,
-        sub_text: str = None,  # type: ignore[untyped]
+        sub_text: str | None = None,  # type: ignore[untyped]
     ):
         super().__init__()
         self.content = ft.Column(
@@ -425,6 +425,7 @@ class HealthReportDialog(ft.AlertDialog):
     def __init__(self, page, report, on_dismiss=None):
         self.page_ref = page
         self.report = report
+        self._locale_subscription_id: object | None = None
 
         # 缓存对话框尺寸（打开时计算一次，不随 resize 变化）
         self._cached_width, self._cached_height = self._dialog_size()
@@ -487,6 +488,35 @@ class HealthReportDialog(ft.AlertDialog):
 
         if self.on_dismiss_callback:
             self.on_dismiss_callback()
+
+    def did_mount(self):
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+
+    def will_unmount(self):
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """Refresh i18n text on locale change (pure UI rebuild)."""
+        try:
+            self.content = self._build_content()
+            self.actions = [
+                ft.TextButton(
+                    I18n.get("health_btn_deep_scan"),
+                    on_click=self.run_deep_scan,
+                    style=ft.ButtonStyle(color=AppColors.ACCENT),
+                ),
+                ft.TextButton(
+                    I18n.get("common_close"),
+                    on_click=self.close_dialog,
+                    style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                ),
+            ]
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[HealthReportDialog] refresh_locale failed: {e}")
 
     def _build_content(self):
         # Extract Data
@@ -586,6 +616,8 @@ class HealthScanDialog(ft.AlertDialog):
     def __init__(self, page, data_processor: DataProcessor):  # pragma: no cover
         self.page_ref = page
         self._data_processor = data_processor
+        self._locale_subscription_id: object | None = None
+        self._last_result: dict | None = None
         # 缓存对话框尺寸
         self._cached_width, self._cached_height = self._dialog_size()
         self.progress_bar = ft.ProgressBar(
@@ -599,10 +631,12 @@ class HealthScanDialog(ft.AlertDialog):
             color=AppColors.TEXT_SECONDARY,
         )
         self.result_content = ft.Column(visible=False)
+        self._title_text = ft.Text(I18n.get("scan_title"), size=16, weight=ft.FontWeight.BOLD)
+        self._close_btn = ft.TextButton(I18n.get("common_close"), on_click=self.close_dialog)
 
         super().__init__(
             modal=True,
-            title=ft.Text(I18n.get("scan_title"), size=16, weight=ft.FontWeight.BOLD),
+            title=self._title_text,
             content=ft.Container(
                 width=self._cached_width,
                 height=self._cached_height,
@@ -615,9 +649,7 @@ class HealthScanDialog(ft.AlertDialog):
                     ],
                 ),
             ),
-            actions=[
-                ft.TextButton(I18n.get("common_close"), on_click=self.close_dialog),
-            ],
+            actions=[self._close_btn],
             actions_padding=10,
         )
 
@@ -637,6 +669,29 @@ class HealthScanDialog(ft.AlertDialog):
         else:
             self.open = False
             self.page_ref.update()
+
+    def did_mount(self):  # pragma: no cover
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+
+    def will_unmount(self):  # pragma: no cover
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """Refresh i18n text on locale change (pure UI)."""
+        try:
+            self._title_text.value = I18n.get("scan_title")
+            self._close_btn.text = I18n.get("common_close")
+            if self.status_text.visible:
+                self.status_text.value = I18n.get("scan_step_init")
+            # 结果区域可见时，用缓存的扫描结果重建以刷新所有 i18n 文案
+            if self._last_result is not None and self.result_content.visible:
+                self.show_results(self._last_result)
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[HealthScanDialog] refresh_locale failed: {e}")
 
     async def start_scan(self):
         """Start async scan"""
@@ -665,6 +720,7 @@ class HealthScanDialog(ft.AlertDialog):
 
     def show_results(self, result):  # pragma: no cover
         """Display results."""
+        self._last_result = result
         score = result.get("score", 0)
         tier = result.get("tier", 1)
         avg_lag = result.get("avg_lag", 99)

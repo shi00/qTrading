@@ -313,6 +313,57 @@ class TableViewerTab(ft.Container):
             self.page.overlay.remove(self.save_file_picker)
             self.page.update()
 
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
+
+        由父视图 DataExplorerView.refresh_locale 级联调用，自身不订阅 I18n。
+        """
+        try:
+            # 令 MetaDataManager 缓存失效，确保后续 get_table_alias/get_column_alias 用新 locale
+            MetaDataManager.invalidate_cache()
+            self.table_selector.label = I18n.get("data_select_table")
+            saved_table = self.table_selector.value
+            self.table_selector.options = [
+                ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.tables_list
+            ]
+            self.table_selector.value = saved_table
+
+            self.filter_col.label = I18n.get("data_filter_col")
+            self._populate_filter_columns()
+
+            self.filter_op.label = I18n.get("data_filter_op")
+            saved_op = self.filter_op.value
+            self.filter_op.options = [
+                ft.dropdown.Option("="),
+                ft.dropdown.Option("LIKE"),
+                ft.dropdown.Option(">"),
+                ft.dropdown.Option("<"),
+                ft.dropdown.Option(">="),
+                ft.dropdown.Option("<="),
+                ft.dropdown.Option("!="),
+            ]
+            self.filter_op.value = saved_op
+
+            self.filter_val.label = I18n.get("data_filter_val")
+            self.btn_query.tooltip = I18n.get("common_query")
+            self.btn_refresh.tooltip = I18n.get("common_refresh")
+            self._loading_text.value = I18n.get("data_loading")
+            self._loading_hint.value = I18n.get("data_loading_hint")
+
+            # 重建表头以刷新列别名翻译
+            if self.vm.table_columns:
+                self._rebuild_table_columns()
+                self._rebuild_table_rows()
+                self._update_pagination_ui()
+            else:
+                # 加载占位文案
+                self.data_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_loading")))]
+
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[TableViewerTab] refresh_locale error: {e}")
+
     async def did_mount_async(self):  # pragma: no cover
         # Skip re-loading if tables already loaded (switching back to this view)
         if self.vm.tables_loaded:
@@ -759,16 +810,17 @@ class SQLConsoleTab(ft.Container):
             visible=False,  # pragma: no cover
         )  # pragma: no cover
 
+        self.empty_hint_text = ft.Text(  # pragma: no cover
+            I18n.get("data_sql_empty_hint"),  # pragma: no cover
+            color=AppColors.TEXT_HINT,  # pragma: no cover
+            size=14,  # pragma: no cover
+        )  # pragma: no cover
         self.empty_state = ft.Container(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     ft.Container(height=40),  # pragma: no cover
                     ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),  # pragma: no cover
-                    ft.Text(  # pragma: no cover
-                        I18n.get("data_sql_empty_hint"),  # pragma: no cover
-                        color=AppColors.TEXT_HINT,  # pragma: no cover
-                        size=14,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self.empty_hint_text,  # pragma: no cover
                 ],  # pragma: no cover
                 alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
@@ -783,6 +835,19 @@ class SQLConsoleTab(ft.Container):
             color=AppColors.TEXT_SECONDARY,  # pragma: no cover
         )  # pragma: no cover
 
+        self.date_fmt_hint_text = ft.Text(  # pragma: no cover
+            I18n.get("data_date_fmt_hint"),  # pragma: no cover
+            size=11,  # pragma: no cover
+            color=AppColors.TEXT_HINT,  # pragma: no cover
+        )  # pragma: no cover
+        self.btn_count = ft.OutlinedButton(  # pragma: no cover
+            I18n.get("data_btn_count"),  # pragma: no cover
+            style=AppStyles.outline_button(),  # pragma: no cover
+            on_click=lambda e: self._set_sql(  # pragma: no cover
+                "SELECT COUNT(*) FROM daily_quotes",  # pragma: no cover
+            ),  # pragma: no cover
+        )  # pragma: no cover
+
         self.content = ft.Column(  # pragma: no cover
             [  # pragma: no cover
                 ft.Container(  # pragma: no cover
@@ -794,11 +859,7 @@ class SQLConsoleTab(ft.Container):
                                     self.btn_run,  # pragma: no cover
                                     self.progress_ring,  # pragma: no cover
                                     ft.Container(expand=True),  # pragma: no cover
-                                    ft.Text(  # pragma: no cover
-                                        I18n.get("data_date_fmt_hint"),  # pragma: no cover
-                                        size=11,  # pragma: no cover
-                                        color=AppColors.TEXT_HINT,  # pragma: no cover
-                                    ),  # pragma: no cover
+                                    self.date_fmt_hint_text,  # pragma: no cover
                                     ft.OutlinedButton(  # pragma: no cover
                                         "SELECT * LIMIT 10",  # pragma: no cover
                                         style=AppStyles.outline_button(),  # pragma: no cover
@@ -806,13 +867,7 @@ class SQLConsoleTab(ft.Container):
                                             "SELECT * FROM stock_basic LIMIT 10",  # pragma: no cover
                                         ),  # pragma: no cover
                                     ),  # pragma: no cover
-                                    ft.OutlinedButton(  # pragma: no cover
-                                        I18n.get("data_btn_count"),  # pragma: no cover
-                                        style=AppStyles.outline_button(),  # pragma: no cover
-                                        on_click=lambda e: self._set_sql(  # pragma: no cover
-                                            "SELECT COUNT(*) FROM daily_quotes",  # pragma: no cover
-                                        ),  # pragma: no cover
-                                    ),  # pragma: no cover
+                                    self.btn_count,  # pragma: no cover
                                 ],  # pragma: no cover
                                 vertical_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
                             ),  # pragma: no cover
@@ -845,6 +900,26 @@ class SQLConsoleTab(ft.Container):
             spacing=0,  # pragma: no cover
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH,  # pragma: no cover
         )  # pragma: no cover
+
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
+
+        由父视图 DataExplorerView.refresh_locale 级联调用，自身不订阅 I18n。
+        注：status_text 为运行时动态文案，由 _run_query 流程自行管理，不在此刷新。
+        """
+        try:
+            MetaDataManager.invalidate_cache()
+            self.sql_editor.label = I18n.get("data_sql_label")
+            self.sql_editor.hint_text = I18n.get("data_sql_hint")
+            self.btn_run.text = I18n.get("data_sql_execute")
+            self.empty_hint_text.value = I18n.get("data_sql_empty_hint")
+            self.date_fmt_hint_text.value = I18n.get("data_date_fmt_hint")
+            self.btn_count.text = I18n.get("data_btn_count")
+            self.result_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_sql_result")))]
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[SQLConsoleTab] refresh_locale error: {e}")
 
     def _set_sql(self, sql):  # pragma: no cover
         self.sql_editor.value = sql
@@ -1009,17 +1084,19 @@ class DataExplorerView(ft.Container):
         self._ui_built = False  # Track if UI has been built
         self._pubsub_subscribed = False
         self._mount_task = None
+        self._locale_subscription_id: object | None = None
+        self._loading_text = ft.Text(  # pragma: no cover
+            I18n.get("data_loading"),  # pragma: no cover
+            size=12,  # pragma: no cover
+            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
+        )  # pragma: no cover
 
         # Start with a loading state to ensure instant tab switching
         self.loading_view = ft.Container(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     ft.ProgressRing(),  # pragma: no cover
-                    ft.Text(  # pragma: no cover
-                        I18n.get("data_loading"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    ),  # pragma: no cover
+                    self._loading_text,  # pragma: no cover
                 ],  # pragma: no cover
                 alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
@@ -1037,12 +1114,16 @@ class DataExplorerView(ft.Container):
         if getattr(self, "_mounted", False):
             return
         self._mounted = True
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
         if self.page:
             self._mount_task = self.page.run_task(self.did_mount_async)  # type: ignore[untyped]
 
     def will_unmount(self):  # pragma: no cover
         """Clean up subscriptions when view is detached"""
         self._mounted = False
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
         if self.page and getattr(self, "_pubsub_subscribed", False):
             try:
                 self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
@@ -1053,6 +1134,29 @@ class DataExplorerView(ft.Container):
             self._mount_task.cancel()
             self._mount_task = None
         self.vm.dispose()
+
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
+
+        级联调用 table_tab 和 sql_tab 的 refresh_locale。
+        """
+        try:
+            self._loading_text.value = I18n.get("data_loading")
+            if hasattr(self, "tabs"):
+                # 刷新 Tabs 标题
+                if len(self.tabs.tabs) >= 1:
+                    self.tabs.tabs[0].text = I18n.get("data_tab_explorer")
+                if len(self.tabs.tabs) >= 2:
+                    self.tabs.tabs[1].text = I18n.get("data_tab_sql")
+                # 级联调用子 tab 的 refresh_locale
+                if hasattr(self, "table_tab"):
+                    self.table_tab.refresh_locale()
+                if hasattr(self, "sql_tab"):
+                    self.sql_tab.refresh_locale()
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[DataExplorerView] refresh_locale error: {e}")
 
     async def did_mount_async(self):  # pragma: no cover
         import time as _time
@@ -1129,6 +1233,10 @@ class DataExplorerView(ft.Container):
                 # Yield to Flet event loop to ensure child controls are fully mounted
                 # before triggering data load (prevents 'Control must be added to page first')
                 await asyncio.sleep(0)
+                # 生命周期兜底：若语言切换发生在 _lazy_build_ui 完成前，
+                # refresh_locale 会因 hasattr(self, "tabs") 为 False 而跳过级联，
+                # 此处构建完成后显式调用一次 refresh_locale 兜底（§5.8 规范 7）。
+                self.refresh_locale()
 
         except Exception as e:
             logger.error(f"Error building DataExplorerView: {e}")

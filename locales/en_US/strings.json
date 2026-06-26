@@ -662,6 +662,7 @@
     "db_info": "Database Information",
     "db_test_connection": "Test Connection",
     "settings_db_title": "Database Configuration",
+    "settings_db_saved": "Database configuration saved",
     "settings_tab_database": "Database",
     "wizard_token_label": "Enter Tushare Pro Token",
     "wizard_token_hint": "Get from tushare.pro",

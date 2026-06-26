@@ -280,25 +280,34 @@ class AppLayout(ft.Container):
         """Subscribe to global events"""
         I18n.subscribe(self._on_locale_change)
 
-    def _on_locale_change(self):  # pragma: no cover
-        """Handle i18n locale change"""  # pragma: no cover
-        self.page.title = I18n.get("app_title")  # type: ignore[untyped]  # pragma: no cover
-        if self.nav_rail:  # pragma: no cover
-            nav_keys = [  # pragma: no cover
-                "nav_market",  # pragma: no cover
-                "nav_screener",  # pragma: no cover
-                "nav_backtest",  # pragma: no cover
-                "nav_data",  # pragma: no cover
-                "nav_tasks",  # pragma: no cover
-                "nav_settings",  # pragma: no cover
-            ]  # pragma: no cover
-            for i, key in enumerate(nav_keys):  # pragma: no cover
-                if i < len(self.nav_rail.destinations):  # type: ignore[untyped]  # pragma: no cover
-                    text = I18n.get(key)  # pragma: no cover
-                    self.nav_rail.destinations[i].label = text  # type: ignore[untyped]  # pragma: no cover
-                    self.nav_rail.destinations[i].label_content.value = text  # type: ignore[untyped]  # pragma: no cover
-            self.nav_rail.update()  # pragma: no cover
-        self.page.update()  # type: ignore[untyped]  # pragma: no cover
+    def _on_locale_change(self):
+        """Handle i18n locale change"""
+        try:
+            self.page.title = I18n.get("app_title")  # type: ignore[untyped]
+            # Brand header controls
+            if self.brand_text:
+                self.brand_text.value = I18n.get("app_brand")
+            if self.collapse_btn:
+                self.collapse_btn.tooltip = I18n.get("nav_toggle_collapse")
+            if self.nav_rail:
+                nav_keys = [
+                    "nav_market",
+                    "nav_screener",
+                    "nav_backtest",
+                    "nav_data",
+                    "nav_tasks",
+                    "nav_settings",
+                ]
+                for i, key in enumerate(nav_keys):
+                    if i < len(self.nav_rail.destinations):  # type: ignore[untyped]
+                        text = I18n.get(key)
+                        self.nav_rail.destinations[i].label = text  # type: ignore[untyped]
+                        self.nav_rail.destinations[i].label_content.value = text  # type: ignore[untyped]
+                self.nav_rail.update()
+            if self.page:
+                self.page.update()  # type: ignore[untyped]
+        except Exception as e:
+            logger.warning(f"[AppLayout] _on_locale_change failed: {e}")
 
     def _on_nav_change(self, e):
         """Handle Navigation Rail Change"""
@@ -372,6 +381,16 @@ class AppLayout(ft.Container):
         self.body.content = new_view  # type: ignore[untyped]
         self._current_tab_index = index
         self.nav_rail.selected_index = index  # type: ignore[untyped]
+
+        # 生命周期兜底：缓存的视图可能错过 I18n 通知（例如视图未挂载时收到语言切换），
+        # 切换到时显式调用 refresh_locale，确保文案与当前 locale 一致。
+        refresh_fn = getattr(new_view, "refresh_locale", None) or getattr(new_view, "_on_locale_change", None)
+        if callable(refresh_fn):
+            try:
+                refresh_fn()
+            except Exception as ex:
+                logger.debug(f"[AppLayout] View locale refresh skipped: {ex}")
+
         self.body.update()  # type: ignore[untyped]
         self.nav_rail.update()  # type: ignore[untyped]
         logger.debug(

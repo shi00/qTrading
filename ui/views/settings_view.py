@@ -95,25 +95,39 @@ class SettingsView(ft.Container):
 
     def _on_unmount(self):
         I18n.unsubscribe(self.refresh_locale)
-        # Cascade cleanup to child tabs
+        # Cascade cleanup to child tabs（§5.8 规范 6：统一检查 will_unmount）
         for tab in self.tab_contents:
-            if hasattr(tab, "_on_unmount"):
+            unmount_fn = getattr(tab, "will_unmount", None) or getattr(tab, "_on_unmount", None)
+            if callable(unmount_fn):
                 try:
-                    tab._on_unmount()
+                    unmount_fn()
                 except Exception as e:
                     logger.warning(f"Tab {type(tab).__name__} cleanup error: {e}")
 
     def refresh_locale(self):  # pragma: no cover
-        self.header_title.value = I18n.get("settings_title")  # pragma: no cover
-        # Update tab button labels from config  # pragma: no cover
-        for i, (key, _) in enumerate(self.TAB_CONFIG):  # pragma: no cover
-            if i < len(self.tab_buttons):  # pragma: no cover
-                self.tab_buttons[i].text = I18n.get(key)  # pragma: no cover
         try:  # pragma: no cover
+            self.header_title.value = I18n.get("settings_title")  # pragma: no cover
+            # Update tab button labels and tooltips from config  # pragma: no cover
+            for i, (key, _) in enumerate(self.TAB_CONFIG):  # pragma: no cover
+                if i < len(self.tab_buttons):  # pragma: no cover
+                    localized = I18n.get(key)  # pragma: no cover
+                    self.tab_buttons[i].text = localized  # pragma: no cover
+                    self.tab_buttons[i].tooltip = localized  # pragma: no cover
+            # 级联刷新当前激活的 Tab，避免延迟挂载 Tab 错过 I18n 通知（§5.8 规范 6/7）
+            if 0 <= self.current_tab_index < len(self.tab_contents):  # pragma: no cover
+                current_tab = self.tab_contents[self.current_tab_index]  # pragma: no cover
+                refresh_fn = getattr(current_tab, "refresh_locale", None) or getattr(  # pragma: no cover
+                    current_tab, "_on_locale_change", None
+                )
+                if callable(refresh_fn):  # pragma: no cover
+                    try:  # pragma: no cover
+                        refresh_fn()  # type: ignore[untyped]  # pragma: no cover
+                    except Exception as ex:  # pragma: no cover
+                        logger.debug(f"[SettingsView] Current tab refresh_locale skipped: {ex}")  # pragma: no cover
             if self.page:  # pragma: no cover
                 self.update()  # pragma: no cover
         except Exception as e:  # pragma: no cover
-            logger.debug(f"[SettingsView] Locale refresh update skipped: {e}")  # pragma: no cover
+            logger.warning(f"[SettingsView] refresh_locale failed: {e}")  # pragma: no cover
 
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:  # pragma: no cover
         """Centralized tab button style factory."""  # pragma: no cover
@@ -155,6 +169,21 @@ class SettingsView(ft.Container):
 
         for i, btn in enumerate(self.tab_buttons):
             btn.style = self._get_tab_button_style(is_selected=(i == idx))
+
+        # 生命周期兜底：延迟挂载的子 Tab 可能错过 I18n 订阅的 sync_immediately 同步，
+        # 切换到时显式调用 refresh_locale，确保文案与当前 locale 一致。
+        new_tab = self.tab_contents[idx]
+        if hasattr(new_tab, "refresh_locale"):
+            try:
+                new_tab.refresh_locale()  # type: ignore[untyped]
+            except Exception as ex:
+                logger.debug(f"[SettingsView] Tab refresh_locale skipped: {ex}")
+        elif hasattr(new_tab, "_on_locale_change"):
+            try:
+                new_tab._on_locale_change()  # type: ignore[untyped]
+            except Exception as ex:
+                logger.debug(f"[SettingsView] Tab _on_locale_change skipped: {ex}")
+
         self._safe_update()
 
     def show_snack(self, message, color=None, **kwargs):

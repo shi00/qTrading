@@ -67,6 +67,7 @@ class TaskCenterView(ft.Container):
         self.task_manager = TaskManager()
         self._mounted = False
         self._all_tasks: list[AppTask] = []
+        self._locale_subscription_id: object | None = None
 
         # Pagination state
         self._current_page = 1
@@ -89,15 +90,17 @@ class TaskCenterView(ft.Container):
             ),
         )
 
+        self.header_title = ft.Text(
+            I18n.get("nav_tasks"),
+            size=22,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        )
+
         header = ft.Row(
             [
                 ft.Icon(ft.Icons.TASK_ALT, color=AppColors.PRIMARY, size=28),
-                ft.Text(
-                    I18n.get("nav_tasks"),
-                    size=22,
-                    weight=ft.FontWeight.BOLD,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
+                self.header_title,
                 ft.Container(expand=True),
                 self.stats_text,
                 self.clear_btn,
@@ -107,6 +110,18 @@ class TaskCenterView(ft.Container):
         )
 
         # --- Empty state ---
+        self.empty_title = ft.Text(
+            I18n.get("task_empty_title"),
+            size=18,
+            weight=ft.FontWeight.W_500,
+            color=AppColors.TEXT_SECONDARY,
+        )
+        self.empty_subtitle = ft.Text(
+            I18n.get("task_empty_subtitle"),
+            size=13,
+            color=AppColors.TEXT_HINT,
+            text_align=ft.TextAlign.CENTER,
+        )
         self.empty_view = ft.Container(
             content=ft.Column(
                 [
@@ -115,18 +130,8 @@ class TaskCenterView(ft.Container):
                         size=64,
                         color=AppColors.TEXT_HINT,
                     ),
-                    ft.Text(
-                        I18n.get("task_empty_title"),
-                        size=18,
-                        weight=ft.FontWeight.W_500,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    ft.Text(
-                        I18n.get("task_empty_subtitle"),
-                        size=13,
-                        color=AppColors.TEXT_HINT,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
+                    self.empty_title,
+                    self.empty_subtitle,
                 ],
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
@@ -184,10 +189,32 @@ class TaskCenterView(ft.Container):
         self._mounted = True
         self.task_manager.subscribe(self._on_tasks_updated)
         self._refresh_ui(self.task_manager.get_all_tasks())
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
     def will_unmount(self):
         self._mounted = False
         self.task_manager.unsubscribe(self._on_tasks_updated)
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
+        try:
+            self.clear_btn.text = I18n.get("task_clear_finished")
+            self.header_title.value = I18n.get("nav_tasks")
+            self.empty_title.value = I18n.get("task_empty_title")
+            self.empty_subtitle.value = I18n.get("task_empty_subtitle")
+            self.btn_prev.tooltip = I18n.get("common_prev_page")
+            self.btn_next.tooltip = I18n.get("common_next_page")
+            # stats_text 重算
+            total = len(self._all_tasks)
+            running = sum(1 for t in self._all_tasks if t.status == TaskStatus.RUNNING)
+            self.stats_text.value = I18n.get("task_stats_fmt").format(total=total, running=running)
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[TaskCenterView] refresh_locale error: {e}")
 
     def _on_tasks_updated(self, current_tasks):
         if not self._mounted:

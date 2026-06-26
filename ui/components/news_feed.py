@@ -86,9 +86,13 @@ class NewsFeed(ft.Container):
 
     def update_locale(self):
         """Update static text when locale changes"""
-        self.empty_text.value = I18n.get("home_news_empty")
-        self.load_more_btn.content.content.value = I18n.get("news_load_more")  # type: ignore[untyped]
-        self.update()
+        try:
+            self.empty_text.value = I18n.get("home_news_empty")
+            self.load_more_btn.content.content.value = I18n.get("news_load_more")  # type: ignore[untyped]
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[NewsFeed] update_locale failed: {e}")
 
     def update_theme(self):
         """Re-render list on theme change"""

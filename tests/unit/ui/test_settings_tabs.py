@@ -1239,7 +1239,8 @@ class TestDatabaseTab:
         tab = self._make_tab()
         tab.show_snack = snack
         tab._on_save({"host": "localhost"})
-        snack.assert_called_once_with("Database configuration saved", "success")
+        # mock_i18n.get 返回 key 本身，I18n.get("settings_db_saved") → "settings_db_saved"
+        snack.assert_called_once_with("settings_db_saved", "success")
 
     def test_on_test_success_logs_debug(self, mock_page, caplog):
         tab = self._make_tab()

@@ -59,12 +59,13 @@ class DataSourceTab(ft.Container):
             AppColors.TEXT_HINT,  # pragma: no cover
         )  # pragma: no cover
 
+        self.health_summary_text = ft.Text(  # pragma: no cover
+            I18n.get("settings_check_health"),  # pragma: no cover
+            size=12,  # pragma: no cover
+            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
+        )  # pragma: no cover
         self.health_summary_container = ft.Container(  # pragma: no cover
-            content=ft.Text(  # pragma: no cover
-                I18n.get("settings_check_health"),  # pragma: no cover
-                size=12,  # pragma: no cover
-                color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-            ),  # pragma: no cover
+            content=self.health_summary_text,  # pragma: no cover
             padding=ft.padding.symmetric(vertical=10, horizontal=15),  # pragma: no cover
             bgcolor=AppColors.SURFACE_VARIANT,  # pragma: no cover
             border_radius=8,  # pragma: no cover
@@ -81,6 +82,11 @@ class DataSourceTab(ft.Container):
             style=style_health,  # pragma: no cover
             height=40,  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
+        )  # pragma: no cover
+        self.btn_health_report = ft.IconButton(  # pragma: no cover
+            icon=ft.Icons.INFO_OUTLINE,  # pragma: no cover
+            tooltip=I18n.get("health_report_title"),  # pragma: no cover
+            on_click=self.show_health_report_dialog,  # pragma: no cover
         )  # pragma: no cover
 
         self.header_health = SectionHeader(
@@ -102,11 +108,7 @@ class DataSourceTab(ft.Container):
                             self.header_health,  # pragma: no cover
                             ft.Row(  # pragma: no cover
                                 [  # pragma: no cover
-                                    ft.IconButton(  # pragma: no cover
-                                        icon=ft.Icons.INFO_OUTLINE,  # pragma: no cover
-                                        tooltip=I18n.get("health_report_title"),  # pragma: no cover
-                                        on_click=self.show_health_report_dialog,  # pragma: no cover
-                                    ),  # pragma: no cover
+                                    self.btn_health_report,  # pragma: no cover
                                     self.btn_check_health,  # pragma: no cover
                                 ],  # pragma: no cover
                             ),  # pragma: no cover
@@ -350,27 +352,55 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     def refresh_locale(self):  # pragma: no cover
-        # Historical Data Card
-        self.sync_button.text = I18n.get("settings_init_data")
-        self.sync_button.tooltip = I18n.get("settings_init_desc")
-        self.row_init.title_view.value = I18n.get("settings_init_data")
-        self.row_init.subtitle_view.value = I18n.get("settings_hint_first_run")
-        self.row_token.update_locale()
-        self.history_years_dropdown.label = I18n.get("settings_history_range")
-        self.history_years_dropdown.options = [
-            ft.dropdown.Option("1", f"1 {I18n.get('unit_year')}".strip()),
-            ft.dropdown.Option("2", f"2 {I18n.get('unit_years')}".strip()),
-            ft.dropdown.Option("3", f"3 {I18n.get('unit_years')}".strip()),
-            ft.dropdown.Option("4", f"4 {I18n.get('unit_years')}".strip()),
-            ft.dropdown.Option("5", f"5 {I18n.get('unit_years')}".strip()),
-        ]
+        try:
+            # Historical Data Card
+            self.sync_button.text = I18n.get("settings_init_data")
+            self.sync_button.tooltip = I18n.get("settings_init_desc")
+            self.row_init.title_view.value = I18n.get("settings_init_data")
+            self.row_init.subtitle_view.value = I18n.get("settings_hint_first_run")
+            self.row_token.update_locale()
+            self.history_years_dropdown.label = I18n.get("settings_history_range")
+            self.history_years_dropdown.options = [
+                ft.dropdown.Option("1", f"1 {I18n.get('unit_year')}".strip()),
+                ft.dropdown.Option("2", f"2 {I18n.get('unit_years')}".strip()),
+                ft.dropdown.Option("3", f"3 {I18n.get('unit_years')}".strip()),
+                ft.dropdown.Option("4", f"4 {I18n.get('unit_years')}".strip()),
+                ft.dropdown.Option("5", f"5 {I18n.get('unit_years')}".strip()),
+            ]
 
-        self.header_health.update_locale()
-        self.header_console.update_locale()
-        self.header_api.update_locale()
-        self.header_init.update_locale()
+            self.header_health.update_locale()
+            self.header_console.update_locale()
+            self.header_api.update_locale()
+            self.header_init.update_locale()
 
-        self._safe_update()
+            # Health dashboard
+            self.btn_check_health.text = I18n.get("settings_check_health")
+            self.btn_health_report.tooltip = I18n.get("health_report_title")
+            self.health_summary_text.value = I18n.get("settings_check_health")
+
+            # MetricCard labels (values are runtime data, refreshed separately)
+            self.metric_sync.set_label(I18n.get("ds_last_update"))
+            self.metric_coverage.set_label(I18n.get("ds_data_coverage"))
+            self.metric_health.set_label(I18n.get("ds_sys_health"))
+            self.metric_storage.set_label(I18n.get("ds_storage_usage"))
+
+            # ActionChip title/subtitle
+            self.action_full_sync.set_text(
+                I18n.get("settings_full_sync"),
+                I18n.get("ds_action_full"),
+            )
+            self.action_clear_cache.set_text(
+                I18n.get("settings_clear_cache"),
+                I18n.get("ds_action_clear"),
+            )
+            self.action_doubao_rebuild.set_text(
+                I18n.get("ds_btn_doubao_rebuild"),
+                I18n.get("ds_btn_doubao_rebuild_desc"),
+            )
+
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[DataSourceTab] refresh_locale failed: {e}")
 
     # --- Config Handlers ---
 

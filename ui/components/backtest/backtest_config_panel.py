@@ -172,6 +172,39 @@ class BacktestConfigPanel(ft.Container):
                 self.page.overlay.append(self.end_date_picker)
             self.page.update()
 
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。"""
+        try:
+            self.start_date_picker.help_text = I18n.get("date_picker_help")
+            self.start_date_picker.cancel_text = I18n.get("common_cancel")
+            self.start_date_picker.confirm_text = I18n.get("common_ok")
+            self.start_date_picker.error_format_text = I18n.get("date_picker_error_format")
+            self.start_date_picker.error_invalid_text = I18n.get("date_picker_error_invalid")
+            self.end_date_picker.help_text = I18n.get("date_picker_help")
+            self.end_date_picker.cancel_text = I18n.get("common_cancel")
+            self.end_date_picker.confirm_text = I18n.get("common_ok")
+            self.end_date_picker.error_format_text = I18n.get("date_picker_error_format")
+            self.end_date_picker.error_invalid_text = I18n.get("date_picker_error_invalid")
+            self.initial_capital_input.label = I18n.get("backtest_initial_capital")
+            self.rebalance_dropdown.label = I18n.get("backtest_rebalance_freq")
+            saved_rebalance = self.rebalance_dropdown.value
+            self.rebalance_dropdown.options = [
+                ft.dropdown.Option("signal", I18n.get("backtest_rebalance_signal")),
+                ft.dropdown.Option("daily", I18n.get("backtest_rebalance_daily")),
+                ft.dropdown.Option("weekly", I18n.get("backtest_rebalance_weekly")),
+                ft.dropdown.Option("monthly", I18n.get("backtest_rebalance_monthly")),
+            ]
+            self.rebalance_dropdown.value = saved_rebalance
+            self.max_position_input.label = I18n.get("backtest_max_positions")
+            self.stamp_duty_auto_checkbox.label = I18n.get("backtest_stamp_duty_auto")
+            self.run_btn.text = I18n.get("backtest_run")
+            # 重建 content 以刷新所有内联 ft.Text(I18n.get(...)) 文案
+            self.content = self._build_content()
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[BacktestConfigPanel] refresh_locale error: {e}")
+
     def will_unmount(self):
         """卸载时：确保关闭并清理对话框"""
         super().will_unmount()

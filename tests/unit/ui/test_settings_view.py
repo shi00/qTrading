@@ -410,3 +410,79 @@ class TestSettingsView:
 
                 assert len(page.overlay) == 1
                 assert isinstance(page.overlay[0], ft.SnackBar)
+
+    def test_on_tab_click_invokes_refresh_locale_fallback(self):
+        """切换到延迟挂载的 Tab 时，必须显式调用 refresh_locale 兜底（§5.8 规范 7）。"""
+        with patch("ui.views.settings_view.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "test"
+            mock_i18n.subscribe = MagicMock()
+            mock_i18n.unsubscribe = MagicMock()
+
+            mock_tab_with_refresh = MagicMock()
+            mock_tab_with_refresh.refresh_locale = MagicMock()
+            mock_tab_no_refresh = MagicMock()
+            # 删除 refresh_locale 属性以模拟旧组件，验证 _on_locale_change 兜底分支
+            del mock_tab_no_refresh.refresh_locale
+            mock_tab_no_refresh._on_locale_change = MagicMock()
+
+            with (
+                patch("ui.views.settings_view.DataSourceTab", return_value=mock_tab_with_refresh),
+                patch("ui.views.settings_view.DatabaseTab", return_value=mock_tab_no_refresh),
+                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
+                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
+                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
+                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
+            ):
+                mock_ai_tab.return_value = MagicMock()
+                mock_auto_tab.return_value = MagicMock()
+                mock_notify_tab.return_value = MagicMock()
+                mock_system_tab.return_value = MagicMock()
+
+                view = SettingsView()
+                view.page = _FakePage()
+
+                # 切到 idx=0（DataSourceTab，有 refresh_locale）
+                event0 = MagicMock()
+                event0.control.data = "0"
+                view._on_tab_click(event0)
+                mock_tab_with_refresh.refresh_locale.assert_called_once()
+
+                # 切到 idx=1（DatabaseTab，仅有 _on_locale_change）
+                event1 = MagicMock()
+                event1.control.data = "1"
+                view._on_tab_click(event1)
+                mock_tab_no_refresh._on_locale_change.assert_called_once()
+
+    def test_on_tab_click_refresh_locale_swallows_exception(self):
+        """refresh_locale 抛异常时不应中断 tab 切换流程（§5.8 规范 9）。"""
+        with patch("ui.views.settings_view.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "test"
+            mock_i18n.subscribe = MagicMock()
+            mock_i18n.unsubscribe = MagicMock()
+
+            mock_tab_with_error = MagicMock()
+            mock_tab_with_error.refresh_locale.side_effect = RuntimeError("refresh failed")
+
+            with (
+                patch("ui.views.settings_view.DataSourceTab", return_value=mock_tab_with_error),
+                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
+                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
+                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
+                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
+                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
+            ):
+                mock_db_tab.return_value = MagicMock()
+                mock_ai_tab.return_value = MagicMock()
+                mock_auto_tab.return_value = MagicMock()
+                mock_notify_tab.return_value = MagicMock()
+                mock_system_tab.return_value = MagicMock()
+
+                view = SettingsView()
+                view.page = _FakePage()
+
+                event = MagicMock()
+                event.control.data = "0"
+                # 不应抛出异常
+                view._on_tab_click(event)
+                assert view.current_tab_index == 0
+                mock_tab_with_error.refresh_locale.assert_called_once()

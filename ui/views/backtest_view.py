@@ -31,6 +31,14 @@ class BacktestView(ft.Container):
 
         self.vm = BacktestViewModel()
         self._selected_strategy: str | None = None
+        self._locale_subscription_id: object | None = None
+
+        self.title_text = ft.Text(
+            I18n.get("backtest_view_title"),
+            size=24,
+            weight=ft.FontWeight.BOLD,
+            color=AppColors.TEXT_PRIMARY,
+        )
 
         self.strategy_dropdown = ft.Dropdown(
             label=I18n.get("backtest_select_strategy"),
@@ -67,18 +75,38 @@ class BacktestView(ft.Container):
         self.content = self._build_content()
         self._load_strategies()
 
+    def did_mount(self):
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+
+    def will_unmount(self):
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
+        try:
+            self.title_text.value = I18n.get("backtest_view_title")
+            self.strategy_dropdown.label = I18n.get("backtest_select_strategy")
+            saved_strategy = self.strategy_dropdown.value
+            strategies = self.vm.get_available_strategies()
+            self.strategy_dropdown.options = [ft.dropdown.Option(key, name) for key, name in strategies.items()]
+            self.strategy_dropdown.value = saved_strategy
+            self.cancel_button.text = I18n.get("common_cancel")
+            if hasattr(self.config_panel, "refresh_locale"):
+                self.config_panel.refresh_locale()
+            if hasattr(self.result_panel, "refresh_locale"):
+                self.result_panel.refresh_locale()
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[BacktestView] refresh_locale error: {e}")
+
     def _build_content(self) -> ft.Column:
         return ft.Column(
             [
                 ft.Row(
-                    [
-                        ft.Text(
-                            I18n.get("backtest_view_title"),
-                            size=24,
-                            weight=ft.FontWeight.BOLD,
-                            color=AppColors.TEXT_PRIMARY,
-                        ),
-                    ],
+                    [self.title_text],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
                 ft.Divider(color=AppColors.DIVIDER),
@@ -202,4 +230,5 @@ class BacktestView(ft.Container):
 
     def dispose(self):
         """清理资源。"""
+        self.will_unmount()
         self.vm.dispose()

@@ -283,6 +283,37 @@ class TestAutomationTab:
 
                 assert tab.schedule_enabled.label == "translated_text"
 
+    def test_on_locale_change_preserves_dropdown_value(self):
+        """§5.8 规范 4：_on_locale_change 重建 time_options 后 schedule_time.value 必须保留。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_ch.get_auto_update_time.return_value = "16:30"
+            mock_ch.is_doubao_schedule_enabled.return_value = False
+            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_doubao_schedule_enabled = MagicMock()
+            mock_ch.set_doubao_schedule_time = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "translated_text"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                # 模拟用户选择了一个不在默认 _build_time_options 中的值
+                tab.schedule_time.value = "08:00"
+
+                # 重建 options 期间不应丢失 value
+                original_value = tab.schedule_time.value
+                tab._on_locale_change("en")
+
+                assert tab.schedule_time.value == original_value
+                assert tab.schedule_time.value == "08:00"
+                # options 被重建（新对象，非 None）
+                assert tab.schedule_time.options is not None
+                assert len(tab.schedule_time.options) > 0
+
 
 class TestNotificationsTab:
     def test_init_with_default_config(self):

@@ -117,6 +117,7 @@ class ScreenerView(ft.Container):
     def __init__(self, page: ft.Page):
         super().__init__(expand=True)
         self._page_ref = page
+        self._locale_subscription_id: object | None = None
 
         # ViewModel
         self.vm = ScreenerViewModel()
@@ -263,16 +264,17 @@ class ScreenerView(ft.Container):
             on_click=self._on_load_more_history,  # pragma: no cover
             visible=False,  # pragma: no cover
         )  # pragma: no cover
+        self.history_tree_title_text = ft.Text(  # pragma: no cover
+            I18n.get("screener_mode_history"),  # pragma: no cover
+            weight=ft.FontWeight.BOLD,  # pragma: no cover
+            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
+            size=14,  # pragma: no cover
+        )  # pragma: no cover
         self.history_tree_container = ft.Container(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     ft.Container(  # pragma: no cover
-                        content=ft.Text(  # pragma: no cover
-                            I18n.get("screener_mode_history"),  # pragma: no cover
-                            weight=ft.FontWeight.BOLD,  # pragma: no cover
-                            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                            size=14,  # pragma: no cover
-                        ),  # pragma: no cover
+                        content=self.history_tree_title_text,  # pragma: no cover
                         padding=ft.padding.only(left=12, top=10, bottom=5),  # pragma: no cover
                     ),  # pragma: no cover
                     ft.Divider(height=1, color=AppColors.DIVIDER),  # pragma: no cover
@@ -317,6 +319,9 @@ class ScreenerView(ft.Container):
         # Load Strategies Async
         self.page.run_task(self._load_strategies)  # type: ignore[untyped]
 
+        # Subscribe to I18n locale changes
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+
     def handle_resize(self):
         """窗口 resize 通知 — 刷新虚拟表格视口。"""
         table = getattr(self, "result_table", None)
@@ -324,6 +329,9 @@ class ScreenerView(ft.Container):
             table.refresh_viewport()
 
     def will_unmount(self):  # pragma: no cover
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
         self.vm.unsubscribe_task_manager()
         self.vm.dispose()
 
@@ -348,6 +356,106 @@ class ScreenerView(ft.Container):
 
         # U-1 fix: Reset mounted state for proper re-mount handling
         self._mounted = False
+
+    def refresh_locale(self):  # pragma: no cover
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
+        try:
+            # 顶部标题
+            if hasattr(self, "title_text"):
+                self.title_text.value = I18n.get("screener_title")
+
+            # 策略下拉框：label + options（重建策略名翻译，保留 missing_apis 标记与当前选择）
+            self.strategy_dropdown.label = I18n.get("select_strategy")
+            saved_strategy = self.strategy_dropdown.value
+            try:
+                strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
+                options = []
+                for key, info in strategies_with_dep.items():
+                    strategy_obj = self.vm.strategy_mgr.get_strategy(key)
+                    if strategy_obj and hasattr(strategy_obj, "name_key"):
+                        name = I18n.get(strategy_obj.name_key)
+                    else:
+                        name = info["name"]
+                    if info.get("missing_apis"):
+                        name = f"{name} ⚠️"
+                    options.append(ft.dropdown.Option(key, name))
+                self.strategy_dropdown.options = options
+                self.strategy_dropdown.value = saved_strategy
+            except Exception as ex:
+                logger.debug(f"[ScreenerView] strategy dropdown rebuild skipped: {ex}")
+
+            # 策略描述
+            if self.selected_strategy:
+                strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
+                if strategy_obj and hasattr(strategy_obj, "get_dynamic_description"):
+                    defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
+                    self.strategy_desc_text.value = strategy_obj.get_dynamic_description(defaults)
+                else:
+                    self.strategy_desc_text.value = self.vm.get_strategy_desc(self.selected_strategy)
+            else:
+                self.strategy_desc_text.value = I18n.get("screener_no_strategy_hint")
+
+            # 按钮
+            self.run_btn.text = I18n.get("run_screening")
+            self.export_btn.text = I18n.get("screener_export")
+
+            # 分页信息
+            self.page_info_text.value = I18n.get("screener_page_info").format(
+                current=self.vm.page_no,
+                total=getattr(self.vm, "total_pages", 0),
+            )
+
+            # 每页大小下拉框：重建 options 以严格符合 §5.8 规范 4
+            self.page_size_dropdown.label = I18n.get("screener_page_size")
+            saved_page_size = self.page_size_dropdown.value
+            per_page = I18n.get("screener_per_page")
+            self.page_size_dropdown.options = [
+                ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50", "100")
+            ]
+            self.page_size_dropdown.value = saved_page_size
+
+            # 模式切换 Segments
+            segments = self.mode_toggle.segments
+            if len(segments) >= 2:
+                if isinstance(segments[0].label, ft.Text):
+                    segments[0].label.value = I18n.get("screener_mode_run")
+                if isinstance(segments[1].label, ft.Text):
+                    segments[1].label.value = I18n.get("screener_mode_history")
+
+            # 历史加载更多按钮
+            self.history_load_more_btn.text = I18n.get("history_load_more")
+
+            # 历史树标题
+            if hasattr(self, "history_tree_title_text"):
+                self.history_tree_title_text.value = I18n.get("screener_mode_history")
+
+            # AI 分析报告标题
+            if hasattr(self, "log_title_text"):
+                self.log_title_text.value = I18n.get("ai_analysis_report")
+
+            # 结果表格列：失效列别名缓存后重建表头与行（label 来自 MetaDataManager）
+            try:
+                MetaDataManager.invalidate_cache()
+                df = self.vm.get_current_page_data()
+                if df is not None and not df.empty:
+                    vt_columns, formatted_rows = _build_table_data(df)
+                    self.result_table.set_columns(vt_columns)
+                    self.result_table.set_rows(
+                        formatted_rows,
+                        sort_col=self.vm.sort_column,
+                        sort_asc=self.vm.sort_ascending,
+                    )
+            except Exception as table_ex:
+                logger.debug(f"[ScreenerView] refresh_locale table rebuild skipped: {table_ex}")
+
+            # 策略参数面板
+            if self.selected_strategy:
+                self._render_strategy_params()
+
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[ScreenerView] refresh_locale error: {e}")
 
     def _on_task_unlock(self):  # pragma: no cover
         """Called by ViewModel when strategy task completes."""
@@ -439,15 +547,16 @@ class ScreenerView(ft.Container):
         # 1. Top Control Deck (Card Layout)
         # ==========================================
         # Left side: Title + Mode Toggle + Dropdown + Desc
+        self.title_text = ft.Text(  # pragma: no cover
+            I18n.get("screener_title"),  # pragma: no cover
+            size=20,  # pragma: no cover
+            weight=ft.FontWeight.BOLD,  # pragma: no cover
+            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
+        )  # pragma: no cover
         title_row = ft.Row(  # pragma: no cover
             [  # pragma: no cover
                 ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("screener_title"),  # pragma: no cover
-                    size=20,  # pragma: no cover
-                    weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
+                self.title_text,  # pragma: no cover
                 ft.Container(width=20),  # pragma: no cover
                 self.mode_toggle,  # pragma: no cover
             ],  # pragma: no cover
@@ -945,7 +1054,7 @@ class ScreenerView(ft.Container):
 
         self.params_container.update()
 
-    def _resolve_group_title(self, group_name: str, label_key: str = None) -> str:  # type: ignore[untyped]
+    def _resolve_group_title(self, group_name: str, label_key: str | None = None) -> str:  # type: ignore[untyped]
         """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
         from ui.theme import DEFAULT_GROUP_LABELS
 

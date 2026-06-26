@@ -22,6 +22,7 @@ class DatabaseTab(ft.Container):
         super().__init__()  # pragma: no cover
         self.show_snack = show_snack_callback  # pragma: no cover
         self.expand = True  # pragma: no cover
+        self._locale_subscription_id: object | None = None  # pragma: no cover
 
         self.config_panel = DatabaseConfigPanel(  # pragma: no cover
             on_save_callback=self._on_save,  # pragma: no cover
@@ -29,6 +30,13 @@ class DatabaseTab(ft.Container):
             show_header=True,  # pragma: no cover
             compact=False,  # pragma: no cover
             load_password=True,  # pragma: no cover
+        )  # pragma: no cover
+
+        self.title_text = ft.Text(  # pragma: no cover
+            I18n.get("settings_db_title"),  # pragma: no cover
+            size=24,  # pragma: no cover
+            weight=ft.FontWeight.W_500,  # pragma: no cover
+            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
         )  # pragma: no cover
 
         self.content = self._build_ui()  # pragma: no cover
@@ -43,14 +51,7 @@ class DatabaseTab(ft.Container):
                 ft.Row(  # pragma: no cover
                     [  # pragma: no cover
                         ft.Icon(ft.Icons.STORAGE, size=32, color=AppColors.PRIMARY),  # pragma: no cover
-                        ft.Text(  # pragma: no cover
-                            I18n.get("settings_db_title")  # pragma: no cover
-                            if I18n.get("settings_db_title")  # pragma: no cover
-                            else "Database Configuration",  # pragma: no cover
-                            size=24,  # pragma: no cover
-                            weight=ft.FontWeight.W_500,  # pragma: no cover
-                            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                        ),  # pragma: no cover
+                        self.title_text,  # pragma: no cover
                     ],  # pragma: no cover
                 ),  # pragma: no cover
                 ft.Container(height=20),  # pragma: no cover
@@ -70,7 +71,7 @@ class DatabaseTab(ft.Container):
 
     def _on_save(self, config: dict):
         """Handle successful save."""
-        self.show_snack("Database configuration saved", "success")
+        self.show_snack(I18n.get("settings_db_saved"), "success")
 
     def _on_test_success(self, config: dict):
         """Handle successful connection test."""
@@ -78,6 +79,21 @@ class DatabaseTab(ft.Container):
 
     def _on_mount(self):
         self.config_panel.reload_config()
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
     def _on_unmount(self):
-        pass
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
+
+        注：DatabaseConfigPanel 已自行订阅 I18n，由 I18n.set_locale 自动触发。
+        """
+        try:
+            self.title_text.value = I18n.get("settings_db_title")
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[DatabaseTab] refresh_locale error: {e}")

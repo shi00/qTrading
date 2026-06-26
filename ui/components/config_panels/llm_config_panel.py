@@ -89,6 +89,7 @@ class LLMConfigPanel(ft.Container):
         self._is_azure = False
         self._api_key_modified = False
         self._is_verifying = False
+        self._locale_subscription_id: object | None = None
 
         self._build_ui()
 
@@ -1099,31 +1100,37 @@ class LLMConfigPanel(ft.Container):
             logger.debug("[LLMConfigPanel] Safe update skipped: %s", DataSanitizer.sanitize_error(e))
 
     def did_mount(self):  # pragma: no cover
-        I18n.subscribe(self._on_locale_change)
+        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
 
     def will_unmount(self):  # pragma: no cover
-        I18n.unsubscribe(self._on_locale_change)
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
 
-    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
-        self.provider_dropdown.label = I18n.get("llm_select_provider")
-        self.model_dropdown.label = I18n.get("llm_select_model")
-        self.custom_model_input.label = I18n.get("llm_custom_model")
-        self.base_url_input.label = I18n.get("llm_base_url")
-        self.api_key_input.label = I18n.get("llm_api_key")
-        self.azure_resource_input.label = I18n.get("llm_azure_resource_name")
-        self.azure_deployment_input.label = I18n.get("llm_azure_deployment_name")
-        self.azure_version_input.label = I18n.get("llm_azure_api_version")
-        self.test_button.text = I18n.get("llm_test_connection")
-        self.refresh_models_button.tooltip = I18n.get("llm_refresh_models")
-        self.save_button.text = I18n.get("settings_save_config")
+    def _on_locale_change(self):  # pragma: no cover
+        try:
+            self.provider_dropdown.label = I18n.get("llm_select_provider")
+            self.model_dropdown.label = I18n.get("llm_select_model")
+            self.custom_model_input.label = I18n.get("llm_custom_model")
+            self.base_url_input.label = I18n.get("llm_base_url")
+            self.api_key_input.label = I18n.get("llm_api_key")
+            self.azure_resource_input.label = I18n.get("llm_azure_resource_name")
+            self.azure_deployment_input.label = I18n.get("llm_azure_deployment_name")
+            self.azure_version_input.label = I18n.get("llm_azure_api_version")
+            self.test_button.text = I18n.get("llm_test_connection")
+            self.refresh_models_button.tooltip = I18n.get("llm_refresh_models")
+            self.save_button.text = I18n.get("settings_save_config")
 
-        self.provider_dropdown.options = self._build_provider_options()
-        self.provider_dropdown.value = self._current_provider
+            self.provider_dropdown.options = self._build_provider_options()
+            self.provider_dropdown.value = self._current_provider
 
-        self.model_dropdown.options = self._build_model_options(self._current_provider)
+            self.model_dropdown.options = self._build_model_options(self._current_provider)
 
-        self._update_links_row()
+            self._update_links_row()
 
-        self.section_header.update_locale()
+            self.section_header.update_locale()
 
-        self.update()
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[LLMConfigPanel] refresh_locale failed: {e}")

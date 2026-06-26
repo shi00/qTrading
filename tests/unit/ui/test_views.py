@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import datetime
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
@@ -8,6 +9,7 @@ import pytest
 
 from services.task_manager import TaskStatus
 from tests.unit.ui.conftest import set_page, wrap_mock_page
+from ui.views.home_view import logger as home_view_logger
 from ui.views.task_center_view import (
     PAGE_SIZE,
     TaskCenterView,
@@ -143,12 +145,14 @@ class TestSettingsView:
         self.mock_i18n.unsubscribe.assert_called_with(view.refresh_locale)
 
     def test_on_unmount_cascades_to_child_tabs(self, mock_page):
+        """§5.8 规范 6：_on_unmount 应级联调用子 tab 的 will_unmount（优先）或 _on_unmount（兼容）"""
         view = self._make_view()
         set_page(view, mock_page)
         mock_tab = MagicMock()
         view.tab_contents = [mock_tab]
         view._on_unmount()
-        mock_tab._on_unmount.assert_called_once()
+        # 优先调用 will_unmount（规范要求），MagicMock 同时具备两者，will_unmount 优先
+        mock_tab.will_unmount.assert_called_once()
 
     def test_update_theme_propagates_to_tabs(self, mock_page):
         view = self._make_view()
@@ -621,6 +625,37 @@ class TestHomeView:
         mock_page.pubsub.unsubscribe.assert_called_once_with(view._on_broadcast_message)
         assert view._pubsub_subscribed is False
 
+    def test_refresh_locale_cascades_to_sub_components(self, mock_page):
+        """§5.8 规范 6：refresh_locale 必须级联调用 dashboard.update_locale 和 news_feed.update_locale。"""
+        view = self._make_view()
+        set_page(view, wrap_mock_page(mock_page))
+        view.update = MagicMock()
+        # vm.last_market_data 必须返回 dict 以便 .get("date", "--") 与 .get("stale", False) 正常工作
+        self.mock_vm.last_market_data = {}
+
+        view.refresh_locale()
+
+        view.dashboard.update_locale.assert_called_once()
+        view.news_feed.update_locale.assert_called_once()
+        view.update.assert_called_once()
+        # 头部文案也应被刷新
+        self.mock_i18n.get.assert_any_call("home_title")
+        self.mock_i18n.get.assert_any_call("home_live_news")
+        self.mock_i18n.get.assert_any_call("home_refresh")
+
+    def test_refresh_locale_swallows_exception(self, mock_page, caplog):
+        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
+        view = self._make_view()
+        set_page(view, wrap_mock_page(mock_page))
+        # 强制 I18n.get 抛异常以触发 try/except
+        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
+
+        with caplog.at_level(logging.WARNING, logger=home_view_logger.name):
+            # 不应抛出异常
+            view.refresh_locale()
+
+        assert any("refresh_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
+
 
 class TestAppLayout:
     patches: list
@@ -870,3 +905,42 @@ class TestAppLayout:
         with patch("ui.app_layout.ScreenerView", FakeSV):
             await layout.run_strategy_from_home("test_strategy")
             mock_task.cancel.assert_called_once()
+
+    def test_on_locale_change_refreshes_ui_state(self, mock_page):
+        """§5.8 规范 1/5/6：_on_locale_change 正向路径刷新 UI 控件文案。
+
+        覆盖 app_layout.py:283-310 的正向路径：
+        - page.title / brand_text.value / collapse_btn.tooltip 被刷新
+        - nav_rail.destinations[i].label 与 label_content.value 被刷新
+        - nav_rail.update 被调用
+        mock_i18n.get 返回 key 本身，便于断言。
+        """
+        layout = self._make_layout(mock_page)
+        # nav_rail 是真实 ft.NavigationRail，未绑定 page 时 update() 抛 AssertionError
+        layout.nav_rail.update = MagicMock()
+        layout._on_locale_change()
+        # 规范 5：实例属性被刷新
+        assert layout.page.title == "app_title"
+        assert layout.brand_text.value == "app_brand"
+        assert layout.collapse_btn.tooltip == "nav_toggle_collapse"
+        # 规范 6：nav_rail.destinations 级联刷新
+        nav_keys = ["nav_market", "nav_screener", "nav_backtest", "nav_data", "nav_tasks", "nav_settings"]
+        for i, key in enumerate(nav_keys):
+            assert layout.nav_rail.destinations[i].label == key
+            assert layout.nav_rail.destinations[i].label_content.value == key
+        # nav_rail.update 被调用一次
+        layout.nav_rail.update.assert_called_once()
+
+    def test_on_locale_change_swallows_exception_and_logs_warning(self, mock_page):
+        """§5.8 规范 9：_on_locale_change 异常时降级为 logger.warning，不抛出。"""
+        layout = self._make_layout(mock_page)
+        # 让 I18n.get 抛异常，触发 _on_locale_change 的 except 分支
+        self.mock_i18n.get.side_effect = RuntimeError("test error")
+        with patch("ui.app_layout.logger") as mock_logger:
+            # 不应抛出异常
+            layout._on_locale_change()
+            mock_logger.warning.assert_called_once()
+            # 验证警告消息包含异常信息与方法名
+            warning_msg = mock_logger.warning.call_args[0][0]
+            assert "test error" in warning_msg
+            assert "_on_locale_change" in warning_msg

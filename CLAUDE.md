@@ -1,10 +1,10 @@
-# CLAUDE.md — AStockScreener (QTrading) 项目上下文
+# CLAUDE.md — AStockScreener (QTrading) 项目宪法
 
-> 本文件为 LLM 对话上下文文件，每次在 Trae/Cursor 等 IDE 中与 AI 对话时自动加载。
-> 请严格遵循以下交互准则、架构原则、设计规则和编码规范。
+> 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
+> 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.7.0，最后校对：2026-06-18
-> **阅读顺序建议**：§3 (红线，先读后写) → §1.9 (验证命令) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。开发工作流请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+> **对应版本**：0.8.0，最后校对：2026-06-26
+> **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
 
 ---
 
@@ -29,16 +29,16 @@
 ### 1.3 极简设计 (Simplicity First)
 
 - **编写解决当前问题的最少代码。绝不进行过度、推测性的设计。**
-- **不做多余功能**：仅实现明确要求的特性，绝不添加“未来可能有用”的代码。
+- **不做多余功能**：仅实现明确要求的特性，绝不添加"未来可能有用"的代码。
 - **拒绝过度设计**：不要为"未来可能的需求"引入抽象层；当前能跑通的最简方案优先。
-- **拒绝过度抽象**：绝不为单次使用的代码做抽象封装或提供虚假的“灵活性”、“可配置性”。
-- **精简行数**：如果 200 行代码可以通过重构缩减到 50 行，必须重写。时刻反思：“这是否显得过于复杂？”。
+- **拒绝过度抽象**：绝不为单次使用的代码做抽象封装或提供虚假的"灵活性"、"可配置性"。
+- **精简行数**：如果 200 行代码可以通过重构缩减到 50 行，必须重写。时刻反思："这是否显得过于复杂？"。
 - **合理异常处理**：仅对真实发生的边界情况和合理异常进行捕获，不对绝对不可能发生的场景编写冗余的防御代码。
 
 ### 1.4 微创修改 (Surgical Changes)
 
 - **仅修改必须触及的代码，只清理自己的逻辑，绝不随意改变周边代码。**
-- **禁止过度修饰**：不要顺手“优化”周边的格式、命名、注释或无关逻辑。
+- **禁止过度修饰**：不要顺手"优化"周边的格式、命名、注释或无关逻辑。
 - **不做无益重构**：绝不重构没坏的代码。
 - **严格融入风格**：必须与现有代码的编码风格（哪怕是你认为不够优雅的风格）保持绝对一致。
 - **残留代码处理**：若发现无关的死代码（Dead Code），在回复中指出，绝不顺手删除。
@@ -47,9 +47,9 @@
 
 - **明确定义成功标准，持续迭代直到验证通过。**
 - **测试驱动思维**：将每个开发任务转换为可验证的目标：
-  - “添加输入校验” → “编写针对无效输入的测试并使其通过”。
-  - “修复 Bug” → “先编写能稳定复现该 Bug 的测试，再修复代码使测试通过”。
-  - “重构逻辑” → “确保重构前后的测试均完全通过”。
+  - "添加输入校验" → "编写针对无效输入的测试并使其通过"。
+  - "修复 Bug" → "先编写能稳定复现该 Bug 的测试，再修复代码使测试通过"。
+  - "重构逻辑" → "确保重构前后的测试均完全通过"。
 - **多步规划**：对于复杂或多步骤的任务，必须在动手前输出简要的步骤与验证清单：
   ```text
   1. [步骤A] → 验证: [具体检查点/命令]
@@ -75,19 +75,19 @@
 
 | 任务类型 | 必读章节 / 文件 |
 |---------|----------------|
-| 新增/修改策略 | §6.1、§6.2、§6.3、`strategies/base_strategy.py`；工作流见 CONTRIBUTING.md「新增一个策略」 |
-| 新增/修改 DAO 或数据表 | §6.4、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 CONTRIBUTING.md「新增一张数据表」/「新增一个 DAO」 |
-| 新增/修改数据同步 | §6.5、`data/sync/base.py` |
-| 新增/修改 UI 视图 | §6.8、`ui/app_layout.py`、对应 ViewModel；工作流见 CONTRIBUTING.md「新增一个 UI 视图」 |
-| 修改异常处理 | §5.7、§3 红线、`utils/error_classifier.py` |
-| 修改单例 / 资源生命周期 | §4.3、`utils/singleton_registry.py`、`utils/shutdown.py` |
-| 性能优化 | §6.7 性能红线、`utils/log_decorators.py` |
-| 调整 CI / 依赖 | §8、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
-| 新增/修改回测 | §6.4、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
+| 新增/修改策略 | CONTRIBUTING.md「策略模式实现模板」、`strategies/base_strategy.py`；工作流见 CONTRIBUTING.md「新增一个策略」 |
+| 新增/修改 DAO 或数据表 | CONTRIBUTING.md「DAO 模式」、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 CONTRIBUTING.md「新增一张数据表」/「新增一个 DAO」 |
+| 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
+| 新增/修改 UI 视图 | CONTRIBUTING.md「语言切换响应」、`ui/app_layout.py`、对应 ViewModel；工作流见 CONTRIBUTING.md「新增一个 UI 视图」 |
+| 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
+| 修改单例 / 资源生命周期 | §4.3、CONTRIBUTING.md「单例模式实现模板」、`utils/singleton_registry.py`、`utils/shutdown.py` |
+| 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
+| 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
+| 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
 
 ### 1.9 关键验证命令
 
-修改代码后，按以下顺序自检（完整命令见 CONTRIBUTING.md §2）：
+修改代码后，按以下顺序自检（完整命令见 CONTRIBUTING.md「常用开发与测试命令」）：
 
 ```bash
 ruff check .              # Lint
@@ -156,6 +156,7 @@ pre-commit run --all-files  # 全量 hook 检查
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别。
 - 涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
+- **UI 语言切换响应**：新增/修改 UI 视图或组件必须遵守 [CONTRIBUTING.md「语言切换响应 (I18n Hot Reload)」](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload) 的 9 条规范（订阅机制、回调命名、纯 UI 操作、options 重建、实例属性提取、子组件级联、生命周期兜底、MetaDataManager 缓存失效、异常降级）。
 
 ---
 
@@ -205,45 +206,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.3 单例模式
 
-使用 `@register_singleton` 装饰器统一管理单例生命周期：
-
-```python
-import threading
-from utils.singleton_registry import register_singleton
-
-@register_singleton
-class MyService:
-    _instance = None
-    _initialized = False
-    _lock = threading.Lock()
-
-    def __new__(cls, *args, **kwargs):
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = super().__new__(cls)
-                cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self):
-        if self._initialized:
-            return
-        # ... 初始化逻辑 ...
-        self._initialized = True
-
-    @classmethod
-    def _reset_singleton(cls):
-        """Reset singleton for testing only. NEVER call in production."""
-        with cls._lock:
-            cls._instance = None
-            cls._initialized = False
-
-    @classmethod
-    def _atexit_cleanup(cls):
-        """Optional: invoked by singleton_registry's centralized atexit handler."""
-        if cls._instance is not None:
-            # 释放外部资源 (线程池、连接、文件句柄等)
-            ...
-```
+使用 `@register_singleton` 装饰器统一管理单例生命周期。**完整代码模板、DI 准则与 `_atexit_cleanup` 实现见 [CONTRIBUTING.md「单例模式实现模板」](./CONTRIBUTING.md#单例模式实现模板)。**
 
 **所有单例必须:**
 
@@ -254,16 +217,6 @@ class MyService:
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 方法 (由 `singleton_registry` 的集中 `atexit` 处理器调用，按注册逆序执行)
 6. 必须支持通过参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖
 
-**设计准则：依赖注入优先**
-
-新增单例须支持依赖注入/可注入时钟：构造函数应接收可选的 config/clock 注入参数，默认走生产实现（ConfigHandler/time.monotonic），测试可传 fake。这样无需替换 sys.modules 或全局 patch。
-
-```python
-def __init__(self, *, config=None, clock=None):
-    self._config = config  # None → 走 ConfigHandler
-    self._clock = clock or time.monotonic  # None → 走 time.monotonic
-```
-
 **@register_singleton 单例**: 见 `utils/singleton_registry.py` 的注册清单（当前含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/LocalModelManager/StrategyManager）。
 
 **非注册单例**: `ConfigHandler` (静态方法/类方法 + RWLockFair 保护)、`ProxyManager` (非装饰器单例)。
@@ -272,318 +225,93 @@ def __init__(self, *, config=None, clock=None):
 
 ---
 
-## 5. 编码规范
+## 5. 编码规范索引
+
+详细规范见 [CONTRIBUTING.md「实现规范手册」](./CONTRIBUTING.md#第三部分实现规范手册)，此处仅列要点。
 
 ### 5.1 Python 风格
 
-- **Python 版本**: 3.13+ (强制使用新语法：`type[T]` 泛型、`X | Y` 联合类型、`type Alias = ...`、PEP 695 泛型类等；禁用 `typing.Union` 和 `typing.Optional`)
-- **行宽**: 120 字符
-- **缩进**: 4 空格
-- **引号**: 双引号 `"`
-- **格式化工具**: Ruff (`ruff format`)
-- **Lint 规则**: `F, E, W, UP, B, SIM, BLE` (见 `pyproject.toml [tool.ruff.lint]`)
-- **忽略规则**: `E501, E402, SIM102, SIM105, SIM108, SIM117, BLE001`
+- Python 3.13+，行宽 120，缩进 4 空格，双引号，Ruff 格式化。
+- Lint 规则 `F, E, W, UP, B, SIM, BLE`，忽略 `E501, E402, SIM102, SIM105, SIM108, SIM117, BLE001`。
 
 ### 5.2 类型标注
 
-- **类型检查器**: Pyright (`basic` 模式，版本见 `.github/workflows/ci_cd.yml`；完整配置见 `pyrightconfig.json`，优先级高于 `pyproject.toml`)
-- **关键 Pyright 规则**:
-
-| 规则 | 级别 | 说明 |
-|------|------|------|
-| `reportCallIssue` | `error` | 函数调用类型不匹配必须修复 |
-| `reportOptionalOperand` | `error` | Optional 值参与运算必须先判空 |
-| `reportOptionalIterable` | `error` | Optional 值用于迭代必须先判空 |
-| `reportGeneralTypeIssues` | `error` | 通用类型问题必须修复 |
-| `reportMissingImports` | `error` | 缺失导入必须修复 |
-| `reportOptionalMemberAccess` | `warning` | Optional 成员访问应判空 |
-| `reportArgumentType` | `warning` | 参数类型不匹配应修复 |
-| `reportAttributeAccessIssue` | `warning` | 属性访问问题应修复 |
-| `reportOptionalSubscript` | `warning` | Optional 值下标访问应判空 |
-
-- **`type: ignore` 必须带理由** (pre-commit 强制拦截裸 `# type: ignore`):
-
-  ```python
-  # ✅ 正确
-  task._coroutine_gen = None  # type: ignore[assignment]
-
-  # ❌ 错误 (pre-commit 会拒绝)
-  task._coroutine_gen = None  # type: ignore
-  ```
+- Pyright `basic` 模式，配置见 `pyrightconfig.json` (优先级高于 `pyproject.toml`)。
+- `# type: ignore` 必须带 `[reason]` (pre-commit 强制拦截裸 `# type: ignore`)。
+- **完整 Pyright 规则表见 [CONTRIBUTING.md「类型标注与 Pyright 规则」](./CONTRIBUTING.md#类型标注与-pyright-规则)。**
 
 ### 5.3 导入顺序
 
-```python
-# 1. 标准库
-import asyncio
-import logging
-
-# 2. 第三方库
-import pandas as pd
-import polars as pl
-
-# 3. 本项目模块 (按层级从低到高：core → utils → data → services → strategies → ui)
-from core.i18n import I18n
-from utils.thread_pool import TaskType, ThreadPoolManager
-from data.cache.cache_manager import CacheManager
-```
+标准库 → 第三方库 → 本项目模块（按层级从低到高：core → utils → data → services → strategies → ui）。
 
 ### 5.4 日志规范
 
-- 使用 `logging.getLogger(__name__)` 获取模块级 logger。
-- 日志前缀格式: `[ClassName]` 或 `[ModuleName]`，便于过滤。
-- **日志级别选择**:
-  - `DEBUG` — 性能采样、细粒度执行轨迹 (生产默认不输出)
-  - `INFO` — 关键状态变迁 (服务启动、连接建立、任务完成)
-  - `WARNING` — 慢查询、慢写入、降级路径、关机期间的连接错误、可恢复异常
-  - `ERROR` — 操作失败但不影响进程
-  - `CRITICAL` — 系统级失败 (`MemoryError`、磁盘满)、数据完整性问题
-- **关机期间** 的连接错误 (`no active connection` / `database is closed` / `ConnectionDoesNotExistError`) 必须降级为 `warning`，避免污染日志。
-- **UI 交互埋点** 使用专用 `UILogger.log_action()` 类方法或 `@log_ui_action` 装饰器，自动写入 `ui.action` logger 通道。
-- **敏感参数** 必须经 `DataSanitizer.sanitize_args()` 或 `DataSanitizer.sanitize_error()` 脱敏后再记录。
-- **Correlation ID** 涉及跨模块的请求链路追踪，使用 `utils/correlation.py` 提供的工具串联日志。
+- `logging.getLogger(__name__)`，前缀 `[ClassName]` 或 `[ModuleName]`。
+- 关机期间的连接错误必须降级为 `warning`。
+- 敏感参数必须经 `DataSanitizer` 脱敏。
+- **完整日志级别选择、UI 埋点、Correlation ID 规范见 [CONTRIBUTING.md「日志规范」](./CONTRIBUTING.md#日志规范)。**
 
 ### 5.5 异步编程规范
 
-- **asyncio 模式**: 全项目使用 `asyncio` 驱动异步。
-- **线程安全**: UI 回调可能来自线程池，使用 `loop.call_soon_threadsafe()` 转移到事件循环。
-- **线程池分离**: IO 密集型使用 `TaskType.IO`，CPU 密集型 (NumPy/Pandas 等 GIL 释放型) 使用 `TaskType.CPU`；纯 Python CPU 密集任务应使用 `ProcessPoolExecutor` (项目暂无)。
-- **CancelledError 必须传播**: 永远 `raise` 不吞没，否则破坏优雅停机。
-- **事件循环绑定对象**: 使用 `utils.loop_local` 的 `get_loop_local()` / `del_loop_local()` / `clear_all_loop_locals()` 管理 `asyncio.Event`、`asyncio.Lock` 等绑定到特定事件循环的对象，避免跨循环死锁。
-- **`asyncio.gather`** 涉及失败可恢复场景使用 `return_exceptions=True`，并在调用方逐个分类异常。
-- **不要在 `__init__`** 中调用 `asyncio.create_task()`，会绑定到错误的事件循环；改为提供 `async def initialize()` 方法。
+- 全项目 `asyncio` 驱动；`CancelledError` 必须传播 (R2)。
+- 事件循环绑定对象使用 `get_loop_local()` (R11)。
+- **完整规范（线程池分离、gather、`__init__` 限制等）见 [CONTRIBUTING.md「异步编程规范」](./CONTRIBUTING.md#异步编程规范)。**
 
 ### 5.6 数据库操作规范
 
-- **异步引擎**: 使用 `asyncpg` 驱动 (通过 SQLAlchemy asyncio)。
-- **参数占位符**: 使用 `$1, $2, ...` (asyncpg 原生占位符，非 `%s`)。
-- **批量写入**: 使用 `_save_upsert()` (基于 `ON CONFLICT DO UPDATE`，内置分块，大小见 `base_dao.py`)。
-- **分块 IN 查询**: 使用 `chunked_in_query()` 避免 PostgreSQL 参数上限 (分块大小见 `base_dao.py`)。
-- **引擎状态检查**: DAO 操作前必须确认引擎仍可用；关机/释放后继续访问时应抛出或传播 `EngineDisposedError`，调用方按关机降级处理。
-- **维护锁**: DAO 操作前 `await self._get_maintenance_event().wait()` 等待维护完成 (基类已自动处理)。
-- **慢查询阈值**: 见 `base_dao.py` 配置 (基类自动告警，无需手动埋点)。
-- **DB 异常应在 DAO 层处理**: 业务层只接收 `EngineDisposedError` 和业务异常，不应直接捕获 `asyncpg.*Error`。
+- asyncpg 驱动，占位符 `$1, $2, ...` (R4)。
+- 批量写入用 `_save_upsert()` (R8)，分块 IN 查询用 `chunked_in_query()`。
+- **完整规范（引擎状态、维护锁、慢查询、异常分层）见 [CONTRIBUTING.md「数据库操作规范」](./CONTRIBUTING.md#数据库操作规范)。**
 
 ### 5.7 错误处理模式
 
-```python
-# ✅ 标准异常处理模式
-try:
-    result = await some_operation()
-except asyncio.CancelledError:
-    logger.warning("[Module] Cancelled during shutdown.")
-    raise  # R2: 必须传播
-except EngineDisposedError:
-    logger.warning("[Module] Engine disposed, skipping operation.")
-    return  # 优雅降级
-except Exception as e:
-    error_info = classify_error(e, context="general")     # 返回 dict: code / message_key [/ format_args / should_retry]
-    severity = classify_severity(e, context="general")    # 返回: system / recoverable / operational
-    if severity == "system":
-        logger.critical(f"[Module] SYSTEM-LEVEL failure: {e}", exc_info=True)
-        raise  # 系统级错误必须上抛
-    elif severity == "recoverable":
-        logger.warning(f"[Module] Recoverable error ({error_info['code']}): {e}")
-    else:
-        logger.error(f"[Module] Operational error: {e}", exc_info=True)
-```
+- 使用 `classify_error()` + `classify_severity()` 分类，按严重度选择日志级别。
+- **完整代码示例与分类上下文表见 [CONTRIBUTING.md「错误处理标准模式」](./CONTRIBUTING.md#错误处理标准模式)。**
 
-**错误分类上下文** (`classify_error` 的 `context` 参数):
+### 5.8 语言切换响应规范 (I18n Hot Reload)
 
-- `"token"` — Tushare Token 验证错误
-- `"llm"` — LLM API 调用错误 (区分永久错误 / 瞬态可重试错误，返回 `should_retry` 字段)
-- `"db"` — 数据库连接 / 认证错误
-- `"chart"` — 图表渲染错误
-- `"general"` — 通用错误 (默认)
+新增/修改 UI 视图或组件必须遵守 9 条规范（订阅机制、回调命名、纯 UI 操作、options 重建、实例属性提取、子组件级联、生命周期兜底、MetaDataManager 缓存失效、异常降级）。
 
-**UI 层错误展示** 使用 `get_error_message(error_info)` 把 `message_key` 翻译为本地化文案。
+**完整规范、判定决策树、标准 View 模板、测试要求见 [CONTRIBUTING.md「语言切换响应 (I18n Hot Reload)」](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload)。**
 
 ---
 
-## 6. 设计模式
+## 6. 设计模式索引
 
-### 6.1 策略模式 (自动注册)
+详细实现模板见 [CONTRIBUTING.md「实现规范手册」](./CONTRIBUTING.md#第三部分实现规范手册)，此处仅列要点。
 
-```python
-from strategies.base_strategy import BaseStrategy, register_strategy
-from strategies.utils import StrategyContext
-
-@register_strategy("my_strategy")
-class MyStrategy(BaseStrategy):
-    required_context_keys: tuple[str, ...] = ("screening_data",)
-    required_tables: tuple[str, ...] = ("daily_quotes",)
-    required_history_days = 60
-
-    def __init__(self):
-        super().__init__(name_key="strategy_my", desc_key="strategy_my_desc")
-
-    async def filter(self, context: StrategyContext):
-        # 策略逻辑：返回过滤后的 DataFrame
-        ...
-```
-
-- **策略入口**: `strategies/all_strategies.py` 通过导入触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 统一暴露。
-- **策略 API**: 依赖声明 (`required_context_keys`/`required_tables`/`required_history_days`/`required_apis`)、动态参数 (`get_parameters()`)、动态描述 (`get_dynamic_description()`)、依赖检查 (`check_dependencies()`) — 详见 `strategies/base_strategy.py`。
-- **新增策略流程**: 见 CONTRIBUTING.md「新增一个策略」。
-
-### 6.2 Polars 向量化策略基类
-
-继承 `PolarsBaseStrategy` 使用 Polars LazyFrame 进行高性能向量化计算。
-`PolarsBaseStrategy` 同时继承了 `AIStrategyMixin`，Polars 过滤后自动进入 AI 分析阶段（可通过 `enable_ai_analysis = False` 关闭）：
-
-```python
-from strategies.polars_base import PolarsBaseStrategy
-from data.persistence.quality_gate import QualityTier
-
-class MyPolarsStrategy(PolarsBaseStrategy):
-    # 注：如需覆盖默认质量等级，应在类属性中定义 required_quality_tier = QualityTier.GOLD，而非在方法上加装饰器。
-    required_quality_tier = QualityTier.SILVER
-
-    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
-        return lf.filter(pl.col("pct_chg") > 5.0)
-```
-
-> 注：上述类属性模式适用于 `PolarsBaseStrategy` 子类。非 `PolarsBaseStrategy` 子类（如 `OversoldStrategy` 继承 `BaseStrategy` + `AIStrategyMixin`）可使用 `@require_quality` 装饰器。
-
-### 6.3 AI 策略混入 (AIStrategyMixin)
-
-`strategies/ai_mixin.py` 的 `AIStrategyMixin` 类提供 AI 增强能力，混入到策略类中实现 LLM 驱动的智能选股：
-
-- 构建结构化 Prompt → 调用 LLM → 解析结构化响应
-- 支持云端 (LiteLLM) 和本地 (llama-cpp-python) 双模式
-- 内置重试、超时、Token 计量、Prompt 安全防护 (`utils/prompt_guard.py`)
-- Prompt 模板集中在 `strategies/strategy_prompts.py`，响应校验在 `strategies/prompt_validator.py`
-
-### 6.4 DAO 模式
-
-所有数据访问通过 `BaseDao` 子类，统一提供：
-
-- `_read_db()` — 原生 SQL 读取，返回 DataFrame
-- `_read_db_select()` — SQLAlchemy Core 查询 (**推荐**，防注入)
-- `_write_db()` — 单条写入 (⚠️ `is_many=True` 已废弃，使用会触发 `DeprecationWarning`)
-- `_save_upsert()` — 批量 UPSERT (**推荐**，基于 `pg_insert` + `ON CONFLICT`)
-- `chunked_in_query()` — 分块 IN 查询 (避免参数上限)
-
-**DAO 继承体系**: `BaseDao` → 具体子类见 `data/persistence/daos/` 目录
-
-### 6.5 数据同步架构
-
-`data/sync/` 下按数据类别组织同步策略：
-
-- `base.py` — 同步基础定义 (`SyncContext` 依赖注入容器、`SyncResult` 结果数据类、`ISyncStrategy` 策略接口，含取消支持)
-- `historical.py` — 历史行情同步
-- `financial.py` — 财务报告同步
-- `holder.py` — 股东数据同步
-- `macro.py` — 宏观数据同步
-
-所有同步通过 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 注册表驱动，包含表结构、同步配置、质量监控配置。
-
-### 6.6 TaskManager 任务生命周期
-
-```text
-QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
-                 ↘ INTERRUPTED (应用异常退出)
-```
-
-- 任务通过 `submit_task()` 提交，传入 `coroutine_factory` (无参可调用对象，返回 coroutine)
-- 使用 `update_progress(progress)` 报告进度 (0.0-1.0)，内置节流避免 UI 风暴
-- 工作协程内部使用 `is_cancelled()` 检测取消信号 (用户主动取消 / 应用退出)
-- 任务持久化到本地，重启后 `RUNNING` 状态会被回填为 `INTERRUPTED`
-
-### 6.7 配置管理、质量门控、性能监控
-
-- **配置管理**: `ConfigHandler` 使用读写锁 (`rwlock.RWLockFair`) 保护并发访问。敏感信息优先使用 `keyring`，降级到 AES-GCM 加密文件 (`utils/security_utils.py`)。
-- **数据质量门控**: 使用 `@require_quality(QualityTier.SILVER)` 确保只有数据质量达标才执行逻辑。质量分层: `CRITICAL(0)` → `BRONZE(1)` → `SILVER(2)` → `GOLD(3)`。`STRICT_QUALITY_GATE` 环境变量控制严格模式（默认开启，设为 `false` 关闭）。
-- **性能监控装饰器** (`utils/log_decorators.py`):
-  - `@log_async_operation(operation_name="fetch_data", threshold_ms=500)` — 异步操作日志 + 性能监控 + 自动脱敏
-  - `@track_performance(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)` — 纯性能追踪 (轻量)
-  - `@log_ui_action(component_name="Settings", action_type="Click")` — UI 交互埋点
-  - `AsyncOperationLogger` — 复杂流程分段日志上下文管理器
-  - **取舍**: 同一函数只挂一个性能装饰器，优先选 `@log_async_operation` (功能更完整)。
-
-**标准性能红线 (`PerfThreshold`)**: 具体数值见 `utils/log_decorators.py`，涵盖内存计算/DB单查询/外部网络/DB批量IO/AI推理/全局初始化六类场景。
-
-### 6.8 MVVM 表现层
-
-- **View** (`ui/views/`): 仅负责构建 Flet 控件树和绑定事件，不持有业务状态。事件回调将 (用户意图, 参数) 转发给 ViewModel。
-- **ViewModel** (`ui/viewmodels/`): 持有业务状态 (DataFrame、筛选结果、加载标记)，调用 services/strategies/data 层，通过回调通知 View 刷新。
-- **Component** (`ui/components/`): 可复用控件 (图表、对话框、虚拟表格、Toast)，不耦合具体业务。
-- **Theme** (`ui/theme.py`): 亮/暗主题切换，颜色/字体 token 集中管理。
-- **i18n** (`ui/i18n.py`): 对 `core.i18n` 的 UI 层薄封装，提供 Flet 文本绑定。
+| 模式 | 要点 | 详细文档 |
+|------|------|---------|
+| **策略模式** | `@register_strategy("key")` 自动注册，`strategies/all_strategies.py` 触发导入 | [CONTRIBUTING.md「策略模式实现模板」](./CONTRIBUTING.md#策略模式实现模板) |
+| **Polars 向量化基类** | `PolarsBaseStrategy` 继承自带 AI 阶段，`_filter_logic` 返回 LazyFrame | [CONTRIBUTING.md「Polars 向量化策略基类」](./CONTRIBUTING.md#polars-向量化策略基类) |
+| **AI 策略混入** | `AIStrategyMixin` 提供 LLM 驱动选股，Prompt 在 `strategies/strategy_prompts.py` | [CONTRIBUTING.md「AI 策略混入」](./CONTRIBUTING.md#ai-策略混入) |
+| **DAO 模式** | `BaseDao` 子类，统一 `_read_db_select` / `_save_upsert` / `chunked_in_query` | [CONTRIBUTING.md「DAO 模式」](./CONTRIBUTING.md#dao-模式) |
+| **数据同步架构** | `data/sync/` 按类别组织，`TABLE_DEFINITIONS` 驱动 | [CONTRIBUTING.md「数据同步架构」](./CONTRIBUTING.md#数据同步架构) |
+| **TaskManager** | `QUEUED → RUNNING → COMPLETED/FAILED/CANCELLED/INTERRUPTED` | [CONTRIBUTING.md「TaskManager 任务生命周期」](./CONTRIBUTING.md#taskmanager-任务生命周期) |
+| **配置/质量/性能** | `ConfigHandler` + `@require_quality` + `@log_async_operation` | [CONTRIBUTING.md「配置管理、质量门控、性能监控」](./CONTRIBUTING.md#配置管理质量门控性能监控) |
+| **MVVM 表现层** | View (控件树) + ViewModel (业务状态) + Component (可复用) | [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层) |
 
 ---
 
-## 7. 测试规范
+## 7. 测试规范索引
 
-### 7.1 测试架构
+详细规范见 [CONTRIBUTING.md「测试规范」](./CONTRIBUTING.md#测试规范)。
 
-分为 `unit/` (单元测试, 纯逻辑隔离), `integration/` (集成测试, 依赖 PostgreSQL), `e2e/` (端到端测试)。
-
-测试标记 (定义在 `pyproject.toml [tool.pytest.ini_options]`):
-
-- `@pytest.mark.unit` — 单元测试
-- `@pytest.mark.integration` — 集成测试
-- `@pytest.mark.database` — 需要数据库连接
-- `@pytest.mark.ai` — 涉及 AI 服务或模型调用
-- `@pytest.mark.e2e` — 端到端测试
-- `@pytest.mark.slow` — 慢速测试 (真实 sleep、大量 IO)
-- `@pytest.mark.network` — 需要真实网络访问
-- `@pytest.mark.no_auto_mock` — 跳过 `mock_external_services` autouse fixture (用于测试外部服务自身)
-
-### 7.2 测试编写规则
-
-- **单例隔离**: 单元测试（`tests/unit/`）由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置所有注册单例。集成测试和 e2e 测试不自动重置单例，需手动管理。需精细控制单例初始化状态时（如测试 `__init__` 重复初始化防护），可使用 `singleton_state` 上下文管理器：
-
-  ```python
-  from tests.conftest import singleton_state
-
-  with singleton_state(TaskManager, extra_attrs=["_initialized"]):
-      mgr = TaskManager()
-      # 测试逻辑...
-  # 自动恢复原始单例状态
-  ```
-
-- **外部服务 Mock**: 单元测试由 `mock_external_services` autouse fixture 自动 mock 外部网络调用 (`NewsFetcher`/`ReviewManager`)。测试自身模块需跳过 mock 时，在文件顶部声明 `pytestmark = pytest.mark.no_auto_mock`。
-
-- **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
-- **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。
-- **事件循环策略**: Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 为 `session` 级。
-  > **已知技术债（P1-2）**：session 级事件循环导致 loop-local 缓存（`asyncio.Event`/`Lock`/`Semaphore`）跨测试泄漏，由 `tests/conftest.py` 的 `reset_loop_local_cache` autouse fixture 维持隔离。中期应降为 `function` 作用域以从根因消除泄漏，降级后可删除该 fixture。探测测试见 `tests/unit/test_infra_loop_isolation.py`。
-- **配置隔离**: 测试使用临时配置文件 (`tempfile.mkdtemp`)，通过 `pytest_configure` 在 import 之前重写 `utils.config_handler.CONFIG_FILE`。
-- **DB 隔离**: 集成测试连接 `test_astock` 数据库 (CI 通过 service container 启动 PostgreSQL 16)，通过 `TEST_DB_*` 环境变量配置。
-
-### 7.3 覆盖率要求
-
-> [!NOTE]
-> 覆盖率阈值的单一事实源位于 `pyproject.toml`。
-> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）
-> - **单文件覆盖率**：具体数值见 `pyproject.toml` 中的 `per_file_minimum`（目前为 ≥ 80%，由 `scripts/check_per_file_coverage.py` 强制检查）
-> - **覆盖率源**：`core`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
-> - **覆盖率排除行**：`pragma: no cover`、`if __name__ == "__main__"`、`if TYPE_CHECKING:`、`raise NotImplementedError`、`...`
+- 测试分三层：`unit/`（纯逻辑隔离）、`integration/`（依赖 PostgreSQL）、`e2e/`（端到端）。
+- 单元测试由 `_reset_all_singletons` autouse fixture 自动重置单例 (R7)。
+- `keyring` 和 `litellm` 在 `tests/conftest.py` 全局 mock (session 别，`pytest_configure` 早期拦截)。
+- Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 为 `session` 级（已知技术债 P1-2，详见 CONTRIBUTING.md）。
+- 覆盖率：整体 ≥ 85%，单文件 ≥ 80%（阈值源：`pyproject.toml`）。
 
 ---
 
-## 8. CI/CD 流水线与门禁
+## 8. CI/CD 门禁索引
 
-GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量门禁包括：
+详细流水线见 [CONTRIBUTING.md「CI/CD 流水线与门禁」](./CONTRIBUTING.md#cicd-流水线与门禁)。
 
-1. **Fast Ruff Check & Format** (Python 3.13 + 3.14 experimental)
-2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步)
-3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
-4. **Pyright Type Check** (版本见 `ci_cd.yml`，`continue-on-error: false`)
-5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
-6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration)
-7. **Windows E2E Tests** (`tests/e2e/`，Chromium + PostgreSQL)
-8. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)**
-9. **requirements*.txt 漂移处理** (`requirements-drift` job 检测到 main 分支漂移时，由 `update-requirements` job 创建同步 PR)
+PR/主干质量门禁：Ruff → Pre-commit → Security Audit → Pyright → Alembic 迁移 → Unit/Integration Tests → Windows E2E → 覆盖率门禁 → requirements 漂移处理。
 
-发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → GitHub Release 发布。
-
-**其他 workflow**: CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、自动化 Release PR (`release-please.yml`)、依赖更新机器人 (`renovate.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)。
-
-### 8.1 Pre-commit Hooks
-
-本项目使用 7 个 pre-commit hook (定义在 `.pre-commit-config.yaml`，含 Ruff lint/format、裸 `type: ignore` 检测、requirements 同步、版本一致性校验)，提交前必须全部通过。
+发布流程：打 `v*.*.*` tag → `build-windows` job → PyInstaller 打包 CPU/CUDA → smoke test → Inno Setup 安装包 → GitHub Release。
 
 ---
 

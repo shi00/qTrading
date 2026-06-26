@@ -125,14 +125,14 @@ class TestDatabaseTabOnSave:
         tab = self._make_tab()
         tab.show_snack = snack
         tab._on_save({"host": "localhost"})
-        snack.assert_called_once_with("Database configuration saved", "success")
+        snack.assert_called_once_with("settings_db_saved", "success")
 
     def test_on_save_with_empty_config(self):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab._on_save({})
-        snack.assert_called_once_with("Database configuration saved", "success")
+        snack.assert_called_once_with("settings_db_saved", "success")
 
     def test_on_save_with_full_config(self):
         snack = MagicMock()
@@ -146,7 +146,7 @@ class TestDatabaseTabOnSave:
             "password": "secret",
         }
         tab._on_save(config)
-        snack.assert_called_once_with("Database configuration saved", "success")
+        snack.assert_called_once_with("settings_db_saved", "success")
 
     def test_on_save_show_snack_none_raises_type_error(self):
         tab = self._make_tab()

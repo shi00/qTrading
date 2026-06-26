@@ -1008,27 +1008,82 @@ class OnboardingWizard(ft.Container):
         LocalModelManager.cancel_verification_if_active()
         self.vm.dispose()
 
-    def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
-        if hasattr(self, "header_title"):
-            self.header_title.value = I18n.get("wizard_welcome_title")
-        if hasattr(self, "header_desc"):
-            self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
-        if hasattr(self, "gradient_guide_text"):
-            self.gradient_guide_text.value = I18n.get("wizard_welcome_guide")
-        self.sync_status.value = I18n.get("wizard_status_ready")
-        self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
-        self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
-        self.btn_cancel_sync.text = I18n.get("wizard_btn_cancel")
-        self.schedule_enabled.label = I18n.get("wizard_schedule_label")
-        self.schedule_time.label = I18n.get("wizard_schedule_time_label")
-        self.loading_overlay_text.value = I18n.get("wizard_validating")
+    def _on_locale_change(self):
+        try:
+            if hasattr(self, "header_title"):
+                self.header_title.value = I18n.get("wizard_welcome_title")
+            if hasattr(self, "header_desc"):
+                self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
+            if hasattr(self, "gradient_guide_text"):
+                self.gradient_guide_text.value = I18n.get("wizard_welcome_guide")
+            self.sync_status.value = I18n.get("wizard_status_ready")
+            self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
+            self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
+            self.btn_cancel_sync.text = I18n.get("wizard_btn_cancel")
+            self.schedule_enabled.label = I18n.get("wizard_schedule_label")
+            self.schedule_time.label = I18n.get("wizard_schedule_time_label")
+            self.loading_overlay_text.value = I18n.get("wizard_validating")
 
-        if hasattr(self, "wizard_language_dropdown"):
-            self.wizard_language_dropdown.label = I18n.get_language_label()
+            if hasattr(self, "wizard_language_dropdown"):
+                self.wizard_language_dropdown.label = I18n.get_language_label()
+                self.wizard_language_dropdown.tooltip = I18n.get_language_label()
+                self.wizard_language_dropdown.options = [
+                    ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()
+                ]
 
+            # 重建步骤内容（含子面板），保证外部触发的语言切换也能完整刷新
+            self._rebuild_steps_after_locale_change()
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[OnboardingWizard] _on_locale_change failed: {e}")
+
+    def _rebuild_steps_after_locale_change(self):
+        """语言切换后重建子面板与 steps_content，并重新绑定 VM 回调。"""
+        # 取消旧面板的 i18n 订阅，避免泄漏
+        for panel_attr in ("database_panel", "tushare_panel", "llm_config_panel", "local_model_panel"):
+            old_panel = getattr(self, panel_attr, None)
+            if old_panel and hasattr(old_panel, "will_unmount"):
+                try:
+                    old_panel.will_unmount()
+                except Exception as e:
+                    logger.debug("Onboarding panel cleanup failed: %s", e, exc_info=True)
+
+        # 保留用户在 schedule 控件上的未保存输入，避免重建后丢失（§5.8 规范 3 纯 UI 操作的副作用保护）
+        saved_schedule_enabled = (
+            getattr(self.schedule_enabled, "value", True) if hasattr(self, "schedule_enabled") else True
+        )
+        saved_schedule_time = getattr(self.schedule_time, "value", None) if hasattr(self, "schedule_time") else None
+
+        self._init_database_controls()
+        self._init_token_controls()
+        self._init_cloud_ai_controls()
+        self._init_local_model_controls()
+        self._init_sync_controls()
+        self._init_schedule_controls()
+
+        # 恢复用户输入的 schedule 值（_init_schedule_controls 默认 value=True，从 ConfigHandler 读 time）
+        if hasattr(self, "schedule_enabled"):
+            self.schedule_enabled.value = saved_schedule_enabled
+        if hasattr(self, "schedule_time") and saved_schedule_time is not None:
+            self.schedule_time.value = saved_schedule_time
+
+        self.steps_content = [
+            self._build_welcome_step(),
+            self._build_database_step(),
+            self._build_token_step(),
+            self._build_cloud_ai_step(),
+            self._build_local_model_step(),
+            self._build_sync_step(),
+            self._build_schedule_step(),
+            self._build_complete_step(),
+        ]
+
+        self.step_container.content = self.steps_content[self.vm.current_step]
         self.step_indicators.controls = self._build_step_indicators()
         self._update_navigation_buttons()
-        self._safe_update()
+
+        # Rebind panel callbacks to new panels
+        self._rebind_panel_callbacks()
 
     def _on_language_change_wizard(self, e):  # pragma: no cover
         """Handle language change in Onboarding Wizard"""
@@ -1039,6 +1094,7 @@ class OnboardingWizard(ft.Container):
                 logger.warning(f"[OnboardingWizard] Failed to persist locale: {new_locale}")
                 self._safe_update()
                 return
+            # I18n.set_locale 会自动触发 _on_locale_change → _rebuild_steps_after_locale_change
             I18n.set_locale(new_locale)
 
             if self.app_page and getattr(self.app_page, "locale_configuration", None):
@@ -1051,47 +1107,6 @@ class OnboardingWizard(ft.Container):
                     self.app_page.update()
                 except Exception as ex:
                     logger.debug("[OnboardingWizard] Failed to update page locale configuration: %s", ex, exc_info=True)
-
-            if hasattr(self, "header_title"):
-                self.header_title.value = I18n.get("wizard_welcome_title")
-            if hasattr(self, "header_desc"):
-                self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
-
-            # 取消旧面板的 i18n 订阅，避免泄漏
-            for panel_attr in ("database_panel", "tushare_panel", "llm_config_panel", "local_model_panel"):
-                old_panel = getattr(self, panel_attr, None)
-                if old_panel and hasattr(old_panel, "will_unmount"):
-                    try:
-                        old_panel.will_unmount()
-                    except Exception as e:
-                        logger.debug("Onboarding operation failed: %s", e, exc_info=True)
-
-            self._init_database_controls()
-            self._init_token_controls()
-            self._init_cloud_ai_controls()
-            self._init_local_model_controls()
-            self._init_sync_controls()
-            self._init_schedule_controls()
-
-            self.steps_content = [
-                self._build_welcome_step(),
-                self._build_database_step(),
-                self._build_token_step(),
-                self._build_cloud_ai_step(),
-                self._build_local_model_step(),
-                self._build_sync_step(),
-                self._build_schedule_step(),
-                self._build_complete_step(),
-            ]
-
-            self.step_container.content = self.steps_content[self.vm.current_step]
-            self.step_indicators.controls = self._build_step_indicators()
-            self._update_navigation_buttons()
-
-            # Rebind panel callbacks to new panels
-            self._rebind_panel_callbacks()
-
-            self._safe_update()
         except Exception as ex:
             logger.error("[OnboardingWizard] Language change failed: %s", DataSanitizer.sanitize_error(ex))
 

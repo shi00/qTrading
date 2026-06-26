@@ -176,14 +176,14 @@ class TestStrategyExampleSignature:
         )
 
     def test_claude_uses_tuple_not_list(self):
-        """CLAUDE.md strategy example should use tuple, not list for required_context_keys."""
-        content = _read(CLAUDE_PATH)
+        """CLAUDE.md or CONTRIBUTING.md strategy example should use tuple, not list for required_context_keys."""
+        content = _read(CLAUDE_PATH) + "\n" + _read(ROOT / "CONTRIBUTING.md")
         # Should use tuple syntax
         assert "required_context_keys: tuple[str, ...]" in content, (
-            "CLAUDE.md should use 'tuple[str, ...]' for required_context_keys"
+            "CLAUDE.md or CONTRIBUTING.md should use 'tuple[str, ...]' for required_context_keys"
         )
         # Should not use list syntax
         wrong_pattern = r"required_context_keys\s*=\s*\["
         assert not re.search(wrong_pattern, content), (
-            "CLAUDE.md should not use list syntax for required_context_keys (should be tuple)"
+            "CLAUDE.md or CONTRIBUTING.md should not use list syntax for required_context_keys (should be tuple)"
         )

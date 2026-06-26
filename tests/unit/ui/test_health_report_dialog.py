@@ -1,9 +1,11 @@
 import contextlib
+import logging
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from tests.unit.ui.conftest import set_page, wrap_mock_page
+from ui.components.health_report_dialog import logger as dialog_logger
 
 pytestmark = pytest.mark.unit
 
@@ -131,6 +133,37 @@ class TestHealthReportDialog:
     def test_build_content_red_status(self, mock_page):
         dlg = self._make_dialog(mock_page, self._make_report("red"))
         assert dlg.content is not None
+
+    def test_refresh_locale_rebuilds_actions(self, mock_page):
+        """§5.8 规范 6：refresh_locale 应正确刷新文案（重建 actions），不抛出异常。"""
+        dlg = self._make_dialog(mock_page, self._make_report("green"))
+        set_page(dlg, mock_page)
+        dlg.update = MagicMock()
+        original_content = dlg.content
+
+        dlg.refresh_locale()
+
+        # content 被重建为新对象（_build_content 返回新树）
+        assert dlg.content is not original_content
+        # 仍然有 2 个 action（深度扫描 + 关闭）
+        assert len(dlg.actions) == 2
+        dlg.update.assert_called_once()
+        # I18n.get 应被调用以刷新文案
+        self.mock_i18n.get.assert_any_call("health_btn_deep_scan")
+        self.mock_i18n.get.assert_any_call("common_close")
+
+    def test_refresh_locale_swallows_exception(self, mock_page, caplog):
+        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
+        dlg = self._make_dialog(mock_page, self._make_report("green"))
+        set_page(dlg, mock_page)
+        # 强制 I18n.get 抛异常以触发 try/except
+        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
+
+        with caplog.at_level(logging.WARNING, logger=dialog_logger.name):
+            # 不应抛出异常
+            dlg.refresh_locale()
+
+        assert any("refresh_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
 
 
 class TestHealthScoreCard:

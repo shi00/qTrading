@@ -113,6 +113,13 @@ class MetricCard(ft.Container):
         if self.page:
             self.update()
 
+    def set_label(self, label: str) -> None:
+        """Update the label text (used for i18n hot reload)."""
+        self.label_text = label
+        self.label_view.value = label.upper() if label else ""
+        if self.page:
+            self.update()
+
     def update_theme(self):
         """Only needed for custom UP/DOWN colors in trend display."""
         self._build_status_row()
@@ -212,6 +219,19 @@ class ActionChip(ft.Container):
             except Exception as exc:
                 logger.debug(f"[SettingsWidget] UI update skipped: {exc}")
 
+    def set_text(self, title: str, subtitle: str | None = None) -> None:
+        """Update title (and optional subtitle) — used for i18n hot reload."""
+        self.title_text = title
+        # Rebuild content to refresh text since title/subtitle are inlined
+        if subtitle is not None:
+            self.subtitle_text = subtitle
+        self.content = self._build_content()
+        if self.page:
+            try:
+                self.update()
+            except Exception as exc:
+                logger.debug(f"[SettingsWidget] UI update skipped: {exc}")
+
 
 class StatusBadge(ft.Container):
     """
@@ -220,19 +240,37 @@ class StatusBadge(ft.Container):
 
     def __init__(self, text, color, icon=None):
         super().__init__()
-        content_row = [ft.Text(text, size=10, color=color, weight=ft.FontWeight.BOLD)]
-        if icon:
-            content_row.insert(0, ft.Icon(icon, size=10, color=color))  # type: ignore[untyped]
-        self.content = ft.Row(
+        self.badge_text = text
+        self.badge_color = color
+        self.badge_icon = icon
+        self.content = self._build_content()
+        self.padding = ft.padding.symmetric(horizontal=8, vertical=4)
+        self.bgcolor = ft.Colors.with_opacity(0.1, color)
+        self.border_radius = 20
+        self.border = ft.border.all(1, ft.Colors.with_opacity(0.2, color))
+
+    def _build_content(self):
+        content_row: list[ft.Control] = [
+            ft.Text(self.badge_text, size=10, color=self.badge_color, weight=ft.FontWeight.BOLD)
+        ]
+        if self.badge_icon:
+            content_row.insert(0, ft.Icon(self.badge_icon, size=10, color=self.badge_color))
+        return ft.Row(
             content_row,
             spacing=4,
             alignment=ft.MainAxisAlignment.CENTER,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         )
-        self.padding = ft.padding.symmetric(horizontal=8, vertical=4)
-        self.bgcolor = ft.Colors.with_opacity(0.1, color)
-        self.border_radius = 20
-        self.border = ft.border.all(1, ft.Colors.with_opacity(0.2, color))
+
+    def set_text(self, text: str) -> None:
+        """Update badge text — used for i18n hot reload."""
+        self.badge_text = text
+        self.content = self._build_content()
+        if self.page:
+            try:
+                self.update()
+            except Exception as exc:
+                logger.debug(f"[StatusBadge] UI update skipped: {exc}")
 
 
 class SectionHeader(ft.Row):

@@ -395,7 +395,7 @@ class AIBrainTab(ft.Container):
         except Exception as e:  # pragma: no cover
             logger.debug("Safe update skipped: %s", e)  # pragma: no cover
 
-    def _on_locale_change(self, new_locale: str = None):  # type: ignore[assignment]  # pragma: no cover
+    def _on_locale_change(self):  # pragma: no cover
         """语言变更回调 - 重建整个 UI"""  # pragma: no cover
         try:  # pragma: no cover
             saved_values = {  # pragma: no cover
@@ -406,6 +406,15 @@ class AIBrainTab(ft.Container):
                 "prompt": self.ai_prompt_input.value,  # pragma: no cover
                 "news_prompt": self.ai_news_prompt_input.value,  # pragma: no cover
             }  # pragma: no cover
+
+            # 重建前调用旧 panel 的 will_unmount，取消 I18n 订阅避免泄漏
+            for panel_attr in ("llm_config_panel", "failover_panel", "local_model_panel"):
+                old_panel = getattr(self, panel_attr, None)
+                if old_panel and hasattr(old_panel, "will_unmount"):
+                    try:  # pragma: no cover
+                        old_panel.will_unmount()
+                    except Exception as e:  # pragma: no cover
+                        logger.debug("[AIBrainTab] Old panel cleanup failed: %s", e, exc_info=True)
 
             self._build_controls()  # pragma: no cover
 

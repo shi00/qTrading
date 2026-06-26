@@ -54,6 +54,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self._provider = edit_item.provider if edit_item else ""
         self._is_edit = edit_item is not None
         self._page_ref = page
+        self._locale_subscription_id: object | None = None
 
         super().__init__()
 
@@ -122,26 +123,26 @@ class ProviderCredentialDialog(ft.AlertDialog):
             spacing=12,
             width=440,
         )
-        self.actions = [
-            ft.TextButton(
-                text=I18n.get("btn_cancel"),
-                on_click=self._on_cancel,
-            ),
-        ]
-        if self._test_connection_callback:
-            self.actions.append(
-                ft.TextButton(
-                    text=I18n.get("failover_test_connection"),
-                    on_click=self._on_test_connection,
-                ),
-            )
-        self.actions.append(
-            ft.ElevatedButton(
-                text=I18n.get("common_confirm"),
-                on_click=self._on_confirm_click,
-                style=AppStyles.primary_button(),
-            ),
+        self._cancel_btn = ft.TextButton(
+            text=I18n.get("btn_cancel"),
+            on_click=self._on_cancel,
         )
+        self._test_btn = None
+        if self._test_connection_callback:
+            self._test_btn = ft.TextButton(
+                text=I18n.get("failover_test_connection"),
+                on_click=self._on_test_connection,
+            )
+        self._confirm_btn = ft.ElevatedButton(
+            text=I18n.get("common_confirm"),
+            on_click=self._on_confirm_click,
+            style=AppStyles.primary_button(),
+        )
+
+        self.actions = [self._cancel_btn]
+        if self._test_btn is not None:
+            self.actions.append(self._test_btn)
+        self.actions.append(self._confirm_btn)
 
     def _populate_edit_data(self):
         if self._edit_item is None:
@@ -156,6 +157,41 @@ class ProviderCredentialDialog(ft.AlertDialog):
             key = cred["api_key"]
             self.api_key_input.value = key
             self.api_key_masked = DataSanitizer.sanitize_token(key)
+
+    def did_mount(self):
+        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+
+    def will_unmount(self):
+        if self._locale_subscription_id is not None:
+            I18n.unsubscribe(self._locale_subscription_id)
+            self._locale_subscription_id = None
+
+    def refresh_locale(self):
+        """Refresh i18n text on locale change (pure UI, preserves user input)."""
+        try:
+            self.title.value = I18n.get("failover_dialog_title")
+            self.provider_dropdown.label = I18n.get("failover_select_provider")
+            self.model_dropdown.label = I18n.get("failover_select_model")
+            self.custom_model_input.label = I18n.get("llm_custom_model")
+            self.custom_model_input.hint_text = I18n.get("failover_custom_model_hint")
+            self.base_url_input.label = I18n.get("failover_base_url_optional")
+            pinfo = LLM_PROVIDERS.get(self._provider, {})
+            default_url = pinfo.get("base_url", "")
+            self.base_url_input.hint_text = default_url or I18n.get("failover_base_url_hint")
+            self.api_key_input.label = I18n.get("llm_api_key")
+
+            self._cancel_btn.text = I18n.get("btn_cancel")
+            if self._test_btn is not None:
+                self._test_btn.text = I18n.get("failover_test_connection")
+            self._confirm_btn.text = I18n.get("common_confirm")
+
+            # 重建链接行（其文案依赖 i18n）
+            self._update_links_row(self._provider)
+
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[ProviderCredentialDialog] refresh_locale failed: {e}")
 
     def _on_provider_change(self, e):
         provider = e.control.value
@@ -639,9 +675,12 @@ class FailoverConfigPanel(ft.Container):
         I18n.unsubscribe(self._on_locale_change)
 
     def _on_locale_change(self, new_locale: str | None = None):
-        self._build_ui()
-        self._load_config()
-        self._safe_update()
+        try:
+            self._build_ui()
+            self._load_config()
+            self._safe_update()
+        except Exception as e:
+            logger.warning(f"[FailoverConfigPanel] _on_locale_change failed: {e}")
 
     def reload_config(self):
         self._load_config()

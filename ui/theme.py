@@ -605,7 +605,7 @@ def _build_theme(theme_name: str) -> ft.Theme:
     )
 
 
-def apply_page_theme(page: ft.Page, theme_name: str = None):  # type: ignore[untyped]
+def apply_page_theme(page: ft.Page, theme_name: str | None = None):  # type: ignore[untyped]
     """
     应用全局页面主题。
 

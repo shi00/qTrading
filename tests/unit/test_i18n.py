@@ -171,7 +171,9 @@ class TestI18nAPICompatibility:
         def callback():
             callback_called.append(True)
 
-        I18n.subscribe(callback)
+        # sync_immediately=False to isolate the set_locale trigger from the
+        # immediate-sync side effect introduced by the new default.
+        I18n.subscribe(callback, sync_immediately=False)
         I18n.set_locale("en_US")
 
         assert len(callback_called) == 1
@@ -187,7 +189,7 @@ class TestI18nAPICompatibility:
         def callback():
             callback_called.append(True)
 
-        subscription_id = I18n.subscribe(callback)
+        subscription_id = I18n.subscribe(callback, sync_immediately=False)
 
         assert subscription_id is callback
 
@@ -205,13 +207,145 @@ class TestI18nAPICompatibility:
         def callback():
             callback_called.append(True)
 
-        I18n.subscribe(callback)
-        I18n.subscribe(callback)
-        I18n.subscribe(callback)
+        I18n.subscribe(callback, sync_immediately=False)
+        I18n.subscribe(callback, sync_immediately=False)
+        I18n.subscribe(callback, sync_immediately=False)
 
         I18n.set_locale("en_US")
 
         assert len(callback_called) == 1
+
+    def test_subscribe_sync_immediately_true(self):
+        """sync_immediately=True (default) fires callback once on subscribe."""
+        callback_called = []
+
+        def callback():
+            callback_called.append(I18n.current_locale())
+
+        I18n.subscribe(callback, sync_immediately=True)
+
+        # Immediate sync fires once with current locale, no set_locale yet.
+        assert len(callback_called) == 1
+        assert callback_called[0] == DEFAULT_LOCALE
+
+        I18n.set_locale("en_US")
+        # Now: immediate sync (1) + set_locale (1) = 2
+        assert len(callback_called) == 2
+        assert callback_called[1] == "en_US"
+
+    def test_subscribe_sync_immediately_default_is_true(self):
+        """Default behavior (no kwarg) should be sync_immediately=True."""
+        callback_called = []
+
+        def callback():
+            callback_called.append(True)
+
+        I18n.subscribe(callback)  # no kwarg → defaults to True
+
+        assert len(callback_called) == 1
+
+        I18n.set_locale("en_US")
+        assert len(callback_called) == 2
+
+    def test_subscribe_sync_immediately_false(self):
+        """sync_immediately=False does NOT fire callback on subscribe."""
+        callback_called = []
+
+        def callback():
+            callback_called.append(True)
+
+        I18n.subscribe(callback, sync_immediately=False)
+
+        assert len(callback_called) == 0
+
+        I18n.set_locale("en_US")
+        assert len(callback_called) == 1
+
+    def test_subscribe_multiple_listeners_all_called(self):
+        """All distinct callbacks are invoked on set_locale."""
+        calls_a = []
+        calls_b = []
+        calls_c = []
+
+        def cb_a():
+            calls_a.append(True)
+
+        def cb_b():
+            calls_b.append(True)
+
+        def cb_c():
+            calls_c.append(True)
+
+        I18n.subscribe(cb_a, sync_immediately=False)
+        I18n.subscribe(cb_b, sync_immediately=False)
+        I18n.subscribe(cb_c, sync_immediately=False)
+
+        I18n.set_locale("en_US")
+
+        assert len(calls_a) == 1
+        assert len(calls_b) == 1
+        assert len(calls_c) == 1
+
+    def test_subscribe_listener_exception_isolation(self):
+        """A callback raising must not block subsequent callbacks (set_locale path)."""
+        calls_good_before = []
+        calls_good_after = []
+
+        def cb_bad_before():
+            raise RuntimeError("boom-before")
+
+        def cb_good_before():
+            calls_good_before.append(True)
+
+        def cb_good_after():
+            calls_good_after.append(True)
+
+        I18n.subscribe(cb_bad_before, sync_immediately=False)
+        I18n.subscribe(cb_good_before, sync_immediately=False)
+        I18n.subscribe(cb_good_after, sync_immediately=False)
+
+        # No exception should propagate.
+        I18n.set_locale("en_US")
+
+        assert len(calls_good_before) == 1
+        assert len(calls_good_after) == 1
+
+    def test_subscribe_sync_immediately_exception_isolation(self):
+        """A callback raising during sync_immediately must be swallowed, not re-raised."""
+        calls_good = []
+
+        def cb_bad():
+            raise RuntimeError("sync-boom")
+
+        def cb_good():
+            calls_good.append(True)
+
+        # cb_bad must not propagate; subscription still succeeds.
+        I18n.subscribe(cb_bad, sync_immediately=True)
+        I18n.subscribe(cb_good, sync_immediately=True)
+
+        # cb_good's immediate sync still ran despite cb_bad raising earlier.
+        assert len(calls_good) == 1
+
+    def test_unsubscribe_nonexistent_callback_idempotent(self):
+        """Unsubscribing a callback that was never subscribed is a no-op."""
+        calls = []
+
+        def callback():
+            calls.append(True)
+
+        def never_subscribed():
+            calls.append("should-not-happen")
+
+        I18n.subscribe(callback, sync_immediately=False)
+
+        # Removing a never-subscribed callback must not raise.
+        I18n.unsubscribe(never_subscribed)
+
+        I18n.set_locale("en_US")
+        # Only the subscribed callback fired.
+        assert len(calls) == 1
+        assert calls[0] is True
 
     def test_get_supported_locales(self):
         locales = I18n.get_supported_locales()

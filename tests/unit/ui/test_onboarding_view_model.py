@@ -806,7 +806,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         set_page(wizard, mock_page)
         original_title = wizard.header_title
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_title" else key
-        wizard._on_locale_change("en_US")
+        wizard._on_locale_change()
         assert original_title.value == "en_wizard_welcome_title"
         assert wizard.header_title is original_title
 
@@ -817,7 +817,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: (
             f"en_{key}" if key == "wizard_welcome_desc_with_time" else key
         )
-        wizard._on_locale_change("en_US")
+        wizard._on_locale_change()
         assert original_desc.value == "en_wizard_welcome_desc_with_time"
         assert wizard.header_desc is original_desc
 
@@ -826,9 +826,12 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         set_page(wizard, mock_page)
         original_text = wizard.gradient_guide_text
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_guide" else key
-        wizard._on_locale_change("en_US")
+        wizard._on_locale_change()
+        # _on_locale_change 先更新 original_text.value，再调用 _rebuild_steps_after_locale_change 重建
+        # 重建会创建新的 gradient_guide_text 对象，但 original_text.value 已被更新
         assert original_text.value == "en_wizard_welcome_guide"
-        assert wizard.gradient_guide_text is original_text
+        # 重建后的新引用也应具有正确的 value
+        assert wizard.gradient_guide_text.value == "en_wizard_welcome_guide"
 
     def test_header_title_is_in_ui_tree(self, mock_page):
         wizard = self._make_wizard(mock_page)
@@ -855,6 +858,8 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         original_title = wizard.header_title
         original_desc = wizard.header_desc
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if "welcome" in key else key
+        # 模拟 I18n.set_locale 触发回调（mock_i18n.set_locale 不会自动触发）
+        self.mock_i18n.set_locale.side_effect = lambda locale: wizard._on_locale_change()
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
         wizard._on_language_change_wizard(MagicMock())
@@ -974,3 +979,37 @@ class TestOnboardingWizardLoading(_OnboardingWizardBase):
         wizard.vm.validation_in_progress = True
         wizard._on_panel_loading_change(False)
         assert wizard.loading_overlay.visible is True
+
+
+class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
+    """OnboardingWizard 语言切换重建行为测试（§5.8 规范 3/6）。"""
+
+    def test_rebuild_calls_old_panel_will_unmount(self, mock_page):
+        """§5.8 规范 6：重建子 panel 前必须调用旧 panel 的 will_unmount，避免 I18n 订阅泄漏"""
+        wizard = self._make_wizard(mock_page)
+        # 保存旧 panel 引用并替换 will_unmount 为独立 MagicMock 以便断言
+        old_panels = {
+            "database_panel": wizard.database_panel,
+            "tushare_panel": wizard.tushare_panel,
+            "llm_config_panel": wizard.llm_config_panel,
+            "local_model_panel": wizard.local_model_panel,
+        }
+        for panel in old_panels.values():
+            panel.will_unmount = MagicMock()
+
+        wizard._rebuild_steps_after_locale_change()
+
+        for panel in old_panels.values():
+            panel.will_unmount.assert_called_once()
+
+    def test_rebuild_preserves_schedule_values(self, mock_page):
+        """§5.8 规范 3：重建后必须保留 schedule_enabled.value 和 schedule_time.value"""
+        wizard = self._make_wizard(mock_page)
+        # 模拟用户在 schedule 控件上的未保存输入
+        wizard.schedule_enabled.value = False
+        wizard.schedule_time.value = "09:00"
+
+        wizard._rebuild_steps_after_locale_change()
+
+        assert wizard.schedule_enabled.value is False
+        assert wizard.schedule_time.value == "09:00"

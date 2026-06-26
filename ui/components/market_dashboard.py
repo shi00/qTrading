@@ -1,7 +1,11 @@
+import logging
+
 import flet as ft
 
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+
+logger = logging.getLogger(__name__)
 
 
 class MarketDashboard(ft.Column):
@@ -190,13 +194,17 @@ class MarketDashboard(ft.Column):
 
     def update_locale(self):
         """Update static text when locale changes"""
-        self.sh_title.value = I18n.get("home_index_sh")
-        self.sz_title.value = I18n.get("home_index_sz")
-        self.cyb_title.value = I18n.get("home_index_cyb")
-        self.hsgt_title.value = I18n.get("home_northbound")
-        self.concepts_title.value = I18n.get("home_hot_concepts")
-        self.concepts_placeholder.value = I18n.get("home_hot_concepts_empty")
-        self.update()
+        try:
+            self.sh_title.value = I18n.get("home_index_sh")
+            self.sz_title.value = I18n.get("home_index_sz")
+            self.cyb_title.value = I18n.get("home_index_cyb")
+            self.hsgt_title.value = I18n.get("home_northbound")
+            self.concepts_title.value = I18n.get("home_hot_concepts")
+            self.concepts_placeholder.value = I18n.get("home_hot_concepts_empty")
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[MarketDashboard] update_locale failed: {e}")
 
     def update_data(self, data):
         """

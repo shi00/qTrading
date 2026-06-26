@@ -41,6 +41,19 @@ class BacktestResultPanel(ft.Container):
         if self.page:
             self.update()
 
+    def refresh_locale(self):
+        """语言切换时刷新界面（纯 UI 操作）。
+
+        若已有结果，重建 content 以刷新所有 I18n.get() 文案；
+        若为空状态，重建 empty_content 刷新提示文案。
+        """
+        try:
+            self.content = self._build_content()
+            if self.page:
+                self.update()
+        except Exception as e:
+            logger.warning(f"[BacktestResultPanel] refresh_locale error: {e}")
+
     def _build_empty_content(self) -> ft.Column:
         return ft.Column(
             [
