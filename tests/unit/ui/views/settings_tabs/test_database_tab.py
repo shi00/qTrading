@@ -353,3 +353,132 @@ class TestDatabaseTabEdgeCases:
             # 验证传入的回调是 tab 实例的方法
             assert callable(call_kwargs["on_save_callback"])
             assert callable(call_kwargs["on_test_success_callback"])
+
+
+class TestDatabaseTabOnUnmountWithSubscription:
+    """DatabaseTab._on_unmount 在有 subscription_id 时的分支测试。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
+            patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_tab(self):
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        return DatabaseTab(show_snack_callback=MagicMock())
+
+    def test_on_unmount_unsubscribes_after_mount(self):
+        tab = self._make_tab()
+        # _on_mount 设置 _locale_subscription_id
+        tab._on_mount()
+        assert tab._locale_subscription_id == "sub_id"
+        # _on_unmount 应取消订阅并清空 id
+        tab._on_unmount()
+        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
+        assert tab._locale_subscription_id is None
+
+    def test_on_unmount_idempotent_after_double_unmount(self):
+        tab = self._make_tab()
+        tab._on_mount()
+        tab._on_unmount()
+        # 第二次 _on_unmount 时 id 已为 None，不应再调用 unsubscribe
+        self.mock_i18n.unsubscribe.reset_mock()
+        tab._on_unmount()
+        self.mock_i18n.unsubscribe.assert_not_called()
+
+    def test_will_unmount_delegates_to_on_unmount_with_subscription(self):
+        tab = self._make_tab()
+        tab._on_mount()
+        tab.will_unmount()
+        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
+        assert tab._locale_subscription_id is None
+
+
+class TestDatabaseTabRefreshLocale:
+    """DatabaseTab.refresh_locale 方法测试。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
+            patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_tab(self):
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        return DatabaseTab(show_snack_callback=MagicMock())
+
+    def _set_page(self, tab, page):
+        tab._Control__page = page
+
+    def test_refresh_locale_updates_title_text(self):
+        tab = self._make_tab()
+        tab.refresh_locale()
+        # I18n.get 应被调用获取 settings_db_title
+        self.mock_i18n.get.assert_any_call("settings_db_title")
+        # title_text.value 应被更新（mock 返回 key 本身）
+        assert tab.title_text.value == "settings_db_title"
+
+    def test_refresh_locale_with_page_calls_update(self, mock_page):
+        tab = self._make_tab()
+        self._set_page(tab, mock_page)
+        tab.update = MagicMock()
+        tab.refresh_locale()
+        tab.update.assert_called_once()
+
+    def test_refresh_locale_without_page_no_update(self):
+        tab = self._make_tab()
+        # page 未设置，refresh_locale 不应抛出异常
+        tab.refresh_locale()
+        # title_text 仍被更新
+        assert tab.title_text.value == "settings_db_title"
+
+    def test_refresh_locale_exception_swallowed(self, caplog):
+        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
+        from ui.views.settings_tabs.database_tab import logger as tab_logger
+
+        tab = self._make_tab()
+        # 强制 I18n.get 抛异常以触发 try/except
+        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
+
+        with caplog.at_level(logging.WARNING, logger=tab_logger.name):
+            # 不应抛出异常
+            tab.refresh_locale()
+
+        assert any("refresh_locale error" in r.message and "i18n boom" in r.message for r in caplog.records)
+
+    def test_refresh_locale_update_exception_swallowed(self, mock_page, caplog):
+        """page.update 异常时也应被 except 捕获。"""
+        from ui.views.settings_tabs.database_tab import logger as tab_logger
+
+        tab = self._make_tab()
+        self._set_page(tab, mock_page)
+        # update 抛异常，但 refresh_locale 的 try/except 应捕获
+        tab.update = MagicMock(side_effect=RuntimeError("update failed"))
+
+        with caplog.at_level(logging.WARNING, logger=tab_logger.name):
+            tab.refresh_locale()
+
+        assert any("refresh_locale error" in r.message for r in caplog.records)

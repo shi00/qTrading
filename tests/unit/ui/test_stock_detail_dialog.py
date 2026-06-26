@@ -1,7 +1,7 @@
 import contextlib
 import logging
 import math
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -10,6 +10,18 @@ from tests.unit.ui.conftest import set_page
 from ui.components.stock_detail_dialog import logger as detail_logger
 
 pytestmark = pytest.mark.unit
+
+
+class _TrickyInt(int):
+    """int 子类，其 __float__ 抛出 ValueError。
+
+    用于测试 format_mv/vol/amount/_format_val 中的防御性 except 分支：
+    is_valid_number 对 int 子类直接返回 True（不调用 float），
+    但 format 函数中的 float(val) 会触发 __float__ 从而抛出异常。
+    """
+
+    def __float__(self):
+        raise ValueError("tricky")
 
 
 class TestStockDetailDialogFormatVal:
@@ -813,3 +825,366 @@ class TestTushareUnitConstants:
         from ui.components.stock_detail_dialog import TUSHARE_AMOUNT_UNIT
 
         assert TUSHARE_AMOUNT_UNIT == 100000
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：format_mv/vol/amount 防御性 except 分支
+# ---------------------------------------------------------------------------
+class TestFormatPureFunctionExceptionBranch:
+    """覆盖 format_mv/vol/amount 中 except (ValueError, TypeError) 分支。
+
+    使用 _TrickyInt（int 子类，__float__ 抛 ValueError）使 is_valid_number 返回 True
+    但 format 函数中的 float(val) 抛异常。
+    """
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def test_format_mv_tricky_int_returns_dash(self):
+        from ui.components.stock_detail_dialog import format_mv
+
+        assert format_mv(_TrickyInt(5)) == "-"
+
+    def test_format_vol_tricky_int_returns_dash(self):
+        from ui.components.stock_detail_dialog import format_vol
+
+        assert format_vol(_TrickyInt(5)) == "-"
+
+    def test_format_amount_tricky_int_returns_dash(self):
+        from ui.components.stock_detail_dialog import format_amount
+
+        assert format_amount(_TrickyInt(5)) == "-"
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：_format_val 防御性 except 分支
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogFormatValException:
+    """覆盖 _format_val 中 except (ValueError, TypeError) 分支。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {})
+
+    def test_format_val_tricky_int_returns_dash(self):
+        dlg = self._make_dialog({"close": _TrickyInt(5)})
+        assert dlg._format_val("close") == "-"
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：_dialog_size 带 page 参数
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogDialogSize:
+    """覆盖 _dialog_size 在有 page 参数时的计算分支。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def test_dialog_size_with_page_uses_window_dims(self, mock_page):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        # mock_page.window.width=1200, window.height=800
+        # w = min(max(1200-80, 600), 900) = 900
+        # h = min(max(800-80, 500), 700) = 700
+        dlg = StockDetailDialog(stock_data={}, page=mock_page)
+        assert dlg._cached_width == 900
+        assert dlg._cached_height == 700
+
+    def test_dialog_size_clamps_to_min(self, mock_page):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        mock_page.window.width = 600  # 600-80=520 < 600 → clamp to 600
+        mock_page.window.height = 500  # 500-80=420 < 500 → clamp to 500
+        dlg = StockDetailDialog(stock_data={}, page=mock_page)
+        assert dlg._cached_width == 600
+        assert dlg._cached_height == 500
+
+    def test_dialog_size_clamps_to_max(self, mock_page):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        mock_page.window.width = 2000  # 2000-80=1920 > 900 → clamp to 900
+        mock_page.window.height = 2000  # 2000-80=1920 > 700 → clamp to 700
+        dlg = StockDetailDialog(stock_data={}, page=mock_page)
+        assert dlg._cached_width == 900
+        assert dlg._cached_height == 700
+
+    def test_dialog_size_window_none_falls_back(self, mock_page):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        mock_page.window.width = None
+        mock_page.window.height = None
+        # int(None or 1280) = 1280, int(None or 800) = 800
+        dlg = StockDetailDialog(stock_data={}, page=mock_page)
+        assert dlg._cached_width == 900  # min(max(1280-80, 600), 900) = 900
+        assert dlg._cached_height == 700  # min(max(800-80, 500), 700) = 700
+
+    def test_chart_width_derived_from_dialog_width(self, mock_page):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        mock_page.window.width = 1000
+        dlg = StockDetailDialog(stock_data={}, page=mock_page)
+        # _cached_width = min(max(1000-80, 600), 900) = 900
+        # _chart_width = max(900 - 40, 600) = 860
+        assert dlg._chart_width == 860
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：ai_score 解析异常
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogAiScoreParse:
+    """覆盖 ai_score 为不可转换值时的 except 分支。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {})
+
+    def test_ai_score_invalid_string_falls_back_to_zero(self):
+        # ai_score="not_a_number" → float() raises ValueError → score_val=0
+        dlg = self._make_dialog({"ai_reason": "test", "ai_score": "not_a_number"})
+        # 验证对话框正常构建（score_val=0，不抛异常）
+        assert dlg.content is not None
+
+    def test_ai_score_none_with_ai_reason(self):
+        # ai_score=None → score_val=0 (else 分支)
+        dlg = self._make_dialog({"ai_reason": "test", "ai_score": None})
+        assert dlg.content is not None
+
+    def test_ai_score_valid_number(self):
+        dlg = self._make_dialog({"ai_reason": "test", "ai_score": "85.5"})
+        assert dlg.content is not None
+
+    def test_ai_score_only_no_reason(self):
+        # 仅 ai_score，无 ai_reason
+        dlg = self._make_dialog({"ai_score": "90"})
+        assert dlg.content is not None
+
+    def test_ai_score_int_zero(self):
+        dlg = self._make_dialog({"ai_reason": "test", "ai_score": 0})
+        assert dlg.content is not None
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：_close / did_mount / will_unmount / refresh_locale 边界
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogLifecycle:
+    """覆盖生命周期方法与 _close 的边界分支。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {})
+
+    def test_close_without_page_no_update(self):
+        # page 未设置，_close 不应抛出异常（不调用 page.update）
+        dlg = self._make_dialog()
+        dlg._close(None)
+        assert dlg.open is False
+
+    def test_did_mount_subscribes_locale(self):
+        dlg = self._make_dialog()
+        dlg.did_mount()
+        # I18n.subscribe 应被调用，返回 sub_id
+        self.mock_i18n.subscribe.assert_called_once()
+        assert dlg._locale_subscription_id == "sub_id"
+
+    def test_will_unmount_unsubscribes_when_id_set(self):
+        dlg = self._make_dialog()
+        dlg.did_mount()  # 设置 _locale_subscription_id
+        dlg.will_unmount()
+        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
+        assert dlg._locale_subscription_id is None
+
+    def test_will_unmount_noop_when_id_none(self):
+        dlg = self._make_dialog()
+        # 未调用 did_mount，_locale_subscription_id 为 None
+        dlg.will_unmount()
+        self.mock_i18n.unsubscribe.assert_not_called()
+
+    def test_refresh_locale_without_page_no_update(self):
+        dlg = self._make_dialog({"ts_code": "000001.SZ"})
+        # page 未设置，refresh_locale 不应抛出（不调用 self.update）
+        dlg.refresh_locale()
+        # title/content 被重建
+        assert dlg.title is not None
+        assert dlg.content is not None
+
+    def test_refresh_locale_preserves_ft_image_chart(self, mock_page):
+        """refresh_locale 应保留已加载的 ft.Image K 线图。"""
+        import flet as ft
+
+        dlg = self._make_dialog({"ts_code": "000001.SZ", "name": "测试"})
+        set_page(dlg, mock_page)
+        dlg.update = MagicMock()
+
+        # 模拟已加载的 K 线图（ft.Image）
+        original_image = ft.Image(src_base64="loaded_png_data", fit=ft.ImageFit.CONTAIN)
+        dlg.chart_container.content = original_image
+
+        dlg.refresh_locale()
+
+        # chart_container.content 应恢复为原来的 ft.Image
+        assert dlg.chart_container.content is original_image
+        dlg.update.assert_called_once()
+
+    def test_refresh_locale_does_not_preserve_non_image_chart(self, mock_page):
+        """chart_container.content 非 ft.Image 时不应保留。"""
+        import flet as ft
+
+        dlg = self._make_dialog({"ts_code": "000001.SZ"})
+        set_page(dlg, mock_page)
+        dlg.update = MagicMock()
+
+        # chart_container.content 是 ProgressRing（非 ft.Image）
+        dlg.chart_container.content = ft.ProgressRing()
+        original = dlg.chart_container.content
+
+        dlg.refresh_locale()
+
+        # _build_content 会重建 chart_container，content 不再是原来的 ProgressRing
+        assert dlg.chart_container.content is not original
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：load_chart 成功路径（非空 DataFrame + 生成图片）
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogLoadChartSuccess:
+    """覆盖 load_chart 成功路径：非空 DataFrame → 生成 PNG → 设置 ft.Image。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_dialog(self, data=None, data_processor=None):
+        from ui.components.stock_detail_dialog import StockDetailDialog
+
+        return StockDetailDialog(stock_data=data or {}, data_processor=data_processor)
+
+    @pytest.mark.asyncio
+    async def test_load_chart_success_sets_ft_image(self, mock_page):
+        import flet as ft
+        import pandas as pd
+
+        # 非空 DataFrame，无 vol 列（覆盖 line 529-530 添加 vol 列）
+        df = pd.DataFrame({"close": [10.0, 11.0, 12.0]})
+
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = AsyncMock(return_value=df)
+
+        dlg = self._make_dialog(data={"name": "测试股票"}, data_processor=mock_dp)
+        set_page(dlg, mock_page)
+        dlg.chart_container = MagicMock()
+
+        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = AsyncMock(return_value="base64pngdata")
+            await dlg.load_chart("000001.SZ")
+
+        # 验证最终设置了 ft.Image
+        assert isinstance(dlg.chart_container.content, ft.Image)
+        assert dlg.chart_container.content.src_base64 == "base64pngdata"
+        # chart_container.update 被调用多次（loading + 最终图片）
+        assert dlg.chart_container.update.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_load_chart_success_with_existing_vol_column(self, mock_page):
+        import flet as ft
+        import pandas as pd
+
+        # 非空 DataFrame，已有 vol 列
+        df = pd.DataFrame({"close": [10.0, 11.0], "vol": [100, 200]})
+
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = AsyncMock(return_value=df)
+
+        dlg = self._make_dialog(data={"name": "测试"}, data_processor=mock_dp)
+        set_page(dlg, mock_page)
+        dlg.chart_container = MagicMock()
+
+        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = AsyncMock(return_value="b64")
+            await dlg.load_chart("000001.SZ")
+
+        assert isinstance(dlg.chart_container.content, ft.Image)
+        # vol 列已存在，不应被覆盖
+        assert list(df["vol"]) == [100, 200]
