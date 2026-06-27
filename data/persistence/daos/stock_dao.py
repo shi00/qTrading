@@ -221,8 +221,8 @@ class StockDao(BaseDao):
     async def get_stocks_without_ai_concepts(
         self,
         batch_size: int,
-        exclude_codes: list = None,  # type: ignore[untyped]
-    ) -> list:
+        exclude_codes: list[str] | None = None,
+    ) -> list[tuple[str, str]]:
         sql = f"""
             SELECT ts_code, name FROM stock_basic
             WHERE list_status = 'L'
@@ -242,7 +242,7 @@ class StockDao(BaseDao):
             :batch_size
         ]
 
-    async def get_concepts(self, ts_codes: list = None):  # type: ignore[untyped]
+    async def get_concepts(self, ts_codes: list[str] | None = None) -> dict[str, list[str]]:
         """
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]
@@ -405,3 +405,109 @@ class StockDao(BaseDao):
         if df is None or df.empty:
             return []
         return df.to_dict(orient="records")
+
+    # --- AI Concept Failures (错题本) ---
+
+    # 默认重试上限与冷却期（24h），可由调用方覆盖
+    AI_CONCEPT_FAILURE_MAX_RETRY = 3
+    AI_CONCEPT_FAILURE_COOLDOWN_SECONDS = 24 * 3600
+
+    async def upsert_ai_concept_failure(
+        self,
+        ts_code: str,
+        name: str,
+        error: str,
+        *,
+        cooldown_seconds: int | None = None,
+    ) -> int:
+        """记录/更新一次失败：retry_count+1，刷新 last_attempt_at / next_retry_at。
+
+        使用 UPSERT（ON CONFLICT ts_code DO UPDATE）保证幂等。
+        """
+        cooldown = cooldown_seconds if cooldown_seconds is not None else self.AI_CONCEPT_FAILURE_COOLDOWN_SECONDS
+        now = get_now().replace(tzinfo=None)
+        next_retry = now + datetime.timedelta(seconds=cooldown)
+        sql = """
+            INSERT INTO ai_concept_failures
+                (ts_code, name, last_error, retry_count, last_attempt_at, next_retry_at)
+            VALUES ($1, $2, $3, 1, $4, $5)
+            ON CONFLICT (ts_code) DO UPDATE SET
+                name = EXCLUDED.name,
+                last_error = EXCLUDED.last_error,
+                retry_count = ai_concept_failures.retry_count + 1,
+                last_attempt_at = EXCLUDED.last_attempt_at,
+                next_retry_at = EXCLUDED.next_retry_at,
+                updated_at = now()
+        """
+        try:
+            async with self._guarded_begin() as conn:
+                await conn.exec_driver_sql(sql, (ts_code, name, error, now, next_retry))
+            return 1
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] upsert_ai_concept_failure failed for {ts_code}: {e}")
+            raise
+
+    async def get_ai_concept_failures_for_retry(
+        self,
+        batch_size: int,
+        *,
+        max_retry: int | None = None,
+    ) -> list[tuple[str, str]]:
+        """拉取可重试的失败股票：retry_count < max_retry AND next_retry_at <= now。
+
+        Returns: list of (ts_code, name)
+        """
+        limit = max_retry if max_retry is not None else self.AI_CONCEPT_FAILURE_MAX_RETRY
+        sql = """
+            SELECT ts_code, name FROM ai_concept_failures
+            WHERE retry_count < $1
+              AND (next_retry_at IS NULL OR next_retry_at <= now())
+            ORDER BY last_attempt_at ASC
+            LIMIT $2
+        """
+        try:
+            df = await self._read_db(sql, (limit, batch_size))
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] get_ai_concept_failures_for_retry failed: {e}")
+            return []
+        if df is None or df.empty:
+            return []
+        return list(df[["ts_code", "name"]].itertuples(index=False, name=None))
+
+    async def clear_ai_concept_failure(self, ts_code: str) -> int:
+        """成功打标后从错题本删除。"""
+        try:
+            return await self._write_db(
+                "DELETE FROM ai_concept_failures WHERE ts_code = $1",
+                (ts_code,),
+            )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] clear_ai_concept_failure failed for {ts_code}: {e}")
+            raise
+
+    async def count_ai_concept_failures(self) -> int:
+        """统计错题本当前条目数（用于诊断/监控）。"""
+        try:
+            df = await self._read_db("SELECT COUNT(*) AS cnt FROM ai_concept_failures")
+            if df is None or df.empty:
+                return 0
+            return int(df["cnt"].iloc[0] or 0)
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug(f"[StockDao] count_ai_concept_failures failed: {e}")
+            return 0

@@ -331,6 +331,15 @@ class TaskManager:
         task = self._tasks.get(task_id)
         return task is not None and task.status == TaskStatus.CANCELLED
 
+    def get_cancel_event(self, task_id: str) -> asyncio.Event | None:
+        """返回任务的取消信号 asyncio.Event，task 不存在或未启动时返回 None。
+
+        Event 在 _task_runner 中懒初始化以绑定正确的事件循环（R11）。
+        调用方应优先使用此访问器，而非穿透 task._cancel_event 私有字段。
+        """
+        task = self._tasks.get(task_id)
+        return task._cancel_event if task else None
+
     def cancel_task(self, task_id: str):
         """User requested cancellation.  Thread-safe."""
         if self._loop and self._loop.is_running():

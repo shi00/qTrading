@@ -331,7 +331,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def run_ai_concept_tagging(
         self,
         task_id: str | None = None,
-        cancel_event=None,
+        cancel_event: asyncio.Event | None = None,
         *,
         manual_trigger: bool = False,
         **kwargs,
@@ -364,6 +364,11 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         ai_service = kwargs.get("ai_service")
         if ai_service is not None:
             self.context.ai_service = ai_service
+
+        # Propagate cancel_event to context so that long-running strategies
+        # (e.g. AIConceptTagSyncStrategy) can poll cancel state inside LLM
+        # calls (~2s granularity), satisfying project memory's hard constraint.
+        self.context.cancel_event = cancel_event
 
         def _cancelled() -> bool:
             if self.is_cancelled():

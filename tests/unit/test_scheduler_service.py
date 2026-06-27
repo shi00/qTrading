@@ -907,9 +907,8 @@ class TestAiConceptLogicClosure:
         mock_dp = MagicMock()
         mock_dp.run_ai_concept_tagging = AsyncMock()
         mock_tm = MagicMock()
-        mock_task = MagicMock()
-        mock_task._cancel_event = MagicMock()
-        mock_tm.get_task.return_value = mock_task
+        sentinel_cancel_event = MagicMock()
+        mock_tm.get_cancel_event.return_value = sentinel_cancel_event
         now_val = datetime(2024, 6, 15, 10, 0)
 
         with (
@@ -923,10 +922,14 @@ class TestAiConceptLogicClosure:
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
             assert isinstance(result_msg, str)
-            # Verify manual_trigger=False for scheduled (non-manual) run
+            # 验证通过 get_cancel_event 访问器获取取消事件（而非穿透 _cancel_event）
+            mock_tm.get_cancel_event.assert_called_once_with("test_task")
+            # 验证 manual_trigger=False（调度场景不调用 LLM）
             mock_dp.run_ai_concept_tagging.assert_called_once()
             call_kwargs = mock_dp.run_ai_concept_tagging.call_args.kwargs
             assert call_kwargs.get("manual_trigger") is False
+            # 验证 cancel_event 被正确传递给 run_ai_concept_tagging（P0-2 取消链路）
+            assert call_kwargs.get("cancel_event") is sentinel_cancel_event
 
 
 class TestNightlyPredictionLogicClosure:

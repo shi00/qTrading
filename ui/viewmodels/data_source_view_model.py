@@ -240,8 +240,7 @@ class DataSourceViewModel:
         self._set_sync_busy(True, "ai_concept_sync")
 
         async def _ai_concept_logic(task_id: str, **kwargs):
-            task = self._tm.get_task(task_id)
-            cancel_event = getattr(task, "_cancel_event", None) if task else None
+            cancel_event = self._tm.get_cancel_event(task_id)
             try:
                 self._tm.update_progress(task_id, 0.05, I18n.get("ds_ai_concept_rebuild_start"))
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.

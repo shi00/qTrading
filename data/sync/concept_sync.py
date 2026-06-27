@@ -35,6 +35,10 @@ _AKSHARE_RETRY_BASE_DELAY = 1.0  # seconds; exponential backoff: 1, 2, 4
 # Default batch size for AI concept tagging.
 _AI_TAG_DEFAULT_BATCH = 50
 
+# Polling interval (seconds) for cancel-aware LLM calls. Project memory hard
+# constraint: long-running operations must check cancel_event every 2 seconds.
+_AI_TAG_CANCEL_POLL_INTERVAL = 2.0
+
 
 def _to_ts_code(code: str) -> str:
     """Convert a 6-digit AKShare code to Tushare ts_code format.
@@ -157,6 +161,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             logger.warning("[AKShareConceptSync] Engine disposed, stopping.")
             result.status = SyncStatus.FAILED.value
             result.errors.append("Engine disposed during sync")
+            raise
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
@@ -247,6 +252,7 @@ class LimitListSyncStrategy(ISyncStrategy):
             logger.warning("[LimitListSync] Engine disposed, stopping.")
             result.status = SyncStatus.FAILED.value
             result.errors.append("Engine disposed during sync")
+            raise
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
@@ -268,6 +274,15 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
     the strategy skips with status=SUCCESS and skipped>0. Otherwise it fetches
     untagged stocks, asks the LLM to infer core concepts, and upserts via
     ``StockDao.upsert_ai_concepts``.
+
+    错题本 (P1-6): run 开始时优先从 ``ai_concept_failures`` 表拉取可重试股票
+    (retry_count < max_retry AND next_retry_at <= now)，再从
+    ``get_stocks_without_ai_concepts`` 拉取补充到 batch_size。失败时 upsert 入
+    错题本；成功后从错题本删除。
+
+    取消粒度 (P0-2): LLM 单次调用通过 ``_cancellable_llm_call`` 包装，每
+    ``_AI_TAG_CANCEL_POLL_INTERVAL`` (2s) 检查 ``context.cancel_event``，最长
+    2 秒内响应取消。
     """
 
     @log_async_operation(
@@ -292,19 +307,61 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 return result
 
             stock_dao = self.context.cache.stock_dao
-            pending = await stock_dao.get_stocks_without_ai_concepts(batch_size, [])
+            cancel_event = getattr(self.context, "cancel_event", None)
+
+            # 错题本优先重试：先从失败队列拉取（max_retry + cooldown 过滤）
+            # EngineDisposedError 必须传播（R5），不可作为可恢复错误吞掉
+            retry_pending: list[tuple[str, str]] = []
+            try:
+                retry_pending = await stock_dao.get_ai_concept_failures_for_retry(batch_size)
+            except asyncio.CancelledError:
+                raise
+            except EngineDisposedError:
+                raise
+            except Exception as e:
+                logger.warning("[AIConceptTagSync] Failed to load retry queue, continuing without it: %s", e)
+                retry_pending = []
+
+            retry_codes = {ts_code for ts_code, _ in retry_pending}
+
+            # 补充未打标的新股票
+            fresh_pending: list[tuple[str, str]] = []
+            remaining = max(0, batch_size - len(retry_pending))
+            if remaining > 0:
+                try:
+                    fresh_pending = await stock_dao.get_stocks_without_ai_concepts(remaining, [])
+                except asyncio.CancelledError:
+                    raise
+                except EngineDisposedError:
+                    raise
+                except Exception as e:
+                    logger.warning("[AIConceptTagSync] Failed to load fresh pending: %s", e)
+                    fresh_pending = []
+
+            pending = retry_pending + fresh_pending
 
             if not pending:
                 logger.debug("[AIConceptTagSync] No pending stocks for AI concept tagging.")
                 return result
 
+            if retry_pending:
+                logger.info(
+                    "[AIConceptTagSync] Pending: %d retry + %d fresh",
+                    len(retry_pending),
+                    len(fresh_pending),
+                )
+
             entries: list[dict] = []
             failed: list[str] = []
+            succeeded_codes: list[str] = []
 
             for ts_code, name in pending:
                 if self._cancelled:
                     result.status = SyncStatus.CANCELLED.value
-                    return result
+                    break
+                if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
+                    result.status = SyncStatus.CANCELLED.value
+                    break
 
                 try:
                     messages = [
@@ -321,10 +378,12 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             "content": f"股票代码：{ts_code}\n股票名称：{name}",
                         },
                     ]
-                    resp = await ai_service.chat_with_web_search(
+                    resp = await self._cancellable_llm_call(
+                        ai_service,
                         messages,
                         temperature=0.3,
                         timeout=60.0,
+                        cancel_event=cancel_event,
                     )
                     concepts: list[str] = []
                     content = resp.get("content", "") if isinstance(resp, dict) else ""
@@ -344,13 +403,28 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         if isinstance(raw, list):
                             concepts = [str(c) for c in raw if c]
                     entries.append({"ts_code": ts_code, "concepts": concepts})
+                    succeeded_codes.append(ts_code)
                 except asyncio.CancelledError:
+                    result.status = SyncStatus.CANCELLED.value
                     raise
                 except EngineDisposedError:
                     raise
                 except Exception as e:
                     failed.append(f"{ts_code}: {e}")
                     logger.warning("[AIConceptTagSync] Failed for %s: %s", ts_code, e)
+                    # 写入错题本（不影响主流程；CancelledError/EngineDisposedError 必须传播，R2/R5）
+                    try:
+                        await stock_dao.upsert_ai_concept_failure(ts_code, name, str(e))
+                    except asyncio.CancelledError:
+                        raise
+                    except EngineDisposedError:
+                        raise
+                    except Exception as fe:
+                        logger.warning(
+                            "[AIConceptTagSync] Failed to persist failure for %s: %s",
+                            ts_code,
+                            fe,
+                        )
 
             if self._check_cancelled(result):
                 return result
@@ -359,14 +433,32 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 saved = await stock_dao.upsert_ai_concepts(entries)
                 result.added = saved or 0
 
+            # 成功打标的股票：从错题本清除
+            if succeeded_codes:
+                for ts_code in succeeded_codes:
+                    if ts_code in retry_codes:
+                        try:
+                            await stock_dao.clear_ai_concept_failure(ts_code)
+                        except asyncio.CancelledError:
+                            raise
+                        except EngineDisposedError:
+                            raise
+                        except Exception as fe:
+                            logger.warning(
+                                "[AIConceptTagSync] Failed to clear failure record for %s: %s",
+                                ts_code,
+                                fe,
+                            )
+
             if failed:
                 result.status = SyncStatus.PARTIAL.value
                 result.errors.extend(failed)
 
             logger.info(
-                "[AIConceptTagSync] Done | added=%d, failed=%d",
+                "[AIConceptTagSync] Done | added=%d, failed=%d, retry_cleared=%d",
                 result.added,
                 len(failed),
+                sum(1 for c in succeeded_codes if c in retry_codes),
             )
         except asyncio.CancelledError:
             result.status = SyncStatus.CANCELLED.value
@@ -375,6 +467,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             logger.warning("[AIConceptTagSync] Engine disposed, stopping.")
             result.status = SyncStatus.FAILED.value
             result.errors.append("Engine disposed during sync")
+            raise
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
@@ -386,3 +479,58 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             result.errors.append(error_info["message_key"])
 
         return result
+
+    async def _cancellable_llm_call(
+        self,
+        ai_service: typing.Any,
+        messages: list[dict],
+        *,
+        temperature: float,
+        timeout: float,
+        cancel_event: typing.Any,
+    ) -> dict:
+        """LLM 调用包装：每 _AI_TAG_CANCEL_POLL_INTERVAL (2s) 检查 cancel_event。
+
+        若取消信号到达，取消底层 LLM task 并 raise CancelledError；否则正常返回
+        LLM 响应。底层 LLM 调用本身不受影响（asyncio.shield 保护），但本调用
+        会主动 cancel 它以释放资源。
+        """
+        if cancel_event is None:
+            return await ai_service.chat_with_web_search(
+                messages,
+                temperature=temperature,
+                timeout=timeout,
+            )
+
+        llm_task = asyncio.create_task(
+            ai_service.chat_with_web_search(messages, temperature=temperature, timeout=timeout),
+        )
+        try:
+            while not llm_task.done():
+                if hasattr(cancel_event, "is_set") and cancel_event.is_set():
+                    llm_task.cancel()
+                    # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
+                    try:
+                        await llm_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise asyncio.CancelledError()
+                try:
+                    # shield 防止外部 cancel 传播到 LLM task 内部前被 wait_for 吞掉
+                    return await asyncio.wait_for(
+                        asyncio.shield(llm_task),
+                        timeout=_AI_TAG_CANCEL_POLL_INTERVAL,
+                    )
+                except TimeoutError:
+                    continue
+            # 走到这里说明 llm_task 已 done（极端边界：循环外完成）
+            return await llm_task
+        except asyncio.CancelledError:
+            if not llm_task.done():
+                llm_task.cancel()
+                # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
+                try:
+                    await llm_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise

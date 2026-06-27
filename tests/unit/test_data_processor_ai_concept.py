@@ -152,3 +152,26 @@ class TestRunAIConceptTagging:
             MockLimitList.return_value.run.assert_not_called()
             MockAITag.return_value.run.assert_not_called()
             assert "cancelled" in result
+
+    @pytest.mark.asyncio
+    async def test_cancel_event_propagated_to_context(self):
+        """P0-2: cancel_event 必须设置到 context，供 AIConceptTagSyncStrategy 轮询"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        mock_result = _make_sync_result(status="success", added=0)
+        cancel_event = asyncio.Event()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
+            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
+        ):
+            MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
+            MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
+            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
+
+            await dp.run_ai_concept_tagging(
+                cancel_event=cancel_event,
+                manual_trigger=True,
+            )
+
+            assert dp.context.cancel_event is cancel_event

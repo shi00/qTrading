@@ -274,6 +274,14 @@ class TestDataSourceViewModelAiConceptRebuild:
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
         bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_ai_concept_done"), "success")
+        # 验证通过 get_cancel_event 访问器获取取消事件（P0-2 取消链路）
+        mock_task_manager.get_cancel_event.assert_called_once_with("task_123")
+        # 验证 manual_trigger=True + cancel_event + ai_service 参数正确传递
+        mock_processor.run_ai_concept_tagging.assert_called_once()
+        kwargs = mock_processor.run_ai_concept_tagging.call_args.kwargs
+        assert kwargs.get("manual_trigger") is True
+        assert kwargs.get("cancel_event") is mock_task_manager.get_cancel_event.return_value
+        assert "ai_service" in kwargs
 
     async def test_rebuild_cancelled_propagates(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=asyncio.CancelledError())

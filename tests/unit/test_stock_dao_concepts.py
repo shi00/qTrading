@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -270,3 +272,205 @@ class TestGetConceptsByPrefix:
         dao._read_db = AsyncMock(return_value=pd.DataFrame())
         result = await dao.get_concepts_by_prefix("EM_")
         assert result == []
+
+
+class TestAIConceptFailureConstants:
+    """错题本：默认重试上限与冷却期常量"""
+
+    def test_max_retry_constant(self):
+        assert StockDao.AI_CONCEPT_FAILURE_MAX_RETRY == 3
+
+    def test_cooldown_seconds_constant(self):
+        assert StockDao.AI_CONCEPT_FAILURE_COOLDOWN_SECONDS == 24 * 3600
+
+
+class TestUpsertAIConceptFailure:
+    """错题本：upsert_ai_concept_failure"""
+
+    @pytest.mark.asyncio
+    async def test_upsert_calls_guarded_begin_with_correct_sql(self):
+        """验证使用 _guarded_begin 事务保护，SQL 含 ON CONFLICT upsert"""
+        dao = _make_dao()
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql = AsyncMock()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await dao.upsert_ai_concept_failure("000001.SZ", "平安银行", "LLM timeout")
+        assert result == 1
+        mock_conn.exec_driver_sql.assert_called_once()
+        sql_arg = mock_conn.exec_driver_sql.call_args.args[0]
+        assert "INSERT INTO ai_concept_failures" in sql_arg
+        assert "ON CONFLICT (ts_code) DO UPDATE" in sql_arg
+        assert "retry_count = ai_concept_failures.retry_count + 1" in sql_arg
+        params = mock_conn.exec_driver_sql.call_args.args[1]
+        assert params[0] == "000001.SZ"
+        assert params[1] == "平安银行"
+        assert params[2] == "LLM timeout"
+
+    @pytest.mark.asyncio
+    async def test_upsert_propagates_cancelled_error(self):
+        """CancelledError 必须传播（R2）"""
+        dao = _make_dao()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(
+            side_effect=asyncio.CancelledError(),
+        )
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(asyncio.CancelledError):
+            await dao.upsert_ai_concept_failure("000001.SZ", "test", "err")
+
+    @pytest.mark.asyncio
+    async def test_upsert_propagates_engine_disposed(self):
+        """EngineDisposedError 必须传播（R5）"""
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(
+            side_effect=EngineDisposedError(),
+        )
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(EngineDisposedError):
+            await dao.upsert_ai_concept_failure("000001.SZ", "test", "err")
+
+    @pytest.mark.asyncio
+    async def test_upsert_custom_cooldown_overrides_default(self):
+        """显式传入 cooldown_seconds 时使用自定义值"""
+        import datetime as dt
+
+        from utils.time_utils import get_now
+
+        dao = _make_dao()
+        mock_conn = AsyncMock()
+        mock_conn.exec_driver_sql = AsyncMock()
+        dao._guarded_begin = MagicMock()
+        dao._guarded_begin.return_value.__aenter__ = AsyncMock(return_value=mock_conn)
+        dao._guarded_begin.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        before = get_now().replace(tzinfo=None)
+        await dao.upsert_ai_concept_failure("000001.SZ", "test", "err", cooldown_seconds=60)
+        after = get_now().replace(tzinfo=None)
+        params = mock_conn.exec_driver_sql.call_args.args[1]
+        # params[4] = next_retry_at
+        next_retry: dt.datetime = params[4]
+        # 应在 [before+60s, after+60s] 范围内
+        assert before + dt.timedelta(seconds=60) <= next_retry <= after + dt.timedelta(seconds=60)
+
+
+class TestGetAIConceptFailuresForRetry:
+    """错题本：get_ai_concept_failures_for_retry"""
+
+    @pytest.mark.asyncio
+    async def test_returns_list_of_tuples(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {"ts_code": ["000001.SZ", "600000.SH"], "name": ["平安银行", "浦发银行"]},
+            ),
+        )
+        result = await dao.get_ai_concept_failures_for_retry(batch_size=10)
+        assert result == [("000001.SZ", "平安银行"), ("600000.SH", "浦发银行")]
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "retry_count < $1" in sql_arg
+        assert "next_retry_at IS NULL OR next_retry_at <= now()" in sql_arg
+        assert "ORDER BY last_attempt_at ASC" in sql_arg
+        assert "LIMIT $2" in sql_arg
+        # 默认 max_retry=3
+        params = dao._read_db.call_args.args[1]
+        assert params == (3, 10)
+
+    @pytest.mark.asyncio
+    async def test_custom_max_retry_overrides_default(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        await dao.get_ai_concept_failures_for_retry(batch_size=5, max_retry=10)
+        params = dao._read_db.call_args.args[1]
+        assert params == (10, 5)
+
+    @pytest.mark.asyncio
+    async def test_empty_returns_empty_list(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_ai_concept_failures_for_retry(batch_size=10)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_propagates_engine_disposed(self):
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError())
+        with pytest.raises(EngineDisposedError):
+            await dao.get_ai_concept_failures_for_retry(batch_size=10)
+
+
+class TestClearAIConceptFailure:
+    """错题本：clear_ai_concept_failure"""
+
+    @pytest.mark.asyncio
+    async def test_clear_calls_write_db_with_param(self):
+        """成功打标后从错题本删除，使用参数化 SQL（R4）"""
+        dao = _make_dao()
+        dao._write_db = AsyncMock(return_value=1)
+        result = await dao.clear_ai_concept_failure("000001.SZ")
+        assert result == 1
+        sql_arg = dao._write_db.call_args.args[0]
+        assert "DELETE FROM ai_concept_failures WHERE ts_code = $1" in sql_arg
+        params = dao._write_db.call_args.args[1]
+        assert params == ("000001.SZ",)
+
+    @pytest.mark.asyncio
+    async def test_clear_propagates_cancelled(self):
+        dao = _make_dao()
+        dao._write_db = AsyncMock(side_effect=asyncio.CancelledError())
+        with pytest.raises(asyncio.CancelledError):
+            await dao.clear_ai_concept_failure("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_clear_propagates_engine_disposed(self):
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao._write_db = AsyncMock(side_effect=EngineDisposedError())
+        with pytest.raises(EngineDisposedError):
+            await dao.clear_ai_concept_failure("000001.SZ")
+
+
+class TestCountAIConceptFailures:
+    """错题本：count_ai_concept_failures"""
+
+    @pytest.mark.asyncio
+    async def test_returns_count(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame({"cnt": [5]}),
+        )
+        result = await dao.count_ai_concept_failures()
+        assert result == 5
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_on_empty(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=None)
+        result = await dao.count_ai_concept_failures()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_swallows_operational_errors_returns_zero(self):
+        """通用异常降级为 0，不传播（诊断用途）"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=RuntimeError("connect fail"))
+        result = await dao.count_ai_concept_failures()
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_count_propagates_engine_disposed(self):
+        """EngineDisposedError 必须传播（R5），不可被降级为 0"""
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError())
+        with pytest.raises(EngineDisposedError):
+            await dao.count_ai_concept_failures()

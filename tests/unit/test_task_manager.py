@@ -446,6 +446,48 @@ class TestTaskManagerIsCancelled:
         assert mgr.is_cancelled("nonexistent") is False
 
 
+class TestTaskManagerGetCancelEvent:
+    """get_cancel_event 访问器测试：task 不存在 / 未启动 / 已启动三态。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_nonexistent_task_returns_none(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        assert mgr.get_cancel_event("nonexistent") is None
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_queued_task_not_started_returns_none(self, mock_i18n, mock_tp):
+        """QUEUED 状态的 task _cancel_event 尚未在 _task_runner 中懒初始化，应返回 None。"""
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.QUEUED)
+        mgr._tasks[t.id] = t
+        assert t._cancel_event is None  # 前置条件
+        assert mgr.get_cancel_event(t.id) is None
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_running_task_returns_event(self, mock_i18n, mock_tp):
+        """RUNNING 状态且 _cancel_event 已设置的 task 应返回该 Event 实例。"""
+        mgr = TaskManager()
+        evt = asyncio.Event()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        t._cancel_event = evt
+        mgr._tasks[t.id] = t
+        assert mgr.get_cancel_event(t.id) is evt
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_completed_task_returns_event_if_set(self, mock_i18n, mock_tp):
+        """终态 task 的 _cancel_event 不被清理，仍可返回（供诊断用）。"""
+        mgr = TaskManager()
+        evt = asyncio.Event()
+        t = AppTask(name="test", status=TaskStatus.COMPLETED)
+        t._cancel_event = evt
+        mgr._tasks[t.id] = t
+        assert mgr.get_cancel_event(t.id) is evt
+
+
 class TestTaskManagerCancelTask:
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
