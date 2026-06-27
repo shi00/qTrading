@@ -364,3 +364,14 @@ class TestBacktestConfigPanel:
         panel._show_end_picker(mock_event)
 
         mock_page.open.assert_called_once_with(panel.end_date_picker)
+
+    def test_refresh_locale_preserves_dropdown_value(self, panel: BacktestConfigPanel) -> None:
+        """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""
+        panel.rebalance_dropdown.value = "signal"
+        original_value = panel.rebalance_dropdown.value
+        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            panel.refresh_locale()
+        assert panel.rebalance_dropdown.value == original_value
+        assert panel.rebalance_dropdown.options is not None
+        assert len(panel.rebalance_dropdown.options) > 0

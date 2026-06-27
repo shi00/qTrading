@@ -1112,6 +1112,28 @@ class TestSystemTab:
         self.mock_i18n.get.side_effect = Exception("locale error")
         tab._on_locale_change("en_US")
 
+    def test_on_locale_change_preserves_dropdown_values(self, mock_page):
+        """§5.8 规范 4：_on_locale_change 重建 options 后 4 个 dropdown 的 value 必须保留。"""
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.language_dropdown.value = "en_US"
+        tab.theme_dropdown.value = "dark"
+        tab.log_level_dropdown.value = "INFO"
+        tab.point_tier_dropdown.value = "free"
+        tab._on_locale_change("en_US")
+        assert tab.language_dropdown.value == "en_US"
+        assert tab.theme_dropdown.value == "dark"
+        assert tab.log_level_dropdown.value == "INFO"
+        assert tab.point_tier_dropdown.value == "free"
+        for dropdown in (
+            tab.language_dropdown,
+            tab.theme_dropdown,
+            tab.log_level_dropdown,
+            tab.point_tier_dropdown,
+        ):
+            assert dropdown.options is not None
+            assert len(dropdown.options) > 0
+
 
 class TestDataSourceTab:
     patches: list
@@ -1206,6 +1228,16 @@ class TestDataSourceTab:
         tab.metric_storage = MagicMock()
         tab.update_theme()
         tab.metric_sync.update_theme.assert_called_once()
+
+    def test_refresh_locale_preserves_dropdown_value(self, mock_page):
+        """§5.8 规范 4：refresh_locale 重建 options 后 history_years_dropdown 的 value 必须保留。"""
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.history_years_dropdown.value = "3"
+        tab.refresh_locale()
+        assert tab.history_years_dropdown.value == "3"
+        assert tab.history_years_dropdown.options is not None
+        assert len(tab.history_years_dropdown.options) > 0
 
 
 class TestDatabaseTab:

@@ -1107,7 +1107,7 @@ class LLMConfigPanel(ft.Container):
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
 
-    def _on_locale_change(self):  # pragma: no cover
+    def _on_locale_change(self):
         try:
             self.provider_dropdown.label = I18n.get("llm_select_provider")
             self.model_dropdown.label = I18n.get("llm_select_model")
@@ -1121,10 +1121,15 @@ class LLMConfigPanel(ft.Container):
             self.refresh_models_button.tooltip = I18n.get("llm_refresh_models")
             self.save_button.text = I18n.get("settings_save_config")
 
+            saved_provider = self.provider_dropdown.value
+            self.provider_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.provider_dropdown.options = self._build_provider_options()
-            self.provider_dropdown.value = self._current_provider
+            self.provider_dropdown.value = saved_provider
 
+            saved_model = self.model_dropdown.value
+            self.model_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.model_dropdown.options = self._build_model_options(self._current_provider)
+            self.model_dropdown.value = saved_model
 
             self._update_links_row()
 

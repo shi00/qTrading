@@ -323,6 +323,7 @@ class TableViewerTab(ft.Container):
             MetaDataManager.invalidate_cache()
             self.table_selector.label = I18n.get("data_select_table")
             saved_table = self.table_selector.value
+            self.table_selector.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.table_selector.options = [
                 ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.tables_list
             ]
@@ -333,6 +334,7 @@ class TableViewerTab(ft.Container):
 
             self.filter_op.label = I18n.get("data_filter_op")
             saved_op = self.filter_op.value
+            self.filter_op.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.filter_op.options = [
                 ft.dropdown.Option("="),
                 ft.dropdown.Option("LIKE"),
@@ -458,8 +460,11 @@ class TableViewerTab(ft.Container):
             except Exception as toggle_err:
                 logger.debug(f"[_toggle_loading] finalization ignored: {toggle_err}")
 
-    def _populate_filter_columns(self):  # pragma: no cover
-        """Fill filter column dropdown from vm.table_columns."""
+    def _populate_filter_columns(self):
+        """Fill filter column dropdown from vm.table_columns.
+
+        经 refresh_locale 调用时 options 含 i18n 别名，需强制 dirty（§5.8 规范 4）。
+        """
         self.filter_col.options = [
             ft.dropdown.Option(
                 key=col,
@@ -468,6 +473,7 @@ class TableViewerTab(ft.Container):
             for col in self.vm.table_columns
         ]
         if self.vm.table_columns:
+            self.filter_col.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.filter_col.value = self.vm.table_columns[0]
 
     def _rebuild_table_columns(self):  # pragma: no cover

@@ -47,6 +47,18 @@ class TestTableToApiMap:
         for table in expected_tables:
             assert table in client.TABLE_TO_API_MAP, f"Missing mapping for {table}"
 
+    def test_limit_list_maps_to_limit_list_d_api(self, tushare_client_mocks):
+        """本地表名 limit_list 应映射到 Tushare API 名 limit_list_d（带 _d 后缀）。
+        修复历史 bug：代码曾错误调用 self.pro.limit_list（不存在的接口名）。"""
+        client, _, _ = tushare_client_mocks
+        assert client.TABLE_TO_API_MAP["limit_list"] == "limit_list_d"
+
+    def test_slow_api_overrides_uses_limit_list_d(self, tushare_client_mocks):
+        """_SLOW_API_OVERRIDES 的 key 是 API 名，应使用 limit_list_d 而非 limit_list。"""
+        client, _, _ = tushare_client_mocks
+        assert "limit_list_d" in client._SLOW_API_OVERRIDES
+        assert "limit_list" not in client._SLOW_API_OVERRIDES
+
 
 class TestGetEffectiveSyncedTables:
     def test_all_tables_included_when_all_apis_available(self, tushare_client_mocks):
@@ -236,7 +248,7 @@ class TestProbeApiCapabilities:
             "moneyflow",
             "hk_hold",
             "top_list",
-            "limit_list",
+            "limit_list_d",
             "margin_detail",
             "block_trade",
             "fina_indicator",

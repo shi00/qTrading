@@ -833,6 +833,18 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         # 重建后的新引用也应具有正确的 value
         assert wizard.gradient_guide_text.value == "en_wizard_welcome_guide"
 
+    def test_on_locale_change_preserves_dropdown_value(self, mock_page):
+        """§5.8 规范 4：_on_locale_change 重建 options 后 value 必须保留。"""
+        self.mock_i18n.current_locale.return_value = "zh_CN"
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        wizard.wizard_language_dropdown.value = "zh_CN"
+        original_value = wizard.wizard_language_dropdown.value
+        wizard._on_locale_change()
+        assert wizard.wizard_language_dropdown.value == original_value
+        assert wizard.wizard_language_dropdown.options is not None
+        assert len(wizard.wizard_language_dropdown.options) > 0
+
     def test_header_title_is_in_ui_tree(self, mock_page):
         wizard = self._make_wizard(mock_page)
         header_column = wizard.header_container

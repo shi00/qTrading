@@ -302,7 +302,7 @@ pyparsing==3.3.2
     # via
     #   matplotlib
     #   pip-requirements-parser
-pyright==1.1.410
+pyright==1.1.411
     # via astockscreener (pyproject.toml)
 pytest==9.0.3
     # via

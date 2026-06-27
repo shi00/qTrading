@@ -118,6 +118,33 @@ class TestTushareClientSetToken:
         mock_ts.set_token.assert_called_with("new_token")
 
 
+class TestTushareClientTokenBreakerProperty:
+    """is_token_invalid 只读属性应正确反映 _token_invalid 状态。"""
+
+    def test_is_token_invalid_default_false(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        assert client.is_token_invalid is False
+
+    def test_is_token_invalid_true_after_set(self, tushare_client_mocks):
+        client, _, _ = tushare_client_mocks
+        client._token_invalid = True
+        assert client.is_token_invalid is True
+
+    def test_is_token_invalid_resets_on_set_token(self, tushare_client_mocks):
+        """set_token 应重置熔断标志（已有逻辑），is_token_invalid 随之返回 False。"""
+        client, _, _ = tushare_client_mocks
+        client._token_invalid = True
+        assert client.is_token_invalid is True
+        client.set_token("new_token_after_invalid")
+        assert client.is_token_invalid is False
+
+    def test_is_token_invalid_is_readonly(self, tushare_client_mocks):
+        """is_token_invalid 是 property，不能直接赋值。"""
+        client, _, _ = tushare_client_mocks
+        with pytest.raises(AttributeError):
+            client.is_token_invalid = True  # type: ignore[misc]
+
+
 class TestTushareClientHandleApiCall:
     @pytest.mark.asyncio
     async def test_no_pro_raises(self):

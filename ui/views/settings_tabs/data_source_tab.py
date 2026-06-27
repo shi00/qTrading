@@ -360,7 +360,7 @@ class DataSourceTab(ft.Container):
         # Standard colors auto-update via semantic tokens
         self._safe_update()
 
-    def refresh_locale(self):  # pragma: no cover
+    def refresh_locale(self):
         try:
             # Historical Data Card
             self.sync_button.text = I18n.get("settings_init_data")
@@ -369,6 +369,8 @@ class DataSourceTab(ft.Container):
             self.row_init.subtitle_view.value = I18n.get("settings_hint_first_run")
             self.row_token.update_locale()
             self.history_years_dropdown.label = I18n.get("settings_history_range")
+            saved_history_years = self.history_years_dropdown.value
+            self.history_years_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.history_years_dropdown.options = [
                 ft.dropdown.Option("1", f"1 {I18n.get('unit_year')}".strip()),
                 ft.dropdown.Option("2", f"2 {I18n.get('unit_years')}".strip()),
@@ -376,6 +378,7 @@ class DataSourceTab(ft.Container):
                 ft.dropdown.Option("4", f"4 {I18n.get('unit_years')}".strip()),
                 ft.dropdown.Option("5", f"5 {I18n.get('unit_years')}".strip()),
             ]
+            self.history_years_dropdown.value = saved_history_years
 
             self.header_health.update_locale()
             self.header_console.update_locale()

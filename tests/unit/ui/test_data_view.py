@@ -307,6 +307,50 @@ class TestTableViewerTab:
         tab._rebuild_table_rows()
         assert len(tab.data_table.rows) == 2
 
+    def test_refresh_locale_preserves_dropdown_values(self, mock_page):
+        """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""
+        import ui.views.data_view as mod
+
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        # 配置 tables_list 与 get_table_alias 返回，确保 table_selector.options 能重建
+        tab.vm.tables_list = ["stock_basic", "daily"]
+        mod.MetaDataManager.get_table_alias.return_value = "alias"
+        tab.table_selector.value = "stock_basic"
+        tab.filter_op.value = "="
+        original_table = tab.table_selector.value
+        original_op = tab.filter_op.value
+        tab.refresh_locale()
+        assert tab.table_selector.value == original_table
+        assert tab.filter_op.value == original_op
+        assert tab.table_selector.options is not None
+        assert len(tab.table_selector.options) > 0
+        assert tab.filter_op.options is not None
+        assert len(tab.filter_op.options) > 0
+
+    def test_refresh_locale_preserves_filter_col_value(self, mock_page):
+        """§5.8 规范 4：refresh_locale 重建 filter_col.options 后 value 必须保留。
+
+        _populate_filter_columns 会重置 filter_col.value 为 table_columns[0]，
+        因此设置 table_columns[0]="col1" 并预选 "col1" 时，refresh_locale 后应仍为 "col1"
+        （data_view.py:475-477 先置 None 强制 dirty 再回填 table_columns[0]）。
+        """
+        import ui.views.data_view as mod
+
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.vm.tables_list = ["stock_basic", "daily"]
+        tab.vm.current_table = "stock_basic"
+        tab.vm.table_columns = ["col1", "col2"]
+        tab.vm.current_data = pd.DataFrame()
+        mod.MetaDataManager.get_table_alias.return_value = "alias"
+        mod.MetaDataManager.get_column_alias.return_value = "col_alias"
+        tab.filter_col.value = "col1"
+        tab.refresh_locale()
+        assert tab.filter_col.value == "col1"
+        assert tab.filter_col.options is not None
+        assert len(tab.filter_col.options) == 2
+
 
 class TestSQLConsoleTab:
     patches: list

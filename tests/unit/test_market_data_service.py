@@ -821,3 +821,94 @@ class TestMarketDataServiceSafeFetch:
         svc._running = True
         svc._fetch_market_data = AsyncMock(side_effect=Exception("network error"))
         await svc._safe_fetch()
+
+
+class TestMarketDataServicePollLoopTokenBreaker:
+    """token 熔断时 _poll_loop 应延长 sleep 间隔，避免 fast-fail 每 30s 刷屏 WARNING。"""
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_token_invalid_extends_poll_interval(self, mock_tc, mock_cache, mock_api):
+        svc = MarketDataService()
+        svc._running = True
+        svc._safe_fetch = AsyncMock()
+        # 模拟 token 熔断
+        svc.api = MagicMock()
+        svc.api.is_token_invalid = True
+
+        sleep_calls = []
+
+        async def fake_sleep(interval):
+            sleep_calls.append(interval)
+            # 第一次 sleep 后停止循环
+            svc._running = False
+
+        with (
+            patch(
+                "data.domain_services.market_data_service.ConfigHandler.get_market_data_poll_interval", return_value=30
+            ),
+            patch("data.domain_services.market_data_service.asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await svc._poll_loop()
+
+        # token 熔断时应延长到 300s
+        assert sleep_calls == [300], f"预期 sleep 300s，实际 {sleep_calls}"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_token_valid_uses_config_interval(self, mock_tc, mock_cache, mock_api):
+        svc = MarketDataService()
+        svc._running = True
+        svc._safe_fetch = AsyncMock()
+        svc.api = MagicMock()
+        svc.api.is_token_invalid = False
+
+        sleep_calls = []
+
+        async def fake_sleep(interval):
+            sleep_calls.append(interval)
+            svc._running = False
+
+        with (
+            patch(
+                "data.domain_services.market_data_service.ConfigHandler.get_market_data_poll_interval", return_value=45
+            ),
+            patch("data.domain_services.market_data_service.asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await svc._poll_loop()
+
+        # token 正常时使用配置值
+        assert sleep_calls == [45], f"预期 sleep 45s，实际 {sleep_calls}"
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_token_invalid_uses_max_when_config_higher(self, mock_tc, mock_cache, mock_api):
+        """配置间隔高于 300s 时，token 熔断不应缩短间隔（max 语义）。"""
+        svc = MarketDataService()
+        svc._running = True
+        svc._safe_fetch = AsyncMock()
+        svc.api = MagicMock()
+        svc.api.is_token_invalid = True
+
+        sleep_calls = []
+
+        async def fake_sleep(interval):
+            sleep_calls.append(interval)
+            svc._running = False
+
+        with (
+            patch(
+                "data.domain_services.market_data_service.ConfigHandler.get_market_data_poll_interval", return_value=600
+            ),
+            patch("data.domain_services.market_data_service.asyncio.sleep", side_effect=fake_sleep),
+        ):
+            await svc._poll_loop()
+
+        # 配置 600s > 300s，应取 600s
+        assert sleep_calls == [600], f"预期 sleep 600s（取最大值），实际 {sleep_calls}"

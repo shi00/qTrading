@@ -249,7 +249,7 @@ class AutomationTab(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[AutomationTab] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str | None = None):
         """语言变更回调
 
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
@@ -258,7 +258,10 @@ class AutomationTab(ft.Container):
             # 更新静态文本
             self.schedule_enabled.label = I18n.get("settings_auto_update")
             self.schedule_time.label = I18n.get("settings_update_time")
+            saved_schedule_time = self.schedule_time.value
+            self.schedule_time.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.schedule_time.options = self._build_time_options()
+            self.schedule_time.value = saved_schedule_time
             self.schedule_status.value = self._get_schedule_status_text(
                 self.schedule_enabled.value,
             )
@@ -267,7 +270,10 @@ class AutomationTab(ft.Container):
                 "settings_doubao_update",
             )
             self.doubao_time.label = I18n.get("settings_update_time")
+            saved_doubao_time = self.doubao_time.value
+            self.doubao_time.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.doubao_time.options = self._build_time_options()
+            self.doubao_time.value = saved_doubao_time
             self.doubao_status.value = self._get_schedule_status_text(
                 self.doubao_enabled.value,
             )
@@ -461,7 +467,7 @@ class NotificationsTab(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[NotificationsTab] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str | None = None):
         """语言变更回调
 
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
@@ -469,7 +475,10 @@ class NotificationsTab(ft.Container):
         try:
             self.news_alerts_enabled.label = I18n.get("settings_news_alerts")
             self.news_interval.label = I18n.get("settings_news_interval")
+            saved_news_interval = self.news_interval.value
+            self.news_interval.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.news_interval.options = self._build_interval_options()
+            self.news_interval.value = saved_news_interval
             for row in [self.row_alerts, self.row_interval]:
                 row.update_locale()
             self._build_content()

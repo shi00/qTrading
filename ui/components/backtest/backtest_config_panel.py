@@ -183,6 +183,7 @@ class BacktestConfigPanel(ft.Container):
             self.initial_capital_input.label = I18n.get("backtest_initial_capital")
             self.rebalance_dropdown.label = I18n.get("backtest_rebalance_freq")
             saved_rebalance = self.rebalance_dropdown.value
+            self.rebalance_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.rebalance_dropdown.options = [
                 ft.dropdown.Option("signal", I18n.get("backtest_rebalance_signal")),
                 ft.dropdown.Option("daily", I18n.get("backtest_rebalance_daily")),

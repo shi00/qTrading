@@ -717,6 +717,24 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 4. **下拉框 options 同步**：所有 `ft.Dropdown` 的 `options` 中如果包含 `I18n.get()` 翻译文案，`refresh_locale` 必须重建 `options` 列表（**保留当前 `value`**），不能只刷新 `label`。枚举型 options（如主题、日志级别、积分档位）必须重建；语言选择器 options 也需重建以保持一致性。
 
+   **⚠️ 必须强制刷新 value（Flet 已知坑）**：`Control._set_attr_internal` 对相等值短路（源码 `flet/core/control.py:189` 的 `orig_val[0] != value` 判断），不标记 dirty。因此以下两种"看似正确"的写法**均无效**，前端收不到 value 变更，闭合状态下选中项显示文本不会刷新：
+
+   - `dropdown.value = dropdown.value`（自赋值）
+   - `saved = dropdown.value; ...; dropdown.value = saved`（saved_value 模式）
+
+   必须先置 `None` 再恢复，强制触发两次 dirty：
+
+   ```python
+   saved = dropdown.value
+   dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，必须先置空）
+   dropdown.options = [...]  # 重建 options（含新 locale 文案）
+   dropdown.value = saved   # 再次触发 dirty，前端 rebuild 选中项文本
+   ```
+
+   原理：`value=None` 时原值非空，被改写为 `""` 并触发 dirty；`value=saved` 时原值为 `""`，再次触发 dirty。前端收到两次 value 变更事件，`DropdownButton` 必然 rebuild 并重新查找选中项显示文本。
+
+   **边界情况**：当 `saved_value` 为 `None`（用户未选中）时，闭合态本就无文本需刷新，无需此修复，但套用本模式也无副作用；当 `saved_value` 为空字符串 `""` 时本方案失效（两次赋值均被短路），实际项目 option key 应非空，若出现需单独处理。
+
 5. **实例属性提取**：内联在 `ft.Row`/`ft.Column` 中且 `tooltip`/`text` 来自 `I18n.get()` 的控件（如 `ft.IconButton`、`ft.Text`），必须提取为实例属性（`self.xxx_btn`/`self.xxx_text`），否则 `refresh_locale` 无法引用。`MetricCard`/`ActionChip`/`StatusBadge` 等复合组件通过 `set_label`/`set_text` 方法刷新。
 
 6. **子组件级联与状态保留**：父视图的 `refresh_locale` 必须级联调用子组件的 `refresh_locale`（若存在）或 `_on_locale_change`。包含子 panel 的视图（如 `OnboardingWizard`、`AIBrainTab`、`BacktestView`）在重建子 panel 前必须先调用旧 panel 的 `will_unmount`，取消其 I18n 订阅避免泄漏；**重建后必须恢复旧 panel 的用户输入状态**（如表单值、选中项），避免用户输入丢失。
@@ -732,6 +750,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - ❌ 在 `refresh_locale` 中调用网络请求 / 数据库查询 / 重型 CPU 计算
 - ❌ 只刷新 `Dropdown.label` 而不重建 `options`
 - ❌ 重建 `options` 时不保留当前 `value`
+- ❌ `dropdown.value = dropdown.value` 自赋值刷新（被 Flet `_set_attr_internal` 短路，无效）
+- ❌ 仅 `value = saved_value` 不先置 `None`（同样被短路，闭合态选中项文本不刷新）
 - ❌ 重建子 panel 前不调用旧 panel 的 `will_unmount`
 - ❌ 重建子 panel 后不恢复用户输入状态（如表单值、选中项）
 - ❌ 内联 `ft.Text(I18n.get(...))` 不提取为实例属性，导致无法刷新
@@ -823,15 +843,20 @@ class MyView(ft.Container):
             self.title_text.value = I18n.get("my_view_title")
             self.action_btn.tooltip = I18n.get("my_view_refresh")
 
-            # 规范 4：重建 options 并保留 value
             self.size_dropdown.label = I18n.get("my_view_page_size")
+            # 规范 4：重建 options 并强制刷新 value（Flet 对相等值短路，必须先置 None）
+            # value 恢复放在 try 外，确保 options 重建失败也能恢复（§5.8 规范 9 异常降级）
             saved_value = self.size_dropdown.value
-            per_page = I18n.get("unit_per_page")
-            self.size_dropdown.options = [
-                ft.dropdown.Option(k, text=f"{k} {per_page}")
-                for k in ("10", "20", "50")
-            ]
-            self.size_dropdown.value = saved_value
+            self.size_dropdown.value = None  # 强制触发 dirty
+            try:
+                per_page = I18n.get("unit_per_page")
+                self.size_dropdown.options = [
+                    ft.dropdown.Option(k, text=f"{k} {per_page}")
+                    for k in ("10", "20", "50")
+                ]
+            except Exception as rebuild_err:
+                logger.debug(f"[MyView] size_dropdown options rebuild skipped: {rebuild_err}")
+            self.size_dropdown.value = saved_value  # 无论 options 重建是否成功都恢复 value
 
             # 规范 6：级联子组件（若有）
             # child_refresh = getattr(self.child_panel, "refresh_locale", None)

@@ -4,6 +4,8 @@ import zipfile
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
+
 from utils.diagnostics import SystemDiagnosticsCollector
 from services.task_manager import TaskStatus, AppTask
 
@@ -142,3 +144,74 @@ async def test_diagnostics_export(tmp_path):
             # 清理产生的 zip 文件
             if os.path.exists(zip_path):
                 os.remove(zip_path)
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_export_with_numpy_types(tmp_path):
+    """health_info 含 numpy 标量（来自 pandas SQL 聚合查询）时，json_serial 应正确序列化。
+    修复历史 bug：json_serial 仅处理 datetime，导致 numpy.int64 触发 TypeError。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "app.log").write_text("ok", encoding="utf-8")
+    (log_dir / "error.log").write_text("ok", encoding="utf-8")
+
+    with patch("config.APP_ROOT", str(tmp_path)):
+        mock_dp = MagicMock()
+        # 模拟 stock_dao.count_trade_days() 等返回 numpy 标量的场景
+        mock_dp.check_data_health = AsyncMock(
+            return_value={
+                "status": "green",
+                "msg": "OK",
+                "trade_days": np.int64(252),
+                "concept_count": np.int64(85),
+                "expected_rows": np.int64(4500),
+                "avg_amount": np.float64(1.23e8),
+                "is_healthy": np.bool_(True),
+            }
+        )
+
+        mock_tm = MagicMock()
+        mock_tm.get_all_tasks.return_value = []
+
+        mock_tp = MagicMock()
+        mock_io_pool = MagicMock()
+        mock_io_pool._max_workers = 10
+        mock_io_pool._threads = []
+        mock_cpu_pool = MagicMock()
+        mock_cpu_pool._max_workers = 4
+        mock_cpu_pool._threads = []
+        mock_tp.io_pool = mock_io_pool
+        mock_tp.cpu_pool = mock_cpu_pool
+
+        async def mock_run_async(task_type, func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        mock_tp.run_async = mock_run_async
+
+        with (
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+            patch("utils.thread_pool.ThreadPoolManager", return_value=mock_tp),
+            patch(
+                "utils.config_handler.ConfigHandler.load_config",
+                return_value={"log_level": "INFO"},
+            ),
+        ):
+            zip_path = await SystemDiagnosticsCollector.export()
+            assert os.path.exists(zip_path)
+
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    summary_data = json.loads(zf.read("diagnostics_summary.json").decode("utf-8"))
+                    health = summary_data["health"]
+                    # numpy 标量应被正确序列化为 Python 原生类型
+                    assert health["trade_days"] == 252
+                    assert isinstance(health["trade_days"], int)
+                    assert health["concept_count"] == 85
+                    assert health["expected_rows"] == 4500
+                    assert health["avg_amount"] == 1.23e8
+                    assert isinstance(health["avg_amount"], float)
+                    assert health["is_healthy"] is True
+            finally:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)

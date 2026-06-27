@@ -193,6 +193,10 @@ class MarketDataService:
             try:
                 # 动态获取配置的刷新间隔（默认30秒）
                 interval = ConfigHandler.get_market_data_poll_interval()
+                # token 已熔断时延长轮询间隔，避免 fast-fail 每 30s 刷屏 WARNING；
+                # 用户重新 set_token 后 _token_invalid 自动重置为 False，下次轮询恢复常规间隔。
+                if self.api.is_token_invalid:
+                    interval = max(interval, 300)  # 5 分钟探测一次
                 await asyncio.sleep(interval)
                 if self._running:
                     await self._safe_fetch()

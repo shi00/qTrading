@@ -357,7 +357,7 @@ class ScreenerView(ft.Container):
         # U-1 fix: Reset mounted state for proper re-mount handling
         self._mounted = False
 
-    def refresh_locale(self):  # pragma: no cover
+    def refresh_locale(self):
         """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
         try:
             # 顶部标题
@@ -367,6 +367,7 @@ class ScreenerView(ft.Container):
             # 策略下拉框：label + options（重建策略名翻译，保留 missing_apis 标记与当前选择）
             self.strategy_dropdown.label = I18n.get("select_strategy")
             saved_strategy = self.strategy_dropdown.value
+            self.strategy_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             try:
                 self.vm.strategy_mgr.invalidate_dependency_cache()
                 strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
@@ -381,9 +382,9 @@ class ScreenerView(ft.Container):
                         name = f"{name} ⚠️"
                     options.append(ft.dropdown.Option(key, name))
                 self.strategy_dropdown.options = options
-                self.strategy_dropdown.value = saved_strategy
             except Exception as ex:
                 logger.debug(f"[ScreenerView] strategy dropdown rebuild skipped: {ex}")
+            self.strategy_dropdown.value = saved_strategy  # 无论 options 重建是否成功都恢复 value
 
             # 策略描述
             if self.selected_strategy:
@@ -409,6 +410,7 @@ class ScreenerView(ft.Container):
             # 每页大小下拉框：重建 options 以严格符合 §5.8 规范 4
             self.page_size_dropdown.label = I18n.get("screener_page_size")
             saved_page_size = self.page_size_dropdown.value
+            self.page_size_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             per_page = I18n.get("screener_per_page")
             self.page_size_dropdown.options = [
                 ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50", "100")

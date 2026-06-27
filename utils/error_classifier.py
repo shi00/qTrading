@@ -103,6 +103,12 @@ def classify_severity(e: Exception, context: str = "general") -> str:
     if isinstance(e, PermissionError):
         return "system"
 
+    # 识别 Tushare API 权限错误（token 失效/接口无权限）：
+    # 这是用户配置问题，不应刷屏 ERROR + traceback；归为 recoverable 走 WARNING 路径。
+    # 用类名字符串匹配而非 isinstance，避免 utils 反向依赖 data 层（R1 架构边界）。
+    if error_type == "TushareAPIPermissionError":
+        return "recoverable"
+
     classified = classify_error(e, context)
     code = classified.get("code", "unknown")
 

@@ -1163,3 +1163,41 @@ class TestScreenerView:
         self.mock_vm.strategy_mgr.get_strategy.assert_called_with("value")
         # 验证 I18n.get 被调用获取 name_key 的翻译
         self.mock_i18n.get.assert_any_call("strategy_value_name")
+
+    def test_refresh_locale_preserves_dropdown_values(self, mock_page):
+        """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""
+        view = self._make_view(mock_page)
+        # 配置 strategy_mgr 返回有效数据，确保 strategy_dropdown.options 能重建
+        mock_strategy = MagicMock()
+        mock_strategy.name_key = "strategy_ma_cross_name"
+        self.mock_vm.strategy_mgr.get_strategy.return_value = mock_strategy
+        self.mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {
+            "ma_cross": {"name": "MA Cross", "missing_apis": []},
+        }
+        view.strategy_dropdown.value = "ma_cross"
+        view.page_size_dropdown.value = "20"
+        original_strategy = view.strategy_dropdown.value
+        original_page_size = view.page_size_dropdown.value
+        view.refresh_locale()
+        assert view.strategy_dropdown.value == original_strategy
+        assert view.page_size_dropdown.value == original_page_size
+        assert view.strategy_dropdown.options is not None
+        assert len(view.strategy_dropdown.options) > 0
+        assert view.page_size_dropdown.options is not None
+        assert len(view.page_size_dropdown.options) > 0
+
+    def test_refresh_locale_preserves_value_when_strategy_rebuild_fails(self, mock_page):
+        """§5.8 规范 4 异常路径：strategy_dropdown options 重建失败时 value 仍须恢复。
+
+        生产代码 screener_view.py:371-387 内层 try/except 保护 options 重建，
+        `value = saved_strategy` 在 except 之后（第 387 行），确保异常时 value 不丢失。
+        page_size_dropdown 重建无 try 保护但 options 硬编码，value 同样保留。
+        """
+        view = self._make_view(mock_page)
+        view.strategy_dropdown.value = "ma_cross"
+        view.page_size_dropdown.value = "20"
+        # 模拟 options 重建抛异常（命中内层 except）
+        self.mock_vm.strategy_mgr.get_all_with_dependencies.side_effect = Exception("boom")
+        view.refresh_locale()
+        assert view.strategy_dropdown.value == "ma_cross"
+        assert view.page_size_dropdown.value == "20"

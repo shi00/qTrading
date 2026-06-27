@@ -1669,6 +1669,28 @@ class TestLLMConfigPanelExtended:
         with patch.object(panel, "update", side_effect=Exception("update error")):
             panel._safe_update()
 
+    def test_on_locale_change_preserves_dropdown_values(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
+        """§5.8 规范 4：_on_locale_change 重建 options 后 provider_dropdown 与 model_dropdown 的 value 必须保留。"""
+        panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
+        panel.provider_dropdown.value = "deepseek"
+        panel.model_dropdown.value = "deepseek-chat"
+
+        saved_provider = panel.provider_dropdown.value
+        saved_model = panel.model_dropdown.value
+        panel._on_locale_change()
+
+        assert panel.provider_dropdown.value == saved_provider
+        assert panel.provider_dropdown.value == "deepseek"
+        assert panel.provider_dropdown.options is not None
+        assert len(panel.provider_dropdown.options) > 0
+
+        assert panel.model_dropdown.value == saved_model
+        assert panel.model_dropdown.value == "deepseek-chat"
+        assert panel.model_dropdown.options is not None
+        assert len(panel.model_dropdown.options) > 0
+
 
 class TestDatabaseConfigPanelExtended:
     def test_load_password_enabled(self, mock_config_handler_db, mock_i18n_db, mock_page):

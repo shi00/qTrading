@@ -47,7 +47,7 @@ class TushareProApi(typing.Protocol):
     index_daily: Callable[..., pd.DataFrame]
     moneyflow_hsgt: Callable[..., pd.DataFrame]
     index_dailybasic: Callable[..., pd.DataFrame]
-    limit_list: Callable[..., pd.DataFrame]
+    limit_list_d: Callable[..., pd.DataFrame]
     suspend_d: Callable[..., pd.DataFrame]
     margin_detail: Callable[..., pd.DataFrame]
     fina_audit: Callable[..., pd.DataFrame]
@@ -129,7 +129,7 @@ class TushareClient:
         "moneyflow": 0.5,
         "moneyflow_hsgt": 0.5,
         "hk_hold": 0.5,
-        "limit_list": 0.5,
+        "limit_list_d": 0.5,
         "margin_detail": 0.5,
         "fina_audit": 0.5,
         "fina_mainbz": 0.5,
@@ -171,7 +171,7 @@ class TushareClient:
         "northbound_holding": "hk_hold",
         "moneyflow_daily": "moneyflow",
         "top_list": "top_list",
-        "limit_list": "limit_list",
+        "limit_list": "limit_list_d",
         "margin_daily": "margin_detail",
         "block_trade": "block_trade",
     }
@@ -349,6 +349,11 @@ class TushareClient:
         if self._config is not None:
             return self._config.get_tushare_api_limit()
         return ConfigHandler.get_tushare_api_limit()
+
+    @property
+    def is_token_invalid(self) -> bool:
+        """Token 是否已失效（用户需重新 set_token 后才能恢复）。"""
+        return self._token_invalid
 
     def set_token(self, token: str | None) -> bool:
         """
@@ -561,7 +566,7 @@ class TushareClient:
             ("moneyflow", {"trade_date": recent_date}),
             ("hk_hold", {"trade_date": recent_date}),
             ("top_list", {"trade_date": recent_date}),
-            ("limit_list", {"trade_date": recent_date}),
+            ("limit_list_d", {"trade_date": recent_date}),
             ("margin_detail", {"trade_date": recent_date}),
             ("block_trade", {"trade_date": recent_date}),
             ("fina_indicator", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
@@ -1256,26 +1261,32 @@ class TushareClient:
     async def get_limit_list(self, trade_date: str | None = None):
         """Get daily limit up/down list
 
-        Tushare API returns:
+        Tushare API (limit_list_d) returns 18 fields (doc_id=298):
         - trade_date: 交易日期
         - ts_code: 股票代码
+        - industry: 所属行业
         - name: 股票名称
         - close: 收盘价
         - pct_chg: 涨跌幅
-        - amp: 振幅
-        - fc_ratio: 封单金额/日成交金额
-        - fl_ratio: 封单手数/流通股本
+        - amount: 成交额
+        - limit_amount: 板上成交金额（仅跌停有）
+        - float_mv: 流通市值
+        - total_mv: 总市值
+        - turnover_ratio: 换手率
         - fd_amount: 封单金额
-        - first_time: 首次涨停时间
+        - first_time: 首次封板时间
         - last_time: 最后封板时间
-        - open_times: 打开次数
-        - strth: 涨跌停强度
-        - limit: D跌停U涨停
+        - open_times: 炸板次数（跌停为开板次数）
+        - up_stat: 涨停统计（"N/T" 格式：T 天有 N 次涨停）
+        - limit_times: 连板数
+        - limit: D跌停 U涨停 Z炸板
+
+        Note: amp/fc_ratio/fl_ratio/strth 属于旧 limit_list 接口，limit_list_d 不提供，已永久删除。
         """
         return await self._handle_api_call(
-            self.pro.limit_list,
+            self.pro.limit_list_d,
             trade_date=trade_date,
-            fields="trade_date,ts_code,name,close,pct_chg,amp,fc_ratio,fl_ratio,fd_amount,first_time,last_time,open_times,strth,limit",
+            fields="trade_date,ts_code,industry,name,close,pct_chg,amount,limit_amount,float_mv,total_mv,turnover_ratio,fd_amount,first_time,last_time,open_times,up_stat,limit_times,limit",
         )
 
     async def get_suspend_d(self, trade_date: str | None = None, ts_code: str | None = None):

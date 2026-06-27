@@ -462,3 +462,33 @@ class TestBacktestView:
             view.refresh_locale()
 
         assert any("refresh_locale error" in r.message and "i18n boom" in r.message for r in caplog.records)
+
+    @patch("ui.views.backtest_view.BacktestViewModel")
+    @patch("ui.views.backtest_view.BacktestConfigPanel")
+    @patch("ui.views.backtest_view.BacktestResultPanel")
+    @patch("ui.views.backtest_view.I18n.get")
+    def test_refresh_locale_preserves_dropdown_value(
+        self,
+        mock_i18n: MagicMock,
+        mock_result_panel_cls: MagicMock,
+        mock_config_panel_cls: MagicMock,
+        mock_vm_cls: MagicMock,
+        mock_page: MagicMock,
+    ) -> None:
+        """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""
+        mock_i18n.return_value = "mock_text"
+        mock_vm = MagicMock()
+        mock_vm_cls.return_value = mock_vm
+        mock_vm.get_available_strategies.return_value = {"strategy1": "策略1"}
+
+        view = BacktestView(mock_page)
+        view.page = mock_page
+        view.update = MagicMock()
+
+        view.strategy_dropdown.value = "strategy1"
+        original_value = view.strategy_dropdown.value
+        view.refresh_locale()
+
+        assert view.strategy_dropdown.value == original_value
+        assert view.strategy_dropdown.options is not None
+        assert len(view.strategy_dropdown.options) > 0

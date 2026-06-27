@@ -532,3 +532,30 @@ class TestClassifyErrorBackwardCompat:
         e = FileNotFoundError("test")
         result = classify_error(e)
         assert result["code"] == "file_not_found"
+
+
+class TestClassifySeverityTusharePermission:
+    """TushareAPIPermissionError 应归为 recoverable，避免 token 失效刷屏 ERROR + traceback。
+    用动态创建同名异常类测试，避免 utils 测试反向依赖 data 层（R1 架构边界）。"""
+
+    def test_tushare_api_permission_error_is_recoverable(self):
+        # 动态创建类名为 TushareAPIPermissionError 的异常，模拟真实异常的 type 匹配
+        TushareAPIPermissionError = type("TushareAPIPermissionError", (Exception,), {})
+        e = TushareAPIPermissionError("Token marked invalid")
+        assert classify_severity(e) == "recoverable"
+
+    def test_tushare_api_permission_error_in_any_context(self):
+        # 无论何种 context，token 熔断都应识别为 recoverable
+        TushareAPIPermissionError = type("TushareAPIPermissionError", (Exception,), {})
+        for ctx in ("general", "token", "llm", "db", "chart"):
+            e = TushareAPIPermissionError("test")
+            assert classify_severity(e, context=ctx) == "recoverable", f"context={ctx} 应识别为 recoverable"
+
+    def test_other_permission_named_exception_not_affected(self):
+        # 验证不会误伤其他名称相似的异常
+        OtherPermissionError = type("OtherPermissionError", (Exception,), {})
+        assert classify_severity(OtherPermissionError("test")) == "operational"
+
+    def test_builtin_permission_error_still_system(self):
+        # 内置 PermissionError（文件系统权限）仍归为 system，不受影响
+        assert classify_severity(PermissionError("access denied")) == "system"

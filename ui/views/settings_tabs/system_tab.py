@@ -458,32 +458,43 @@ class SystemTab(ft.Container):
             logger.debug("[SystemTab] Language | Change failed traceback", exc_info=True)
             self.show_snack(DataSanitizer.sanitize_error(ex), color=AppColors.ERROR)
 
-    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str | None = None):
         """语言变更回调 - 更新 Settings UI 文本"""
         try:
             self.language_dropdown.label = I18n.get_language_label()
             self.language_dropdown.tooltip = I18n.get_language_label()
+            saved_language = self.language_dropdown.value
+            self.language_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.language_dropdown.options = [
                 ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()
             ]
+            self.language_dropdown.value = saved_language
             self.theme_dropdown.label = I18n.get("settings_theme")
             self.log_level_dropdown.label = I18n.get("settings_log_level")
 
+            saved_theme = self.theme_dropdown.value
+            self.theme_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.theme_dropdown.options = [
                 ft.dropdown.Option(ThemeName.DARK, I18n.get("theme_dark")),
                 ft.dropdown.Option(ThemeName.LIGHT, I18n.get("theme_light")),
                 ft.dropdown.Option(ThemeName.NAVY, I18n.get("theme_navy")),
                 ft.dropdown.Option(ThemeName.DRACULA, I18n.get("theme_dracula")),
             ]
+            self.theme_dropdown.value = saved_theme
 
+            saved_log_level = self.log_level_dropdown.value
+            self.log_level_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.log_level_dropdown.options = [
                 ft.dropdown.Option("DEBUG", I18n.get("sys_opt_debug")),
                 ft.dropdown.Option("INFO", I18n.get("sys_opt_info")),
                 ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),
                 ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),
             ]
+            self.log_level_dropdown.value = saved_log_level
 
             self.point_tier_dropdown.label = I18n.get("sys_label_point_tier")
+            saved_point_tier = self.point_tier_dropdown.value
+            self.point_tier_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             self.point_tier_dropdown.options = [
                 ft.dropdown.Option("free", I18n.get("sys_tier_free")),
                 ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),
@@ -491,6 +502,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("flagship", I18n.get("sys_tier_flagship")),
                 ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),
             ]
+            self.point_tier_dropdown.value = saved_point_tier
 
             self.concurrency_input.label = I18n.get("settings_concurrency")
             self.concurrency_input.suffix_text = I18n.get("sys_suffix_threads")

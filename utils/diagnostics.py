@@ -134,6 +134,23 @@ class SystemDiagnosticsCollector:
             def json_serial(obj):
                 if isinstance(obj, (datetime.datetime, datetime.date)):
                     return obj.isoformat()
+                # numpy 标量（int64/float64/bool_ 等）来自 pandas SQL 聚合查询，
+                # 标准 json 无法序列化。用 item() 鸭子类型统一处理所有 numpy 标量类型，
+                # 避免硬依赖 numpy 版本差异（不同版本类名不同，如 bool_ vs bool）。
+                if hasattr(obj, "item") and callable(obj.item):
+                    try:
+                        return obj.item()
+                    except (ValueError, AttributeError):
+                        pass  # 非 0 维数组，走后续分支
+                # numpy ndarray（多维）
+                if hasattr(obj, "tolist") and callable(obj.tolist):
+                    return obj.tolist()
+                # pandas Timestamp
+                if hasattr(obj, "isoformat") and callable(obj.isoformat):
+                    return obj.isoformat()
+                # Decimal（SQLAlchemy Numeric 可能返回）
+                if hasattr(obj, "is_finite") and hasattr(obj, "as_tuple"):
+                    return float(obj)
                 raise TypeError(f"Type {type(obj)} not serializable")
 
             # 7. 在 IO 线程池中执行物理文件读写与 ZIP 归档，防范主线程 CPU/IO 阻塞 (符合 CLAUDE.md R16)

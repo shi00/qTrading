@@ -95,6 +95,6 @@ def test_low_frequency_tables():
     from data.persistence.daos.quote_dao import LOW_FREQUENCY_TABLES
 
     assert isinstance(LOW_FREQUENCY_TABLES, (list, set, tuple)), "LOW_FREQUENCY_TABLES should be a collection"
-    assert "block_trade" in LOW_FREQUENCY_TABLES or "limit_list_d" in LOW_FREQUENCY_TABLES, (
+    assert "block_trade" in LOW_FREQUENCY_TABLES or "limit_list" in LOW_FREQUENCY_TABLES, (
         "Expected low frequency tables not found"
     )
