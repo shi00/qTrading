@@ -12,6 +12,7 @@ classify_error + classify_severity (§5.7).
 """
 
 import asyncio
+import json
 import logging
 import typing
 
@@ -320,13 +321,26 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             "content": f"股票代码：{ts_code}\n股票名称：{name}",
                         },
                     ]
-                    resp = await ai_service._chat_completion_with_failover(  # type: ignore[private-method-access]  # AIService is injected via DI; only it provides LLM call entry
+                    resp = await ai_service.chat_with_web_search(
                         messages,
-                        json_mode=True,
+                        temperature=0.3,
+                        timeout=60.0,
                     )
                     concepts: list[str] = []
-                    if isinstance(resp, dict):
-                        raw = resp.get("concepts", [])
+                    content = resp.get("content", "") if isinstance(resp, dict) else ""
+                    parsed: typing.Any = None
+                    if content:
+                        try:
+                            parsed = json.loads(content)
+                        except json.JSONDecodeError:
+                            start = content.find("{")
+                            if start != -1:
+                                try:
+                                    parsed, _ = json.JSONDecoder().raw_decode(content[start:])
+                                except json.JSONDecodeError:
+                                    logger.warning("[AIConceptTagSync] JSON parse failed for %s", ts_code)
+                    if isinstance(parsed, dict):
+                        raw = parsed.get("concepts", [])
                         if isinstance(raw, list):
                             concepts = [str(c) for c in raw if c]
                     entries.append({"ts_code": ts_code, "concepts": concepts})

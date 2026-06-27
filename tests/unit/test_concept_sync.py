@@ -234,8 +234,10 @@ class TestLimitListSync:
 def _make_ai_service_mock(available=True, response=None):
     svc = MagicMock()
     svc.is_cloud_available = MagicMock(return_value=available)
-    svc._chat_completion_with_failover = AsyncMock(
-        return_value=response or {"concepts": ["锂电池", "新能源车"]},
+    # chat_with_web_search returns {"content": str, "usage": dict, "reasoning_content": str}
+    default_content = '{"concepts": ["锂电池", "新能源车"]}'
+    svc.chat_with_web_search = AsyncMock(
+        return_value=response or {"content": default_content},
     )
     return svc
 
@@ -316,7 +318,7 @@ class TestAIConceptTagSync:
                 response=None,
             ),
         )
-        ctx.ai_service._chat_completion_with_failover = AsyncMock(
+        ctx.ai_service.chat_with_web_search = AsyncMock(
             side_effect=RuntimeError("llm error"),
         )
         ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(

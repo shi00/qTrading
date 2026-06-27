@@ -324,24 +324,96 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             progress_callback(1.0, 1.0, I18n.get("init_daily_update_done"))
         return result
 
-    async def run_doubao_tagging(
+    @log_async_operation(
+        operation_name="run_ai_concept_tagging",
+        threshold_ms=PerfThreshold.AI_INFERENCE,
+    )
+    async def run_ai_concept_tagging(
         self,
-        task_id: str = None,  # type: ignore[assignment]
+        task_id: str | None = None,
         cancel_event=None,
+        *,
+        manual_trigger: bool = False,
         **kwargs,
-    ):
-        try:
-            from scripts.doubao_auto_tagger import DoubaoTagger
-        except ImportError as e:
-            logger.error(
-                "Playwright 依赖缺失，请运行 `pip install playwright && playwright install`",
-            )
-            raise RuntimeError(I18n.get("error_missing_playwright")) from e
+    ) -> str:
+        """Orchestrate concept sync from multiple sources.
 
-        tagger = DoubaoTagger()
-        tagger.dao = self.cache.stock_dao
-        tagger.cancel_event = cancel_event
-        await tagger.run(limit=0)
+        Executes three strategies in sequence:
+        1. AKShareConceptSyncStrategy — East-Money concept boards (always)
+        2. LimitListSyncStrategy — Tushare limit_list (always)
+        3. AIConceptTagSyncStrategy — LLM-driven tagging (only when manual_trigger=True)
+
+        Args:
+            task_id: Optional task identifier for logging.
+            cancel_event: Optional asyncio.Event for cancellation signaling.
+            manual_trigger: If True, execute LLM-based concept tagging.
+            **kwargs: Additional arguments. Supports `ai_service` for LLM injection
+                (R1: data/ must not import services/; AIService is passed via kwargs
+                and stored on SyncContext.ai_service).
+
+        Returns:
+            Summary string, e.g. "akshare=success | limit_list=success | ai_tag=skipped".
+        """
+        from data.sync.concept_sync import (
+            AIConceptTagSyncStrategy,
+            AKShareConceptSyncStrategy,
+            LimitListSyncStrategy,
+        )
+
+        # Inject ai_service into context for LLM-driven strategies (R1: DI, no direct import)
+        ai_service = kwargs.get("ai_service")
+        if ai_service is not None:
+            self.context.ai_service = ai_service
+
+        def _cancelled() -> bool:
+            if self.is_cancelled():
+                return True
+            return cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set()
+
+        parts: list[str] = []
+
+        # Step 1: AKShare concept boards
+        if _cancelled():
+            parts.append("akshare=cancelled")
+        else:
+            try:
+                r = await AKShareConceptSyncStrategy(self.context).run()
+                parts.append(f"akshare={r.status}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("[DataProcessor] AIConceptTag | AKShare failed: %s", e, exc_info=True)
+                parts.append("akshare=failed")
+
+        # Step 2: LimitList
+        if _cancelled():
+            parts.append("limit_list=cancelled")
+        else:
+            try:
+                r = await LimitListSyncStrategy(self.context).run()
+                parts.append(f"limit_list={r.status}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("[DataProcessor] AIConceptTag | LimitList failed: %s", e, exc_info=True)
+                parts.append("limit_list=failed")
+
+        # Step 3: AIConceptTag (only on manual trigger)
+        if not manual_trigger:
+            parts.append("ai_tag=skipped")
+        elif _cancelled():
+            parts.append("ai_tag=cancelled")
+        else:
+            try:
+                r = await AIConceptTagSyncStrategy(self.context).run()
+                parts.append(f"ai_tag={r.status}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("[DataProcessor] AIConceptTag | AI tag failed: %s", e, exc_info=True)
+                parts.append("ai_tag=failed")
+
+        return " | ".join(parts)
 
     # ==========================================
     # Core Logic (Business/Orchestration)
