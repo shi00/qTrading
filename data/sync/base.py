@@ -54,6 +54,10 @@ class SyncContext:
     # Optional: request delay provider for testability.
     # Signature: (is_heavy: bool) -> float. None = fall back to ConfigHandler.
     request_delay_provider: Callable[[bool], float] | None = None
+    # Optional: AIService reference injected by DataProcessor for LLM-driven
+    # sync strategies (e.g. AIConceptTagSyncStrategy). Typed as Any to avoid
+    # reverse dependency from data/ → services/ (R1).
+    ai_service: Any = None
 
     @property
     def processor(self):
