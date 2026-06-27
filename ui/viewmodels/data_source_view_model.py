@@ -15,6 +15,7 @@ from utils.error_classifier import classify_error, get_error_message
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
+from services.ai_service import AIService
 from services.task_manager import AppTask, TaskManager, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -232,20 +233,24 @@ class DataSourceViewModel:
         else:
             self._active_task_ids["daily_sync"] = task_id
 
-    # --- Doubao Rebuild ---
+    # --- AI Concept Rebuild ---
 
-    def execute_doubao_rebuild(self):
-        """Execute doubao AI concept rebuild (called by View after user confirms)."""
-        self._set_sync_busy(True, "doubao_sync")
+    def execute_ai_concept_rebuild(self):
+        """Execute AI concept rebuild (called by View after user confirms)."""
+        self._set_sync_busy(True, "ai_concept_sync")
 
-        async def _doubao_logic(task_id: str, **kwargs):
+        async def _ai_concept_logic(task_id: str, **kwargs):
             task = self._tm.get_task(task_id)
             cancel_event = getattr(task, "_cancel_event", None) if task else None
             try:
                 self._tm.update_progress(task_id, 0.05, I18n.get("ds_doubao_rebuild_start"))
-                await self._processor.run_doubao_tagging(
+                # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
+                # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
+                await self._processor.run_ai_concept_tagging(
                     task_id=task_id,
                     cancel_event=cancel_event,
+                    manual_trigger=True,
+                    ai_service=AIService(),
                 )
                 if self.on_show_snack:
                     self.on_show_snack(I18n.get("snack_doubao_done"), "success")
@@ -271,15 +276,15 @@ class DataSourceViewModel:
         task_id = self._tm.submit_task(
             name=I18n.get("task_name_doubao_rebuild"),
             task_type=I18n.get("ds_task_type_ai_tagging"),
-            coroutine_factory=_doubao_logic,
+            coroutine_factory=_ai_concept_logic,
             cancellable=True,
-            unique_key="doubao_sync",
+            unique_key="ai_concept_sync",
         )
 
         if task_id is None:
             self._set_sync_busy(False)
         else:
-            self._active_task_ids["doubao_sync"] = task_id
+            self._active_task_ids["ai_concept_sync"] = task_id
 
     # --- Clear Cache ---
 

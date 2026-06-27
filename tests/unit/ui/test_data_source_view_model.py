@@ -40,7 +40,7 @@ def mock_processor():
             },
         )
         instance.run_daily_update = AsyncMock()
-        instance.run_doubao_tagging = AsyncMock()
+        instance.run_ai_concept_tagging = AsyncMock()
         instance.initialize_system = AsyncMock(return_value={"success": True})
         instance.request_cancel = AsyncMock()
         instance.is_cancelled = MagicMock(return_value=False)
@@ -263,22 +263,22 @@ class TestDataSourceViewModelFullDailySync:
         assert bound_vm._active_task_ids["daily_sync"] == "task_123"
 
 
-class TestDataSourceViewModelDoubaoRebuild:
+class TestDataSourceViewModelAiConceptRebuild:
     def test_execute_sets_sync_busy(self, bound_vm):
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         assert bound_vm.is_syncing is True
-        bound_vm.on_sync_busy_changed.assert_called_with(True, "doubao_sync")
+        bound_vm.on_sync_busy_changed.assert_called_with(True, "ai_concept_sync")
 
     async def test_rebuild_success(self, bound_vm, mock_processor, mock_task_manager):
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
         bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_doubao_done"), "success")
 
     async def test_rebuild_cancelled_propagates(self, bound_vm, mock_processor, mock_task_manager):
-        mock_processor.run_doubao_tagging = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=asyncio.CancelledError())
 
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
         with pytest.raises(asyncio.CancelledError):
@@ -289,7 +289,7 @@ class TestDataSourceViewModelDoubaoRebuild:
 
     def test_task_rejected_resets_busy(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         assert bound_vm.is_syncing is False
 
 

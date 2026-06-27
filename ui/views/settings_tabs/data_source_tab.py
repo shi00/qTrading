@@ -491,7 +491,7 @@ class DataSourceTab(ft.Container):
             title_key="dialog_doubao_rebuild_title",
             content_key="dialog_doubao_rebuild_content",
             confirm_btn_key="btn_confirm_rebuild",
-            on_confirm_callback=self.vm.execute_doubao_rebuild,
+            on_confirm_callback=self.vm.execute_ai_concept_rebuild,
             is_destructive=True,
         )
 
@@ -548,7 +548,7 @@ class DataSourceTab(ft.Container):
     def _on_vm_sync_busy_changed(self, is_busy: bool, active_key: str | None):
         btn_map = {
             "daily_sync": self.action_full_sync,
-            "doubao_sync": self.action_doubao_rebuild,
+            "ai_concept_sync": self.action_doubao_rebuild,
             "cache_clear": self.action_clear_cache,
             "system_init_sync": self.sync_button,
         }

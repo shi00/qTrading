@@ -191,8 +191,8 @@ class TestOnVmSyncBusyChanged:
         # Should call _update_sync_buttons with action_full_sync as active
         tab.action_full_sync.set_loading.assert_called_with(True)
 
-    def test_doubao_sync_active(self, tab):
-        tab._on_vm_sync_busy_changed(True, "doubao_sync")
+    def test_ai_concept_sync_active(self, tab):
+        tab._on_vm_sync_busy_changed(True, "ai_concept_sync")
         tab.action_doubao_rebuild.set_loading.assert_called_with(True)
 
     def test_cache_clear_active(self, tab):

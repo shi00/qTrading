@@ -136,8 +136,8 @@ class TestSchedulerServiceCheckConfigSync:
         result = svc._check_config_sync()
         assert result["time"] == "09:30"
         assert result["enabled"] is True
-        assert result["doubao_time"] == "10:00"
-        assert result["doubao_enabled"] is False
+        assert result["ai_concept_time"] == "10:00"
+        assert result["ai_concept_enabled"] is False
 
 
 class TestSchedulerServiceScheduleJobs:
@@ -162,14 +162,20 @@ class TestSchedulerServiceScheduleJobs:
         assert job is not None
 
     @patch("utils.scheduler_service.ConfigHandler")
-    def test_schedule_jobs_adds_doubao_weekly(self, mock_ch):
+    def test_schedule_jobs_adds_ai_concept_daily(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
-        job = svc.scheduler.get_job("doubao_weekly_refresh")
+        job = svc.scheduler.get_job("ai_concept_daily_refresh")
         assert job is not None
+        # Trigger must be daily: str(trigger) must NOT restrict day_of_week to a specific day (e.g. sat)
+        trigger_str = str(job.trigger)
+        assert "sat" not in trigger_str.lower()
+        # Hour must match configured value (10:00)
+        hour_field = next(f for f in job.trigger.fields if f.name == "hour")
+        assert "10" in str(hour_field)
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_schedule_jobs_invalid_time_defaults(self, mock_ch):
@@ -204,8 +210,8 @@ class TestSchedulerServiceWatchConfigChanges:
             return_value={
                 "time": "09:30",
                 "enabled": True,
-                "doubao_time": "10:00",
-                "doubao_enabled": False,
+                "ai_concept_time": "10:00",
+                "ai_concept_enabled": False,
             }
         )
         svc = SchedulerService()
@@ -223,16 +229,16 @@ class TestSchedulerServiceWatchConfigChanges:
             return_value={
                 "time": "10:00",
                 "enabled": True,
-                "doubao_time": "10:00",
-                "doubao_enabled": False,
+                "ai_concept_time": "10:00",
+                "ai_concept_enabled": False,
             }
         )
         svc = SchedulerService()
         svc._last_known_config = {
             "time": "09:30",
             "enabled": True,
-            "doubao_time": "10:00",
-            "doubao_enabled": False,
+            "ai_concept_time": "10:00",
+            "ai_concept_enabled": False,
         }
         svc._schedule_jobs = MagicMock()
         await svc._watch_config_changes()
@@ -248,8 +254,8 @@ class TestSchedulerServiceWatchConfigChanges:
         config = {
             "time": "09:30",
             "enabled": True,
-            "doubao_time": "10:00",
-            "doubao_enabled": False,
+            "ai_concept_time": "10:00",
+            "ai_concept_enabled": False,
         }
         mock_tpm_instance.run_async = AsyncMock(return_value=config)
         svc = SchedulerService()
@@ -436,13 +442,13 @@ class TestRunDailyUpdate:
             mock_tm_instance.submit_task.assert_called_once()
 
 
-class TestRunDoubaoTagger:
+class TestRunAiConceptTagger:
     @pytest.mark.asyncio
     async def test_disabled(self):
         svc = _make_svc()
         with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
             mock_ch.is_ai_concept_schedule_enabled.return_value = False
-            await svc._run_doubao_tagger()
+            await svc._run_ai_concept_tagger()
 
     @pytest.mark.asyncio
     async def test_already_done(self):
@@ -454,8 +460,8 @@ class TestRunDoubaoTagger:
             mock_ch.is_ai_concept_schedule_enabled.return_value = True
             today_str = "20240615"
             mock_now.return_value.strftime.return_value = today_str
-            svc._last_doubao_date = today_str
-            await svc._run_doubao_tagger()
+            svc._last_ai_concept_date = today_str
+            await svc._run_ai_concept_tagger()
 
     @pytest.mark.asyncio
     async def test_submits_task(self):
@@ -467,10 +473,10 @@ class TestRunDoubaoTagger:
         ):
             mock_ch.is_ai_concept_schedule_enabled.return_value = True
             mock_now.return_value.strftime.return_value = "20240615"
-            svc._last_doubao_date = None
+            svc._last_ai_concept_date = None
             mock_tm_instance = MagicMock()
             mock_tm.return_value = mock_tm_instance
-            await svc._run_doubao_tagger()
+            await svc._run_ai_concept_tagger()
             mock_tm_instance.submit_task.assert_called_once()
 
 
@@ -562,13 +568,13 @@ class TestScheduleJobsInvalidTime:
         assert svc.scheduler.get_job("daily_update") is not None
 
     @patch("utils.scheduler_service.ConfigHandler")
-    def test_none_doubao_time(self, mock_ch):
+    def test_none_ai_concept_time(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
         mock_ch.get_ai_concept_schedule_time.return_value = None
         svc = SchedulerService()
         svc._schedule_jobs()
-        assert svc.scheduler.get_job("doubao_weekly_refresh") is not None
+        assert svc.scheduler.get_job("ai_concept_daily_refresh") is not None
 
 
 class TestSchedulerServiceStatus:
@@ -683,22 +689,22 @@ class TestWatchConfigChangesMore:
                 return_value={
                     "time": "09:30",
                     "enabled": False,
-                    "doubao_time": "10:00",
-                    "doubao_enabled": False,
+                    "ai_concept_time": "10:00",
+                    "ai_concept_enabled": False,
                 }
             )
             svc._last_known_config = {
                 "time": "09:30",
                 "enabled": True,
-                "doubao_time": "10:00",
-                "doubao_enabled": False,
+                "ai_concept_time": "10:00",
+                "ai_concept_enabled": False,
             }
             svc._schedule_jobs = MagicMock()
             await svc._watch_config_changes()
             svc._schedule_jobs.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_doubao_change_triggers_reload(self):
+    async def test_ai_concept_change_triggers_reload(self):
         svc = _make_svc()
         with patch("utils.scheduler_service.ThreadPoolManager") as mock_tpm:
             mock_tpm_instance = MagicMock()
@@ -707,15 +713,15 @@ class TestWatchConfigChangesMore:
                 return_value={
                     "time": "09:30",
                     "enabled": True,
-                    "doubao_time": "11:00",
-                    "doubao_enabled": True,
+                    "ai_concept_time": "11:00",
+                    "ai_concept_enabled": True,
                 }
             )
             svc._last_known_config = {
                 "time": "09:30",
                 "enabled": True,
-                "doubao_time": "10:00",
-                "doubao_enabled": False,
+                "ai_concept_time": "10:00",
+                "ai_concept_enabled": False,
             }
             svc._schedule_jobs = MagicMock()
             await svc._watch_config_changes()
@@ -751,7 +757,7 @@ class TestWatchConfigChangesDeep:
     @pytest.mark.asyncio
     @patch("utils.scheduler_service.ConfigHandler")
     @patch("utils.scheduler_service.ThreadPoolManager")
-    async def test_doubao_config_change(self, mock_tpm, mock_ch):
+    async def test_ai_concept_config_change(self, mock_tpm, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_tpm_instance = MagicMock()
         mock_tpm.return_value = mock_tpm_instance
@@ -759,16 +765,16 @@ class TestWatchConfigChangesDeep:
             return_value={
                 "time": "09:30",
                 "enabled": True,
-                "doubao_time": "11:00",
-                "doubao_enabled": True,
+                "ai_concept_time": "11:00",
+                "ai_concept_enabled": True,
             }
         )
         svc = SchedulerService()
         svc._last_known_config = {
             "time": "09:30",
             "enabled": True,
-            "doubao_time": "10:00",
-            "doubao_enabled": False,
+            "ai_concept_time": "10:00",
+            "ai_concept_enabled": False,
         }
         svc._schedule_jobs = MagicMock()
         await svc._watch_config_changes()
@@ -894,12 +900,12 @@ class TestDailyUpdateLogicClosure:
             assert isinstance(result_msg, str)
 
 
-class TestDoubaoLogicClosure:
+class TestAiConceptLogicClosure:
     @pytest.mark.asyncio
-    async def test_doubao_logic_closure(self):
+    async def test_ai_concept_logic_closure(self):
         svc = _make_svc()
         mock_dp = MagicMock()
-        mock_dp.run_doubao_tagging = AsyncMock()
+        mock_dp.run_ai_concept_tagging = AsyncMock()
         mock_tm = MagicMock()
         mock_task = MagicMock()
         mock_task._cancel_event = MagicMock()
@@ -913,10 +919,14 @@ class TestDoubaoLogicClosure:
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):
             mock_ch.is_ai_concept_schedule_enabled.return_value = True
-            await svc._run_doubao_tagger()
+            await svc._run_ai_concept_tagger()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")
             assert isinstance(result_msg, str)
+            # Verify manual_trigger=False for scheduled (non-manual) run
+            mock_dp.run_ai_concept_tagging.assert_called_once()
+            call_kwargs = mock_dp.run_ai_concept_tagging.call_args.kwargs
+            assert call_kwargs.get("manual_trigger") is False
 
 
 class TestNightlyPredictionLogicClosure:

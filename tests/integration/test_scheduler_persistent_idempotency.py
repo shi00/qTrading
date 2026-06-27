@@ -124,10 +124,10 @@ class TestSchedulerFailureProtection:
         assert has_errors is False
 
 
-class TestDoubaoIdempotency:
-    """H-7: Doubao weekly task must have idempotency key."""
+class TestAiConceptIdempotency:
+    """H-7: AI Concept daily task must have idempotency key."""
 
-    def test_doubao_date_persisted_and_read(self, monkeypatch, tmp_path):
+    def test_ai_concept_date_persisted_and_read(self, monkeypatch, tmp_path):
         import utils.config_handler as cfg_mod
         import utils.scheduler_service as sched_mod
 
@@ -135,7 +135,7 @@ class TestDoubaoIdempotency:
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
         cfg_mod.ConfigHandler._config_cache = None
         cfg_mod.ConfigHandler.save_config(
-            {_CFG_LAST_DOUBAO_REFRESH: "20260428"},
+            {_CFG_LAST_AI_CONCEPT_REFRESH: "20260428"},
             replace=True,
         )
         cfg_mod.ConfigHandler._config_cache = None
@@ -144,9 +144,9 @@ class TestDoubaoIdempotency:
         sched_mod.SchedulerService._reset_singleton()
         service = sched_mod.SchedulerService()
 
-        assert service._last_doubao_date == "20260428"
+        assert service._last_ai_concept_date == "20260428"
 
-    def test_doubao_skips_when_already_done(self, monkeypatch, tmp_path):
+    def test_ai_concept_skips_when_already_done(self, monkeypatch, tmp_path):
         import utils.config_handler as cfg_mod
         import utils.scheduler_service as sched_mod
 
@@ -158,15 +158,15 @@ class TestDoubaoIdempotency:
 
         sched_mod.SchedulerService._reset_singleton()
         service = sched_mod.SchedulerService()
-        service._last_doubao_date = "20260430"
+        service._last_ai_concept_date = "20260430"
 
         monkeypatch.setattr(sched_mod, "get_now", lambda: __import__("datetime").datetime(2026, 4, 30))
         monkeypatch.setattr(sched_mod, "ConfigHandler", cfg_mod.ConfigHandler)
 
         import asyncio
 
-        result = asyncio.run(service._run_doubao_tagger())
+        result = asyncio.run(service._run_ai_concept_tagger())
         assert result is None
 
 
-_CFG_LAST_DOUBAO_REFRESH = "scheduler_last_ai_concept_refresh"
+_CFG_LAST_AI_CONCEPT_REFRESH = "scheduler_last_ai_concept_refresh"
