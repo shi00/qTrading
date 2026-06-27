@@ -15,7 +15,7 @@ from datetime import date, timedelta
 import flet as ft
 
 from ui.i18n import I18n
-from ui.theme import AppColors, AppStyles
+from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
 
@@ -65,19 +65,16 @@ class BacktestConfigPanel(ft.Container):
             text=one_year_ago.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
             on_click=self._show_start_picker,
-            width=AppStyles.CONTROL_WIDTH_SM,
         )
         self.end_date_btn = ft.OutlinedButton(
             text=today.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
             on_click=self._show_end_picker,
-            width=AppStyles.CONTROL_WIDTH_SM,
         )
 
         self.initial_capital_input = ft.TextField(
             label=I18n.get("backtest_initial_capital"),
             value="1000000",
-            width=AppStyles.CONTROL_WIDTH_SM,
             keyboard_type=ft.KeyboardType.NUMBER,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,
@@ -93,7 +90,6 @@ class BacktestConfigPanel(ft.Container):
                 ft.dropdown.Option("monthly", I18n.get("backtest_rebalance_monthly")),
             ],
             value="signal",
-            width=AppStyles.CONTROL_WIDTH_SM,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,
             color=AppColors.INPUT_TEXT,
@@ -102,7 +98,6 @@ class BacktestConfigPanel(ft.Container):
         self.max_position_input = ft.TextField(
             label=I18n.get("backtest_max_positions"),
             value="50",
-            width=AppStyles.CONTROL_WIDTH_XS,
             keyboard_type=ft.KeyboardType.NUMBER,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,
@@ -245,7 +240,7 @@ class BacktestConfigPanel(ft.Container):
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
-                ft.Row(
+                ft.ResponsiveRow(
                     [
                         ft.Column(
                             [
@@ -253,6 +248,8 @@ class BacktestConfigPanel(ft.Container):
                                 self.start_date_btn,
                             ],
                             spacing=4,
+                            col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                         ft.Column(
                             [
@@ -260,9 +257,11 @@ class BacktestConfigPanel(ft.Container):
                                 self.end_date_btn,
                             ],
                             spacing=4,
+                            col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                         ),
                     ],
-                    spacing=20,
+                    run_spacing=16,
                 ),
                 ft.Container(height=16),
                 ft.Text(
@@ -271,14 +270,25 @@ class BacktestConfigPanel(ft.Container):
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
-                ft.Row(
+                ft.ResponsiveRow(
                     [
-                        self.initial_capital_input,
-                        self.rebalance_dropdown,
-                        self.max_position_input,
+                        ft.Column(
+                            [self.initial_capital_input],
+                            col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
+                        ft.Column(
+                            [self.rebalance_dropdown],
+                            col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
+                        ft.Column(
+                            [self.max_position_input],
+                            col={"xs": 12, "sm": 6, "md": 4, "xl": 3},
+                            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+                        ),
                     ],
-                    spacing=16,
-                    wrap=True,
+                    run_spacing=16,
                 ),
                 ft.Container(height=16),
                 ft.ExpansionTile(
@@ -335,6 +345,7 @@ class BacktestConfigPanel(ft.Container):
             ],
             spacing=12,
             scroll=ft.ScrollMode.AUTO,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
         )
 
     def _on_start_date_change(self, e):

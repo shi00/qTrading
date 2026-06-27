@@ -960,3 +960,236 @@ class TestAppLayout:
             warning_msg = mock_logger.warning.call_args[0][0]
             assert "test error" in warning_msg
             assert "_on_locale_change" in warning_msg
+
+    # ========== Resize 逻辑测试 (覆盖 app_layout.py:83-84, 93-95, 99-116) ==========
+
+    def test_will_unmount_cancels_resize_debounce_task(self, mock_page):
+        """覆盖 app_layout.py:83-84，will_unmount 取消 resize debounce task。"""
+        layout = self._make_layout(mock_page)
+        mock_resize_task = MagicMock()
+        layout._resize_debounce_task = mock_resize_task
+        layout.will_unmount()
+        mock_resize_task.cancel.assert_called_once()
+        assert layout._resize_debounce_task is None
+
+    def test_schedule_resize_cancels_existing_task(self, mock_page):
+        """覆盖 app_layout.py:93-94，schedule_resize 取消已有 task。"""
+        layout = self._make_layout(mock_page)
+        mock_old_task = MagicMock()
+        layout._resize_debounce_task = mock_old_task
+        mock_page.run_task = MagicMock(return_value=MagicMock())
+        layout.schedule_resize()
+        mock_old_task.cancel.assert_called_once()
+
+    def test_schedule_resize_creates_new_task(self, mock_page):
+        """覆盖 app_layout.py:95，schedule_resize 创建新 task。"""
+        layout = self._make_layout(mock_page)
+        mock_new_task = MagicMock()
+        mock_page.run_task = MagicMock(return_value=mock_new_task)
+        layout.schedule_resize()
+        mock_page.run_task.assert_called_once_with(layout._handle_resize)
+        assert layout._resize_debounce_task == mock_new_task
+
+    @pytest.mark.asyncio
+    async def test_handle_resize_propagates_cancelled_error(self, mock_page):
+        """覆盖 app_layout.py:101-102，CancelledError 必须传播（R2 红线）。"""
+        layout = self._make_layout(mock_page)
+        with pytest.raises(asyncio.CancelledError):
+            with patch("asyncio.sleep", side_effect=asyncio.CancelledError):
+                await layout._handle_resize()
+
+    @pytest.mark.asyncio
+    async def test_handle_resize_returns_without_page(self, mock_page):
+        """覆盖 app_layout.py:104-105，page 缺失时提前返回。"""
+        layout = self._make_layout(mock_page)
+        layout.page = None
+        mock_view = MagicMock()
+        layout._view_cache[0] = mock_view
+        layout._current_tab_index = 0
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await layout._handle_resize()
+        # page 缺失时不应调用视图的 handle_resize
+        mock_view.handle_resize.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_resize_returns_without_cached_view(self, mock_page):
+        """覆盖 app_layout.py:107-109，视图未缓存时提前返回。"""
+        layout = self._make_layout(mock_page)
+        layout._current_tab_index = 99  # 无缓存的索引
+        mock_page.run_task = MagicMock()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await layout._handle_resize()
+        # 无缓存视图时不应有副作用（page.run_task 不应被再次调用）
+        mock_page.run_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_resize_calls_view_handle_resize(self, mock_page):
+        """覆盖 app_layout.py:112-114，成功调用视图 handle_resize。"""
+        layout = self._make_layout(mock_page)
+        mock_view = MagicMock()
+        mock_view.handle_resize = MagicMock()
+        layout._view_cache[0] = mock_view
+        layout._current_tab_index = 0
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await layout._handle_resize()
+            mock_view.handle_resize.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_resize_catches_view_handler_exception(self, mock_page):
+        """覆盖 app_layout.py:115-116，视图 handle_resize 异常时降级为 debug log。"""
+        layout = self._make_layout(mock_page)
+        mock_view = MagicMock()
+        mock_view.handle_resize = MagicMock(side_effect=RuntimeError("resize error"))
+        layout._view_cache[0] = mock_view
+        layout._current_tab_index = 0
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch("ui.app_layout.logger") as mock_logger:
+                await layout._handle_resize()
+                mock_logger.debug.assert_called_once()
+                debug_msg = mock_logger.debug.call_args[0][0]
+                assert "Resize handler error" in debug_msg
+
+    # ========== _on_locale_change 分支测试 (覆盖 app_layout.py:298-317) ==========
+
+    def test_on_locale_change_skips_missing_brand_text(self, mock_page):
+        """覆盖 app_layout.py:298->exit，brand_text 缺失时跳过刷新。"""
+        layout = self._make_layout(mock_page)
+        layout.brand_text = None
+        layout.nav_rail.update = MagicMock()
+        layout._on_locale_change()
+        # nav_rail 仍被刷新（brand_text 缺失不影响后续流程）
+        layout.nav_rail.update.assert_called_once()
+
+    def test_on_locale_change_skips_missing_collapse_btn(self, mock_page):
+        """覆盖 app_layout.py:300->exit，collapse_btn 缺失时跳过刷新。"""
+        layout = self._make_layout(mock_page)
+        layout.collapse_btn = None
+        layout.nav_rail.update = MagicMock()
+        layout._on_locale_change()
+        # nav_rail 仍被刷新
+        layout.nav_rail.update.assert_called_once()
+
+    def test_on_locale_change_skips_missing_nav_rail(self, mock_page):
+        """覆盖 app_layout.py:302->exit，nav_rail 缺失时跳过刷新。"""
+        layout = self._make_layout(mock_page)
+        layout.nav_rail = None
+        mock_page.update = MagicMock()
+        layout._on_locale_change()
+        # page.update 仍被调用（nav_rail 缺失不影响 page 更新）
+        mock_page.update.assert_called_once()
+
+    def test_on_locale_change_skips_destinations_boundary(self, mock_page):
+        """覆盖 app_layout.py:312->exit，destinations 索引边界检查。"""
+        layout = self._make_layout(mock_page)
+        # 减少 destinations 数量，触发 i < len 检查失败路径
+        original_dests = layout.nav_rail.destinations[:]
+        layout.nav_rail.destinations = original_dests[:3]
+        layout.nav_rail.update = MagicMock()
+        layout._on_locale_change()
+        # 前 3 个 destinations 被刷新为对应的 nav key
+        expected_keys = ["nav_market", "nav_screener", "nav_backtest"]
+        for i, expected_key in enumerate(expected_keys):
+            assert layout.nav_rail.destinations[i].label == expected_key
+            assert layout.nav_rail.destinations[i].label_content.value == expected_key
+        layout.nav_rail.update.assert_called_once()
+
+    def test_on_locale_change_updates_page_after_nav_rail(self, mock_page):
+        """覆盖 app_layout.py:317->exit，page 存在时调用 update。"""
+        layout = self._make_layout(mock_page)
+        layout.nav_rail.update = MagicMock()
+        mock_page.update = MagicMock()
+        layout._on_locale_change()
+        mock_page.update.assert_called_once()
+
+    def test_on_locale_change_skips_page_update_if_missing(self, mock_page):
+        """覆盖 app_layout.py:317->exit，page 为 falsy 时跳过 update。
+
+        需让 self.page.title=... 能成功（MagicMock 允许属性设置），
+        但 if self.page: 为 False（通过 __bool__ 返回 False）。
+        """
+        layout = self._make_layout(mock_page)
+        layout.nav_rail.update = MagicMock()
+        # 构造 falsy page：允许设置 title 属性，但 bool(page) 为 False
+        falsy_page = MagicMock()
+        falsy_page.__bool__ = lambda self: False
+        layout.page = falsy_page
+        layout._on_locale_change()
+        # nav_rail.update 仍被调用（page falsy 不影响 nav_rail 刷新）
+        layout.nav_rail.update.assert_called_once()
+        # page.update 不应被调用
+        falsy_page.update.assert_not_called()
+
+    # ========== _execute_tab_switch 异常降级测试 (覆盖 app_layout.py:398-404, 414-415) ==========
+
+    @pytest.mark.asyncio
+    async def test_execute_tab_switch_body_update_fails_fallback_to_page(self, mock_page):
+        """覆盖 app_layout.py:398-404，body.update 失败后降级到 page.update。"""
+        layout = self._make_layout(mock_page)
+        layout._current_tab_index = 0
+        layout._pending_tab_index = 1
+        layout.nav_rail.update = MagicMock()
+        layout.body.update = MagicMock(side_effect=RuntimeError("body update failed"))
+        mock_page.update = MagicMock()
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch("ui.app_layout.logger") as mock_logger:
+                await layout._execute_tab_switch()
+                mock_logger.error.assert_called_once()
+                mock_page.update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_tab_switch_page_update_fails_silently(self, mock_page):
+        """覆盖 app_layout.py:402-404，page.update 失败时静默忽略。"""
+        layout = self._make_layout(mock_page)
+        layout._current_tab_index = 0
+        layout._pending_tab_index = 1
+        layout.nav_rail.update = MagicMock()
+        layout.body.update = MagicMock(side_effect=RuntimeError("body update failed"))
+        mock_page.update = MagicMock(side_effect=RuntimeError("page update failed"))
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            await layout._execute_tab_switch()
+        # 流程继续：tab 仍被切换，nav_rail.update 仍被调用
+        assert layout._current_tab_index == 1
+        layout.nav_rail.update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_tab_switch_refresh_locale_exception_logged(self, mock_page):
+        """覆盖 app_layout.py:414-415，refresh_locale 异常时降级为 debug log。"""
+        layout = self._make_layout(mock_page)
+        layout._current_tab_index = 0
+        layout._pending_tab_index = 1
+        layout.body.update = MagicMock()
+        layout.nav_rail.update = MagicMock()
+        mock_view = MagicMock()
+        mock_view.refresh_locale = MagicMock(side_effect=RuntimeError("locale refresh error"))
+        layout._view_cache[1] = mock_view
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            with patch("ui.app_layout.logger") as mock_logger:
+                await layout._execute_tab_switch()
+                # 检查所有 debug calls，找到包含 "View locale refresh skipped" 的消息
+                debug_calls = [call[0][0] for call in mock_logger.debug.call_args_list]
+                assert any("View locale refresh skipped" in msg for msg in debug_calls)
+
+    # ========== run_strategy_from_home 分支测试 (覆盖 app_layout.py:431->exit) ==========
+
+    @pytest.mark.asyncio
+    async def test_run_strategy_from_home_skips_non_screener_view(self, mock_page):
+        """覆盖 app_layout.py:431->exit，screener_view 非 ScreenerView 时跳过调用。
+
+        setup fixture 把 ScreenerView patch 成 MagicMock 实例（非类型），isinstance 会 TypeError。
+        此处临时恢复 ScreenerView 为真实类型，使 isinstance 检查正常工作并返回 False。
+        """
+        layout = self._make_layout(mock_page)
+        layout.body.update = MagicMock()
+        layout.nav_rail.update = MagicMock()
+        # 缓存中放置非 ScreenerView 对象（spec=[] 确保无 select_and_run_strategy 方法）
+        non_screener_view = MagicMock(spec=[])
+        layout._view_cache[1] = non_screener_view
+
+        # 临时恢复 ScreenerView 为真实类型，使 isinstance 可正常判断
+        from ui.views.screener_view import ScreenerView as RealScreenerView
+
+        with patch("ui.app_layout.ScreenerView", RealScreenerView):
+            with patch("asyncio.sleep", new_callable=AsyncMock):
+                await layout.run_strategy_from_home("test_strategy")
+        # 验证未调用 select_and_run_strategy（non_screener_view 无此方法，若调用会抛 AttributeError）
+        non_screener_view.assert_not_called()
