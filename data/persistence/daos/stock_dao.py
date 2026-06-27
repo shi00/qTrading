@@ -340,3 +340,68 @@ class StockDao(BaseDao):
             cols,
             pk_columns=pk_columns,
         )
+
+    async def upsert_em_concepts(self, records: list[dict]) -> int:
+        """
+        东财概念板块成分股入库接口。
+        records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"}]
+        """
+        if not records:
+            return 0
+
+        df = pd.DataFrame(records)
+        cols = get_model_columns(StockConcepts)
+        pk_columns = get_model_pk_columns(StockConcepts)
+
+        return await self._save_upsert(
+            df,
+            "stock_concepts",
+            cols,
+            pk_columns=pk_columns,
+        )
+
+    async def upsert_limit_concepts(self, records: list[dict]) -> int:
+        """
+        涨停原因概念入库接口。
+        records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "LIMIT_C1", "concept_name": "涨停原因1"}]
+        """
+        if not records:
+            return 0
+
+        df = pd.DataFrame(records)
+        cols = get_model_columns(StockConcepts)
+        pk_columns = get_model_pk_columns(StockConcepts)
+
+        return await self._save_upsert(
+            df,
+            "stock_concepts",
+            cols,
+            pk_columns=pk_columns,
+        )
+
+    async def clear_today_limit_concepts(self) -> int:
+        """清空当日 LIMIT_ 前缀概念（涨停原因概念每日重建）。"""
+        return await self._write_db(
+            f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.LIMIT_CONCEPT_PREFIX}%'",
+        )
+
+    async def get_concepts_by_prefix(
+        self,
+        prefix: str,
+        ts_codes: list | None = None,
+    ) -> list[dict]:
+        """
+        按 concept_id 前缀查询概念，可选用 ts_codes 过滤。
+        Returns: list of dict, e.g. [{"ts_code": "...", "concept_id": "...", "concept_name": "..."}]
+        """
+        sql = "SELECT ts_code, concept_id, concept_name FROM stock_concepts WHERE concept_id LIKE $1"
+        params: list = [f"{prefix}%"]
+        if ts_codes:
+            placeholders = ",".join([f"${i + 2}" for i in range(len(ts_codes))])
+            sql += f" AND ts_code IN ({placeholders})"
+            params.extend(ts_codes)
+
+        df = await self._read_db(sql, params)
+        if df is None or df.empty:
+            return []
+        return df.to_dict(orient="records")

@@ -136,3 +136,137 @@ class TestGetStocksWithoutAiConceptsPrefixMigration:
         sql_arg = dao._read_db.call_args.args[0]
         assert "AI_LLM_%" in sql_arg
         assert "AI_DOUBAO_" not in sql_arg
+
+
+class TestUpsertEmConcepts:
+    """Task 1.2: upsert_em_concepts 东财概念入库"""
+
+    @pytest.mark.asyncio
+    async def test_upsert_em_concepts_calls_save_upsert(self):
+        """验证调用 _save_upsert，table_name='stock_concepts'"""
+        dao = _make_dao()
+        records = [
+            {"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"},
+            {"ts_code": "000002.SZ", "concept_id": "EM_C2", "concept_name": "概念2"},
+        ]
+        result = await dao.upsert_em_concepts(records)
+        assert result == 5  # mock _save_upsert return_value=5
+        dao._save_upsert.assert_called_once()
+        args = dao._save_upsert.call_args.args
+        # args[0]=df, args[1]=table_name, args[2]=cols, args[3]=pk_columns
+        assert args[1] == "stock_concepts"
+        # 验证传入的 DataFrame 包含全部 records
+        df_arg = args[0]
+        assert len(df_arg) == 2
+        assert set(df_arg["concept_id"]) == {"EM_C1", "EM_C2"}
+
+    @pytest.mark.asyncio
+    async def test_upsert_em_concepts_empty_records_returns_zero(self):
+        """空列表返回 0，不调用 _save_upsert"""
+        dao = _make_dao()
+        result = await dao.upsert_em_concepts([])
+        assert result == 0
+        dao._save_upsert.assert_not_called()
+
+
+class TestUpsertLimitConcepts:
+    """Task 1.3: upsert_limit_concepts 涨停原因概念入库"""
+
+    @pytest.mark.asyncio
+    async def test_upsert_limit_concepts_calls_save_upsert(self):
+        """验证调用 _save_upsert，table_name='stock_concepts'"""
+        dao = _make_dao()
+        records = [
+            {"ts_code": "000001.SZ", "concept_id": "LIMIT_C1", "concept_name": "涨停原因1"},
+        ]
+        result = await dao.upsert_limit_concepts(records)
+        assert result == 5
+        dao._save_upsert.assert_called_once()
+        args = dao._save_upsert.call_args.args
+        assert args[1] == "stock_concepts"
+        df_arg = args[0]
+        assert len(df_arg) == 1
+        assert df_arg["concept_id"].iloc[0] == "LIMIT_C1"
+
+    @pytest.mark.asyncio
+    async def test_upsert_limit_concepts_empty_records_returns_zero(self):
+        """空列表返回 0，不调用 _save_upsert"""
+        dao = _make_dao()
+        result = await dao.upsert_limit_concepts([])
+        assert result == 0
+        dao._save_upsert.assert_not_called()
+
+
+class TestClearTodayLimitConcepts:
+    """Task 1.3: clear_today_limit_concepts 清空 LIMIT_% 概念"""
+
+    @pytest.mark.asyncio
+    async def test_clear_today_limit_concepts_deletes_limit_prefix(self):
+        """验证 SQL 含 WHERE concept_id LIKE 'LIMIT_%'"""
+        dao = _make_dao()
+        dao._write_db = AsyncMock(return_value=1)
+        result = await dao.clear_today_limit_concepts()
+        assert result == 1
+        dao._write_db.assert_called_once()
+        sql_arg = dao._write_db.call_args.args[0]
+        assert "concept_id LIKE 'LIMIT_%'" in sql_arg
+        assert "DELETE FROM stock_concepts" in sql_arg
+
+
+class TestGetConceptsByPrefix:
+    """Task 1.3: get_concepts_by_prefix 按 concept_id 前缀查询概念"""
+
+    @pytest.mark.asyncio
+    async def test_get_concepts_by_prefix_returns_list(self):
+        """验证返回 list[dict]，SQL 含 LIKE $1 参数化"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "concept_id": ["EM_C1"],
+                    "concept_name": ["概念1"],
+                }
+            )
+        )
+        result = await dao.get_concepts_by_prefix("EM_")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0]["ts_code"] == "000001.SZ"
+        assert result[0]["concept_id"] == "EM_C1"
+        # 验证 SQL 含参数化 LIKE $1（R4 合规）
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "concept_id LIKE $1" in sql_arg
+        # 验证参数含 EM_%
+        params_arg = dao._read_db.call_args.args[1]
+        assert params_arg == ["EM_%"]
+
+    @pytest.mark.asyncio
+    async def test_get_concepts_by_prefix_with_ts_codes(self):
+        """验证带 ts_codes 参数的查询，IN 子句使用 $2, $3 占位符"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "concept_id": ["EM_C1"],
+                    "concept_name": ["概念1"],
+                }
+            )
+        )
+        result = await dao.get_concepts_by_prefix("EM_", ts_codes=["000001.SZ", "000002.SZ"])
+        assert isinstance(result, list)
+        assert len(result) == 1
+        sql_arg = dao._read_db.call_args.args[0]
+        assert "concept_id LIKE $1" in sql_arg
+        assert "ts_code IN ($2,$3)" in sql_arg
+        params_arg = dao._read_db.call_args.args[1]
+        assert params_arg == ["EM_%", "000001.SZ", "000002.SZ"]
+
+    @pytest.mark.asyncio
+    async def test_get_concepts_by_prefix_empty_returns_empty_list(self):
+        """空结果返回 []"""
+        dao = _make_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+        result = await dao.get_concepts_by_prefix("EM_")
+        assert result == []
