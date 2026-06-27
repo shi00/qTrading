@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 
 class StockDao(BaseDao):
+    AI_CONCEPT_PREFIX = "AI_LLM_"
+    EM_CONCEPT_PREFIX = "EM_"
+    LIMIT_CONCEPT_PREFIX = "LIMIT_"
+
     async def save_stock_basic(self, df, priority=None):
         if df is None or df.empty:
             return 0
@@ -190,8 +194,10 @@ class StockDao(BaseDao):
 
         try:
             async with self._guarded_begin() as conn:
-                # 1. Clear old data
-                await conn.exec_driver_sql("DELETE FROM stock_concepts")
+                # 1. Clear old EM-prefixed concepts only (preserve AI_LLM_ concepts)
+                await conn.exec_driver_sql(
+                    f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.EM_CONCEPT_PREFIX}%'"
+                )
 
                 # 2. Insert new data
                 if params:
@@ -207,9 +213,9 @@ class StockDao(BaseDao):
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
             raise
 
-    async def clear_all_doubao_concepts(self) -> int:
+    async def clear_all_ai_llm_concepts(self) -> int:
         return await self._write_db(
-            "DELETE FROM stock_concepts WHERE concept_id LIKE 'AI_DOUBAO_%'",
+            f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.AI_CONCEPT_PREFIX}%'",
         )
 
     async def get_stocks_without_ai_concepts(
@@ -217,12 +223,12 @@ class StockDao(BaseDao):
         batch_size: int,
         exclude_codes: list = None,  # type: ignore[untyped]
     ) -> list:
-        sql = """
+        sql = f"""
             SELECT ts_code, name FROM stock_basic
             WHERE list_status = 'L'
               AND NOT EXISTS (
                   SELECT 1 FROM stock_concepts sc
-                  WHERE sc.ts_code = stock_basic.ts_code AND sc.concept_id LIKE 'AI_DOUBAO_%'
+                  WHERE sc.ts_code = stock_basic.ts_code AND sc.concept_id LIKE '{self.AI_CONCEPT_PREFIX}%'
               )
         """
         df = await self._read_db(sql)
@@ -284,7 +290,7 @@ class StockDao(BaseDao):
     async def upsert_ai_concepts(self, ai_concept_entries: list):
         """
         AI 专属概念批量入库接口。
-        强制为每一个生成的概念附加唯一的 AI_DOUBAO 前缀哈希 ID，以实现物理隔离。
+        强制为每一个生成的概念附加唯一的 AI_LLM 前缀哈希 ID，以实现物理隔离。
         ai_concept_entries: list of dict, e.g. [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
         """
         import hashlib
@@ -301,7 +307,7 @@ class StockDao(BaseDao):
 
             concepts = item.get("concepts", [])
             if not concepts:
-                dummy_id = f"AI_DOUBAO_{hashlib.sha256(b'NONE').hexdigest()}"
+                dummy_id = f"{self.AI_CONCEPT_PREFIX}{hashlib.sha256(b'NONE').hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,
@@ -312,7 +318,7 @@ class StockDao(BaseDao):
                 continue
 
             for concept in concepts:
-                concept_id = f"AI_DOUBAO_{hashlib.sha256(concept.encode('utf-8')).hexdigest()}"
+                concept_id = f"{self.AI_CONCEPT_PREFIX}{hashlib.sha256(concept.encode('utf-8')).hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,
