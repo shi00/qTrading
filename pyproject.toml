@@ -14,7 +14,6 @@ classifiers = [
 
 # urllib3>=2.7.0: Fix Brotli decode error for requests; must be >= 2.6.2
 # brotlicffi: Fast Brotli compression support for urllib3 (optional dep, must be explicit)
-# playwright: Browser automation for E2E tests and scraping helpers
 #
 # Version constraint policy (DEP-M1):
 # - All dependencies use >= for forward compatibility.
@@ -74,7 +73,6 @@ dev = [
 ]
 optional = [
     "brotlicffi>=1.2.0.0",
-    "playwright>=1.59.0",
 ]
 
 [tool.ruff]

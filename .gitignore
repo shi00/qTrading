@@ -74,7 +74,6 @@ junit-*.xml
 astock.db
 astock.db-*
 user_settings.json
-.doubao_auth_state.json
 
 # 2. Logs & Temporary Files
 logs/
