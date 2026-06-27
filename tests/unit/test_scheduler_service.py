@@ -14,7 +14,7 @@ def _make_svc():
         mock_ch.get_setting.return_value = None
         mock_ch.is_auto_update_enabled.return_value = True
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
     return svc
 
@@ -130,8 +130,8 @@ class TestSchedulerServiceCheckConfigSync:
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "09:30"
         mock_ch.is_auto_update_enabled.return_value = True
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
-        mock_ch.is_doubao_schedule_enabled.return_value = False
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
+        mock_ch.is_ai_concept_schedule_enabled.return_value = False
         svc = SchedulerService()
         result = svc._check_config_sync()
         assert result["time"] == "09:30"
@@ -145,7 +145,7 @@ class TestSchedulerServiceScheduleJobs:
     def test_schedule_jobs_adds_daily_update(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
@@ -155,7 +155,7 @@ class TestSchedulerServiceScheduleJobs:
     def test_schedule_jobs_adds_nightly_prediction(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("nightly_prediction")
@@ -165,7 +165,7 @@ class TestSchedulerServiceScheduleJobs:
     def test_schedule_jobs_adds_doubao_weekly(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("doubao_weekly_refresh")
@@ -175,7 +175,7 @@ class TestSchedulerServiceScheduleJobs:
     def test_schedule_jobs_invalid_time_defaults(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = None
-        mock_ch.get_doubao_schedule_time.return_value = "invalid"
+        mock_ch.get_ai_concept_schedule_time.return_value = "invalid"
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
@@ -185,7 +185,7 @@ class TestSchedulerServiceScheduleJobs:
     def test_schedule_jobs_removes_existing(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
         svc._schedule_jobs()
@@ -441,7 +441,7 @@ class TestRunDoubaoTagger:
     async def test_disabled(self):
         svc = _make_svc()
         with patch("utils.scheduler_service.ConfigHandler") as mock_ch:
-            mock_ch.is_doubao_schedule_enabled.return_value = False
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
             await svc._run_doubao_tagger()
 
     @pytest.mark.asyncio
@@ -451,7 +451,7 @@ class TestRunDoubaoTagger:
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
-            mock_ch.is_doubao_schedule_enabled.return_value = True
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
             today_str = "20240615"
             mock_now.return_value.strftime.return_value = today_str
             svc._last_doubao_date = today_str
@@ -465,7 +465,7 @@ class TestRunDoubaoTagger:
             patch("utils.scheduler_service.get_now") as mock_now,
             patch("services.task_manager.TaskManager") as mock_tm,
         ):
-            mock_ch.is_doubao_schedule_enabled.return_value = True
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
             mock_now.return_value.strftime.return_value = "20240615"
             svc._last_doubao_date = None
             mock_tm_instance = MagicMock()
@@ -556,7 +556,7 @@ class TestScheduleJobsInvalidTime:
     def test_invalid_auto_update_time(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "invalid"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
         assert svc.scheduler.get_job("daily_update") is not None
@@ -565,7 +565,7 @@ class TestScheduleJobsInvalidTime:
     def test_none_doubao_time(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = None
+        mock_ch.get_ai_concept_schedule_time.return_value = None
         svc = SchedulerService()
         svc._schedule_jobs()
         assert svc.scheduler.get_job("doubao_weekly_refresh") is not None
@@ -633,7 +633,7 @@ class TestSchedulerStart:
     def test_start_success(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc.scheduler = MagicMock()
         svc.scheduler.running = False
@@ -645,7 +645,7 @@ class TestSchedulerStart:
     def test_start_exception(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc.scheduler = MagicMock()
         svc.scheduler.running = False
@@ -738,7 +738,7 @@ class TestStartDeep:
     def test_start_adds_listeners(self, mock_ch):
         mock_ch.get_setting.return_value = None
         mock_ch.get_auto_update_time.return_value = "16:30"
-        mock_ch.get_doubao_schedule_time.return_value = "10:00"
+        mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc.scheduler = MagicMock()
         svc.scheduler.running = False
@@ -912,7 +912,7 @@ class TestDoubaoLogicClosure:
             patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):
-            mock_ch.is_doubao_schedule_enabled.return_value = True
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
             await svc._run_doubao_tagger()
             factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
             result_msg = await factory("test_task")

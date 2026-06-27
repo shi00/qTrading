@@ -108,7 +108,7 @@ class TestAppConfig:
         with pytest.raises(ValidationError):
             AppConfig(auto_update_time="25:00")
         with pytest.raises(ValidationError):
-            AppConfig(doubao_schedule_time="abc")
+            AppConfig(ai_concept_schedule_time="abc")
 
     def test_extra_allow_dynamic_keys(self):
         cfg = AppConfig.model_validate(

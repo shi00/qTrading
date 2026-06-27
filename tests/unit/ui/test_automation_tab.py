@@ -25,11 +25,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -46,11 +46,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -72,11 +72,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = True
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -98,11 +98,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -123,11 +123,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -142,17 +142,17 @@ class TestAutomationTab:
                 event = MagicMock()
                 tab.on_doubao_toggle(event)
 
-                mock_ch.set_doubao_schedule_enabled.assert_called_once_with(True)
+                mock_ch.set_ai_concept_schedule_enabled.assert_called_once_with(True)
 
     def test_on_doubao_time_change(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -167,17 +167,17 @@ class TestAutomationTab:
                 event = MagicMock()
                 tab.on_doubao_time_change(event)
 
-                mock_ch.set_doubao_schedule_time.assert_called_once_with("18:00")
+                mock_ch.set_ai_concept_schedule_time.assert_called_once_with("18:00")
 
     def test_did_mount_subscribes_to_locale(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -195,11 +195,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -216,11 +216,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -238,11 +238,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -266,11 +266,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "translated_text"
@@ -288,11 +288,11 @@ class TestAutomationTab:
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = True
             mock_ch.get_auto_update_time.return_value = "16:30"
-            mock_ch.is_doubao_schedule_enabled.return_value = False
-            mock_ch.get_doubao_schedule_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
             mock_ch.save_config = MagicMock()
-            mock_ch.set_doubao_schedule_enabled = MagicMock()
-            mock_ch.set_doubao_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "translated_text"

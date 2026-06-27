@@ -88,15 +88,15 @@ class TestConfigHandlerGetAutoUpdateTime:
 class TestConfigHandlerIsDoubaoScheduleEnabled:
     @patch("utils.config_handler.ConfigHandler.load_config")
     def test_enabled(self, mock_load):
-        mock_load.return_value = {"doubao_schedule_enabled": True}
-        assert ConfigHandler.is_doubao_schedule_enabled() is True
+        mock_load.return_value = {"ai_concept_schedule_enabled": True}
+        assert ConfigHandler.is_ai_concept_schedule_enabled() is True
 
 
 class TestConfigHandlerGetDoubaoScheduleTime:
     @patch("utils.config_handler.ConfigHandler.load_config")
     def test_get_time(self, mock_load):
-        mock_load.return_value = {"doubao_schedule_time": "10:00"}
-        assert ConfigHandler.get_doubao_schedule_time() == "10:00"
+        mock_load.return_value = {"ai_concept_schedule_time": "10:00"}
+        assert ConfigHandler.get_ai_concept_schedule_time() == "10:00"
 
 
 class TestConfigHandlerGetLocalAiConfig:
@@ -1473,13 +1473,13 @@ class TestSimpleGetterSetters:
 
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
     def test_set_doubao_schedule_enabled(self, mock_set):
-        cfg_mod.ConfigHandler.set_doubao_schedule_enabled(True)
-        mock_set.assert_called_once_with("doubao_schedule_enabled", True)
+        cfg_mod.ConfigHandler.set_ai_concept_schedule_enabled(True)
+        mock_set.assert_called_once_with("ai_concept_schedule_enabled", True)
 
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
     def test_set_doubao_schedule_time(self, mock_set):
-        cfg_mod.ConfigHandler.set_doubao_schedule_time("12:00")
-        mock_set.assert_called_once_with("doubao_schedule_time", "12:00")
+        cfg_mod.ConfigHandler.set_ai_concept_schedule_time("12:00")
+        mock_set.assert_called_once_with("ai_concept_schedule_time", "12:00")
 
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
     def test_set_db_connection_pool_size(self, mock_set):
@@ -1911,3 +1911,79 @@ class TestSaveProviderCredentialClearSemantics:
         saved_config = mock_save.call_args[0][0]
         qwen_cred = saved_config["llm_provider_credentials"]["qwen"]
         assert qwen_cred.get("base_url") == "https://old.url"
+
+
+class TestConfigHandlerAIConceptSchedule:
+    """Task 5.2: ai_concept 调度配置方法（前身 doubao_schedule_*）"""
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_is_ai_concept_schedule_enabled_default_false(self, mock_load):
+        mock_load.return_value = {}
+        assert ConfigHandler.is_ai_concept_schedule_enabled() is False
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_is_ai_concept_schedule_enabled_true(self, mock_load):
+        mock_load.return_value = {"ai_concept_schedule_enabled": True}
+        assert ConfigHandler.is_ai_concept_schedule_enabled() is True
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_get_ai_concept_schedule_time_default_18(self, mock_load):
+        """默认调度时间应为 "18:00"（Task 5.2 规范）"""
+        mock_load.return_value = {}
+        assert ConfigHandler.get_ai_concept_schedule_time() == "18:00"
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_get_ai_concept_schedule_time_custom(self, mock_load):
+        mock_load.return_value = {"ai_concept_schedule_time": "20:30"}
+        assert ConfigHandler.get_ai_concept_schedule_time() == "20:30"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_ai_concept_schedule_enabled_persists(self, mock_set):
+        ConfigHandler.set_ai_concept_schedule_enabled(True)
+        mock_set.assert_called_once_with("ai_concept_schedule_enabled", True)
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_ai_concept_schedule_time_persists(self, mock_set):
+        ConfigHandler.set_ai_concept_schedule_time("18:00")
+        mock_set.assert_called_once_with("ai_concept_schedule_time", "18:00")
+
+
+class TestConfigHandlerAIConceptSearchEngine:
+    """Task 5.2: 新增 ai_concept 搜索引擎配置"""
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_get_ai_concept_search_engine_default_std(self, mock_load):
+        mock_load.return_value = {}
+        assert ConfigHandler.get_ai_concept_search_engine() == "search_std"
+
+    @patch("utils.config_handler.ConfigHandler.load_config")
+    def test_get_ai_concept_search_engine_pro(self, mock_load):
+        mock_load.return_value = {"ai_concept_search_engine": "search_pro"}
+        assert ConfigHandler.get_ai_concept_search_engine() == "search_pro"
+
+    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
+    def test_set_ai_concept_search_engine_pro(self, mock_set):
+        ConfigHandler.set_ai_concept_search_engine("search_pro")
+        mock_set.assert_called_once_with("ai_concept_search_engine", "search_pro")
+
+    def test_set_ai_concept_search_engine_invalid_raises(self):
+        """Pydantic 校验：非法 engine 值应在 AppConfig 层被拒绝"""
+        from pydantic import ValidationError
+
+        from utils.config_models import AppConfig
+
+        with pytest.raises(ValidationError):
+            AppConfig(ai_concept_search_engine="invalid_engine")
+
+
+class TestConfigHandlerOldDoubaoMethodsRemoved:
+    """Task 5.2: 验证旧 doubao_* 方法已从 ConfigHandler 移除"""
+
+    def test_old_doubao_methods_removed(self):
+        for name in [
+            "is_doubao_schedule_enabled",
+            "set_doubao_schedule_enabled",
+            "get_doubao_schedule_time",
+            "set_doubao_schedule_time",
+        ]:
+            assert not hasattr(ConfigHandler, name), f"ConfigHandler.{name} 应已删除"

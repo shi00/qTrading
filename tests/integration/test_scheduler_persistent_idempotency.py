@@ -169,4 +169,4 @@ class TestDoubaoIdempotency:
         assert result is None
 
 
-_CFG_LAST_DOUBAO_REFRESH = "scheduler_last_doubao_refresh"
+_CFG_LAST_DOUBAO_REFRESH = "scheduler_last_ai_concept_refresh"

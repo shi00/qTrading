@@ -79,8 +79,8 @@ def mock_config_handler():
     m = create_autospec(ConfigHandler, instance=False)
     m.is_auto_update_enabled.return_value = False
     m.get_auto_update_time.return_value = "16:30"
-    m.is_doubao_schedule_enabled.return_value = False
-    m.get_doubao_schedule_time.return_value = "20:00"
+    m.is_ai_concept_schedule_enabled.return_value = False
+    m.get_ai_concept_schedule_time.return_value = "20:00"
     m.get_tushare_api_limit.return_value = 200
     m.get_no_proxy_domains.return_value = []
     m.get_max_cpu_workers.return_value = 4

@@ -178,8 +178,9 @@ class AppConfig(BaseModel):
 
     auto_update_enabled: bool = False
     auto_update_time: str = Field(default="16:30", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
-    doubao_schedule_enabled: bool = False
-    doubao_schedule_time: str = Field(default="10:00", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+    ai_concept_schedule_enabled: bool = False
+    ai_concept_schedule_time: str = Field(default="18:00", pattern="^([01]?[0-9]|2[0-3]):[0-5][0-9]$")
+    ai_concept_search_engine: str = Field(default="search_std", pattern="^(search_std|search_pro)$")
 
     onboarding_complete: bool = False
     enable_news_alerts: bool = True
@@ -200,7 +201,7 @@ class AppConfig(BaseModel):
 
     scheduler_last_daily_update: str = ""
     scheduler_last_nightly_prediction: str = ""
-    scheduler_last_doubao_refresh: str = ""
+    scheduler_last_ai_concept_refresh: str = ""
 
 
 @cache

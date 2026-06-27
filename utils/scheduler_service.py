@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
-_CFG_LAST_DOUBAO_REFRESH = "scheduler_last_doubao_refresh"
+_CFG_LAST_AI_CONCEPT_REFRESH = "scheduler_last_ai_concept_refresh"
 
 _DB_KEY_DAILY_UPDATE = "sched_last_daily_update"
 _DB_KEY_NIGHTLY_PREDICTION = "sched_last_nightly_prediction"
@@ -110,7 +110,7 @@ class SchedulerService:
         )
         self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
         self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
-        self._last_doubao_date = ConfigHandler.get_setting(_CFG_LAST_DOUBAO_REFRESH)
+        self._last_doubao_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
         self._db_state_loaded = False
         self._initialized = True
         logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
@@ -249,8 +249,8 @@ class SchedulerService:
         return {
             "time": ConfigHandler.get_auto_update_time(),
             "enabled": ConfigHandler.is_auto_update_enabled(),
-            "doubao_time": ConfigHandler.get_doubao_schedule_time(),
-            "doubao_enabled": ConfigHandler.is_doubao_schedule_enabled(),
+            "doubao_time": ConfigHandler.get_ai_concept_schedule_time(),
+            "doubao_enabled": ConfigHandler.is_ai_concept_schedule_enabled(),
         }
 
     async def _watch_config_changes(self):
@@ -339,11 +339,11 @@ class SchedulerService:
         logger.info("[Scheduler] Scheduled Nightly Prediction at 20:30")
 
         # 3. Doubao AI Concept Tagging Job (Weekly on Saturday)
-        doubao_time = ConfigHandler.get_doubao_schedule_time() or "10:00"
+        doubao_time = ConfigHandler.get_ai_concept_schedule_time() or "18:00"
         try:
             dh, dm = map(int, doubao_time.split(":"))
         except (ValueError, TypeError, AttributeError):
-            dh, dm = 10, 0
+            dh, dm = 18, 0
 
         self.scheduler.add_job(
             self._run_doubao_tagger,
@@ -431,7 +431,7 @@ class SchedulerService:
 
         ensure_correlation_id()
 
-        if not ConfigHandler.is_doubao_schedule_enabled():
+        if not ConfigHandler.is_ai_concept_schedule_enabled():
             return
 
         today_str = get_now().strftime("%Y%m%d")
@@ -452,7 +452,7 @@ class SchedulerService:
                 cancel_event=cancel_event,
             )
             self._last_doubao_date = today_str
-            await self._persist_run_date_db(_DB_KEY_DOUBAO_REFRESH, _CFG_LAST_DOUBAO_REFRESH, today_str)
+            await self._persist_run_date_db(_DB_KEY_DOUBAO_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
             return I18n.get("sched_doubao_done")
 
         TaskManager().submit_task(

@@ -56,8 +56,8 @@ class AutomationTab(ft.Container):
             color=AppColors.SUCCESS if auto_update_enabled else AppColors.TEXT_HINT,
         )
 
-        doubao_enabled = ConfigHandler.is_doubao_schedule_enabled()
-        doubao_time = ConfigHandler.get_doubao_schedule_time()
+        doubao_enabled = ConfigHandler.is_ai_concept_schedule_enabled()
+        doubao_time = ConfigHandler.get_ai_concept_schedule_time()
 
         self.doubao_enabled = ft.Switch(
             label=I18n.get("settings_doubao_update"),
@@ -323,7 +323,7 @@ class AutomationTab(ft.Container):
 
     def on_doubao_toggle(self, e):
         enabled = self.doubao_enabled.value
-        ConfigHandler.set_doubao_schedule_enabled(enabled)
+        ConfigHandler.set_ai_concept_schedule_enabled(enabled)
         self.doubao_status.value = self._get_schedule_status_text(enabled)
         self.doubao_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
         self.doubao_time.disabled = not enabled
@@ -335,7 +335,7 @@ class AutomationTab(ft.Container):
 
     def on_doubao_time_change(self, e):
         selected_time = self.doubao_time.value
-        ConfigHandler.set_doubao_schedule_time(selected_time)  # type: ignore[untyped]
+        ConfigHandler.set_ai_concept_schedule_time(selected_time)  # type: ignore[untyped]
         self.update()
         if self.show_snack:
             self.show_snack(
