@@ -254,3 +254,29 @@ class TestLLMProviderName:
         """Test that qwen provider name is '通义千问' not '阿里云通义千问'"""
         qwen = LLM_PROVIDERS.get("qwen", {})
         assert qwen.get("name") == "通义千问"
+
+
+class TestZhipuGlm47Flash:
+    """Tests for glm-4.7-flash model in zhipu provider (Task 4.2)."""
+
+    def test_glm_4_7_flash_in_zhipu_models(self):
+        """zhipu 供应商应包含 id='glm-4.7-flash' 的模型条目。"""
+        zhipu = LLM_PROVIDERS.get("zhipu", {})
+        models = zhipu.get("models", [])
+        model_ids = [m["id"] for m in models]
+        assert "glm-4.7-flash" in model_ids, "zhipu 供应商缺少 glm-4.7-flash 模型"
+
+    def test_glm_4_7_flash_has_recommend_tag(self):
+        """glm-4.7-flash 的 tag 应为 'tag_recommend'。"""
+        model = get_model_info("zhipu", "glm-4.7-flash")
+        assert model.get("tag") == "tag_recommend", f"glm-4.7-flash tag 不正确: {model.get('tag')}"
+
+    def test_glm_4_7_flash_context_200k(self):
+        """glm-4.7-flash 的 context 应为 200000。"""
+        model = get_model_info("zhipu", "glm-4.7-flash")
+        assert model.get("context") == 200000, f"glm-4.7-flash context 不正确: {model.get('context')}"
+
+    def test_glm_4_7_flash_has_name(self):
+        """glm-4.7-flash 应有非空 name 字段。"""
+        model = get_model_info("zhipu", "glm-4.7-flash")
+        assert model.get("name"), "glm-4.7-flash name 不应为空"
