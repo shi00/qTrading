@@ -83,25 +83,25 @@ class TestAutomationTab:
         tab.on_schedule_time_change(None)
         snack.assert_called_once_with("settings_snack_time_set")
 
-    def test_on_doubao_toggle_saves_config(self, mock_page):
+    def test_on_ai_concept_toggle_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = True
-        tab.on_doubao_toggle(None)
+        tab.ai_concept_enabled.value = True
+        tab.on_ai_concept_toggle(None)
         self.mock_ch.set_ai_concept_schedule_enabled.assert_called_with(True)
 
-    def test_on_doubao_toggle_disables_time(self, mock_page):
+    def test_on_ai_concept_toggle_disables_time(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = False
-        tab.on_doubao_toggle(None)
-        assert tab.doubao_time.disabled is True
+        tab.ai_concept_enabled.value = False
+        tab.on_ai_concept_toggle(None)
+        assert tab.ai_concept_time.disabled is True
 
-    def test_on_doubao_time_change_saves_config(self, mock_page):
+    def test_on_ai_concept_time_change_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_time.value = "20:00"
-        tab.on_doubao_time_change(None)
+        tab.ai_concept_time.value = "20:00"
+        tab.on_ai_concept_time_change(None)
         self.mock_ch.set_ai_concept_schedule_time.assert_called_with("20:00")
 
     def test_did_mount_subscribes_i18n(self, mock_page):
@@ -156,10 +156,10 @@ class TestAutomationTab:
         tab._on_locale_change("zh_CN")
         self.mock_i18n.get.assert_any_call("settings_status_auto_on")
 
-    def test_on_locale_change_updates_doubao_status(self, mock_page):
+    def test_on_locale_change_updates_ai_concept_status(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = False
+        tab.ai_concept_enabled.value = False
         tab._on_locale_change("zh_CN")
         self.mock_i18n.get.assert_any_call("settings_status_auto_off")
 
@@ -193,20 +193,20 @@ class TestAutomationTab:
         tab.update_theme()
         assert tab.schedule_status.color == ft.Colors.ON_SURFACE_VARIANT
 
-    def test_update_theme_sets_doubao_input_colors(self, mock_page):
+    def test_update_theme_sets_ai_concept_input_colors(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.update_theme()
-        assert tab.doubao_time.bgcolor == self.mock_ac.INPUT_BG
-        assert tab.doubao_time.color == self.mock_ac.INPUT_TEXT
-        assert tab.doubao_time.border_color == self.mock_ac.INPUT_BORDER
+        assert tab.ai_concept_time.bgcolor == self.mock_ac.INPUT_BG
+        assert tab.ai_concept_time.color == self.mock_ac.INPUT_TEXT
+        assert tab.ai_concept_time.border_color == self.mock_ac.INPUT_BORDER
 
-    def test_update_theme_sets_doubao_status_color(self, mock_page):
+    def test_update_theme_sets_ai_concept_status_color(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = True
+        tab.ai_concept_enabled.value = True
         tab.update_theme()
-        assert tab.doubao_status.color == self.mock_ac.SUCCESS
+        assert tab.ai_concept_status.color == self.mock_ac.SUCCESS
 
     def test_update_theme_calls_update_when_page_set(self, mock_page):
         tab = self._make_tab()
@@ -238,29 +238,29 @@ class TestAutomationTab:
         tab._get_schedule_status_text(False)
         self.mock_i18n.get.assert_called_with("settings_status_auto_off")
 
-    def test_on_doubao_toggle_enables_time(self, mock_page):
+    def test_on_ai_concept_toggle_enables_time(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = True
-        tab.on_doubao_toggle(None)
-        assert tab.doubao_time.disabled is False
+        tab.ai_concept_enabled.value = True
+        tab.on_ai_concept_toggle(None)
+        assert tab.ai_concept_time.disabled is False
 
-    def test_on_doubao_toggle_calls_snack(self, mock_page):
+    def test_on_ai_concept_toggle_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
-        tab.doubao_enabled.value = True
-        tab.on_doubao_toggle(None)
+        tab.ai_concept_enabled.value = True
+        tab.on_ai_concept_toggle(None)
         snack.assert_called_once_with("settings_snack_auto_on")
 
-    def test_on_doubao_time_change_calls_snack(self, mock_page):
+    def test_on_ai_concept_time_change_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
-        tab.doubao_time.value = "20:00"
-        tab.on_doubao_time_change(None)
+        tab.ai_concept_time.value = "20:00"
+        tab.on_ai_concept_time_change(None)
         snack.assert_called_once_with("settings_snack_time_set")
 
     def test_safe_update_with_page(self, mock_page):
@@ -279,7 +279,7 @@ class TestAutomationTab:
         tab = self._make_tab()
         assert tab.inner_container is not None
         assert tab.card_main is not None
-        assert tab.card_doubao is not None
+        assert tab.card_ai_concept is not None
 
     def test_build_content_creates_title_and_desc(self, mock_page):
         tab = self._make_tab()
@@ -294,8 +294,8 @@ class TestAutomationTab:
         tab = self._make_tab()
         assert tab.row_schedule is not None
         assert tab.row_time is not None
-        assert tab.row_doubao_schedule is not None
-        assert tab.row_doubao_time is not None
+        assert tab.row_ai_concept_schedule is not None
+        assert tab.row_ai_concept_time is not None
 
     def test_on_schedule_toggle_no_snack_callback(self, mock_page):
         tab = self._make_tab()
@@ -334,41 +334,41 @@ class TestAutomationTab:
         tab.on_schedule_time_change(None)
         self.mock_ch.save_config.assert_called_with({"auto_update_time": "17:00"})
 
-    def test_on_doubao_toggle_no_snack_callback(self, mock_page):
+    def test_on_ai_concept_toggle_no_snack_callback(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = None
-        tab.doubao_enabled.value = True
-        tab.on_doubao_toggle(None)
+        tab.ai_concept_enabled.value = True
+        tab.on_ai_concept_toggle(None)
         self.mock_ch.set_ai_concept_schedule_enabled.assert_called_with(True)
 
-    def test_on_doubao_toggle_updates_status_text(self, mock_page):
+    def test_on_ai_concept_toggle_updates_status_text(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = False
-        tab.on_doubao_toggle(None)
+        tab.ai_concept_enabled.value = False
+        tab.on_ai_concept_toggle(None)
         self.mock_i18n.get.assert_any_call("settings_status_auto_off")
 
-    def test_on_doubao_toggle_disabled_status_color(self, mock_page):
+    def test_on_ai_concept_toggle_disabled_status_color(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = False
-        tab.on_doubao_toggle(None)
-        assert tab.doubao_status.color == ft.Colors.ON_SURFACE_VARIANT
+        tab.ai_concept_enabled.value = False
+        tab.on_ai_concept_toggle(None)
+        assert tab.ai_concept_status.color == ft.Colors.ON_SURFACE_VARIANT
 
-    def test_on_doubao_toggle_enabled_status_color(self, mock_page):
+    def test_on_ai_concept_toggle_enabled_status_color(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = True
-        tab.on_doubao_toggle(None)
-        assert tab.doubao_status.color == self.mock_ac.SUCCESS
+        tab.ai_concept_enabled.value = True
+        tab.on_ai_concept_toggle(None)
+        assert tab.ai_concept_status.color == self.mock_ac.SUCCESS
 
-    def test_on_doubao_time_change_no_snack_callback(self, mock_page):
+    def test_on_ai_concept_time_change_no_snack_callback(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = None
-        tab.doubao_time.value = "16:00"
-        tab.on_doubao_time_change(None)
+        tab.ai_concept_time.value = "16:00"
+        tab.on_ai_concept_time_change(None)
         self.mock_ch.set_ai_concept_schedule_time.assert_called_with("16:00")
 
     def test_on_locale_change_exception_handled(self, mock_page):
@@ -390,18 +390,18 @@ class TestAutomationTab:
         tab.update_theme()
         assert tab.schedule_time.bgcolor == self.mock_ac.INPUT_BG
 
-    def test_update_theme_doubao_status_disabled(self, mock_page):
+    def test_update_theme_ai_concept_status_disabled(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.doubao_enabled.value = False
+        tab.ai_concept_enabled.value = False
         tab.update_theme()
-        assert tab.doubao_status.color == ft.Colors.ON_SURFACE_VARIANT
+        assert tab.ai_concept_status.color == ft.Colors.ON_SURFACE_VARIANT
 
-    def test_on_locale_change_updates_doubao_labels(self, mock_page):
+    def test_on_locale_change_updates_ai_concept_labels(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab._on_locale_change("zh_CN")
-        self.mock_i18n.get.assert_any_call("settings_doubao_update")
+        self.mock_i18n.get.assert_any_call("settings_ai_concept_update")
 
     def test_schedule_time_initially_disabled_when_off(self, mock_page):
         self.mock_ch.is_auto_update_enabled.return_value = False
@@ -413,15 +413,15 @@ class TestAutomationTab:
         tab = self._make_tab()
         assert tab.schedule_time.disabled is False
 
-    def test_doubao_time_initially_disabled_when_off(self, mock_page):
+    def test_ai_concept_time_initially_disabled_when_off(self, mock_page):
         self.mock_ch.is_ai_concept_schedule_enabled.return_value = False
         tab = self._make_tab()
-        assert tab.doubao_time.disabled is True
+        assert tab.ai_concept_time.disabled is True
 
-    def test_doubao_time_initially_enabled_when_on(self, mock_page):
+    def test_ai_concept_time_initially_enabled_when_on(self, mock_page):
         self.mock_ch.is_ai_concept_schedule_enabled.return_value = True
         tab = self._make_tab()
-        assert tab.doubao_time.disabled is False
+        assert tab.ai_concept_time.disabled is False
 
     def test_schedule_status_initial_color_enabled(self, mock_page):
         self.mock_ch.is_auto_update_enabled.return_value = True
@@ -433,15 +433,15 @@ class TestAutomationTab:
         tab = self._make_tab()
         assert tab.schedule_status.color == self.mock_ac.TEXT_HINT
 
-    def test_doubao_status_initial_color_enabled(self, mock_page):
+    def test_ai_concept_status_initial_color_enabled(self, mock_page):
         self.mock_ch.is_ai_concept_schedule_enabled.return_value = True
         tab = self._make_tab()
-        assert tab.doubao_status.color == self.mock_ac.SUCCESS
+        assert tab.ai_concept_status.color == self.mock_ac.SUCCESS
 
-    def test_doubao_status_initial_color_disabled(self, mock_page):
+    def test_ai_concept_status_initial_color_disabled(self, mock_page):
         self.mock_ch.is_ai_concept_schedule_enabled.return_value = False
         tab = self._make_tab()
-        assert tab.doubao_status.color == self.mock_ac.TEXT_HINT
+        assert tab.ai_concept_status.color == self.mock_ac.TEXT_HINT
 
 
 class TestAIBrainTab:

@@ -40,7 +40,7 @@ class TestAutomationTab:
                 tab = AutomationTab(show_snack)
 
                 assert tab.schedule_enabled.value is False
-                assert tab.doubao_enabled.value is False
+                assert tab.ai_concept_enabled.value is False
 
     def test_on_schedule_toggle_enables(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
@@ -119,7 +119,7 @@ class TestAutomationTab:
 
                 mock_ch.save_config.assert_called_once_with({"auto_update_time": "17:00"})
 
-    def test_on_doubao_toggle_enables(self):
+    def test_on_ai_concept_toggle_enables(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
@@ -138,13 +138,13 @@ class TestAutomationTab:
                 tab = AutomationTab(show_snack)
                 tab.page = _FakePage()
 
-                tab.doubao_enabled.value = True
+                tab.ai_concept_enabled.value = True
                 event = MagicMock()
-                tab.on_doubao_toggle(event)
+                tab.on_ai_concept_toggle(event)
 
                 mock_ch.set_ai_concept_schedule_enabled.assert_called_once_with(True)
 
-    def test_on_doubao_time_change(self):
+    def test_on_ai_concept_time_change(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = False
             mock_ch.get_auto_update_time.return_value = "16:00"
@@ -163,9 +163,9 @@ class TestAutomationTab:
                 tab = AutomationTab(show_snack)
                 tab.page = _FakePage()
 
-                tab.doubao_time.value = "18:00"
+                tab.ai_concept_time.value = "18:00"
                 event = MagicMock()
-                tab.on_doubao_time_change(event)
+                tab.on_ai_concept_time_change(event)
 
                 mock_ch.set_ai_concept_schedule_time.assert_called_once_with("18:00")
 
@@ -260,7 +260,7 @@ class TestAutomationTab:
                     tab.update_theme()
 
                     assert tab.schedule_time.bgcolor == "#fff"
-                    assert tab.doubao_time.bgcolor == "#fff"
+                    assert tab.ai_concept_time.bgcolor == "#fff"
 
     def test_on_locale_change(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:

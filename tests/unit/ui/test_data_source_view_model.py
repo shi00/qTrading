@@ -273,7 +273,7 @@ class TestDataSourceViewModelAiConceptRebuild:
         bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
-        bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_doubao_done"), "success")
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_ai_concept_done"), "success")
 
     async def test_rebuild_cancelled_propagates(self, bound_vm, mock_processor, mock_task_manager):
         mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=asyncio.CancelledError())

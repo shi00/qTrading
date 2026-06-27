@@ -243,7 +243,7 @@ class DataSourceViewModel:
             task = self._tm.get_task(task_id)
             cancel_event = getattr(task, "_cancel_event", None) if task else None
             try:
-                self._tm.update_progress(task_id, 0.05, I18n.get("ds_doubao_rebuild_start"))
+                self._tm.update_progress(task_id, 0.05, I18n.get("ds_ai_concept_rebuild_start"))
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
                 # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
                 await self._processor.run_ai_concept_tagging(
@@ -253,8 +253,8 @@ class DataSourceViewModel:
                     ai_service=AIService(),
                 )
                 if self.on_show_snack:
-                    self.on_show_snack(I18n.get("snack_doubao_done"), "success")
-                return I18n.get("ds_doubao_rebuild_done")
+                    self.on_show_snack(I18n.get("snack_ai_concept_done"), "success")
+                return I18n.get("ds_ai_concept_rebuild_done")
             except asyncio.CancelledError:
                 if self.is_syncing and self.on_show_snack:
                     self.on_show_snack(
@@ -274,7 +274,7 @@ class DataSourceViewModel:
                 self._set_sync_busy(False)
 
         task_id = self._tm.submit_task(
-            name=I18n.get("task_name_doubao_rebuild"),
+            name=I18n.get("task_name_ai_concept_rebuild"),
             task_type=I18n.get("ds_task_type_ai_tagging"),
             coroutine_factory=_ai_concept_logic,
             cancellable=True,

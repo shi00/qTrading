@@ -446,7 +446,7 @@ class SchedulerService:
             task = tm.get_task(task_id)
             cancel_event = task._cancel_event if task else None
             processor = DataProcessor()
-            tm.update_progress(task_id, 0.05, I18n.get("sched_doubao_clear_history"))
+            tm.update_progress(task_id, 0.05, I18n.get("sched_ai_concept_clear_history"))
             # Scheduled run: manual_trigger=False → only sync free data sources, no LLM call
             await processor.run_ai_concept_tagging(
                 task_id=task_id,
@@ -455,11 +455,11 @@ class SchedulerService:
             )
             self._last_ai_concept_date = today_str
             await self._persist_run_date_db(_DB_KEY_AI_CONCEPT_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
-            return I18n.get("sched_doubao_done")
+            return I18n.get("sched_ai_concept_done")
 
         TaskManager().submit_task(
-            name=I18n.get("sched_doubao_task_name"),
-            task_type=I18n.get("sched_doubao_task_type"),
+            name=I18n.get("sched_ai_concept_task_name"),
+            task_type=I18n.get("sched_ai_concept_task_type"),
             coroutine_factory=_ai_concept_logic,
             cancellable=True,
             unique_key="ai_concept_sync",
