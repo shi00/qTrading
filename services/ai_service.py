@@ -508,6 +508,8 @@ class AIService:
             request_params["max_tokens"] = kwargs["max_tokens"]
         if "response_format" in kwargs:
             request_params["response_format"] = kwargs["response_format"]
+        if "tools" in kwargs:
+            request_params["tools"] = kwargs["tools"]
 
         timeout_val = kwargs.get("timeout", DEFAULT_CLOUD_TIMEOUT)
         request_params["timeout"] = httpx.Timeout(timeout_val, connect=CONNECT_TIMEOUT)
@@ -1444,6 +1446,57 @@ class AIService:
             logger.error("[AIService] Verify | ❌ Connection verification failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("[AIService] Verify | Connection verification traceback:", exc_info=True)
             raise
+
+    @log_async_operation(
+        operation_name="chat_with_web_search",
+        threshold_ms=PerfThreshold.AI_INFERENCE,
+    )
+    async def chat_with_web_search(
+        self,
+        messages: list[dict],
+        search_domain_filter: list[str] | None = None,
+        search_engine: str = "search_std",
+        temperature: float = 0.3,
+        timeout: float = 60.0,
+    ) -> dict:
+        """
+        使用智谱 GLM web_search 工具进行带网络搜索的对话。
+
+        封装 LiteLLM tools API，构造 web_search 工具调用。仅适用于支持
+        web_search 工具的模型（如智谱 GLM-4 系列）。
+
+        Args:
+            messages: 消息列表 [{"role":..., "content":...}]
+            search_domain_filter: 域名过滤列表，限制搜索范围（如财经网站）
+            search_engine: 搜索引擎，"search_std"（标准）或 "search_pro"（增强）
+            temperature: 采样温度
+            timeout: 超时时间（秒）
+
+        Returns:
+            {"content": str, "usage": dict, "reasoning_content": str}
+
+        Raises:
+            ValueError: 云端 LLM 未配置时抛出
+            asyncio.CancelledError: 任务被取消时传播（R2）
+        """
+        if not self.is_cloud_available():
+            raise ValueError("Cloud LLM not configured. Please set up API Key.")
+
+        web_search_config: dict = {
+            "enable": True,
+            "search_engine": search_engine,
+        }
+        if search_domain_filter:
+            web_search_config["search_domain_filter"] = search_domain_filter
+
+        tools = [{"type": "web_search", "web_search": web_search_config}]
+
+        return await self._chat_completion_litellm(
+            messages,
+            temperature=temperature,
+            timeout=timeout,
+            tools=tools,
+        )
 
     @staticmethod
     async def test_connection(
