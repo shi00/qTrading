@@ -111,7 +111,7 @@ def validate_prompt(prompt: str) -> tuple[bool, str]:
                 break
 
     if warnings:
-        logger.warning(f"[PromptGuard] {warnings[0]}")
+        logger.warning("[PromptGuard] %s", warnings[0])
         return False, warnings[0]
 
     return True, ""
@@ -126,7 +126,11 @@ def sanitize_prompt(prompt: str) -> str:
     if not prompt:
         return ""
     if len(prompt) > MAX_PROMPT_LENGTH:
-        logger.warning(f"[PromptGuard] Truncating prompt from {len(prompt)} to {MAX_PROMPT_LENGTH} characters.")
+        logger.warning(
+            "[PromptGuard] Truncating prompt from %s to %s characters.",
+            len(prompt),
+            MAX_PROMPT_LENGTH,
+        )
         return prompt[:MAX_PROMPT_LENGTH]
     return prompt
 

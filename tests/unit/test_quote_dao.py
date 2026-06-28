@@ -202,6 +202,38 @@ class TestQuoteDaoSaveLimitList:
         result = await dao.save_limit_list(pd.DataFrame({"ts_code": ["000001.SZ"]}))
         assert result == 1
 
+    @pytest.mark.asyncio
+    async def test_save_renames_tushare_limit_column(self):
+        """R17: Tushare API 返回 'limit' 列（SQL 保留字），写入前需重命名为 'limit_type'。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._save_upsert = AsyncMock(return_value=1)
+        df_in = pd.DataFrame({"ts_code": ["000001.SZ"], "limit": ["U"]})
+        await dao.save_limit_list(df_in)
+        # 验证传给 _save_upsert 的 DataFrame 已包含 limit_type 列，不含 limit 列
+        df_passed = dao._save_upsert.call_args.args[0]
+        assert "limit_type" in df_passed.columns
+        assert "limit" not in df_passed.columns
+        assert df_passed["limit_type"].iloc[0] == "U"
+
+    @pytest.mark.asyncio
+    async def test_save_preserves_existing_limit_type_column(self):
+        """若 DataFrame 已含 limit_type 列（非 Tushare 原始字段），不应触发重命名。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._save_upsert = AsyncMock(return_value=1)
+        df_in = pd.DataFrame({"ts_code": ["000001.SZ"], "limit_type": ["D"]})
+        await dao.save_limit_list(df_in)
+        df_passed = dao._save_upsert.call_args.args[0]
+        assert "limit_type" in df_passed.columns
+        assert df_passed["limit_type"].iloc[0] == "D"
+
+    @pytest.mark.asyncio
+    async def test_save_handles_empty_df(self):
+        """空 DataFrame 不应触发重命名逻辑，避免 KeyError。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._save_upsert = AsyncMock(return_value=0)
+        result = await dao.save_limit_list(pd.DataFrame())
+        assert result == 0
+
 
 class TestQuoteDaoSaveTopList:
     @pytest.mark.asyncio
@@ -998,7 +1030,7 @@ class TestQuoteDaoGetLimitListWithTradeDate:
     @pytest.mark.asyncio
     async def test_with_trade_date(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
-        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "limit": ["U"]}))
+        dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "limit_type": ["U"]}))
         result = await dao.get_limit_list(trade_date="20240615")
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns

@@ -32,6 +32,7 @@ pytestmark = pytest.mark.unit
 
 # limit_list_d 接口（Tushare doc_id=298）官方定义的全部 18 个输出字段
 # 顺序按官方文档列示，与 ORM 字段顺序无关
+# 注：这是 Tushare API 字段名，用于校验 get_limit_list 的 fields 参数
 EXPECTED_LIMIT_LIST_FIELDS: set[str] = {
     "trade_date",
     "ts_code",
@@ -52,6 +53,10 @@ EXPECTED_LIMIT_LIST_FIELDS: set[str] = {
     "limit_times",
     "limit",
 }
+
+# R17: limit 是 SQL 保留字，ORM 通过 Column(name="limit_type") 映射数据库列名，
+# data_dictionary 同步使用 limit_type 作为键。本映射用于 API 字段名 → 数据库列名转换。
+API_TO_ORM_COLUMN_MAP: dict[str, str] = {"limit": "limit_type"}
 
 # 2026-06-27 新增的 8 个字段（此前未保存）
 NEWLY_ADDED_FIELDS: set[str] = {
@@ -81,9 +86,12 @@ class TestLimitListFullFields:
         """ORM 必须包含 limit_list_d 接口的全部 18 个数据字段。
 
         缺失任一字段意味着 _save_upsert 写入时该列会被忽略，导致数据丢失。
+        R17: limit 是 SQL 保留字，ORM 通过 Column(name="limit_type") 映射数据库列名，
+        故检查时需将 API 字段名 limit 转换为数据库列名 limit_type。
         """
         orm_cols = {c.name for c in LimitList.__table__.columns} - ORM_META_COLUMNS
-        missing = EXPECTED_LIMIT_LIST_FIELDS - orm_cols
+        expected_orm_cols = {API_TO_ORM_COLUMN_MAP.get(f, f) for f in EXPECTED_LIMIT_LIST_FIELDS}
+        missing = expected_orm_cols - orm_cols
         assert not missing, (
             f"LimitList ORM 缺失 limit_list_d 接口字段 {missing}，会导致 _save_upsert 写入时丢失这些数据"
         )
@@ -106,9 +114,11 @@ class TestLimitListFullFields:
         """data_dictionary 必须包含 limit_list 表全部 18 个字段的映射。
 
         缺失映射会导致 UI 展示时找不到对应 i18n 键，影响数据透明度。
+        R17: data_dictionary 键使用数据库列名（limit_type），需将 API 字段名 limit 转换。
         """
         dict_cols = set(TABLE_DEFINITIONS["limit_list"]["columns"].keys())
-        missing = EXPECTED_LIMIT_LIST_FIELDS - dict_cols
+        expected_orm_cols = {API_TO_ORM_COLUMN_MAP.get(f, f) for f in EXPECTED_LIMIT_LIST_FIELDS}
+        missing = expected_orm_cols - dict_cols
         assert not missing, f"data_dictionary['limit_list']['columns'] 缺失字段映射 {missing}"
 
     @pytest.mark.parametrize("locale_folder", ["zh_CN", "en_US"])

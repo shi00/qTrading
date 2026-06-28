@@ -7,6 +7,7 @@
     "**/.pytest_cache",
     "**/.venv",
     "**/node_modules",
+    "**/.worktrees",
     "venv",
     "alembic"
   ],

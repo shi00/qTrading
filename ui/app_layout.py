@@ -113,7 +113,7 @@ class AppLayout(ft.Container):
             try:
                 current_view.handle_resize()  # type: ignore[untyped]
             except Exception as e:
-                logger.debug(f"[AppLayout] Resize handler error: {e}", exc_info=True)
+                logger.debug("[AppLayout] Resize handler error: %s", e, exc_info=True)
 
     def _toggle_nav(self, e):  # pragma: no cover
         """切换 NavigationRail 折叠/展开状态。"""
@@ -259,7 +259,7 @@ class AppLayout(ft.Container):
         if index in self._view_cache:
             return self._view_cache[index]
 
-        logger.debug(f"[AppLayout] Lazy loading view for index {index}")
+        logger.debug("[AppLayout] Lazy loading view for index %s", index)
         _t0 = _time.perf_counter()
 
         view = None
@@ -280,7 +280,9 @@ class AppLayout(ft.Container):
 
         self._view_cache[index] = view
         logger.debug(
-            f"[AppLayout] View {index} loaded in {(_time.perf_counter() - _t0) * 1000:.1f}ms",
+            "[AppLayout] View %s loaded in %.1fms",
+            index,
+            (_time.perf_counter() - _t0) * 1000,
         )
         return view
 
@@ -317,7 +319,7 @@ class AppLayout(ft.Container):
             if self.page:
                 self.page.update()  # type: ignore[untyped]
         except Exception as e:
-            logger.warning(f"[AppLayout] _on_locale_change failed: {e}")
+            logger.warning("[AppLayout] _on_locale_change failed: %s", e, exc_info=True)
 
     def _on_nav_change(self, e):
         """Handle Navigation Rail Change"""
@@ -345,7 +347,10 @@ class AppLayout(ft.Container):
                     view.update_theme()  # type: ignore[untyped]  # pragma: no cover
                 except Exception as e:  # pragma: no cover
                     logger.error(  # pragma: no cover
-                        f"[AppLayout] Failed to update custom colors for {type(view).__name__}: {e}",  # pragma: no cover
+                        "[AppLayout] Failed to update custom colors for %s: %s",  # pragma: no cover
+                        type(view).__name__,  # pragma: no cover
+                        e,  # pragma: no cover
+                        exc_info=True,  # pragma: no cover
                     )  # pragma: no cover
 
         # 3. Single page update — Flet redraws all semantic-token-based colors automatically  # pragma: no cover
@@ -380,7 +385,7 @@ class AppLayout(ft.Container):
         UILogger.log_action("AppLayout", "Navigate", f"tab={tab_name}")
 
         _t0 = _time.perf_counter()
-        logger.debug(f"[AppLayout] Switching to tab index {index}")
+        logger.debug("[AppLayout] Switching to tab index %s", index)
 
         # Optimize HomeView visibility for background resource saving
         home_view = self._get_view(NavTabs.MARKET)
@@ -396,12 +401,16 @@ class AppLayout(ft.Container):
         try:
             self.body.update()  # type: ignore[untyped]
         except Exception as ex:
-            logger.error(f"[AppLayout] body.update() failed during tab switch: {ex}", exc_info=True)
+            logger.error("[AppLayout] body.update() failed during tab switch: %s", ex, exc_info=True)
             try:
                 if self.page:
                     self.page.update()
-            except Exception:
-                pass
+            except Exception as fallback_ex:
+                logger.debug(
+                    "[AppLayout] page.update() fallback also failed: %s",
+                    fallback_ex,
+                    exc_info=True,
+                )
 
         self.nav_rail.update()  # type: ignore[untyped]
 
@@ -412,9 +421,10 @@ class AppLayout(ft.Container):
             try:
                 refresh_fn()
             except Exception as ex:
-                logger.debug(f"[AppLayout] View locale refresh skipped: {ex}")
+                logger.debug("[AppLayout] View locale refresh skipped: %s", ex, exc_info=True)
         logger.debug(
-            f"[AppLayout] Tab switch done in {(_time.perf_counter() - _t0) * 1000:.1f}ms",
+            "[AppLayout] Tab switch done in %.1fms",
+            (_time.perf_counter() - _t0) * 1000,
         )
 
     async def run_strategy_from_home(self, strategy_key):

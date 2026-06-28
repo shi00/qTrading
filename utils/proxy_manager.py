@@ -61,7 +61,8 @@ class ProxyManager:
 
                 ProxyManager._original_no_proxy = original_domains
                 logger.info(
-                    f"[ProxyManager] Snapshotted {len(original_domains)} original NO_PROXY domains from env.",
+                    "[ProxyManager] Snapshotted %s original NO_PROXY domains from env.",
+                    len(original_domains),
                 )
 
             final_domains: set[str] = ProxyManager._original_no_proxy.copy()
@@ -76,7 +77,8 @@ class ProxyManager:
                 logger.info("[ProxyManager] No cache/whitelist domains configured.")
             else:
                 logger.info(
-                    f"[ProxyManager] Adding {len(target_domains)} domains to NO_PROXY whitelist.",
+                    "[ProxyManager] Adding %s domains to NO_PROXY whitelist.",
+                    len(target_domains),
                 )
                 final_domains.update(target_domains)
 
@@ -86,7 +88,8 @@ class ProxyManager:
             if final_domains:
                 valid_domains = [d for d in final_domains if d]
                 logger.info(
-                    f"[ProxyManager] Configuration cached. {len(valid_domains)} domains in NO_PROXY.",
+                    "[ProxyManager] Configuration cached. %s domains in NO_PROXY.",
+                    len(valid_domains),
                 )
             else:
                 logger.info("[ProxyManager] Configuration cached. NO_PROXY empty.")

@@ -33,7 +33,8 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = True)
         # streams are already closed (e.g. atexit handlers).
         try:
             logger.debug(
-                f"[loop_local] get_loop_local('{key}') called outside event loop; using module-level fallback cache.",
+                "[loop_local] get_loop_local('%s') called outside event loop; using module-level fallback cache.",
+                key,
             )
         except (ValueError, OSError):
             pass
@@ -50,7 +51,10 @@ def get_loop_local(key: str, factory: Callable[[], Any], *, strict: bool = True)
                 return store[loop]
             if key in _fallback_store:
                 store[loop] = _fallback_store.pop(key)
-                logger.debug(f"[loop_local] Migrated fallback instance for '{key}' to loop-local store.")
+                logger.debug(
+                    "[loop_local] Migrated fallback instance for '%s' to loop-local store.",
+                    key,
+                )
             else:
                 store[loop] = factory()
     return store[loop]

@@ -486,7 +486,7 @@ class StockDetailDialog(ft.AlertDialog):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[StockDetailDialog] refresh_locale failed: {e}")
+            logger.warning("[StockDetailDialog] refresh_locale failed: %s", e, exc_info=True)
 
     async def load_chart(self, ts_code: str):
         """Asynchronously load history data and render an inline K-line chart."""
@@ -550,11 +550,9 @@ class StockDetailDialog(ft.AlertDialog):
             self.chart_container.update()
 
         except Exception as e:
-            import traceback
-
             from utils.error_classifier import classify_error, get_error_message
 
-            logger.error(f"Error loading chart: {e}\n{traceback.format_exc()}")
+            logger.error("Error loading chart: %s", e, exc_info=True)
             error_info = classify_error(e, context="chart")
             self.chart_container.content = ft.Text(
                 get_error_message(error_info),

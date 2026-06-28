@@ -975,16 +975,20 @@ class TestPeakDisclosureSeason:
 
 
 class TestFinancialSyncEngineDisposed:
-    """Tests for EngineDisposedError graceful degradation."""
+    """Tests for EngineDisposedError propagation (R5: 必须从策略外层 raise)."""
 
     @pytest.mark.asyncio
     async def test_engine_disposed_in_run(self):
+        """R5: EngineDisposedError 必须从策略外层 raise，不能被吞。
+
+        与 historical/macro/holder/concept_sync 一致，与集成测试
+        test_ai_concept_tagging.py::TestEngineDisposedE2E 对齐。
+        """
         ctx = make_ctx()
         ctx.cache.get_stock_basic = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = FinancialSyncStrategy(ctx)
-        result = await strategy.run(force=True)
-        assert result.status == "failed"
-        assert any("Engine disposed" in e for e in result.errors)
+        with pytest.raises(EngineDisposedError):
+            await strategy.run(force=True)
 
     @pytest.mark.asyncio
     async def test_engine_disposed_in_fetch_comprehensive(self):

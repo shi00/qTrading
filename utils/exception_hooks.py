@@ -61,9 +61,9 @@ def _sys_excepthook(exctype: type[BaseException], value: BaseException, tb: Trac
             sanitized_msg,
             exc_info=True,
         )
-    except Exception:
+    except Exception as e:
         sys.__excepthook__(exctype, value, tb)
-        print(f"[CRITICAL] Exception hook failed: {value}", file=sys.stderr)
+        print(f"[CRITICAL] Exception hook failed: {value} (hook error: {e})", file=sys.stderr)
 
 
 def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
@@ -89,9 +89,9 @@ def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
             sanitized_msg,
             exc_info=True,
         )
-    except Exception:
+    except Exception as e:
         print(
-            f"[CRITICAL] ThreadingExcepthook failed: {args.exc_value}",
+            f"[CRITICAL] ThreadingExcepthook failed: {args.exc_value} (hook error: {e})",
             file=sys.stderr,
         )
 
@@ -128,8 +128,8 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -
             )
         else:
             logger.critical("[AsyncioHandler] Event loop error (no exception): %s", message)
-    except Exception:
-        print(f"[CRITICAL] AsyncioHandler failed: {context}", file=sys.stderr)
+    except Exception as e:
+        print(f"[CRITICAL] AsyncioHandler failed: {context} (hook error: {e})", file=sys.stderr)
 
 
 def install_global_exception_hooks(loop: asyncio.AbstractEventLoop | None = None) -> None:

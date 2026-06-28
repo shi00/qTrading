@@ -391,12 +391,14 @@ class DatabaseConfigPanel(ft.Container):
         except ValueError as e:
             from utils.error_classifier import classify_error, get_error_message
 
+            logger.warning("[DatabaseConfigPanel] ValueError: %s", e, exc_info=True)
             error_info = classify_error(e, context="db")
             self._show_error(get_error_message(error_info))
             return False
         except Exception as e:
             from utils.error_classifier import classify_error, get_error_message
 
+            logger.error("[DatabaseConfigPanel] Test connection failed: %s", e, exc_info=True)
             error_info = classify_error(e, context="db")
             self._show_error(get_error_message(error_info))
             return False
@@ -511,7 +513,7 @@ class DatabaseConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.debug(f"Safe update skipped: {e}")
+            logger.debug("Safe update skipped: %s", e, exc_info=True)
 
     def did_mount(self):
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
@@ -547,4 +549,4 @@ class DatabaseConfigPanel(ft.Container):
             self.content = self._build_ui()
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[DatabaseConfigPanel] Failed to update locale: {e}")
+            logger.warning("[DatabaseConfigPanel] Failed to update locale: %s", e, exc_info=True)

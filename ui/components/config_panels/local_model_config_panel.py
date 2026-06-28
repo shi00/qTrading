@@ -432,7 +432,7 @@ class LocalModelConfigPanel(ft.Container):
             return True
 
         except Exception as e:
-            logger.error(f"[LocalModelConfigPanel] Model verification failed: {e}")
+            logger.error("[LocalModelConfigPanel] Model verification failed: %s", e, exc_info=True)
             self._show_error(I18n.get("wizard_err_model_load_failed"))
             return False
 
@@ -473,7 +473,7 @@ class LocalModelConfigPanel(ft.Container):
                 n_gpu_layers=gpu_layers,
             )
         except (ValueError, TypeError) as e:
-            logger.error(f"[LocalModelConfigPanel] Invalid config values: {e}")
+            logger.error("[LocalModelConfigPanel] Invalid config values: %s", e, exc_info=True)
             return False
 
         if not success:
@@ -545,7 +545,7 @@ class LocalModelConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.debug(f"Safe update skipped: {e}")
+            logger.debug("Safe update skipped: %s", e, exc_info=True)
 
     def did_mount(self):
         if self.page:
@@ -627,4 +627,4 @@ class LocalModelConfigPanel(ft.Container):
 
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[LocalModelConfigPanel] Failed to update locale: {e}")
+            logger.warning("[LocalModelConfigPanel] Failed to update locale: %s", e, exc_info=True)

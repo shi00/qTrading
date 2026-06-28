@@ -52,7 +52,7 @@ class BacktestResultPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[BacktestResultPanel] refresh_locale error: {e}")
+            logger.warning("[BacktestResultPanel] refresh_locale error: %s", e, exc_info=True)
 
     def _build_empty_content(self) -> ft.Column:
         return ft.Column(

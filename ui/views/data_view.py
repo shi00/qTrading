@@ -365,7 +365,7 @@ class TableViewerTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[TableViewerTab] refresh_locale error: {e}", exc_info=True)
+            logger.warning("[TableViewerTab] refresh_locale error: %s", e, exc_info=True)
 
     async def did_mount_async(self):  # pragma: no cover
         # Skip re-loading if tables already loaded (switching back to this view)
@@ -390,7 +390,7 @@ class TableViewerTab(ft.Container):
                 self.update()
 
         except Exception as e:
-            logger.error(f"Error loading tables: {e}")
+            logger.error("Error loading tables: %s", e, exc_info=True)
             if self.page:
                 self.page.show_toast(I18n.get("data_err_load_schema"), "error")  # type: ignore[untyped]
 
@@ -448,7 +448,7 @@ class TableViewerTab(ft.Container):
             self._update_pagination_ui()
 
         except Exception as e:
-            logger.error(f"Error loading schema: {e}", exc_info=True)
+            logger.error("Error loading schema: %s", e, exc_info=True)
             if self.page:
                 self.page.show_toast(  # type: ignore[untyped]
                     I18n.get("data_err_load_schema"),
@@ -458,7 +458,7 @@ class TableViewerTab(ft.Container):
             try:
                 await self._toggle_loading(False)
             except Exception as toggle_err:
-                logger.debug(f"[_toggle_loading] finalization ignored: {toggle_err}")
+                logger.debug("[_toggle_loading] finalization ignored: %s", toggle_err, exc_info=True)
 
     def _populate_filter_columns(self):
         """Fill filter column dropdown from vm.table_columns.
@@ -611,7 +611,8 @@ class TableViewerTab(ft.Container):
         # Type Guard: Ensure col_index is an integer
         if not isinstance(col_index, int):
             logger.warning(
-                f"[_on_sort] Invalid column index type: {type(col_index)} inside DataView. Expected int.",
+                "[_on_sort] Invalid column index type: %s inside DataView. Expected int.",
+                type(col_index),
             )
             return
 
@@ -707,7 +708,7 @@ class TableViewerTab(ft.Container):
                     msg = I18n.get("data_export_success", file=filename)
                     self.page.show_toast(msg, "success")  # type: ignore[untyped]
                 except Exception as ex:
-                    logger.error(f"Export write failed: {ex}", exc_info=True)
+                    logger.error("Export write failed: %s", ex, exc_info=True)
                     self.page.show_toast(  # type: ignore[untyped]
                         I18n.get("data_export_fail"),
                         "error",
@@ -926,7 +927,7 @@ class SQLConsoleTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[SQLConsoleTab] refresh_locale error: {e}", exc_info=True)
+            logger.warning("[SQLConsoleTab] refresh_locale error: %s", e, exc_info=True)
 
     def _set_sql(self, sql):  # pragma: no cover
         self.sql_editor.value = sql
@@ -1135,7 +1136,7 @@ class DataExplorerView(ft.Container):
             try:
                 self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
             except Exception as exc:
-                logger.debug(f"[DataView] PubSub unsubscribe skipped: {exc}")
+                logger.debug("[DataView] PubSub unsubscribe skipped: %s", exc, exc_info=True)
             self._pubsub_subscribed = False
         if self._mount_task:
             self._mount_task.cancel()
@@ -1163,7 +1164,7 @@ class DataExplorerView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[DataExplorerView] refresh_locale error: {e}", exc_info=True)
+            logger.warning("[DataExplorerView] refresh_locale error: %s", e, exc_info=True)
 
     async def did_mount_async(self):  # pragma: no cover
         import time as _time
@@ -1192,7 +1193,8 @@ class DataExplorerView(ft.Container):
             await self.table_tab.did_mount_async()
 
         logger.debug(
-            f"[PERF] <<< DataExplorerView.did_mount END (sync part) took {(_time.perf_counter() - _t0) * 1000:.1f}ms",
+            "[PERF] <<< DataExplorerView.did_mount END (sync part) took %.1fms",
+            (_time.perf_counter() - _t0) * 1000,
         )
 
     async def _lazy_build_ui(self):  # pragma: no cover
@@ -1246,13 +1248,14 @@ class DataExplorerView(ft.Container):
                 self.refresh_locale()
 
         except Exception as e:
-            logger.error(f"Error building DataExplorerView: {e}")
+            logger.error("Error building DataExplorerView: %s", e, exc_info=True)
             self.content = ft.Text(f"Error loading view: {e}", color=ft.Colors.RED)
             if self.page:
                 self.update()
 
         logger.debug(
-            f"[PERF] <<< DataExplorerView._lazy_build_ui END took {(_time.perf_counter() - _t0) * 1000:.1f}ms",
+            "[PERF] <<< DataExplorerView._lazy_build_ui END took %.1fms",
+            (_time.perf_counter() - _t0) * 1000,
         )
 
     def _on_tab_changed(self, e):  # pragma: no cover

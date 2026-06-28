@@ -275,7 +275,7 @@ class TushareConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as exc:
-            logger.debug(f"[TushareConfig] UI update skipped: {exc}")
+            logger.debug("[TushareConfig] UI update skipped: %s", exc, exc_info=True)
 
     async def verify_token(self) -> bool:
         token = (self.token_input.value or "").strip()
@@ -325,17 +325,18 @@ class TushareConfigPanel(ft.Container):
                     if unavailable_apis:
                         warning_msg = f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_restricted_apis')}: {', '.join(unavailable_apis)}"
                         self._show_warning(warning_msg)
-                        logger.warning(f"[TushareConfigPanel] Restricted APIs: {unavailable_apis}")
+                        logger.warning("[TushareConfigPanel] Restricted APIs: %s", unavailable_apis)
                     elif available_apis:
                         self._show_success(I18n.get("tushare_verify_success"))
-                        logger.info(f"[TushareConfigPanel] All probed APIs available: {len(available_apis)}")
+                        logger.info("[TushareConfigPanel] All probed APIs available: %s", len(available_apis))
                     else:
                         self._show_warning(
                             f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}"
                         )
                 except Exception as probe_exc:
                     logger.warning(
-                        f"[TushareConfigPanel] Capability probe failed (non-critical): {probe_exc}",
+                        "[TushareConfigPanel] Capability probe failed (non-critical): %s",
+                        probe_exc,
                         exc_info=True,
                     )
                     self._show_success(f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}")
@@ -389,7 +390,7 @@ class TushareConfigPanel(ft.Container):
             self.no_token_text.value = I18n.get("tushare_no_token")
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[TushareConfigPanel] refresh_locale failed: {e}")
+            logger.warning("[TushareConfigPanel] refresh_locale failed: %s", e, exc_info=True)
 
     def did_mount(self):
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)

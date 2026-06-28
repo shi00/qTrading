@@ -436,10 +436,13 @@ class HealthReportDialog(ft.AlertDialog):
             r_tables = len(report.get("fundamentals", {}).get("tables", {}))
             r_lag = report.get("market", {}).get("lag_days", "?")
             logger.info(
-                f"HealthReportDialog Opened: Status={r_status}, Tables={r_tables}, Lag={r_lag}",
+                "HealthReportDialog Opened: Status=%s, Tables=%s, Lag=%s",
+                r_status,
+                r_tables,
+                r_lag,
             )
         except Exception as e:
-            logger.error(f"Error logging report summary: {e}")
+            logger.error("Error logging report summary: %s", e, exc_info=True)
 
         self.on_dismiss_callback = on_dismiss
 
@@ -484,7 +487,7 @@ class HealthReportDialog(ft.AlertDialog):
                 if self.page_ref:
                     self.page_ref.update()
         except Exception as ex:
-            logger.error(f"Error closing dialog: {ex}")
+            logger.error("Error closing dialog: %s", ex, exc_info=True)
 
         if self.on_dismiss_callback:
             self.on_dismiss_callback()
@@ -516,7 +519,7 @@ class HealthReportDialog(ft.AlertDialog):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[HealthReportDialog] refresh_locale failed: {e}")
+            logger.warning("[HealthReportDialog] refresh_locale failed: %s", e, exc_info=True)
 
     def _build_content(self):
         # Extract Data
@@ -691,7 +694,7 @@ class HealthScanDialog(ft.AlertDialog):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[HealthScanDialog] refresh_locale failed: {e}")
+            logger.warning("[HealthScanDialog] refresh_locale failed: %s", e, exc_info=True)
 
     async def start_scan(self):
         """Start async scan"""
@@ -708,7 +711,8 @@ class HealthScanDialog(ft.AlertDialog):
                 progress_callback=on_progress,
             )
             self.show_results(result)
-        except Exception:
+        except Exception as ex:
+            logger.error("[HealthScanDialog] Scan failed: %s", ex, exc_info=True)
             self.status_text.value = I18n.get("db_err_format")
             self.page_ref.update()
 

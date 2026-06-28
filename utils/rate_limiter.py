@@ -118,8 +118,11 @@ class TokenBucket:
             self._consecutive_successes = 0
             if old_rate != self.rate:
                 logger.info(
-                    f"[RateLimiter] Rate reduced: {old_rate:.2f} -> {self.rate:.2f} req/s "
-                    f"({self.rate * 60:.0f}/min, was {old_rate * 60:.0f}/min)",
+                    "[RateLimiter] Rate reduced: %.2f -> %.2f req/s (%.0f/min, was %.0f/min)",
+                    old_rate,
+                    self.rate,
+                    self.rate * 60,
+                    old_rate * 60,
                 )
 
     def on_success(self):
@@ -142,8 +145,10 @@ class TokenBucket:
                 self._consecutive_successes = 0
                 if old_rate != self.rate:
                     logger.debug(
-                        f"[RateLimiter] Rate recovered: {old_rate:.2f} -> {self.rate:.2f} req/s "
-                        f"({self.rate * 60:.0f}/min)",
+                        "[RateLimiter] Rate recovered: %.2f -> %.2f req/s (%.0f/min)",
+                        old_rate,
+                        self.rate,
+                        self.rate * 60,
                     )
 
     @property

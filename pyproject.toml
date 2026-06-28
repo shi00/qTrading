@@ -117,7 +117,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["core", "data", "services", "strategies", "utils", "ui", "config", "main"]
+source = ["core", "data", "services", "strategies", "utils", "ui", "app", "config", "main"]
 omit = [
     "data/tiktoken_cache/*",
     "scripts/*",

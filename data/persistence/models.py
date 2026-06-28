@@ -408,7 +408,7 @@ class LimitList(Base):
     first_time = Column(String)
     last_time = Column(String)
     open_times = Column(Integer)
-    limit = Column(String)
+    limit = Column(String, name="limit_type")  # R17: limit 是 SQL 保留字，数据库列名映射为 limit_type
     # limit_list_d 接口完整字段补全（2026-06-27），原 10 字段扩展为 18 字段
     industry = Column(String)
     amount = Column(Numeric(20, 4))

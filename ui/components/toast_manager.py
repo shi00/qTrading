@@ -78,7 +78,7 @@ class ToastManager:
 
         # Defensive guard: showing animated overlays on an empty page crashes Flet's Dart renderer.
         if not self.page.controls:
-            logger.warning(f"[ToastManager] Suppressed toast notification because page has no controls: {message}")
+            logger.warning("[ToastManager] Suppressed toast notification because page has no controls: %s", message)
             return
 
         # Determine colors and icon (Layer 2 custom colors)
@@ -111,7 +111,7 @@ class ToastManager:
                 self.toasts_stack.update()
                 self.container.update()
             except Exception as e:
-                logger.warning(f"Toast update failed: {e}")
+                logger.warning("Toast update failed: %s", e, exc_info=True)
 
         # Start timer with centralized task tracking
         task = self.page.run_task(self._run_toast_lifecycle, toast_card)
@@ -137,7 +137,7 @@ class ToastManager:
                     self.toasts_stack.update()
                     self.container.update()
                 except Exception as exc:
-                    logger.debug(f"[ToastManager] UI update after remove failed: {exc}")
+                    logger.debug("[ToastManager] UI update after remove failed: %s", exc, exc_info=True)
 
     async def stop_all(self) -> None:
         """
@@ -309,7 +309,7 @@ class ToastCard(ft.Container):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug(f"[ToastManager] Auto-dismiss failed: {exc}")
+            logger.debug("[ToastManager] Auto-dismiss failed: %s", exc, exc_info=True)
 
     def _on_hover(self, e):
         self.is_hovered = e.data == "true"

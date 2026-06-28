@@ -85,11 +85,11 @@ class ThreadPoolManager:
     def _init_pools(self):
         # 1. IO Pool Configuration
         io_workers = ConfigHandler.get_max_io_workers()
-        logger.info(f"ThreadPool: IO Pool size: {io_workers}")
+        logger.info("ThreadPool: IO Pool size: %s", io_workers)
 
         # 2. CPU Pool Configuration
         cpu_workers = ConfigHandler.get_max_cpu_workers()
-        logger.info(f"ThreadPool: CPU Pool size: {cpu_workers}")
+        logger.info("ThreadPool: CPU Pool size: %s", cpu_workers)
 
         self._io_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=io_workers if io_workers > 0 else None,
@@ -128,7 +128,9 @@ class ThreadPoolManager:
         self._cpu_pool = new_cpu_pool
 
         logger.info(
-            f"Thread Pools swapped. New sizes: IO={io_workers}, CPU={cpu_workers}",
+            "Thread Pools swapped. New sizes: IO=%s, CPU=%s",
+            io_workers,
+            cpu_workers,
         )
 
         # 3. Graceful shutdown of old pools in background thread to avoid blocking reload

@@ -160,7 +160,7 @@ class ScreenerViewModel:
 
         strategy = self.strategy_mgr.get_strategy(strategy_key)
         if not strategy:
-            logger.error(f"[ScreenerVM] Strategy not found: {strategy_key}")
+            logger.error("[ScreenerVM] Strategy not found: %s", strategy_key)
             if self.on_status:
                 self.on_status(I18n.get("screener_strategy_not_found"), "red")
             return
@@ -298,7 +298,9 @@ class ScreenerViewModel:
                 raise
             except QualityGateError as e:
                 logger.warning(
-                    f"[ScreenerVM] Strategy execution blocked by Quality Gate: {e}",
+                    "[ScreenerVM] Strategy execution blocked by Quality Gate: %s",
+                    e,
+                    exc_info=True,
                 )
                 if self.on_status:
                     self.on_status(
@@ -310,7 +312,8 @@ class ScreenerViewModel:
                 return I18n.get("screener_blocked", reason=str(e))
             except Exception as e:
                 logger.error(
-                    f"[ScreenerVM] Strategy execution failed: {e}",
+                    "[ScreenerVM] Strategy execution failed: %s",
+                    e,
                     exc_info=True,
                 )
                 # Show generic user-friendly message, avoid raw traceback on UI
@@ -386,7 +389,7 @@ class ScreenerViewModel:
                 self.on_update()
 
         except Exception as e:
-            logger.error(f"Sort failed: {e}", exc_info=True)
+            logger.error("Sort failed: %s", e, exc_info=True)
         finally:
             if self.on_progress:
                 self.on_progress(False)
@@ -504,7 +507,8 @@ class ScreenerViewModel:
                 self._ai_buffer = []
                 self._flush_pending = False
                 logger.debug(
-                    f"[ScreenerVM] Saved {len(self._discarded_buffer)} items to discarded_buffer during HISTORY mode"
+                    "[ScreenerVM] Saved %s items to discarded_buffer during HISTORY mode",
+                    len(self._discarded_buffer),
                 )
                 return
 
@@ -564,7 +568,7 @@ class ScreenerViewModel:
             self._last_ai_update = time.time()
 
         except Exception as e:
-            logger.error(f"Error flushing AI buffer: {e}", exc_info=True)
+            logger.error("Error flushing AI buffer: %s", e, exc_info=True)
         finally:
             self._flush_pending = False
 
@@ -607,7 +611,7 @@ class ScreenerViewModel:
             # U-3 fix: Merge discarded_buffer back to ai_buffer
             if self._discarded_buffer:
                 self._ai_buffer.extend(self._discarded_buffer)
-                logger.debug(f"[ScreenerVM] Merged {len(self._discarded_buffer)} discarded items back to ai_buffer")
+                logger.debug("[ScreenerVM] Merged %s discarded items back to ai_buffer", len(self._discarded_buffer))
                 self._discarded_buffer = []
             self._update_pagination()
         self.mode = "REALTIME"

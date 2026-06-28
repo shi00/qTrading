@@ -513,6 +513,10 @@ class QuoteDao(BaseDao):
 
     # --- Limit List ---
     async def save_limit_list(self, df: pd.DataFrame):
+        # R17: Tushare API 字段名为 "limit"（SQL 保留字），数据库列名映射为 "limit_type"。
+        # _save_upsert 按 get_model_columns 返回的数据库列名从 df 取列，需在写入前重命名。
+        if df is not None and not df.empty and "limit" in df.columns and "limit_type" not in df.columns:
+            df = df.rename(columns={"limit": "limit_type"})
         cols = get_model_columns(LimitList)
         pk_columns = get_model_pk_columns(LimitList)
         return await self._save_upsert(
@@ -537,13 +541,14 @@ class QuoteDao(BaseDao):
             trade_date: 单日日期 (YYYYMMDD)，优先于 start_date/end_date
 
         Returns:
-            DataFrame 包含 ts_code, trade_date, limit ('U'=涨停, 'D'=跌停) 等字段
+            DataFrame 包含 ts_code, trade_date, limit_type ('U'=涨停, 'D'=跌停) 等字段。
+            注：数据库列名为 limit_type（R17: limit 是 SQL 保留字），Tushare API 原始字段名为 limit。
         """
         if trade_date:
-            sql = "SELECT ts_code, trade_date, limit, name, close, pct_chg FROM limit_list WHERE trade_date=$1"
+            sql = "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE trade_date=$1"
             return await self._read_db(sql, [trade_date])
 
-        sql = "SELECT ts_code, trade_date, limit, name, close, pct_chg FROM limit_list WHERE 1=1"
+        sql = "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE 1=1"
         p = []
         idx = 1
         if start_date:

@@ -1,3 +1,6 @@
+import asyncio
+import contextlib
+
 import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -79,6 +82,70 @@ class TestMarketDataServiceStop:
         svc._running = True
         svc.stop()
         assert svc._running is False
+
+
+class TestMarketDataServiceStopAsyncR2Propagation:
+    """R2: CancelledError 传播规范验证。
+
+    场景A：stop_async 正常调用，主动 cancel _task，task 响应 cancel 完成
+            → stop_async 正常返回，不抛 CancelledError（cancelling()==0）
+    场景B：stop_async 本身被外部 cancel（应用关闭/超时）
+            → CancelledError 必须传播给调用者（cancelling()>0）
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_stop_async_normal_cancel_does_not_raise(self, mock_tc, mock_cache, mock_api):
+        """场景A：主动取消 _task 后 stop_async 应正常完成（cancelling()==0）。"""
+        svc = MarketDataService()
+        svc._running = True
+        # _task 响应 cancel 后完成
+        svc._task = asyncio.create_task(asyncio.sleep(100))
+        await svc.stop_async(timeout=2.0)
+        assert svc._task is None
+        assert svc._running is False
+
+    @pytest.mark.asyncio
+    @patch("data.domain_services.market_data_service.TushareClient")
+    @patch("data.domain_services.market_data_service.CacheManager")
+    @patch("data.domain_services.market_data_service.TradeCalendarService")
+    async def test_stop_async_propagates_external_cancel(self, mock_tc, mock_cache, mock_api):
+        """场景B：stop_async 被外部取消时，CancelledError 必须传播（R2）。
+
+        模拟方式：
+        1. _task 使用首次捕获 CancelledError 不传播的协程，使 task 不立即完成
+        2. stop_async 主动 cancel _task 后，wait_for 阻塞（_task 不完成）
+        3. 外部 cancel stop_task，wait_for 抛 CancelledError
+        4. 此时 stop_async 的 cancelling() > 0，必须 raise 传播
+        """
+        svc = MarketDataService()
+        svc._running = True
+
+        async def _uncancellable_coro():
+            # 首次 CancelledError 被捕获不传播，第二次 await 可被 cancel
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(100)
+
+        real_task = asyncio.create_task(_uncancellable_coro())
+        svc._task = real_task
+
+        stop_task = asyncio.create_task(svc.stop_async(timeout=10.0))
+        await asyncio.sleep(0.1)  # 让 stop_async 进入 wait_for
+
+        stop_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        # 清理 real_task
+        real_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await real_task
 
 
 class TestMarketDataServiceSafeFloat:

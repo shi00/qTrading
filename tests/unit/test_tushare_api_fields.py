@@ -85,6 +85,12 @@ class TestApiFieldsMatchDaoCols:
         "save_holder_number": {"holder_num_change", "holder_num_ratio"},
     }
 
+    # R17: Tushare API 字段名与数据库列名不一致的映射（保留字场景）。
+    # key = DAO 数据库列名，value = Tushare API 字段名。
+    _DB_TO_API_COL_ALIASES: dict[str, str] = {
+        "limit_type": "limit",  # limit 是 SQL 保留字，数据库列名映射为 limit_type
+    }
+
     API_DAO_MAPPINGS = [
         ("get_moneyflow", "save_moneyflow"),
         ("get_top_list", "save_top_list"),
@@ -136,6 +142,8 @@ class TestApiFieldsMatchDaoCols:
 
                     expected = dao_cols - {"updated_at", "created_at"}
                     expected -= self._COMPUTED_COLS.get(dao_name, set())
+                    # R17: 将数据库列名映射回 Tushare API 字段名后再比较
+                    expected = {self._DB_TO_API_COL_ALIASES.get(c, c) for c in expected}
                     missing = expected - api_fields
 
                     if missing:

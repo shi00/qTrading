@@ -1053,8 +1053,9 @@ class TestAwaitWorkerReadyPolling:
                 result = await mgr._await_worker_ready(timeout=5)
                 assert result is False
                 # Verify exitcode was logged
+                # logger 改用 %s 参数化后，格式字符串含 "exitcode="，参数含 "-6"
                 error_calls = [str(c) for c in mock_logger.error.call_args_list]
-                assert any("exitcode=-6" in c for c in error_calls)
+                assert any("exitcode=" in c and "-6" in c for c in error_calls)
 
     @pytest.mark.asyncio
     async def test_error_status_from_worker(self):

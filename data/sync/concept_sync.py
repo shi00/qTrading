@@ -124,6 +124,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                     board_name,
                                     attempt + 1,
                                     e,
+                                    exc_info=True,
                                 )
                                 await asyncio.sleep(delay)
                             else:
@@ -133,6 +134,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                     board_name,
                                     _AKSHARE_MAX_RETRIES,
                                     e,
+                                    exc_info=True,
                                 )
 
             tasks = [sync_one_board(str(row["板块名称"]), str(row["板块代码"])) for _, row in df_boards.iterrows()]
@@ -166,9 +168,9 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[AKShareConceptSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[AKShareConceptSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
-            logger.error(f"[AKShareConceptSync] Operational error: {e}", exc_info=True)
+            logger.error("[AKShareConceptSync] Operational error: %s", e, exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
@@ -257,9 +259,9 @@ class LimitListSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[LimitListSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[LimitListSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
-            logger.error(f"[LimitListSync] Operational error: {e}", exc_info=True)
+            logger.error("[LimitListSync] Operational error: %s", e, exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
@@ -321,7 +323,11 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                logger.warning("[AIConceptTagSync] Failed to load retry queue, continuing without it: %s", e)
+                logger.warning(
+                    "[AIConceptTagSync] Failed to load retry queue, continuing without it: %s",
+                    e,
+                    exc_info=True,
+                )
                 retry_pending = []
 
             retry_codes = {ts_code for ts_code, _ in retry_pending}
@@ -337,7 +343,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    logger.warning("[AIConceptTagSync] Failed to load fresh pending: %s", e)
+                    logger.warning("[AIConceptTagSync] Failed to load fresh pending: %s", e, exc_info=True)
                     fresh_pending = []
 
             pending = retry_pending + fresh_pending
@@ -414,7 +420,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     raise
                 except Exception as e:
                     failed.append(f"{ts_code}: {e}")
-                    logger.warning("[AIConceptTagSync] Failed for %s: %s", ts_code, e)
+                    logger.warning("[AIConceptTagSync] Failed for %s: %s", ts_code, e, exc_info=True)
                     # 写入错题本（不影响主流程；CancelledError/EngineDisposedError 必须传播，R2/R5）
                     try:
                         await stock_dao.upsert_ai_concept_failure(ts_code, name, str(e))
@@ -427,6 +433,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             "[AIConceptTagSync] Failed to persist failure for %s: %s",
                             ts_code,
                             fe,
+                            exc_info=True,
                         )
 
             if self._check_cancelled(result):
@@ -451,6 +458,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                                 "[AIConceptTagSync] Failed to clear failure record for %s: %s",
                                 ts_code,
                                 fe,
+                                exc_info=True,
                             )
 
             if failed:
@@ -468,7 +476,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as fe:
-                logger.warning("[AIConceptTagSync] Failed to clean expired failures: %s", fe)
+                logger.warning("[AIConceptTagSync] Failed to clean expired failures: %s", fe, exc_info=True)
 
             logger.info(
                 "[AIConceptTagSync] Done | added=%d, failed=%d, retry_cleared=%d",
@@ -488,9 +496,9 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[AIConceptTagSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[AIConceptTagSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
-            logger.error(f"[AIConceptTagSync] Operational error: {e}", exc_info=True)
+            logger.error("[AIConceptTagSync] Operational error: %s", e, exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 

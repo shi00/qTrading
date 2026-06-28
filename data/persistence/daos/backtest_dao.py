@@ -11,6 +11,7 @@ import sqlalchemy as sa
 
 from data.persistence.daos.base_dao import BaseDao, EngineDisposedError
 from data.persistence.models import BacktestResultModel, get_model_columns
+from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,10 @@ class BacktestDAO(BaseDao):
             for r in results.to_dict("records")
         ]
 
+    @log_async_operation(
+        operation_name="BacktestDAO.delete_result",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
     async def delete_result(self, run_id: str) -> bool:
         """
         删除回测结果。

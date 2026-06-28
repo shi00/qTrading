@@ -6,6 +6,9 @@ import logging
 
 import flet as ft
 
+# 架构例外（§4.1）：app 层应仅被 main.py 调用。此处的导入属于 main.py 启动流程
+# 的延伸（main.py:18 装配 StartupViewRenderer），不是 ui 层的正常业务导入。
+# 已在 tests/unit/test_architecture_boundaries.py 的 KNOWN_EXCEPTIONS 中记录。
 from app.startup_controller import StartupContext, StartupController, StartupState
 from core.i18n import I18n
 
@@ -23,7 +26,7 @@ def _get_localized_detail(detail: str) -> str:
         if classified.get("message_key") != "db_err_unknown":
             return get_error_message(classified)
     except Exception as e:
-        logger.warning("[StartupView] Failed to classify error detail '%s': %s", detail, e)
+        logger.warning("[StartupView] Failed to classify error detail '%s': %s", detail, e, exc_info=True)
     return detail
 
 

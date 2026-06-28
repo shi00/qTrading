@@ -217,7 +217,7 @@ class ActionChip(ft.Container):
             try:
                 self.update()
             except Exception as exc:
-                logger.debug(f"[SettingsWidget] UI update skipped: {exc}")
+                logger.debug("[SettingsWidget] UI update skipped: %s", exc, exc_info=True)
 
     def set_text(self, title: str, subtitle: str | None = None) -> None:
         """Update title (and optional subtitle) — used for i18n hot reload."""
@@ -230,7 +230,7 @@ class ActionChip(ft.Container):
             try:
                 self.update()
             except Exception as exc:
-                logger.debug(f"[SettingsWidget] UI update skipped: {exc}")
+                logger.debug("[SettingsWidget] UI update skipped: %s", exc, exc_info=True)
 
 
 class StatusBadge(ft.Container):
@@ -270,7 +270,7 @@ class StatusBadge(ft.Container):
             try:
                 self.update()
             except Exception as exc:
-                logger.debug(f"[StatusBadge] UI update skipped: {exc}")
+                logger.debug("[StatusBadge] UI update skipped: %s", exc, exc_info=True)
 
 
 class SectionHeader(ft.Row):

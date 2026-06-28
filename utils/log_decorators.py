@@ -145,9 +145,9 @@ def log_async_operation(
                     log_parts.append(f"kwargs: {clean_kwargs}")
 
                 args_msg = " | ".join(log_parts) if log_parts else "no args"
-                target_logger.debug(f"[{op_name}] {args_msg}", stacklevel=2)
+                target_logger.debug("[%s] %s", op_name, args_msg, stacklevel=2)
 
-            target_logger.log(log_level, f"[{op_name}] started", stacklevel=2)
+            target_logger.log(log_level, "[%s] started", op_name, stacklevel=2)
 
             try:
                 # 执行原函数
@@ -174,7 +174,11 @@ def log_async_operation(
 
                 target_logger.log(
                     final_level,
-                    f"[{op_name}] completed in {elapsed_str}{result_info}{perf_warning}",
+                    "[%s] completed in %s%s%s",
+                    op_name,
+                    elapsed_str,
+                    result_info,
+                    perf_warning,
                     stacklevel=2,
                 )
 
@@ -192,19 +196,31 @@ def log_async_operation(
                     severity = classify_severity(e)
                     if severity == "system":
                         target_logger.critical(
-                            f"[{op_name}] system failure after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                            "[%s] system failure after %s: %s - %s",
+                            op_name,
+                            elapsed_str,
+                            type(e).__name__,
+                            error_msg,
                             exc_info=True,
                             stacklevel=2,
                         )
                     elif severity == "recoverable":
                         # 可恢复异常记为 WARNING，不打印长 traceback
                         target_logger.warning(
-                            f"[{op_name}] recoverable failure after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                            "[%s] recoverable failure after %s: %s - %s",
+                            op_name,
+                            elapsed_str,
+                            type(e).__name__,
+                            error_msg,
                             stacklevel=2,
                         )
                     else:
                         target_logger.error(
-                            f"[{op_name}] failed after {elapsed_str}: {type(e).__name__} - {error_msg}",
+                            "[%s] failed after %s: %s - %s",
+                            op_name,
+                            elapsed_str,
+                            type(e).__name__,
+                            error_msg,
                             exc_info=True,
                             stacklevel=2,
                         )
@@ -349,7 +365,10 @@ class AsyncOperationLogger:
         if exc_type is None:
             self.logger.log(
                 self.log_level,
-                f"[{self.operation}] completed in {elapsed:.1f}s{metrics_str}",
+                "[%s] completed in %.1fs%s",
+                self.operation,
+                elapsed,
+                metrics_str,
                 stacklevel=2,
             )
         else:
@@ -360,18 +379,33 @@ class AsyncOperationLogger:
             severity = classify_severity(exc_val)
             if severity == "system":
                 self.logger.critical(
-                    f"[{self.operation}] system failure after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                    "[%s] system failure after %.1fs: %s - %s%s",
+                    self.operation,
+                    elapsed,
+                    exc_type.__name__,
+                    error_msg,
+                    metrics_str,
                     exc_info=True,
                     stacklevel=2,
                 )
             elif severity == "recoverable":
                 self.logger.warning(
-                    f"[{self.operation}] recoverable failure after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                    "[%s] recoverable failure after %.1fs: %s - %s%s",
+                    self.operation,
+                    elapsed,
+                    exc_type.__name__,
+                    error_msg,
+                    metrics_str,
                     stacklevel=2,
                 )
             else:
                 self.logger.error(
-                    f"[{self.operation}] failed after {elapsed:.1f}s: {exc_type.__name__} - {error_msg}{metrics_str}",
+                    "[%s] failed after %.1fs: %s - %s%s",
+                    self.operation,
+                    elapsed,
+                    exc_type.__name__,
+                    error_msg,
+                    metrics_str,
                     exc_info=True,
                     stacklevel=2,
                 )
@@ -388,7 +422,7 @@ class AsyncOperationLogger:
         """
         info_str = ", ".join(f"{k}={v}" for k, v in kwargs.items())
         params_str = f" | {info_str}" if info_str else ""
-        self.logger.log(self.log_level, f"[{self.operation}] {milestone}{params_str}", stacklevel=2)
+        self.logger.log(self.log_level, "[%s] %s%s", self.operation, milestone, params_str, stacklevel=2)
 
     def add_metric(self, key: str, value: Any):
         """

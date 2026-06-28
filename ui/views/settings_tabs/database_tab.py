@@ -75,7 +75,7 @@ class DatabaseTab(ft.Container):
 
     def _on_test_success(self, config: dict):
         """Handle successful connection test."""
-        logger.debug(f"Database connection test successful: {config['host']}:{config['port']}/{config['database']}")
+        logger.debug("Database connection test successful: %s:%s/%s", config['host'], config['port'], config['database'])
 
     def _on_mount(self):
         self.config_panel.reload_config()
@@ -96,4 +96,4 @@ class DatabaseTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[DatabaseTab] refresh_locale error: {e}")
+            logger.warning("[DatabaseTab] refresh_locale error: %s", e, exc_info=True)

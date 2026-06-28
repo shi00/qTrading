@@ -329,7 +329,7 @@ class AutomationTab(ft.Container):
             self._build_content()
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[AutomationTab] Failed to update locale: {e}")
+            logger.warning("[AutomationTab] Failed to update locale: %s", e, exc_info=True)
 
     def _safe_update(self):
         """线程安全的 UI 更新，处理页面未附加的情况"""
@@ -337,7 +337,7 @@ class AutomationTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as exc:
-            logger.debug(f"[AutomationTab] UI update skipped: {exc}")
+            logger.debug("[AutomationTab] UI update skipped: %s", exc, exc_info=True)
 
     def _get_schedule_status_text(self, enabled):
         return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
@@ -536,7 +536,7 @@ class NotificationsTab(ft.Container):
             self._build_content()
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[NotificationsTab] Failed to update locale: {e}")
+            logger.warning("[NotificationsTab] Failed to update locale: %s", e, exc_info=True)
 
     def _safe_update(self):
         """线程安全的 UI 更新，处理页面未附加的情况"""
@@ -544,7 +544,7 @@ class NotificationsTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as exc:
-            logger.debug(f"[NotificationsTab] UI update skipped: {exc}")
+            logger.debug("[NotificationsTab] UI update skipped: %s", exc, exc_info=True)
 
     def on_news_toggle(self, e):
         """处理新闻推送开关切换"""

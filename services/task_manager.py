@@ -154,12 +154,12 @@ class TaskManager:
                 if limit <= 0:
                     limit = 5
             except Exception as e:
-                logger.debug(f"[TaskManager] Failed to read cpu_pool max_workers, using default: {e}")
+                logger.debug("[TaskManager] Failed to read cpu_pool max_workers, using default: %s", e, exc_info=True)
                 limit = 5
 
         def _factory():
             sem = asyncio.Semaphore(limit)
-            logger.info(f"[TaskManager] Concurrency semaphore initialized: max={limit}")
+            logger.info("[TaskManager] Concurrency semaphore initialized: max=%s", limit)
             return sem
 
         return get_loop_local("task_manager_semaphore", _factory)
@@ -173,7 +173,7 @@ class TaskManager:
             try:
                 callback(self.get_all_tasks())
             except Exception as e:
-                logger.error(f"[TaskManager] Error in subscriber initial push: {e}")
+                logger.error("[TaskManager] Error in subscriber initial push: %s", e, exc_info=True)
 
     def unsubscribe(self, callback: Callable[[list[AppTask]], None]):
         if callback in self._subscribers:
@@ -200,7 +200,11 @@ class TaskManager:
                 consecutive_errors = self._subscriber_error_counts.get(cb, 0) + 1
                 self._subscriber_error_counts[cb] = consecutive_errors
                 logger.error(
-                    f"[TaskManager] Subscriber callback failed (consecutive: {consecutive_errors}/{self._MAX_SUBSCRIBER_ERRORS}): {e}"
+                    "[TaskManager] Subscriber callback failed (consecutive: %s/%s): %s",
+                    consecutive_errors,
+                    self._MAX_SUBSCRIBER_ERRORS,
+                    e,
+                    exc_info=True,
                 )
                 if consecutive_errors >= self._MAX_SUBSCRIBER_ERRORS:
                     with contextlib.suppress(ValueError):
@@ -243,7 +247,9 @@ class TaskManager:
             with self._active_keys_lock:
                 if unique_key in self._active_keys:
                     logger.warning(
-                        f"[TaskManager] Duplicate task skipped: '{name}' (key={unique_key})",
+                        "[TaskManager] Duplicate task skipped: '%s' (key=%s)",
+                        name,
+                        unique_key,
                     )
                     return None
                 self._active_keys.add(unique_key)
@@ -262,7 +268,8 @@ class TaskManager:
                 with self._active_keys_lock:
                     self._active_keys.discard(unique_key)
             logger.error(
-                f"[TaskManager] Cannot submit task '{name}': no event loop captured.",
+                "[TaskManager] Cannot submit task '%s': no event loop captured.",
+                name,
             )
             return None
 
@@ -279,7 +286,7 @@ class TaskManager:
         Task is already in self._tasks (set by _enqueue on loop thread).
         Always runs on the event loop thread (guaranteed by call_soon_threadsafe)."""
         if task.status == TaskStatus.CANCELLED:
-            logger.debug(f"[TaskManager] Task [{task.id}] already cancelled, skipping launch")
+            logger.debug("[TaskManager] Task [%s] already cancelled, skipping launch", task.id)
             # Release dedup key since _task_runner won't run for this task
             if task.unique_key:
                 with self._active_keys_lock:
@@ -290,7 +297,7 @@ class TaskManager:
         # to ensure it's bound to the correct event loop
         self._persist_task(task)
         self._notify_subscribers()
-        logger.info(f"[TaskManager] Queued task: [{task.id}] {task.name}")
+        logger.info("[TaskManager] Queued task: [%s] %s", task.id, task.name)
 
         # Keep a strong reference to the task to prevent garbage collection
         coro_task = asyncio.create_task(self._task_runner(task.id))
@@ -310,8 +317,9 @@ class TaskManager:
         if not task or task.status != TaskStatus.RUNNING:
             if task and task.status == TaskStatus.CANCELLED:
                 logger.debug(
-                    f"[TaskManager] update_progress ignored for cancelled task {task_id[:8]}. "
-                    f"Worker should check is_cancelled() or update_progress return value."
+                    "[TaskManager] update_progress ignored for cancelled task %s. "
+                    "Worker should check is_cancelled() or update_progress return value.",
+                    task_id[:8],
                 )
             return False
         task.progress = max(0.0, min(1.0, progress))
@@ -355,11 +363,12 @@ class TaskManager:
 
         if not task.cancellable:
             logger.warning(
-                f"[TaskManager] Attempted to cancel non-cancellable task: {task.id}",
+                "[TaskManager] Attempted to cancel non-cancellable task: %s",
+                task.id,
             )
             return
 
-        logger.info(f"[TaskManager] Cancelling task: [{task.id}] {task.name}")
+        logger.info("[TaskManager] Cancelling task: [%s] %s", task.id, task.name)
         task.status = TaskStatus.CANCELLED
         task.description = I18n.get("task_cancelled_desc")
 
@@ -437,16 +446,19 @@ class TaskManager:
         if tasks_to_join:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(*tasks_to_join, return_exceptions=True),
+                    gather_for_shutdown_cleanup(*tasks_to_join),
                     timeout=join_timeout,
                 )
             except TimeoutError:
                 logger.warning(
-                    f"[TaskManager] {len(tasks_to_join)} task(s) did not exit within {join_timeout}s after cancellation"
+                    "[TaskManager] %s task(s) did not exit within %ss after cancellation",
+                    len(tasks_to_join),
+                    join_timeout,
                 )
         if active_ids:
             logger.info(
-                f"[TaskManager] Shutdown: cancelled {len(active_ids)} active task(s).",
+                "[TaskManager] Shutdown: cancelled %s active task(s).",
+                len(active_ids),
             )
             self._notify_subscribers()
 
@@ -507,7 +519,7 @@ class TaskManager:
             async with self._get_semaphore():
                 # Capture the current asyncio task to allow forceful cancellation
                 task._asyncio_task = asyncio.current_task()
-                logger.info(f"[TaskManager] Running: [{task.id}] {task.name}")
+                logger.info("[TaskManager] Running: [%s] %s", task.id, task.name)
 
                 # Execute user logic
                 coro = task._coroutine_gen()
@@ -520,15 +532,15 @@ class TaskManager:
                     task.status = TaskStatus.COMPLETED
                     task.progress = 1.0
                     task.description = str(task.result) if task.result else I18n.get("task_status_completed")
-                    logger.info(f"[TaskManager] Completed: [{task.id}]")
+                    logger.info("[TaskManager] Completed: [%s]", task.id)
                 else:
-                    logger.info(f"[TaskManager] Skipping COMPLETED: [{task.id}] already CANCELLED")
+                    logger.info("[TaskManager] Skipping COMPLETED: [%s] already CANCELLED", task.id)
 
         except asyncio.CancelledError:
             if task.status != TaskStatus.CANCELLED:
                 task.status = TaskStatus.CANCELLED
             task.description = I18n.get("task_cancelled_desc")
-            logger.info(f"[TaskManager] Cancelled processing for: [{task.id}]")
+            logger.info("[TaskManager] Cancelled processing for: [%s]", task.id)
             raise  # Important to re-raise CancelledError for proper asyncio teardown
         except Exception as e:
             # T3 fix: 守卫已被取消的状态，避免用户协程在 except CancelledError 内抛非取消异常时覆盖 CANCELLED。
@@ -537,7 +549,9 @@ class TaskManager:
                 # L1 fix: 重置 description 与 CancelledError 分支保持一致
                 task.description = I18n.get("task_cancelled_desc")
                 logger.info(
-                    f"[TaskManager] Suppressed FAILED (already CANCELLED): [{task.id}] {e}",
+                    "[TaskManager] Suppressed FAILED (already CANCELLED): [%s] %s",
+                    task.id,
+                    e,
                     exc_info=True,
                 )
             else:
@@ -548,12 +562,17 @@ class TaskManager:
                 task.description = I18n.get("task_failed_desc")
                 if severity == "system":
                     logger.critical(
-                        f"[TaskManager] Task {task.id} SYSTEM-LEVEL failure: {e}",
+                        "[TaskManager] Task %s SYSTEM-LEVEL failure: %s",
+                        task.id,
+                        e,
                         exc_info=True,
                     )
                 else:
                     logger.error(
-                        f"[TaskManager] Task {task.id} Failed ({severity}): {e}",
+                        "[TaskManager] Task %s Failed (%s): %s",
+                        task.id,
+                        severity,
+                        e,
                         exc_info=True,
                     )
         finally:
@@ -587,7 +606,7 @@ class TaskManager:
             dt = datetime.datetime.fromisoformat(str(val))
             return from_utc_to_cst(dt)
         except (ValueError, TypeError) as e:
-            logger.debug(f"[TaskManager] _safe_dt parse failed for value={val!r}: {e}")
+            logger.debug("[TaskManager] _safe_dt parse failed for value=%r: %s", val, e, exc_info=True)
             return None
 
     async def init_db(self):
@@ -634,9 +653,10 @@ class TaskManager:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.warning("[TaskManager] Skipping malformed history row: %s", str(e))
+                    logger.warning("[TaskManager] Skipping malformed history row: %s", str(e), exc_info=True)
             logger.info(
-                f"[TaskManager] Loaded {len(self._history)} historical task(s) from DB.",
+                "[TaskManager] Loaded %s historical task(s) from DB.",
+                len(self._history),
             )
 
         # 4. Purge old records (>30 days)
@@ -683,7 +703,7 @@ class TaskManager:
         try:
             return clipped.encode("utf-8", "replace").decode("utf-8", "ignore")
         except (UnicodeDecodeError, UnicodeEncodeError) as e:
-            logger.debug(f"[TaskManager] UTF-8 sanitize failed, using raw clipped: {e}")
+            logger.debug("[TaskManager] UTF-8 sanitize failed, using raw clipped: %s", e, exc_info=True)
             return clipped
 
     def _queue_persist_snapshot(self, snapshot: tuple):
@@ -750,7 +770,7 @@ class TaskManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"[TaskManager] Persist failed (non-critical): {e}")
+            logger.debug("[TaskManager] Persist failed (non-critical): %s", e, exc_info=True)
 
     async def _persist_task_async(self, task: AppTask):
         """Upsert task record (reads current state — use for await-based callers only)."""
@@ -784,4 +804,4 @@ class TaskManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"[TaskManager] DB clear failed (non-critical): {e}")
+            logger.debug("[TaskManager] DB clear failed (non-critical): %s", e, exc_info=True)

@@ -390,7 +390,7 @@ class AppColors:
         加载指定主题的自定义色 (Layer 2)。
         Layer 1 的语义 Token 无需加载——它们在 apply_page_theme 中通过 ColorScheme 生效。
         """
-        logger.info(f"Loading theme: {theme_name}")
+        logger.info("Loading theme: %s", theme_name)
         cls._CURRENT_THEME_NAME = theme_name
         cls._CURRENT_THEME_MODE = THEME_MODE_MAP.get(theme_name, ft.ThemeMode.DARK)
 
@@ -417,14 +417,14 @@ class AppColors:
         cls.TABLE_GRID_H = cls.TABLE_GRID
 
         # 通知监听器 (复制列表避免迭代期间修改)
-        logger.debug(f"Notifying {len(cls._listeners)} theme listeners")
+        logger.debug("Notifying %s theme listeners", len(cls._listeners))
         with cls._listeners_lock:
             listeners_snapshot = list(cls._listeners)
         for listener in listeners_snapshot:
             try:
                 listener()
             except Exception as e:
-                logger.error(f"Error notifying theme listener: {e}")
+                logger.error("Error notifying theme listener: %s", e, exc_info=True)
 
 
 class AppStyles:

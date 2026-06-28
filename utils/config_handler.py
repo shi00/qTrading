@@ -131,7 +131,8 @@ class ConfigHandler:
                 if "api_key" in value and value["api_key"]:
                     try:
                         keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", str(value["api_key"]))
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("[ConfigHandler] Config encrypt fallback triggered: %s", e, exc_info=True)
                         encrypted = SecurityManager.encrypt_data(str(value["api_key"]))
                         cred = provider_credentials.get(provider, {})
                         cred["api_key_encrypted"] = encrypted
@@ -145,7 +146,7 @@ class ConfigHandler:
                 if "models" in value and isinstance(value["models"], list):
                     cleaned_custom_models[provider] = [str(m) for m in value["models"]]
 
-                logger.info(f"[ConfigHandler] Migrated credentials from custom_models for provider: {provider}")
+                logger.info("[ConfigHandler] Migrated credentials from custom_models for provider: %s", provider)
 
         if needs_migration:
             current_config["llm_custom_models"] = cleaned_custom_models
@@ -156,11 +157,11 @@ class ConfigHandler:
             if "models" in cred:
                 if provider not in cleaned_custom_models and isinstance(cred["models"], list):
                     cleaned_custom_models[provider] = [str(m) for m in cred["models"]]
-                    logger.info(f"[ConfigHandler] Migrated 'models' from credentials to custom_models for: {provider}")
+                    logger.info("[ConfigHandler] Migrated 'models' from credentials to custom_models for: %s", provider)
 
                 del cred["models"]
                 needs_migration = True
-                logger.info(f"[ConfigHandler] Removed legacy 'models' from credentials for: {provider}")
+                logger.info("[ConfigHandler] Removed legacy 'models' from credentials for: %s", provider)
 
         if needs_migration and cleaned_custom_models:
             current_config["llm_custom_models"] = cleaned_custom_models
@@ -194,7 +195,7 @@ class ConfigHandler:
                     if key not in current_config:
                         current_config[key] = default_val
                         dirty = True
-                        logger.info(f"Initialized default config: {key}")
+                        logger.info("Initialized default config: %s", key)
                     elif isinstance(default_val, dict) and isinstance(current_config.get(key), dict):
                         nested_result, nested_dirty = ConfigHandler._deep_merge_defaults(
                             current_config[key], default_val
@@ -202,7 +203,7 @@ class ConfigHandler:
                         if nested_dirty:
                             current_config[key] = nested_result
                             dirty = True
-                            logger.info(f"Updated nested config: {key}")
+                            logger.info("Updated nested config: %s", key)
 
                 valid_keys = set(ConfigHandler.DEFAULT_CONFIG.keys())
                 existing_keys = list(current_config.keys())
@@ -211,7 +212,7 @@ class ConfigHandler:
                     if key.startswith("ai_strategy_prompt_"):
                         continue
                     if key not in valid_keys:
-                        logger.info(f"Removing deprecated/unused config: {key}")
+                        logger.info("Removing deprecated/unused config: %s", key)
                         current_config.pop(key)
                         dirty = True
 
@@ -223,7 +224,8 @@ class ConfigHandler:
                     if success:
                         ConfigHandler._config_cache = current_config
                     logger.info(
-                        f"Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: {set(existing_keys) - valid_keys}",
+                        "Configuration (defaults & cleanup) synchronized. Cleared deprecated keys: %s",
+                        set(existing_keys) - valid_keys,
                     )
 
         except Exception as e:
@@ -415,8 +417,12 @@ class ConfigHandler:
         if not token:
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "ts_token")
-            except Exception:
-                logger.debug("Keyring ts_token deletion skipped (not stored or keyring unavailable)")
+            except Exception as e:
+                logger.debug(
+                    "Keyring ts_token deletion skipped (not stored or keyring unavailable): %s",
+                    e,
+                    exc_info=True,
+                )
             return ConfigHandler.save_config({"ts_token": ""})
 
         try:
@@ -585,7 +591,7 @@ class ConfigHandler:
             if password:
                 return password
         except Exception as e:
-            logger.debug("Failed to get db_password from keyring: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Failed to get db_password from keyring: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
         # 3. 加密配置文件
         user_config = ConfigHandler.load_config()
@@ -607,11 +613,11 @@ class ConfigHandler:
             ConfigHandler.save_config({"db_password_encrypted": ""})
             return True
         except Exception as e:
-            logger.warning("Failed to save db_password to keyring: %s", DataSanitizer.sanitize_error(e))
+            logger.warning("Failed to save db_password to keyring: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "db_password")
-            except Exception:
-                logger.debug("Keyring db_password deletion skipped")
+            except Exception as e:
+                logger.debug("Keyring db_password deletion skipped: %s", e, exc_info=True)
             try:
                 encrypted = SecurityManager.encrypt_data(password)
                 ConfigHandler.save_config({"db_password_encrypted": encrypted})
@@ -833,8 +839,8 @@ class ConfigHandler:
             elif not api_key and not os.environ.get(ENV_FALLBACK_MAP["ai_api_key"]):
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
-                except Exception:
-                    logger.debug("Keyring ai_api_key deletion skipped")
+                except Exception as e:
+                    logger.debug("Keyring ai_api_key deletion skipped: %s", e, exc_info=True)
                 ConfigHandler.save_config({"ai_api_key": ""})
 
         return True
@@ -1447,7 +1453,10 @@ class ConfigHandler:
                     should_warn = True
             if should_warn:
                 logger.warning(
-                    f"[Config] IO workers ({io_workers}) exceeds DB connection capacity ({db_capacity}). Capping to {db_capacity}.",
+                    "[Config] IO workers (%s) exceeds DB connection capacity (%s). Capping to %s.",
+                    io_workers,
+                    db_capacity,
+                    db_capacity,
                 )
             io_workers = db_capacity
 

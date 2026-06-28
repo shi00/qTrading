@@ -957,9 +957,10 @@ class TestAppLayout:
             layout._on_locale_change()
             mock_logger.warning.assert_called_once()
             # 验证警告消息包含异常信息与方法名
-            warning_msg = mock_logger.warning.call_args[0][0]
-            assert "test error" in warning_msg
-            assert "_on_locale_change" in warning_msg
+            # logger 改用 %s 参数化后，格式字符串与方法名、异常参数分别校验
+            warning_args = mock_logger.warning.call_args[0]
+            assert "_on_locale_change" in warning_args[0]  # 格式字符串含方法名
+            assert "test error" in str(warning_args[1])  # 异常参数含错误信息
 
     # ========== Resize 逻辑测试 (覆盖 app_layout.py:83-84, 93-95, 99-116) ==========
 

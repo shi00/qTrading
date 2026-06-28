@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # 与 pyproject.toml [tool.coverage.run] source 保持一致
 # "config"/"main" 是顶层模块（config.py/main.py），其余是目录
-SOURCE_DIRS = frozenset(("core", "data", "services", "strategies", "utils", "ui"))
+SOURCE_DIRS = frozenset(("core", "data", "services", "strategies", "utils", "ui", "app"))
 SOURCE_FILES = frozenset(("config.py", "main.py"))
 
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)")

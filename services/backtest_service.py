@@ -110,6 +110,7 @@ class BacktestService:
             logger.error(
                 "[BacktestService] Failed to persist backtest result: %s",
                 e,
+                exc_info=True,
             )
             new_warnings = list(result.data_warnings) + [f"persist_failed: {e}"]
             return result.with_warnings(new_warnings)
@@ -131,6 +132,7 @@ class BacktestService:
                 "[BacktestService] Failed to instantiate strategy %s: %s",
                 strategy_key,
                 e,
+                exc_info=True,
             )
             return None
 
@@ -140,7 +142,8 @@ class BacktestService:
             from importlib.metadata import version
 
             return version("astock-screener")
-        except Exception:
+        except Exception as e:
+            logger.debug("[BacktestService] Failed to get app version: %s", e, exc_info=True)
             return "dev"
 
     async def get_result(self, run_id: str) -> dict | None:

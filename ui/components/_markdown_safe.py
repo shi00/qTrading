@@ -19,7 +19,8 @@ def _is_allowed_domain(url: str) -> bool:
     """检查 URL 的 hostname 是否在白名单中（子域名也算）。"""
     try:
         hostname = urlparse(url).hostname
-    except Exception:
+    except Exception as e:
+        logger.debug("[MarkdownSafe] urlparse failed: %s", e, exc_info=True)
         return False
     if not hostname:
         return False
@@ -70,7 +71,7 @@ def safe_open_url(e) -> None:
         try:
             _show_blocked_snack_bar(page)
         except Exception as exc:
-            logger.warning("[MarkdownSafe] Failed to show snack bar: %s", exc)
+            logger.warning("[MarkdownSafe] Failed to show snack bar: %s", exc, exc_info=True)
             logger.warning("[MarkdownSafe] Blocked non-whitelisted URL: %s", url)
     else:
         logger.warning("[MarkdownSafe] Blocked non-whitelisted URL: %s", url)

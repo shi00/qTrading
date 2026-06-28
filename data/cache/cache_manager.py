@@ -30,6 +30,7 @@ from data.persistence.daos.sync_dao import SyncDao
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.time_utils import get_now, to_utc_for_db
 
@@ -254,6 +255,10 @@ class CacheManager:
     _read_db = read_db
 
     # --- Init & Reset ---
+    @log_async_operation(
+        operation_name="CacheManager.init_db",
+        threshold_ms=PerfThreshold.GLOBAL_INIT,
+    )
     async def init_db(self, force: bool = False, auto_migrate: bool | None = None):
         """Initialize Tables
 
@@ -297,6 +302,10 @@ class CacheManager:
                 )
                 raise
 
+    @log_async_operation(
+        operation_name="CacheManager.hard_reset",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
     async def hard_reset(self):
         """Hard reset by clearing all tables (dropping them) and reinitializing via Alembic."""
         try:
@@ -309,6 +318,10 @@ class CacheManager:
             )
             raise
 
+    @log_async_operation(
+        operation_name="CacheManager.clear_all_cache",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
     async def clear_all_cache(self):
         """Drop all user tables using CASCADE and re-initialize schema.
 

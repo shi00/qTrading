@@ -1138,4 +1138,4 @@ class LLMConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[LLMConfigPanel] refresh_locale failed: {e}")
+            logger.warning("[LLMConfigPanel] refresh_locale failed: %s", e, exc_info=True)

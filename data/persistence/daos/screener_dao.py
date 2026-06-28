@@ -9,6 +9,7 @@ import sqlalchemy as sa
 
 from data.constants import REVIEW_STATUS_COMPLETED, REVIEW_STATUS_PENDING, REVIEW_STATUS_T1_DONE
 from data.persistence.models import Base, ScreeningHistory, get_model_columns
+from utils.log_decorators import PerfThreshold, log_async_operation
 
 from .base_dao import BaseDao, EngineDisposedError
 
@@ -309,6 +310,10 @@ class ScreenerDao(BaseDao):
         df = await self._read_db_select(stmt)
         return df if df is not None else pd.DataFrame()
 
+    @log_async_operation(
+        operation_name="ScreenerDao.update_prediction_result",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
     async def update_prediction_result(
         self,
         record_id: int,

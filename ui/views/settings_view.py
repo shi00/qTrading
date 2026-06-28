@@ -102,7 +102,7 @@ class SettingsView(ft.Container):
                 try:
                     unmount_fn()
                 except Exception as e:
-                    logger.warning(f"Tab {type(tab).__name__} cleanup error: {e}")
+                    logger.warning("Tab %s cleanup error: %s", type(tab).__name__, e, exc_info=True)
 
     def refresh_locale(self):  # pragma: no cover
         try:  # pragma: no cover
@@ -123,11 +123,13 @@ class SettingsView(ft.Container):
                     try:  # pragma: no cover
                         refresh_fn()  # type: ignore[untyped]  # pragma: no cover
                     except Exception as ex:  # pragma: no cover
-                        logger.debug(f"[SettingsView] Current tab refresh_locale skipped: {ex}")  # pragma: no cover
+                        logger.debug(
+                            "[SettingsView] Current tab refresh_locale skipped: %s", ex, exc_info=True
+                        )  # pragma: no cover
             if self.page:  # pragma: no cover
                 self.update()  # pragma: no cover
         except Exception as e:  # pragma: no cover
-            logger.warning(f"[SettingsView] refresh_locale failed: {e}")  # pragma: no cover
+            logger.warning("[SettingsView] refresh_locale failed: %s", e, exc_info=True)  # pragma: no cover
 
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:  # pragma: no cover
         """Centralized tab button style factory."""  # pragma: no cover
@@ -155,15 +157,15 @@ class SettingsView(ft.Container):
     def _on_tab_click(self, e):
         try:
             idx = int(e.control.data)
-        except (ValueError, TypeError):
-            logger.warning(f"Invalid tab index data: {e.control.data}")
+        except (ValueError, TypeError) as exc:
+            logger.warning("Invalid tab index data: %s, error: %s", e.control.data, exc, exc_info=True)
             return
 
         if not (0 <= idx < len(self.tab_contents)):
-            logger.warning(f"Tab index out of range: {idx}")
+            logger.warning("Tab index out of range: %s", idx)
             return
 
-        logger.debug(f"[SettingsView] Switching to tab index: {idx}")
+        logger.debug("[SettingsView] Switching to tab index: %s", idx)
         self.current_tab_index = idx
         self.tab_body.content = self.tab_contents[idx]
 
@@ -177,12 +179,12 @@ class SettingsView(ft.Container):
             try:
                 new_tab.refresh_locale()  # type: ignore[untyped]
             except Exception as ex:
-                logger.debug(f"[SettingsView] Tab refresh_locale skipped: {ex}")
+                logger.debug("[SettingsView] Tab refresh_locale skipped: %s", ex, exc_info=True)
         elif hasattr(new_tab, "_on_locale_change"):
             try:
                 new_tab._on_locale_change()  # type: ignore[untyped]
             except Exception as ex:
-                logger.debug(f"[SettingsView] Tab _on_locale_change skipped: {ex}")
+                logger.debug("[SettingsView] Tab _on_locale_change skipped: %s", ex, exc_info=True)
 
         self._safe_update()
 
@@ -219,7 +221,7 @@ class SettingsView(ft.Container):
             if self.page:  # pragma: no cover
                 self.update()  # pragma: no cover
         except Exception as e:  # pragma: no cover
-            logger.error(f"[SettingsView] Update failed: {e}")  # pragma: no cover
+            logger.error("[SettingsView] Update failed: %s", e, exc_info=True)  # pragma: no cover
 
     def update_theme(self):  # pragma: no cover
         """Propagate custom color updates to child tabs (INPUT_*, UP/DOWN)."""  # pragma: no cover

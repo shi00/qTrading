@@ -193,7 +193,7 @@ def setup_logging(name="astock_screener"):
     for lib in noisy_libs:
         logging.getLogger(lib).setLevel(logging.WARNING)
 
-    logger.info(f"--- Log Session Started: {get_now()} ---")
+    logger.info("--- Log Session Started: %s ---", get_now())
     return logger
 
 
@@ -221,7 +221,7 @@ def update_log_level(level_str):
         if not is_error_log:
             h.setLevel(new_level)
 
-    logger.info(f"Log level updated to {level_str}")
+    logger.info("Log level updated to %s", level_str)
 
 
 def get_logger(name=None):

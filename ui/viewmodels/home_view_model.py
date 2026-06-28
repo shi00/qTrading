@@ -54,7 +54,7 @@ class HomeViewModel:
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
         except Exception as e:
-            logger.warning(f"[HomeVM] Dispose error: {e}", exc_info=True)
+            logger.warning("[HomeVM] Dispose error: %s", e, exc_info=True)
 
     # --- Service Event Handlers ---
     def _on_news_service_update(self, update_type=None, data=None):

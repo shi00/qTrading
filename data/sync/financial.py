@@ -136,7 +136,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             elif trade_date:
                 return parse_date(str(trade_date))
         except Exception as e:
-            logger.debug(f"[FinancialSync] Effective trade date fallback: {e}")
+            logger.debug("[FinancialSync] Effective trade date fallback: %s", e, exc_info=True)
         return get_now().date()
 
     @log_async_operation(
@@ -191,16 +191,17 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.warning("[FinancialSync] Run | Engine disposed, stopping sync.")
             result.status = "failed"
             result.errors.append("Engine disposed during sync")
+            raise
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[FinancialSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[FinancialSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[FinancialSync] Recoverable error ({error_info['code']}): {e}")
+                logger.warning("[FinancialSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
             else:
-                logger.error(f"[FinancialSync] Operational error: {e}", exc_info=True)
+                logger.error("[FinancialSync] Operational error: %s", e, exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -228,7 +229,8 @@ class FinancialSyncStrategy(ISyncStrategy):
             return
 
         logger.debug(
-            f"[FinancialSync] FullSync | Starting comprehensive fundamentals (force={force})...",
+            "[FinancialSync] FullSync | Starting comprehensive fundamentals (force=%s)...",
+            force,
         )
 
         # Local accumulators for aux tables (NOT self variables to avoid AttributeError)
@@ -273,8 +275,9 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         if incomplete_stocks:
             logger.info(
-                f"[FinancialSync] IntegrityCheck | Found {len(incomplete_stocks)} "
-                f"conceptually complete but actually incomplete stocks. Forcing re-sync."
+                "[FinancialSync] IntegrityCheck | Found %s "
+                "conceptually complete but actually incomplete stocks. Forcing re-sync.",
+                len(incomplete_stocks),
             )
             synced_stocks = set(synced_stocks) - incomplete_stocks
         # ===================================
@@ -287,7 +290,9 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         if skipped_count > 0:
             logger.debug(
-                f"[FinancialSync] FullSync | Resume: {skipped_count} done, {len(pending_stocks)} pending",
+                "[FinancialSync] FullSync | Resume: %s done, %s pending",
+                skipped_count,
+                len(pending_stocks),
             )
 
         if not pending_stocks:
@@ -363,9 +368,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         raise
                     except Exception as e:
                         has_error = True
-                        logger.warning(
-                            f"[FinancialSync] StockSync | ⚠️ Failed for {ts_code}: {e}",
-                        )
+                        logger.warning("[FinancialSync] StockSync | ⚠️ Failed for %s: %s", ts_code, e, exc_info=True)
 
                     if not has_error:
                         has_actual_data = df_merged is not None and not df_merged.empty
@@ -383,20 +386,17 @@ class FinancialSyncStrategy(ISyncStrategy):
                             result_accumulator.added += 1
                         else:
                             logger.info(
-                                f"[FinancialSync] StockSync | {ts_code} returned empty data (suspended/delisted/no report yet). "
-                                f"NOT marking complete to allow future retry.",
+                                "[FinancialSync] StockSync | %s returned empty data (suspended/delisted/no report yet). "
+                                "NOT marking complete to allow future retry.",
+                                ts_code,
                             )
                     else:
-                        logger.debug(
-                            f"[FinancialSync] StockSync | {ts_code} incomplete, pending retry.",
-                        )
+                        logger.debug("[FinancialSync] StockSync | %s incomplete, pending retry.", ts_code)
 
             except EngineDisposedError:
                 raise
             except Exception as e:
-                logger.warning(
-                    f"[FinancialSync] StockSync | ⚠️ Failed for {ts_code}: {e}",
-                )
+                logger.warning("[FinancialSync] StockSync | ⚠️ Failed for %s: %s", ts_code, e, exc_info=True)
 
             # Per-stock progress update (advance progress bar for processed stocks)
             if processed:
@@ -446,7 +446,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 today,
                 total_mainbz_rows,
             )
-            logger.debug(f"[FinancialSync] fina_mainbz total: {total_mainbz_rows}")
+            logger.debug("[FinancialSync] fina_mainbz total: %s", total_mainbz_rows)
 
         if total_audit_rows > 0:
             await self.context.cache.update_sync_status(
@@ -454,7 +454,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 today,
                 total_audit_rows,
             )
-            logger.debug(f"[FinancialSync] fina_audit total: {total_audit_rows}")
+            logger.debug("[FinancialSync] fina_audit total: %s", total_audit_rows)
 
         def batch_progress(current, total, msg):
             if progress_callback:
@@ -494,7 +494,11 @@ class FinancialSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(f"[FinancialSync] Date parse | ⚠️ Failed to parse last_sync_date, using 30-day fallback: {e}")
+            logger.warning(
+                "[FinancialSync] Date parse | ⚠️ Failed to parse last_sync_date, using 30-day fallback: %s",
+                e,
+                exc_info=True,
+            )
             start_date_dt = get_now() - datetime.timedelta(days=30)
 
         today_dt = get_now()
@@ -520,9 +524,11 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         if _is_peak_disclosure_season():
             logger.info(
-                f"[FinancialSync] Peak disclosure season detected. "
-                f"Adjusting concurrency: {base_concurrency} → {adjusted_concurrency}, "
-                f"delay: {base_delay}s → {adjusted_delay}s"
+                "[FinancialSync] Peak disclosure season detected. Adjusting concurrency: %s → %s, delay: %ss → %ss",
+                base_concurrency,
+                adjusted_concurrency,
+                base_delay,
+                adjusted_delay,
             )
 
         semaphore = asyncio.Semaphore(adjusted_concurrency)
@@ -567,7 +573,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                         raise
                     except Exception as e:
                         logger.warning(
-                            f"[FinancialSync] Incremental | ⚠️ Failed {ts_code} period={period}: {e}",
+                            "[FinancialSync] Incremental | ⚠️ Failed %s period=%s: %s",
+                            ts_code,
+                            period,
+                            e,
+                            exc_info=True,
                         )
 
                 return result
@@ -581,7 +591,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 batch_results = await gather_return_exceptions_propagating_cancel(*batch)
                 for r in batch_results:
                     if isinstance(r, Exception):
-                        logger.warning(f"[FinancialSync] Batch task failed: {r}")
+                        logger.warning("[FinancialSync] Batch task failed: %s", r)
                         continue
                     day_saved += r["saved"]  # type: ignore[index]
                     total_saved += r["saved"]  # type: ignore[index]
@@ -610,7 +620,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 today,
                 total_mainbz_rows,
             )
-            logger.debug(f"[FinancialSync] fina_mainbz total: {total_mainbz_rows}")
+            logger.debug("[FinancialSync] fina_mainbz total: %s", total_mainbz_rows)
 
         if total_audit_rows > 0:
             await self.context.cache.update_sync_status(
@@ -618,7 +628,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 today,
                 total_audit_rows,
             )
-            logger.debug(f"[FinancialSync] fina_audit total: {total_audit_rows}")
+            logger.debug("[FinancialSync] fina_audit total: %s", total_audit_rows)
 
         result_accumulator.added = total_saved
 
@@ -637,7 +647,8 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         total = len(dates)
         logger.debug(
-            f"[FinancialSync] BatchSync | Syncing corporate actions across {total} days...",
+            "[FinancialSync] BatchSync | Syncing corporate actions across %s days...",
+            total,
         )
 
         concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
@@ -662,7 +673,10 @@ class FinancialSyncStrategy(ISyncStrategy):
                             row_count = await save_func(df)
                             row_count = row_count if row_count is not None else len(df)
                             logger.debug(
-                                f"[FinancialSync] BatchSync | Synced {table_name} for {date_str}: {len(df)} records",
+                                "[FinancialSync] BatchSync | Synced %s for %s: %s records",
+                                table_name,
+                                date_str,
+                                len(df),
                             )
 
                     date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
@@ -676,7 +690,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     raise
                 except TushareAPIPermissionError:
                     logger.warning(
-                        f"[FinancialSync] BatchSync | ⛔ Permission Denied for {table_name}",
+                        "[FinancialSync] BatchSync | ⛔ Permission Denied for %s",
+                        table_name,
                     )
                     date_obj = datetime.datetime.strptime(date_str, "%Y%m%d").date()
                     await self.context.cache.update_sync_status(
@@ -688,7 +703,11 @@ class FinancialSyncStrategy(ISyncStrategy):
                     )
                 except Exception as e:
                     logger.warning(
-                        f"[FinancialSync] BatchSync | ⚠️ Failed {table_name} on {date_str}: {e}",
+                        "[FinancialSync] BatchSync | ⚠️ Failed %s on %s: %s",
+                        table_name,
+                        date_str,
+                        e,
+                        exc_info=True,
                     )
 
         # Iterate per-date (not all-at-once) to avoid task explosion
@@ -704,7 +723,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             gather_results = await gather_return_exceptions_propagating_cancel(*coros)
             for gr in gather_results:
                 if isinstance(gr, Exception):
-                    logger.warning(f"[FinancialSync] Batch table sync failed for date {d}: {gr}")
+                    logger.warning("[FinancialSync] Batch table sync failed for date %s: %s", d, gr, exc_info=True)
 
             # Report progress every 10 days
             if progress_callback and (i + 1) % 10 == 0:
@@ -782,11 +801,12 @@ class FinancialSyncStrategy(ISyncStrategy):
                 raise
             except TushareAPIPermissionError:
                 logger.debug(
-                    f"[FinancialSync] Fetch | Permission denied for aux table on {ts_code}",
+                    "[FinancialSync] Fetch | Permission denied for aux table on %s",
+                    ts_code,
                 )
                 return 0
             except Exception as e:
-                logger.debug(f"[FinancialSync] Fetch | Failed to fetch aux table on {ts_code}: {e}")
+                logger.debug("[FinancialSync] Fetch | Failed to fetch aux table on %s: %s", ts_code, e, exc_info=True)
                 return 0
 
         try:
@@ -825,7 +845,10 @@ class FinancialSyncStrategy(ISyncStrategy):
             for name, result in zip(core_names, results[:4], strict=False):
                 if isinstance(result, Exception):
                     logger.warning(
-                        f"[FinancialSync] Fetch | Core table '{name}' failed for {ts_code}: {result}",
+                        "[FinancialSync] Fetch | Core table '%s' failed for %s: %s",
+                        name,
+                        ts_code,
+                        result,
                     )
 
             # Return aux counts as dict (for caller to accumulate)
@@ -836,7 +859,10 @@ class FinancialSyncStrategy(ISyncStrategy):
             for aux_name, aux_idx in [("mainbz", 4), ("audit", 5)]:
                 if isinstance(results[aux_idx], Exception):
                     logger.debug(
-                        f"[FinancialSync] Fetch | Aux table '{aux_name}' failed for {ts_code}: {results[aux_idx]}",
+                        "[FinancialSync] Fetch | Aux table '%s' failed for %s: %s",
+                        aux_name,
+                        ts_code,
+                        results[aux_idx],
                     )
 
             # 2. Proceed with Core Financial Merging (Income/Balance/Indicator)
@@ -870,9 +896,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                f"[FinancialSync] Fetch | ⚠️ Comprehensive data failed for {ts_code}: {e}",
-            )
+            logger.warning("[FinancialSync] Fetch | ⚠️ Comprehensive data failed for %s: %s", ts_code, e, exc_info=True)
             return None, {"mainbz": 0, "audit": 0}
 
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
@@ -893,7 +917,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             reverse=True,
         )[:12]
 
-        logger.debug(f"[FinancialSync] Repair | Repairing {len(ts_codes)} stocks...")
+        logger.debug("[FinancialSync] Repair | Repairing %s stocks...", len(ts_codes))
 
         total_saved = 0
 
@@ -930,6 +954,6 @@ class FinancialSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    logger.debug(f"[Repair] Failed for {ts_code} period={period}: {e}")
+                    logger.debug("[Repair] Failed for %s period=%s: %s", ts_code, period, e, exc_info=True)
 
         return total_saved

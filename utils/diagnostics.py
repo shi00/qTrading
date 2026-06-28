@@ -108,7 +108,7 @@ class SystemDiagnosticsCollector:
                 if hasattr(dp, "check_data_health"):
                     health_info = await dp.check_data_health()
             except Exception as e:
-                logger.error(f"[Diagnostics] Failed to gather health check data: {e}", exc_info=True)
+                logger.error("[Diagnostics] Failed to gather health check data: %s", e, exc_info=True)
                 health_info = {"status": "red", "error": DataSanitizer.sanitize_error(e)}
 
             # 整合所有状态到一个 json 中
@@ -166,7 +166,7 @@ class SystemDiagnosticsCollector:
                 json_serial,
             )
 
-            logger.info(f"[Diagnostics] Diagnostics package successfully exported to: {zip_path}")
+            logger.info("[Diagnostics] Diagnostics package successfully exported to: %s", zip_path)
             return zip_path
 
         finally:
@@ -199,7 +199,7 @@ class SystemDiagnosticsCollector:
                         out_lf.writelines(sanitized_lines)
                     log_files_to_collect.append((sanitized_log_path, f"sanitized_{log_name}"))
                 except Exception as e:
-                    logger.error(f"[Diagnostics] Failed to read log file {log_name}: {e}")
+                    logger.error("[Diagnostics] Failed to read log file %s: %s", log_name, e, exc_info=True)
 
         # 3. 打包 ZIP
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_f:

@@ -95,7 +95,7 @@ class NewsFeed(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[NewsFeed] update_locale failed: {e}", exc_info=True)
+            logger.warning("[NewsFeed] update_locale failed: %s", e, exc_info=True)
 
     def update_theme(self):
         """Re-render list on theme change"""
@@ -208,7 +208,7 @@ class NewsFeed(ft.Container):
                         row_ctrl.value = translated_tag
                         break
             except Exception as e:
-                logger.warning(f"[NewsFeed] Error updating tag: {e}")
+                logger.warning("[NewsFeed] Error updating tag: %s", e, exc_info=True)
                 continue
 
         if self.page:

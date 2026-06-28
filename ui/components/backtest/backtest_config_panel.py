@@ -199,7 +199,7 @@ class BacktestConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[BacktestConfigPanel] refresh_locale error: {e}")
+            logger.warning("[BacktestConfigPanel] refresh_locale error: %s", e, exc_info=True)
 
     def will_unmount(self):
         """卸载时：确保关闭并清理对话框"""

@@ -81,7 +81,7 @@ class SchedulerService:
         except RuntimeError:
             logger.debug("[Scheduler] Event loop unavailable during %s, skipping graceful shutdown", context)
         except Exception as e:
-            logger.warning("[Scheduler] Error during shutdown (%s): %s", context, e)
+            logger.warning("[Scheduler] Error during shutdown (%s): %s", context, e, exc_info=True)
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -175,7 +175,7 @@ class SchedulerService:
                 replace_existing=True,
             )
         except Exception as e:
-            logger.error(f"[Scheduler] Failed to start: {e}")
+            logger.error("[Scheduler] Failed to start: %s", e, exc_info=True)
 
     async def _load_db_state(self):
         """Load idempotency state from database (primary source of truth).
@@ -209,18 +209,26 @@ class SchedulerService:
 
             self._db_state_loaded = True
             logger.info(
-                f"[Scheduler] DB state loaded: daily={self._last_update_date}, "
-                f"pred={self._last_pred_date}, ai_concept={self._last_ai_concept_date}",
+                "[Scheduler] DB state loaded: daily=%s, pred=%s, ai_concept=%s",
+                self._last_update_date,
+                self._last_pred_date,
+                self._last_ai_concept_date,
             )
         except Exception as e:
-            logger.warning(f"[Scheduler] Failed to load DB state, using ConfigHandler cache: {e}")
+            logger.warning(
+                "[Scheduler] Failed to load DB state, using ConfigHandler cache: %s",
+                e,
+                exc_info=True,
+            )
 
     def _on_job_missed(self, event):
         """Handle missed job events with clear logging"""
         job_id = event.job_id
         run_time = event.scheduled_run_time
         logger.warning(
-            f"[Scheduler] ⚠️ JOB MISSED: '{job_id}' was skipped because the system was busy (Scheduled: {run_time})",
+            "[Scheduler] ⚠️ JOB MISSED: '%s' was skipped because the system was busy (Scheduled: %s)",
+            job_id,
+            run_time,
         )
 
     def _on_job_error(self, event):
@@ -229,16 +237,19 @@ class SchedulerService:
 
         if event.exception and isinstance(event.exception, asyncio.CancelledError):
             logger.info(
-                f"[Scheduler] Job '{event.job_id}' cancelled during shutdown (expected)",
+                "[Scheduler] Job '%s' cancelled during shutdown (expected)",
+                event.job_id,
             )
         else:
             logger.error(
-                f"[Scheduler] Job '{event.job_id}' raised an exception: {event.exception}",
+                "[Scheduler] Job '%s' raised an exception: %s",
+                event.job_id,
+                event.exception,
             )
 
     def stop(self):
         """Stop the scheduler"""
-        logger.info(f"Stopping scheduler... (running={self.scheduler.running})")
+        logger.info("Stopping scheduler... (running=%s)", self.scheduler.running)
         if self.scheduler.running:
             self._safe_shutdown_scheduler(self.scheduler, context="stop")
         else:
@@ -268,7 +279,7 @@ class SchedulerService:
             )
             raise
         except Exception as e:
-            logger.error(f"[Scheduler] Config check failed: {e}")
+            logger.error("[Scheduler] Config check failed: %s", e, exc_info=True)
             return
 
         if not hasattr(self, "_last_known_config"):
@@ -283,13 +294,17 @@ class SchedulerService:
         changed = False
         if current_time != self._last_known_config["time"]:
             logger.info(
-                f"[Scheduler] Detected schedule time change: {self._last_known_config['time']} -> {current_time}",
+                "[Scheduler] Detected schedule time change: %s -> %s",
+                self._last_known_config["time"],
+                current_time,
             )
             changed = True
 
         if current_enabled != self._last_known_config["enabled"]:
             logger.info(
-                f"[Scheduler] Detected enable status change: {self._last_known_config['enabled']} -> {current_enabled}",
+                "[Scheduler] Detected enable status change: %s -> %s",
+                self._last_known_config["enabled"],
+                current_enabled,
             )
             changed = True
 
@@ -326,7 +341,7 @@ class SchedulerService:
             id="daily_update",
             replace_existing=True,
         )
-        logger.info(f"[Scheduler] Scheduled Daily Update at {hour:02d}:{minute:02d}")
+        logger.info("[Scheduler] Scheduled Daily Update at %02d:%02d", hour, minute)
 
         # 2. Nightly AI Prediction Job (Default 20:30)
         # In the future, this could be configurable
@@ -352,7 +367,9 @@ class SchedulerService:
             replace_existing=True,
         )
         logger.info(
-            f"[Scheduler] Scheduled AI Concept Daily Refresh at {dh:02d}:{dm:02d}",
+            "[Scheduler] Scheduled AI Concept Daily Refresh at %02d:%02d",
+            dh,
+            dm,
         )
 
     async def _run_daily_update(self):
@@ -378,11 +395,12 @@ class SchedulerService:
             is_trading = await processor.trade_calendar.is_trading_day(today)
             if not is_trading:
                 logger.info(
-                    f"[Scheduler] Update skipped ({today_str} is not a trading day)",
+                    "[Scheduler] Update skipped (%s is not a trading day)",
+                    today_str,
                 )
                 return
         except Exception as e:
-            logger.warning(f"[Scheduler] Trade calendar check failed: {e}")
+            logger.warning("[Scheduler] Trade calendar check failed: %s", e, exc_info=True)
             if get_now().weekday() >= 5:
                 return
 
@@ -436,7 +454,7 @@ class SchedulerService:
 
         today_str = get_now().strftime("%Y%m%d")
         if self._last_ai_concept_date == today_str:
-            logger.debug(f"[Scheduler] AI Concept tagging already done for {today_str}, skipping")
+            logger.debug("[Scheduler] AI Concept tagging already done for %s, skipping", today_str)
             return
 
         from services.task_manager import TaskManager
@@ -486,12 +504,15 @@ class SchedulerService:
             is_trading = await processor.trade_calendar.is_trading_day(today)
             if not is_trading:
                 logger.info(
-                    f"[Scheduler] Prediction skipped ({today_str} is not a trading day)",
+                    "[Scheduler] Prediction skipped (%s is not a trading day)",
+                    today_str,
                 )
                 return
         except Exception as e:
             logger.warning(
-                f"[Scheduler] Trade calendar check failed for prediction: {e}",
+                "[Scheduler] Trade calendar check failed for prediction: %s",
+                e,
+                exc_info=True,
             )
             if get_now().weekday() >= 5:
                 return

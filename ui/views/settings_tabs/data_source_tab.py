@@ -343,7 +343,7 @@ class DataSourceTab(ft.Container):
             if self.page:
                 self.update()
         except Exception as exc:
-            logger.debug(f"[DataSourceTab] UI update skipped: {exc}")
+            logger.debug("[DataSourceTab] UI update skipped: %s", exc, exc_info=True)
 
     def update_theme(self):  # pragma: no cover
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""
@@ -431,7 +431,7 @@ class DataSourceTab(ft.Container):
 
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[DataSourceTab] refresh_locale failed: {e}")
+            logger.warning("[DataSourceTab] refresh_locale failed: %s", e, exc_info=True)
 
     # --- Config Handlers ---
 
@@ -449,7 +449,7 @@ class DataSourceTab(ft.Container):
             self.show_snack(I18n.get("common_saved"), color=AppColors.SUCCESS)
             self._safe_update()
         except Exception as ex:
-            logger.error(f"[DataSourceTab] HistoryRange | Failed to set config: {ex}")
+            logger.error("[DataSourceTab] HistoryRange | Failed to set config: %s", ex, exc_info=True)
 
     # --- View Event Handlers (delegate to ViewModel) ---
 
@@ -581,12 +581,12 @@ class DataSourceTab(ft.Container):
                         ctrl.set_loading(False)
                         ctrl.opacity = 1.0
                 except Exception as e:
-                    logger.error(f"[DataSourceTab] Failed to reset ctrl state ({ctrl}): {e}", exc_info=True)
+                    logger.error("[DataSourceTab] Failed to reset ctrl state (%s): %s", ctrl, e, exc_info=True)
         if self.page:
             try:
                 self.update()
             except Exception as exc:
-                logger.debug(f"[DataSourceTab] UI update skipped: {exc}")
+                logger.debug("[DataSourceTab] UI update skipped: %s", exc, exc_info=True)
 
     def _on_vm_health_checking(self):
         self.btn_check_health.disabled = True
@@ -814,7 +814,8 @@ class DataSourceTab(ft.Container):
         except Exception as ex:
             self._dialog_open = False
             logger.error(
-                f"[DataSourceTab] Dialog | ❌ Failed to open dialog: {ex}",
+                "[DataSourceTab] Dialog | ❌ Failed to open dialog: %s",
+                ex,
                 exc_info=True,
             )
             self.show_snack(

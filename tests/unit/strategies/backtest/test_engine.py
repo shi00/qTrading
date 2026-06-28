@@ -988,7 +988,7 @@ class TestEnrichLimitStatus:
             {
                 "ts_code": ["000001.SZ"],
                 "trade_date": [date(2024, 1, 2)],
-                "limit": ["U"],
+                "limit_type": ["U"],
             }
         )
         engine.cache.get_limit_list = AsyncMock(return_value=limit_pd)

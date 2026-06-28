@@ -62,14 +62,14 @@ def _hide_file_windows(filepath):
             FILE_ATTRIBUTE_HIDDEN = 0x2
             result = kernel32.SetFileAttributesW(filepath, FILE_ATTRIBUTE_HIDDEN)
             if not result:
-                logger.debug(f"SetFileAttributesW returned False for {filepath}")
+                logger.debug("SetFileAttributesW returned False for %s", filepath)
         except Exception as e:
-            logger.debug(f"Failed to hide file via Win32 API: {e}")
+            logger.debug("Failed to hide file via Win32 API: %s", e, exc_info=True)
     else:
         try:
             os.chmod(filepath, 0o600)
         except OSError as e:
-            logger.debug(f"Failed to set permissions on {filepath}: {e}")
+            logger.debug("Failed to set permissions on %s: %s", filepath, e, exc_info=True)
 
 
 class DecryptionError(Exception):
@@ -172,7 +172,7 @@ class SecurityManager:
                 cls._ensure_legacy_marker()
                 return cls._key
             except Exception as e:
-                logger.error(f"Failed to load primary key file: {e}")
+                logger.error("Failed to load primary key file: %s", e, exc_info=True)
 
         # 2. Try to recover from backup
         if os.path.exists(cls.KEY_FILE_BAK):
@@ -185,7 +185,7 @@ class SecurityManager:
                 cls._ensure_legacy_marker()
                 return cls._key
             except Exception as e:
-                logger.critical(f"Failed to load backup key file: {e}")
+                logger.critical("Failed to load backup key file: %s", e, exc_info=True)
                 raise RuntimeError(
                     "CRITICAL: Both primary and backup key files are corrupt. Cannot proceed.",
                 ) from e
@@ -224,7 +224,7 @@ class SecurityManager:
                     f.write("legacy-file-key\n")
                 _hide_file_windows(_LEGACY_MARKER)
             except (OSError, PermissionError) as exc:
-                logger.debug(f"[SecurityManager] Failed to write legacy marker: {exc}")
+                logger.debug("[SecurityManager] Failed to write legacy marker: %s", exc, exc_info=True)
 
     @classmethod
     def migrate_to_derived_key(cls, decrypt_fn=None, encrypt_fn=None):
@@ -258,7 +258,7 @@ class SecurityManager:
         try:
             cls._load_key_file(cls.KEY_FILE)
         except Exception as e:
-            logger.error(f"Cannot read old key file for migration: {e}")
+            logger.error("Cannot read old key file for migration: %s", e, exc_info=True)
             return False
 
         salt = cls._get_or_create_salt()
@@ -275,7 +275,11 @@ class SecurityManager:
         try:
             cls._save_key(new_key)
         except Exception as e:
-            logger.error("Failed to save new derived key during migration: %s", DataSanitizer.sanitize_error(e))
+            logger.error(
+                "Failed to save new derived key during migration: %s",
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return False
 
         for path in (_LEGACY_MARKER, cls.KEY_FILE_BAK):
@@ -297,7 +301,7 @@ class SecurityManager:
                     if len(salt) >= 16:
                         return salt
             except (OSError, ValueError) as exc:
-                logger.debug(f"[SecurityManager] Salt file read failed, will generate: {exc}")
+                logger.debug("[SecurityManager] Salt file read failed, will generate: %s", exc, exc_info=True)
 
         salt = secrets.token_bytes(32)
         tmp_file = _MACHINE_SALT_FILE + ".tmp"
@@ -309,7 +313,7 @@ class SecurityManager:
             os.replace(tmp_file, _MACHINE_SALT_FILE)
             _hide_file_windows(_MACHINE_SALT_FILE)
         except Exception as e:
-            logger.error(f"Error saving salt file: {e}")
+            logger.error("Error saving salt file: %s", e, exc_info=True)
             if os.path.exists(tmp_file):
                 with contextlib.suppress(OSError):
                     os.remove(tmp_file)
@@ -347,7 +351,7 @@ class SecurityManager:
             _hide_file_windows(cls.KEY_FILE)
             _hide_file_windows(cls.KEY_FILE_BAK)
         except Exception as e:
-            logger.error(f"Error saving key: {e}")
+            logger.error("Error saving key: %s", e, exc_info=True)
             if os.path.exists(tmp_file):
                 with contextlib.suppress(OSError):
                     os.remove(tmp_file)
@@ -358,7 +362,7 @@ class SecurityManager:
         try:
             shutil.copy2(src, dst)
         except Exception as e:
-            logger.warning(f"Failed to copy {src} to {dst}: {e}")
+            logger.warning("Failed to copy %s to %s: %s", src, dst, e, exc_info=True)
 
     @classmethod
     def encrypt_data(cls, plaintext):
@@ -380,7 +384,7 @@ class SecurityManager:
 
             return base64.b64encode(nonce + ciphertext).decode("utf-8")
         except Exception as e:
-            logger.error(f"Encryption error: {e}")
+            logger.error("Encryption error: %s", e, exc_info=True)
             raise EncryptionError(f"Encryption failed: {e}") from e
 
     @classmethod

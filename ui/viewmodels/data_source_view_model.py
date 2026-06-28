@@ -172,7 +172,7 @@ class DataSourceViewModel:
                     self.on_health_cancelled()
                 raise
             except Exception as e:
-                logger.error(f"[DataSourceVM] Health check failed: {e}", exc_info=True)
+                logger.error("[DataSourceVM] Health check failed: %s", e, exc_info=True)
                 error_info = classify_error(e, context="general")
                 if self.on_health_error:
                     self.on_health_error(get_error_message(error_info))
@@ -394,14 +394,14 @@ class DataSourceViewModel:
                 raise
             except InitSyncError as e:
                 msg = str(e)
-                logger.error(f"[DataSourceVM] Init sync failed: {e}")
+                logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 if self.on_show_snack:
                     self.on_show_snack(msg, "error")
                 raise RuntimeError(msg) from e
             except Exception as e:
                 msg = I18n.get("ds_init_fail_fmt")
-                logger.error(f"[DataSourceVM] Init sync failed: {e}", exc_info=True)
+                logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 if self.on_show_snack:
                     self.on_show_snack(msg, "error")

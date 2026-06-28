@@ -304,7 +304,7 @@ class VectorBacktestEngine:
                 return quotes_df.with_columns(pl.lit(None).alias("limit_status")), None
 
             limit_df = pl.from_pandas(limit_list_pd)
-            limit_df = limit_df.select(["ts_code", "trade_date", "limit"]).rename({"limit": "limit_status"})
+            limit_df = limit_df.select(["ts_code", "trade_date", "limit_type"]).rename({"limit_type": "limit_status"})
 
             # 映射 Tushare 原始枚举 → 撮合层统一枚举（使用 Polars 原生表达式，避免 Python 回调）
             limit_df = limit_df.with_columns(

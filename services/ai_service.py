@@ -1048,7 +1048,9 @@ class AIService:
                 history_context = await rm.get_learning_context(as_of=safe_as_of)
             except Exception as e:
                 logger.warning(
-                    f"[AIService] Analyze | ⚠️ Learning context fetch failed: {DataSanitizer.sanitize_error(e)}",
+                    "[AIService] Analyze | ⚠️ Learning context fetch failed: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
                 )
                 history_context = ""
         elif history_context is None:
@@ -1239,7 +1241,9 @@ class AIService:
                 )
             except Exception as e:
                 logger.debug(
-                    f"[AIService] Analyze | Failed to dump prompt to file: {e}",
+                    "[AIService] Analyze | Failed to dump prompt to file: %s",
+                    e,
+                    exc_info=True,
                 )
 
         try:
@@ -1262,8 +1266,9 @@ class AIService:
             return {"error": "Analysis timeout", "score": 0}
         except LocalInferenceTimeoutError as lite:
             logger.error(
-                f"[AIService] Analyze | ❌ Local model inference timeout: {lite}",
-                exc_info=False,
+                "[AIService] Analyze | ❌ Local model inference timeout: %s",
+                lite,
+                exc_info=True,
             )
             return {"error": "Local model timeout", "score": 0}
         except Exception as e:
@@ -1385,7 +1390,9 @@ class AIService:
             )
             result = self._parse_news_result(raw_result)
             logger.debug(
-                f"[AIService] Classify | Local ✅ {result.get('category')} / {result.get('sentiment')}",
+                "[AIService] Classify | Local ✅ %s / %s",
+                result.get("category"),
+                result.get("sentiment"),
             )
             return result
         except Exception as local_e:
@@ -1428,6 +1435,10 @@ class AIService:
             logger.debug("[AIService] Classify | All providers failed traceback:", exc_info=True)
             return {"category": "unknown", "sentiment": "neutral", "error": DataSanitizer.sanitize_error(e)}
 
+    @log_async_operation(
+        operation_name="AIService.verify_connection",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def verify_connection(self) -> bool:
         """
         Verify API connection by sending a minimal request.
@@ -1499,6 +1510,10 @@ class AIService:
         )
 
     @staticmethod
+    @log_async_operation(
+        operation_name="AIService.test_connection",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def test_connection(
         provider: str = "deepseek",
         model: str = "",

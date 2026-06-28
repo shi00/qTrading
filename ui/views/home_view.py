@@ -118,12 +118,12 @@ class HomeView(ft.Container):
             try:
                 self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
             except Exception as exc:
-                logger.debug(f"[HomeView] PubSub unsubscribe skipped: {exc}")
+                logger.debug("[HomeView] PubSub unsubscribe skipped: %s", exc, exc_info=True)
             self._pubsub_subscribed = False
         try:
             I18n.unsubscribe(self.refresh_locale)
         except Exception as exc:
-            logger.debug(f"[HomeView] I18n unsubscribe skipped: {exc}")
+            logger.debug("[HomeView] I18n unsubscribe skipped: %s", exc, exc_info=True)
         if self._init_task:
             self._init_task.cancel()
 
@@ -132,7 +132,7 @@ class HomeView(ft.Container):
     def set_visible(self, visible: bool):  # pragma: no cover
         if self._is_visible != visible:
             self._is_visible = visible
-            logger.debug(f"[HomeView] Visibility | changed to: {visible}")
+            logger.debug("[HomeView] Visibility | changed to: %s", visible)
 
     def refresh_news_if_visible(self, update_type=None, data=None):  # pragma: no cover
         if update_type == NewsUpdateType.TAG_UPDATE:
@@ -214,7 +214,7 @@ class HomeView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[HomeView] refresh_locale failed: {e}", exc_info=True)
+            logger.warning("[HomeView] refresh_locale failed: %s", e, exc_info=True)
 
     def update_theme(self):  # pragma: no cover
         try:
@@ -230,7 +230,7 @@ class HomeView(ft.Container):
             # It's an IconButton, default icon color might need refresh if not set?
             # It usually picks up theme primary/on_surface.
         except Exception as e:
-            logger.error(f"[HomeView] Theme | ❌ Update failed: {e}", exc_info=True)
+            logger.error("[HomeView] Theme | ❌ Update failed: %s", e, exc_info=True)
 
     # --- Data Loading Logic ---
 
@@ -245,7 +245,7 @@ class HomeView(ft.Container):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"[HomeView] Init | ❌ Failed: {e}", exc_info=True)
+            logger.error("[HomeView] Init | ❌ Failed: %s", e, exc_info=True)
 
     async def _load_data(self):  # pragma: no cover
         await self._refresh_market_data()
@@ -259,7 +259,7 @@ class HomeView(ft.Container):
                 # Update UI
                 # DEBUG: Log indices count to investigate RangeError
                 indices = data.get("indices", [])
-                logger.debug(f"[HomeView] Market Data Indices: {len(indices)}")
+                logger.debug("[HomeView] Market Data Indices: %s", len(indices))
 
                 date_str = data.get("date", "--")
                 stale = data.get("stale", False)

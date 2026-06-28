@@ -428,7 +428,7 @@ TABLE_DEFINITIONS = {
             "first_time": "col_first_time",
             "last_time": "col_last_time",
             "open_times": "col_open_times",
-            "limit": "col_limit_type",
+            "limit_type": "col_limit_type",
             "industry": "col_industry",
             "amount": "col_amount",
             "limit_amount": "col_limit_amount",

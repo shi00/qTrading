@@ -81,7 +81,7 @@ class BacktestView(ft.Container):
             try:
                 self.update()
             except Exception as ex:
-                logger.warning(f"[BacktestView] did_mount update skipped: {ex}", exc_info=True)
+                logger.warning("[BacktestView] did_mount update skipped: %s", ex, exc_info=True)
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
     def will_unmount(self):
@@ -107,7 +107,7 @@ class BacktestView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[BacktestView] refresh_locale error: {e}", exc_info=True)
+            logger.warning("[BacktestView] refresh_locale error: %s", e, exc_info=True)
 
     def _build_content(self) -> ft.Column:
         return ft.Column(

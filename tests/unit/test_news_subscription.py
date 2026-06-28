@@ -1048,6 +1048,81 @@ class TestNewsSubscriptionServiceStopAsync:
         await svc.stop_async(drain_timeout=0.1)
         assert svc._processing_task is None
 
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_async_propagates_external_cancel_fetch_task(self, mock_cache, mock_ai):
+        """R2: stop_async 被外部取消时，CancelledError 必须从 fetch_task 路径传播。
+
+        场景：stop_async 正在 await wait_for(_current_fetch_task) 时被外部 cancel
+        根因：原代码 ``except (CancelledError, TimeoutError): pass`` 吞没取消信号
+        修复：检查 cancelling()>0 时 raise 传播
+        """
+        svc = NewsSubscriptionService()
+        svc._running = True
+
+        async def _uncancellable_coro():
+            # 首次 CancelledError 被捕获不传播，第二次 await 可被 cancel
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(100)
+
+        svc._current_fetch_task = asyncio.create_task(_uncancellable_coro())
+        svc._processing_task = None
+        svc.processing_queue = None
+
+        stop_task = asyncio.create_task(svc.stop_async(drain_timeout=10.0))
+        await asyncio.sleep(0.1)  # 让 stop_async 进入 wait_for
+
+        stop_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        # 清理
+        svc._current_fetch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await svc._current_fetch_task
+
+    @pytest.mark.asyncio
+    @patch("services.news_subscription_service.AIService")
+    @patch("services.news_subscription_service.CacheManager")
+    async def test_stop_async_propagates_external_cancel_processing_task(self, mock_cache, mock_ai):
+        """R2: stop_async 被外部取消时，CancelledError 必须从 processing_task 路径传播。
+
+        场景：stop_async 正在 await wait_for(_processing_task) 时被外部 cancel
+        根因：原代码 ``except (CancelledError, TimeoutError): pass`` 吞没取消信号
+        修复：检查 cancelling()>0 时 raise 传播
+        """
+        svc = NewsSubscriptionService()
+        svc._running = True
+
+        async def _uncancellable_coro():
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                pass
+            await asyncio.sleep(100)
+
+        svc._current_fetch_task = None
+        svc._processing_task = asyncio.create_task(_uncancellable_coro())
+        svc.processing_queue = None
+
+        stop_task = asyncio.create_task(svc.stop_async(drain_timeout=10.0))
+        await asyncio.sleep(0.1)  # 让 stop_async 进入 wait_for
+
+        stop_task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await stop_task
+
+        # 清理
+        svc._processing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await svc._processing_task
+
 
 class TestNewsSubscriptionServiceStopWithRunningLoop:
     @pytest.mark.asyncio

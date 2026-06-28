@@ -113,7 +113,7 @@ class MacroSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug(f"[MacroSync] Effective trade date fallback: {e}")
+            logger.debug("[MacroSync] Effective trade date fallback: %s", e, exc_info=True)
         return get_now().date()
 
     @log_async_operation(
@@ -144,23 +144,27 @@ class MacroSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[MacroSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[MacroSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[MacroSync] Recoverable error ({error_info['code']}): {e}")
+                logger.warning("[MacroSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
             else:
-                logger.error(f"[MacroSync] Operational error: {e}", exc_info=True)
+                logger.error("[MacroSync] Operational error: %s", e, exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
         if self._cancelled and result.status not in ("failed", "cancelled"):
             result.status = "cancelled"
         if result.status == "cancelled":
             logger.info(
-                f"[MacroSync] Run | ⚠️ Cancelled. Added={result.added}, Errors={len(result.errors)}",
+                "[MacroSync] Run | ⚠️ Cancelled. Added=%s, Errors=%s",
+                result.added,
+                len(result.errors),
             )
         elif result.status != "failed":
             logger.info(
-                f"[MacroSync] Run | ✅ Complete. Added={result.added}, Errors={len(result.errors)}",
+                "[MacroSync] Run | ✅ Complete. Added=%s, Errors=%s",
+                result.added,
+                len(result.errors),
             )
         return result
 
@@ -182,7 +186,7 @@ class MacroSyncStrategy(ISyncStrategy):
             if merged is not None and not merged.empty:
                 count = await self.dao.save_macro_economy(merged)
                 result.added += count if count else 0
-                logger.debug(f"[MacroSync] Monthly | Saved {count} macro records")
+                logger.debug("[MacroSync] Monthly | Saved %s macro records", count)
                 latest_period = merged["period"].max() if "period" in merged.columns else get_now().date()
                 if isinstance(latest_period, str):
                     if len(latest_period) == 6:
@@ -213,10 +217,10 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-            except Exception:
-                logger.debug("[MacroSync] Monthly | Failed to record skipped_permission status")
+            except Exception as e:
+                logger.debug("[MacroSync] Monthly | Failed to record skipped_permission status: %s", e, exc_info=True)
         except Exception as e:
-            logger.warning(f"[MacroSync] Monthly | ⚠️ Error: {e}", exc_info=True)
+            logger.warning("[MacroSync] Monthly | ⚠️ Error: %s", e, exc_info=True)
             result.errors.append(f"Macro Monthly: {e}")
 
     @classmethod
@@ -271,11 +275,12 @@ class MacroSyncStrategy(ISyncStrategy):
             return merged
 
         if target_col not in df.columns:
-            logger.warning(f"[MacroSync] _merge_indicator | '{target_col}' column not found in data, skipping merge")
+            logger.warning("[MacroSync] _merge_indicator | '%s' column not found in data, skipping merge", target_col)
             return merged
         if "period" not in df.columns:
             logger.warning(
-                f"[MacroSync] _merge_indicator | 'period' column not found in {target_col} data, skipping merge"
+                "[MacroSync] _merge_indicator | 'period' column not found in %s data, skipping merge",
+                target_col,
             )
             return merged
 
@@ -309,7 +314,8 @@ class MacroSyncStrategy(ISyncStrategy):
                     start_date = last_dt.date() + datetime.timedelta(days=_SHIBOR_RESUME_OFFSET_DAYS)
                 except ValueError:
                     logger.warning(
-                        f"[MacroSync] Invalid latest date '{latest}', fallback to 1 year.",
+                        "[MacroSync] Invalid latest date '%s', fallback to 1 year.",
+                        latest,
                     )
                     start_date = today - datetime.timedelta(days=_SHIBOR_FALLBACK_LOOKBACK_DAYS)
 
@@ -326,7 +332,7 @@ class MacroSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
-                logger.debug(f"[MacroSync] Shibor | Saved {count} records")
+                logger.debug("[MacroSync] Shibor | Saved %s records", count)
                 await self.context.cache.update_sync_status(
                     "shibor_daily",
                     today,
@@ -347,10 +353,10 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-            except Exception:
-                logger.debug("[MacroSync] Shibor | Failed to record skipped_permission status")
+            except Exception as e:
+                logger.debug("[MacroSync] Shibor | Failed to record skipped_permission status: %s", e, exc_info=True)
         except Exception as e:
-            logger.warning(f"[MacroSync] Shibor | ⚠️ Error: {e}", exc_info=True)
+            logger.warning("[MacroSync] Shibor | ⚠️ Error: %s", e, exc_info=True)
             result.errors.append(f"Shibor: {e}")
 
     async def _sync_index_weights(self, result: typing.Any):
@@ -392,7 +398,8 @@ class MacroSyncStrategy(ISyncStrategy):
             start_str = start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else str(start_date)
             end_date = today_date.strftime("%Y%m%d")
             logger.debug(
-                f"[MacroSync] IndexWeight | Syncing {len(MAJOR_INDICES)} indices...",
+                "[MacroSync] IndexWeight | Syncing %s indices...",
+                len(MAJOR_INDICES),
             )
 
             iw_saved = 0
@@ -416,19 +423,18 @@ class MacroSyncStrategy(ISyncStrategy):
                     raise
                 except TushareAPIPermissionError:
                     logger.warning(
-                        f"[MacroSync] IndexWeight | ⛔ Permission denied for {idx_code}",
+                        "[MacroSync] IndexWeight | ⛔ Permission denied for %s",
+                        idx_code,
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"[MacroSync] IndexWeight | ⚠️ Failed {idx_code}: {e}",
-                    )
+                    logger.warning("[MacroSync] IndexWeight | ⚠️ Failed %s: %s", idx_code, e, exc_info=True)
 
             await self.context.cache.update_sync_status(
                 "index_weight",
                 today_date,
                 iw_saved,
             )
-            logger.debug(f"[MacroSync] IndexWeight | Total: {iw_saved} records")
+            logger.debug("[MacroSync] IndexWeight | Total: %s records", iw_saved)
 
         except EngineDisposedError:
             raise
@@ -445,11 +451,10 @@ class MacroSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-            except Exception:
-                logger.debug("[MacroSync] IndexWeight | Failed to record skipped_permission status")
+            except Exception as e:
+                logger.debug(
+                    "[MacroSync] IndexWeight | Failed to record skipped_permission status: %s", e, exc_info=True
+                )
         except Exception as e:
-            logger.warning(
-                f"[MacroSync] IndexWeight | ⚠️ Flow-level error: {e}",
-                exc_info=True,
-            )
+            logger.warning("[MacroSync] IndexWeight | ⚠️ Flow-level error: %s", e, exc_info=True)
             result.errors.append(f"IndexWeight: {e}")

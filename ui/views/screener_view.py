@@ -383,7 +383,7 @@ class ScreenerView(ft.Container):
                     options.append(ft.dropdown.Option(key, name))
                 self.strategy_dropdown.options = options
             except Exception as ex:
-                logger.debug(f"[ScreenerView] strategy dropdown rebuild skipped: {ex}")
+                logger.debug("[ScreenerView] strategy dropdown rebuild skipped: %s", ex, exc_info=True)
             self.strategy_dropdown.value = saved_strategy  # 无论 options 重建是否成功都恢复 value
 
             # 策略描述
@@ -449,7 +449,7 @@ class ScreenerView(ft.Container):
                         sort_asc=self.vm.sort_ascending,
                     )
             except Exception as table_ex:
-                logger.debug(f"[ScreenerView] refresh_locale table rebuild skipped: {table_ex}")
+                logger.debug("[ScreenerView] refresh_locale table rebuild skipped: %s", table_ex, exc_info=True)
 
             # 策略参数面板
             if self.selected_strategy:
@@ -458,7 +458,7 @@ class ScreenerView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[ScreenerView] refresh_locale error: {e}")
+            logger.warning("[ScreenerView] refresh_locale error: %s", e, exc_info=True)
 
     def _on_task_unlock(self):  # pragma: no cover
         """Called by ViewModel when strategy task completes."""
@@ -497,7 +497,8 @@ class ScreenerView(ft.Container):
             self.strategy_dropdown.update()
         except Exception as e:
             logger.error(
-                f"[ScreenerView] Strategy | Failed to load strategies: {e}",
+                "[ScreenerView] Strategy | Failed to load strategies: %s",
+                e,
                 exc_info=True,
             )
             self.status_text.value = I18n.get("screener_load_failed")
@@ -508,7 +509,8 @@ class ScreenerView(ft.Container):
         # Handle Pending Deep Link
         if self._pending_strategy_key:
             logger.debug(
-                f"[ScreenerView] Executing pending strategy: {self._pending_strategy_key}",
+                "[ScreenerView] Executing pending strategy: %s",
+                self._pending_strategy_key,
             )
             await self.select_and_run_strategy(self._pending_strategy_key)
             self._pending_strategy_key = None
@@ -517,7 +519,8 @@ class ScreenerView(ft.Container):
         """Public API to select and run a strategy (Deep Link)"""
         if not self.strategy_dropdown.options:
             logger.debug(
-                f"[ScreenerView] Strategies not loaded yet. Queuing {strategy_key}",
+                "[ScreenerView] Strategies not loaded yet. Queuing %s",
+                strategy_key,
             )
             self._pending_strategy_key = strategy_key
             return
@@ -525,7 +528,7 @@ class ScreenerView(ft.Container):
         # Validate existence
         exists = any(opt.key == strategy_key for opt in self.strategy_dropdown.options)
         if not exists:
-            logger.warning(f"[ScreenerView] Strategy {strategy_key} not found.")
+            logger.warning("[ScreenerView] Strategy %s not found.", strategy_key)
             return
 
         self.strategy_dropdown.value = strategy_key
@@ -866,7 +869,8 @@ class ScreenerView(ft.Container):
 
         except Exception as ex:
             logger.error(
-                f"[ScreenerView] History | ❌ Failed to load history tree: {ex}",
+                "[ScreenerView] History | ❌ Failed to load history tree: %s",
+                ex,
                 exc_info=True,
             )
 
@@ -1771,7 +1775,7 @@ class ScreenerView(ft.Container):
             if hasattr(self, "log_title_text"):
                 self.log_title_text.color = AppColors.TEXT_PRIMARY
         except Exception as e:
-            logger.warning(f"Failed to update log area theme: {e}")
+            logger.warning("Failed to update log area theme: %s", e, exc_info=True)
 
         # 4. Pagination
         self.page_info_text.color = AppColors.TEXT_PRIMARY
@@ -1785,7 +1789,8 @@ class ScreenerView(ft.Container):
                 self._render_table_sync()
             except Exception as e:
                 logger.error(
-                    f"[ScreenerView] Theme | ❌ Re-render failed: {e}",
+                    "[ScreenerView] Theme | ❌ Re-render failed: %s",
+                    e,
                     exc_info=True,
                 )
 

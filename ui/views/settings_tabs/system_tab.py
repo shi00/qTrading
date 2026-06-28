@@ -546,7 +546,7 @@ class SystemTab(ft.Container):
 
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[SystemTab] Locale update failed: {e}")
+            logger.warning("[SystemTab] Locale update failed: %s", e, exc_info=True)
 
     def _safe_update(self):  # pragma: no cover
         """线程安全的 UI 更新"""
@@ -554,7 +554,7 @@ class SystemTab(ft.Container):
             if self.page:
                 self.page.update()
         except Exception as e:
-            logger.debug(f"[SystemTab] Update skipped: {e}")
+            logger.debug("[SystemTab] Update skipped: %s", e, exc_info=True)
 
     def did_mount(self):  # pragma: no cover
         """挂载时订阅语言变更"""
@@ -581,7 +581,7 @@ class SystemTab(ft.Container):
 
             self.show_snack(I18n.get("settings_snack_theme_updated"))
         except Exception as ex:
-            logger.error(f"[SystemTab] Theme | ❌ Change failed: {ex}", exc_info=True)
+            logger.error("[SystemTab] Theme | ❌ Change failed: %s", ex, exc_info=True)
             self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_log_level_change(self, e):
@@ -708,7 +708,7 @@ class SystemTab(ft.Container):
             await asyncio.to_thread(ThreadPoolManager().reload_config)
 
             self.show_snack(I18n.get("sys_snack_pool_saved"), color=AppColors.SUCCESS)
-            logger.info(f"Updated ThreadPool: IO={io_val}, CPU={cpu_val}")
+            logger.info("Updated ThreadPool: IO=%s, CPU=%s", io_val, cpu_val)
 
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
@@ -718,7 +718,8 @@ class SystemTab(ft.Container):
                 color=AppColors.ERROR,
             )
             logger.error(
-                f"[SystemTab] ThreadPool | ❌ Save failed: {ex}",
+                "[SystemTab] ThreadPool | ❌ Save failed: %s",
+                ex,
                 exc_info=True,
             )
 
@@ -732,7 +733,7 @@ class SystemTab(ft.Container):
         self.rate_limit_input.update()
         self._reload_rate_limiters_safe()
         self.show_snack(I18n.get("sys_snack_tier_set").format(tier=tier))
-        logger.info(f"[SystemTab] Tushare point tier set to {tier}")
+        logger.info("[SystemTab] Tushare point tier set to %s", tier)
 
     def save_rate_limit(self, e):
         """Save API rate limit setting."""
@@ -763,7 +764,7 @@ class SystemTab(ft.Container):
             ConfigHandler.set_tushare_api_limit(limit)
             self._reload_rate_limiters_safe()
             self.show_snack(I18n.get("sys_snack_limit_set").format(limit=limit))
-            logger.info(f"Tushare API rate limit updated to {limit}")
+            logger.info("Tushare API rate limit updated to %s", limit)
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
 
@@ -773,7 +774,7 @@ class SystemTab(ft.Container):
 
             TushareClient().reload_rate_limiters()
         except Exception as exc:
-            logger.warning(f"[SystemTab] Rate limiter reload skipped: {exc}")
+            logger.warning("[SystemTab] Rate limiter reload skipped: %s", exc, exc_info=True)
 
     def save_no_proxy_domains(self, e):
         """Save no-proxy domain list."""
@@ -789,7 +790,7 @@ class SystemTab(ft.Container):
                 I18n.get("settings_snack_no_proxy_saved"),
                 color=AppColors.SUCCESS,
             )
-            logger.info(f"No-Proxy domains updated: {domains}")
+            logger.info("No-Proxy domains updated: %s", domains)
 
             from utils.proxy_manager import ProxyManager
             from utils.thread_pool import TaskType, ThreadPoolManager
@@ -799,7 +800,8 @@ class SystemTab(ft.Container):
                 ProxyManager.reapply_proxy_policy,
             )
 
-        except Exception:
+        except Exception as ex:
+            logger.error("[SystemTab] No-proxy domains save failed: %s", ex, exc_info=True)
             self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     async def on_export_diagnostics(self, e=None):

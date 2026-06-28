@@ -133,7 +133,7 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           uv pip install --system -r requirements-dev.txt
-          pip install pyright==1.1.410
+          pip install pyright==1.1.411
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'
@@ -442,7 +442,7 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
           uv pip install --system -r requirements-dev.txt
-          pip install pyright==1.1.410
+          pip install pyright==1.1.411
 
       - name: Report optional deps status
         if: env.OPTIONAL_DEPS_FAILED == 'true'

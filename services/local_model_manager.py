@@ -77,7 +77,7 @@ def _persistent_worker(  # pragma: no cover — runs in subprocess, not coverabl
         except queue.Empty:
             continue
         except Exception as e:
-            logger.debug(f"[LocalModel] Worker queue get error: {e}")
+            logger.debug("[LocalModel] Worker queue get error: %s", e, exc_info=True)
             continue
 
         if request == _SENTINEL:
@@ -143,14 +143,16 @@ class LocalModelManager:
 
     _instance: LocalModelManager | None = None
     _initialized: bool = False
-    _lock = threading.Lock()
+    # RLock 允许 get_instance 持锁后调用 LocalModelManager() 时 __new__ 重入同锁不死锁
+    _lock = threading.RLock()
 
     def __new__(cls, *args, **kwargs):
-        # Note: No lock here — callers (get_instance, _reset_singleton) already
-        # hold cls._lock. Using a lock here would cause deadlock with threading.Lock.
+        # §4.3 双检锁：先无锁检查，再加锁检查。RLock 允许 get_instance 持锁后重入。
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
         return cls._instance
 
     @classmethod
@@ -162,7 +164,7 @@ class LocalModelManager:
                 try:
                     inst._shutdown_worker()
                 except Exception as e:
-                    logger.warning(f"[LocalModel] Error during reset shutdown: {e}")
+                    logger.warning("[LocalModel] Error during reset shutdown: %s", e, exc_info=True)
             cls._instance = None
             cls._initialized = False
 
@@ -174,7 +176,7 @@ class LocalModelManager:
             try:
                 inst._shutdown_worker()
             except Exception as e:
-                logger.warning(f"[LocalModel] Error during atexit shutdown: {e}")
+                logger.warning("[LocalModel] Error during atexit shutdown: %s", e, exc_info=True)
 
     @classmethod
     def _get_load_lock(cls):
@@ -223,7 +225,7 @@ class LocalModelManager:
             try:
                 self._request_queue.put(_SENTINEL, timeout=2.0)
             except Exception as e:
-                logger.debug(f"[LocalModel] Failed to send sentinel to worker: {e}")
+                logger.debug("[LocalModel] Failed to send sentinel to worker: %s", e, exc_info=True)
             self._worker_proc.join(timeout=5)
             if self._worker_proc.is_alive():
                 self._worker_proc.terminate()
@@ -238,13 +240,13 @@ class LocalModelManager:
                 self._request_queue.close()
                 self._request_queue.join_thread()
             except Exception as e:
-                logger.debug(f"[LocalModel] Failed to close request queue: {e}")
+                logger.debug("[LocalModel] Failed to close request queue: %s", e, exc_info=True)
         if self._result_queue is not None:
             try:
                 self._result_queue.close()
                 self._result_queue.join_thread()
             except Exception as e:
-                logger.debug(f"[LocalModel] Failed to close result queue: {e}")
+                logger.debug("[LocalModel] Failed to close result queue: %s", e, exc_info=True)
 
         self._worker_proc = None
         self._request_queue = None
@@ -279,7 +281,7 @@ class LocalModelManager:
             )
             proc.start()
             self._worker_proc = proc
-            logger.info(f"[LocalModel] Persistent worker started. pid={proc.pid}")
+            logger.info("[LocalModel] Persistent worker started. pid=%s", proc.pid)
             return True
 
     async def _await_worker_ready(self, timeout: float = 180.0) -> bool:
@@ -342,19 +344,19 @@ class LocalModelManager:
             self._worker_ready = False
             if worker_died:
                 exitcode = self._worker_proc.exitcode if self._worker_proc is not None else None
-                logger.error(f"[LocalModel] Persistent worker crashed before ready. exitcode={exitcode}")
+                logger.error("[LocalModel] Persistent worker crashed before ready. exitcode=%s", exitcode)
             else:
-                logger.error(f"[LocalModel] Persistent worker failed to become ready within {timeout}s.")
+                logger.error("[LocalModel] Persistent worker failed to become ready within %ss.", timeout)
             self._shutdown_worker()
             return False
 
         status, payload = result
         if status == "ready":
             self._worker_ready = True
-            logger.info(f"[LocalModel] Persistent worker ready with model: {payload}")
+            logger.info("[LocalModel] Persistent worker ready with model: %s", payload)
             return True
 
-        logger.error(f"[LocalModel] Persistent worker failed: {payload}")
+        logger.error("[LocalModel] Persistent worker failed: %s", payload)
         self._worker_ready = False
         self._shutdown_worker()
         return False
@@ -410,7 +412,7 @@ class LocalModelManager:
             return False
 
         if not os.path.exists(model_path):
-            logger.error(f"Model file not found: {model_path}")
+            logger.error("Model file not found: %s", model_path)
             return False
 
         if is_verification:
@@ -454,7 +456,9 @@ class LocalModelManager:
                     return True
 
                 logger.info(
-                    f"[LocalModel] Loading model from {model_path} (Stat: {current_stat})...",
+                    "[LocalModel] Loading model from %s (Stat: %s)...",
+                    model_path,
+                    current_stat,
                 )
 
                 self._is_loading = True
@@ -503,18 +507,19 @@ class LocalModelManager:
                                 }
                             )
                         except (ValueError, OSError, RuntimeError) as e:
-                            logger.warning(f"[LocalModel] Failed to persist model SHA-256: {e}")
+                            logger.warning("[LocalModel] Failed to persist model SHA-256: %s", e, exc_info=True)
 
                     elapsed = asyncio.get_running_loop().time() - start_time
                     logger.info(
-                        f"[LocalModel] Model loaded via subprocess in {elapsed:.2f}s.",
+                        "[LocalModel] Model loaded via subprocess in %.2fs.",
+                        elapsed,
                     )
                     return True
                 except Exception as e:
                     self._model_path = ""
                     self._model_stat = (0, 0)
                     self._last_config = {}
-                    logger.error(f"[LocalModel] Failed to load model: {e}", exc_info=True)
+                    logger.error("[LocalModel] Failed to load model: %s", e, exc_info=True)
                     return False
                 finally:
                     self._is_loading = False
@@ -583,9 +588,13 @@ class LocalModelManager:
         timeout_val = config.get("local_model_timeout", 90) or 90
 
         logger.info(
-            f"[LocalModel] Sending inference request to persistent worker. "
-            f"Input len: {len(prompt)}, Max tokens: {max_tokens}, "
-            f"Temp: {temperature}, Timeout: {timeout_val}s",
+            "[LocalModel] Sending inference request to persistent worker. "
+            "Input len: %s, Max tokens: %s, "
+            "Temp: %s, Timeout: %ss",
+            len(prompt),
+            max_tokens,
+            temperature,
+            timeout_val,
         )
         start_time = asyncio.get_running_loop().time()
 
@@ -599,7 +608,7 @@ class LocalModelManager:
                 lambda: request_queue.put((prompt, max_tokens, temperature, system_prompt), timeout=5),
             )
         except Exception as e:
-            logger.error(f"[LocalModel] Failed to send request to worker: {e}")
+            logger.error("[LocalModel] Failed to send request to worker: %s", e, exc_info=True)
             self._worker_ready = False
             raise RuntimeError(f"Failed to send request to worker: {e}") from e
 
@@ -646,8 +655,9 @@ class LocalModelManager:
         except TimeoutError as te:
             elapsed = asyncio.get_running_loop().time() - start_time
             logger.error(
-                f"[LocalModel] Persistent worker inference timed out after {timeout_val}s "
-                f"(elapsed: {elapsed:.1f}s). Terminating worker.",
+                "[LocalModel] Persistent worker inference timed out after %ss (elapsed: %.1fs). Terminating worker.",
+                timeout_val,
+                elapsed,
             )
             self._shutdown_worker()
             raise LocalInferenceTimeoutError(
@@ -662,7 +672,7 @@ class LocalModelManager:
         elapsed = asyncio.get_running_loop().time() - start_time
 
         if status == "error":
-            logger.error(f"[LocalModel] Inference error: {payload}")
+            logger.error("[LocalModel] Inference error: %s", payload)
             raise RuntimeError(f"Inference execution failed: {payload}")
 
         if status == "shutdown":
@@ -670,7 +680,9 @@ class LocalModelManager:
             raise RuntimeError("Worker shut down unexpectedly during inference.")
 
         logger.info(
-            f"[LocalModel] Persistent worker inference completed in {elapsed:.2f}s. Output len: {len(payload)}",
+            "[LocalModel] Persistent worker inference completed in %.2fs. Output len: %s",
+            elapsed,
+            len(payload),
         )
         return payload
 

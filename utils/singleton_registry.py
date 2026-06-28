@@ -41,7 +41,9 @@ def _atexit_cleanup_all() -> None:
                 try:
                     cls._atexit_cleanup()  # type: ignore[attr-defined]
                 except Exception as e:
-                    logger.warning(f"[SingletonRegistry] atexit cleanup failed for {cls.__name__}: {e}")
+                    logger.warning(
+                        "[SingletonRegistry] atexit cleanup failed for %s: %s", cls.__name__, e, exc_info=True
+                    )
 
 
 atexit.register(_atexit_cleanup_all)
@@ -63,19 +65,20 @@ def reset_all_singletons() -> None:
                 try:
                     cls._reset_singleton()  # type: ignore[attr-defined]
                 except Exception as e:
-                    logger.warning(f"[SingletonRegistry] Failed to reset {cls.__name__}: {e}")
+                    logger.warning("[SingletonRegistry] Failed to reset %s: %s", cls.__name__, e, exc_info=True)
             elif hasattr(cls, "_instance"):
                 logger.error(
-                    f"[SingletonRegistry] {cls.__name__} lacks _reset_singleton — "
-                    f"falling back to _instance = None (resources may leak). "
-                    f"Implement _reset_singleton for proper cleanup."
+                    "[SingletonRegistry] %s lacks _reset_singleton — "
+                    "falling back to _instance = None (resources may leak). "
+                    "Implement _reset_singleton for proper cleanup.",
+                    cls.__name__,
                 )
                 instance = cls._instance  # type: ignore[attr-defined]
                 if instance is not None and hasattr(instance, "close"):
                     try:
                         instance.close()
                     except Exception as e:
-                        logger.warning(f"[SingletonRegistry] {cls.__name__}.close() failed: {e}")
+                        logger.warning("[SingletonRegistry] %s.close() failed: %s", cls.__name__, e, exc_info=True)
                 cls._instance = None  # type: ignore[attr-defined]
 
 

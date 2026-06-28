@@ -204,7 +204,7 @@ class MarketDashboard(ft.Column):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[MarketDashboard] update_locale failed: {e}")
+            logger.warning("[MarketDashboard] update_locale failed: %s", e, exc_info=True)
 
     def update_data(self, data):
         """

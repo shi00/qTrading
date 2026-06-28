@@ -59,7 +59,7 @@ class HolderSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug(f"[HolderSync] Effective trade date fallback: {e}")
+            logger.debug("[HolderSync] Effective trade date fallback: %s", e, exc_info=True)
         return get_now().date()
 
     @log_async_operation(
@@ -74,7 +74,8 @@ class HolderSyncStrategy(ISyncStrategy):
         try:
             quarter_ends = self._get_recent_quarter_ends(count=2)
             logger.info(
-                f"[HolderSync] Run | Syncing quarterly snapshots: {quarter_ends}",
+                "[HolderSync] Run | Syncing quarterly snapshots: %s",
+                quarter_ends,
             )
 
             for qe in quarter_ends:
@@ -133,11 +134,15 @@ class HolderSyncStrategy(ISyncStrategy):
 
             if result.status == "cancelled":
                 logger.info(
-                    f"[HolderSync] Run | ⚠️ Cancelled. Synced={result.added}, Errors={errors}",
+                    "[HolderSync] Run | ⚠️ Cancelled. Synced=%s, Errors=%s",
+                    result.added,
+                    errors,
                 )
             else:
                 logger.info(
-                    f"[HolderSync] Run | ✅ Complete. Synced={result.added}, Errors={errors}",
+                    "[HolderSync] Run | ✅ Complete. Synced=%s, Errors=%s",
+                    result.added,
+                    errors,
                 )
 
         except asyncio.CancelledError:
@@ -152,12 +157,12 @@ class HolderSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[HolderSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[HolderSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[HolderSync] Recoverable error ({error_info['code']}): {e}")
+                logger.warning("[HolderSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
             else:
-                logger.error(f"[HolderSync] Operational error: {e}", exc_info=True)
+                logger.error("[HolderSync] Operational error: %s", e, exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -173,12 +178,12 @@ class HolderSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 await self.context.cache.save_holder_number(df)
                 logger.debug(
-                    f"[HolderSync] Table | stk_holdernumber enddate={enddate}: {len(df)} records",
+                    "[HolderSync] Table | stk_holdernumber enddate=%s: %s records",
+                    enddate,
+                    len(df),
                 )
                 return len(df)
-            logger.debug(
-                f"[HolderSync] Table | stk_holdernumber enddate={enddate}: no data",
-            )
+            logger.debug("[HolderSync] Table | stk_holdernumber enddate=%s: no data", enddate)
             return 0
         except EngineDisposedError:
             raise
@@ -229,15 +234,19 @@ class HolderSyncStrategy(ISyncStrategy):
                 ts_codes = [c for c in all_ts_codes if c not in existing_ts_codes]
                 skipped = total - len(ts_codes)
                 logger.info(
-                    f"[HolderSync] top10_holders | Incremental: {skipped}/{total} stocks "
-                    f"already synced for period={period}, {len(ts_codes)} remaining",
+                    "[HolderSync] top10_holders | Incremental: %s/%s stocks already synced for period=%s, %s remaining",
+                    skipped,
+                    total,
+                    period,
+                    len(ts_codes),
                 )
             else:
                 ts_codes = all_ts_codes
 
             if not ts_codes:
                 logger.info(
-                    f"[HolderSync] top10_holders | All stocks already synced for period={period}, skipping",
+                    "[HolderSync] top10_holders | All stocks already synced for period=%s, skipping",
+                    period,
                 )
                 return 0
 
@@ -250,7 +259,9 @@ class HolderSyncStrategy(ISyncStrategy):
             checkpoint_rows = 0
 
             logger.info(
-                f"[HolderSync] top10_holders | Starting per-stock sync: {remaining} stocks, period={period}",
+                "[HolderSync] top10_holders | Starting per-stock sync: %s stocks, period=%s",
+                remaining,
+                period,
             )
 
             for i, ts_code in enumerate(ts_codes):
@@ -281,11 +292,16 @@ class HolderSyncStrategy(ISyncStrategy):
 
                     if stock_errors <= 3 or is_rate_limit:
                         logger.debug(
-                            f"[HolderSync] top10_holders | Skip {ts_code} period={period}: {e}",
+                            "[HolderSync] top10_holders | Skip %s period=%s: %s",
+                            ts_code,
+                            period,
+                            e,
+                            exc_info=True,
                         )
                     if consecutive_errors >= _MAX_ERRORS:
                         logger.warning(
-                            f"[HolderSync] top10_holders | {consecutive_errors} consecutive errors, aborting",
+                            "[HolderSync] top10_holders | %s consecutive errors, aborting",
+                            consecutive_errors,
                         )
                         break
 
@@ -298,9 +314,13 @@ class HolderSyncStrategy(ISyncStrategy):
                             elapsed_info = f", rate={api_limiter.current_rate_per_min:.0f}/min"
 
                     logger.info(
-                        f"[HolderSync] top10_holders | Progress: {i + 1}/{remaining} "
-                        f"({(i + 1) * 100 // remaining}%), "
-                        f"errors={stock_errors}, rate_limits={rate_limit_hits}{elapsed_info}",
+                        "[HolderSync] top10_holders | Progress: %s/%s (%s%%), errors=%s, rate_limits=%s%s",
+                        i + 1,
+                        remaining,
+                        (i + 1) * 100 // remaining,
+                        stock_errors,
+                        rate_limit_hits,
+                        elapsed_info,
                     )
 
                 if total_rows - checkpoint_rows >= _CHECKPOINT_INTERVAL and all_dfs:
@@ -312,15 +332,23 @@ class HolderSyncStrategy(ISyncStrategy):
                 combined = pd.concat(all_dfs, ignore_index=True)
                 await self.context.cache.save_top10_holders(combined)
                 logger.info(
-                    f"[HolderSync] Table | top10_holders period={period}: saved final batch of {len(combined)} records",
+                    "[HolderSync] Table | top10_holders period=%s: saved final batch of %s records",
+                    period,
+                    len(combined),
                 )
 
             total_coverage = len(existing_ts_codes) + (remaining - stock_errors)
             logger.info(
-                f"[HolderSync] Table | top10_holders period={period}: "
-                f"{total_rows} records, "
-                f"coverage: {total_coverage}/{total} stocks, "
-                f"errors={stock_errors}, rate_limits={rate_limit_hits}",
+                "[HolderSync] Table | top10_holders period=%s: "
+                "%s records, "
+                "coverage: %s/%s stocks, "
+                "errors=%s, rate_limits=%s",
+                period,
+                total_rows,
+                total_coverage,
+                total,
+                stock_errors,
+                rate_limit_hits,
             )
 
             if consecutive_errors >= _MAX_ERRORS:
@@ -348,8 +376,11 @@ class HolderSyncStrategy(ISyncStrategy):
             raise
         except Exception as e:
             logger.warning(
-                f"[HolderSync] top10_holders | Failed to query existing ts_codes "
-                f"for period={period}, falling back to full sync: {e}",
+                "[HolderSync] top10_holders | Failed to query existing ts_codes "
+                "for period=%s, falling back to full sync: %s",
+                period,
+                e,
+                exc_info=True,
             )
             return set()
 
@@ -367,20 +398,29 @@ class HolderSyncStrategy(ISyncStrategy):
             combined = pd.concat(all_dfs, ignore_index=True)
             await self.context.cache.save_top10_holders(combined)
             logger.info(
-                f"[HolderSync] top10_holders | Checkpoint saved: {len(combined)} records for period={period}",
+                "[HolderSync] top10_holders | Checkpoint saved: %s records for period=%s",
+                len(combined),
+                period,
             )
             return True
         except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(
-                f"[HolderSync] top10_holders | Checkpoint save failed for period={period}: {e}",
+                "[HolderSync] top10_holders | Checkpoint save failed for period=%s: %s",
+                period,
+                e,
+                exc_info=True,
             )
             return False
 
     def _log_sync_error(self, table_name: str, date_str: str, e: Exception):
         logger.warning(
-            f"[HolderSync] Table | ⚠️ Error syncing {table_name} date={date_str}: {e}",
+            "[HolderSync] Table | ⚠️ Error syncing %s date=%s: %s",
+            table_name,
+            date_str,
+            e,
+            exc_info=True,
         )
 
     async def _sync_one_table(
@@ -399,18 +439,24 @@ class HolderSyncStrategy(ISyncStrategy):
             if df is not None and not df.empty:
                 await save_func(df)
                 logger.debug(
-                    f"[HolderSync] Table | {table_name} end_date={end_date}: {len(df)} records",
+                    "[HolderSync] Table | %s end_date=%s: %s records",
+                    table_name,
+                    end_date,
+                    len(df),
                 )
                 return len(df)
             logger.debug(
-                f"[HolderSync] Table | {table_name} end_date={end_date}: no data",
+                "[HolderSync] Table | %s end_date=%s: no data",
+                table_name,
+                end_date,
             )
             return 0
         except EngineDisposedError:
             raise
         except TushareAPIPermissionError:
             logger.warning(
-                f"[HolderSync] ⛔ Permission denied for {table_name}",
+                "[HolderSync] ⛔ Permission denied for %s",
+                table_name,
             )
             if end_date:
                 qe_date = datetime.datetime.strptime(end_date, "%Y%m%d").date()
@@ -424,7 +470,11 @@ class HolderSyncStrategy(ISyncStrategy):
             return -1
         except Exception as e:
             logger.warning(
-                f"[HolderSync] Table | ⚠️ Error syncing {table_name} end_date={end_date}: {e}",
+                "[HolderSync] Table | ⚠️ Error syncing %s end_date=%s: %s",
+                table_name,
+                end_date,
+                e,
+                exc_info=True,
             )
             return -1
 
@@ -458,27 +508,24 @@ class HolderSyncStrategy(ISyncStrategy):
                     raise
                 except Exception as api_err:
                     logger.debug(
-                        f"[HolderSync] pledge_stat | API error for end_date={end_date}: {api_err}",
+                        "[HolderSync] pledge_stat | API error for end_date=%s: %s",
+                        end_date,
+                        api_err,
+                        exc_info=True,
                     )
                     continue
 
                 if df is not None and not df.empty:
                     actual_end_date = candidate
-                    logger.debug(
-                        f"[HolderSync] pledge_stat | Got data for end_date={end_date}",
-                    )
+                    logger.debug("[HolderSync] pledge_stat | Got data for end_date=%s", end_date)
                     break
-                logger.debug(
-                    f"[HolderSync] pledge_stat | No data for end_date={end_date}",
-                )
+                logger.debug("[HolderSync] pledge_stat | No data for end_date=%s", end_date)
 
             if df is not None and not df.empty:
                 # pledge_stat API does not return ann_date; do NOT synthesize it
                 # to avoid lookahead bias in as_of queries (see MD-001).
                 await self.context.cache.save_pledge_stat(df)
-                logger.debug(
-                    f"[HolderSync] Table | pledge_stat: {len(df)} records",
-                )
+                logger.debug("[HolderSync] Table | pledge_stat: %s records", len(df))
                 return len(df), actual_end_date
 
             if all_api_failed:
@@ -502,11 +549,13 @@ class HolderSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-            except Exception:
-                logger.debug("[HolderSync] pledge_stat | Failed to record skipped_permission status")
+            except Exception as e:
+                logger.debug(
+                    "[HolderSync] pledge_stat | Failed to record skipped_permission status: %s", e, exc_info=True
+                )
             return -1, None
         except Exception as e:
-            logger.warning(f"[HolderSync] Table | ⚠️ Error syncing pledge_stat: {e}")
+            logger.warning("[HolderSync] Table | ⚠️ Error syncing pledge_stat: %s", e, exc_info=True)
             return -1, None
 
     @staticmethod

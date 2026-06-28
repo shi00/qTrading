@@ -73,7 +73,8 @@ class ShutdownCoordinator:
             except (OSError, ValueError):
                 pass
         logger.critical(
-            f"[Shutdown] Force-exiting process with code {code}. Call stack and cleanup state have been logged above.",
+            "[Shutdown] Force-exiting process with code %s. Call stack and cleanup state have been logged above.",
+            code,
         )
         try:
             sys.exit(code)
@@ -120,15 +121,19 @@ class ShutdownCoordinator:
                 for r in step_snapshot
             ]
             logger.error(
-                f"[Shutdown] Watchdog timeout ({effective_timeout}s) — forcing exit. "
-                f"cleanup_done={self._cleanup_done}, "
-                f"cleanup_running={self._cleanup_running}, "
-                f"step_results={step_summary}",
+                "[Shutdown] Watchdog timeout (%ss) — forcing exit. "
+                "cleanup_done=%s, "
+                "cleanup_running=%s, "
+                "step_results=%s",
+                effective_timeout,
+                self._cleanup_done,
+                self._cleanup_running,
+                step_summary,
             )
             force_exit(1)
 
         threading.Thread(target=_force_exit_thread, daemon=True).start()
-        logger.info(f"[Shutdown] Watchdog armed ({effective_timeout}s).")
+        logger.info("[Shutdown] Watchdog armed (%ss).", effective_timeout)
 
     def cancel_watchdog(self):
         if self._watchdog_cancel_event is not None:
@@ -156,8 +161,10 @@ class ShutdownCoordinator:
             self._cleanup_running = True
             logging.getLogger("asyncio").setLevel(logging.ERROR)
             logger.info(
-                f"[Shutdown] ========== Graceful Shutdown Initiated =========="
-                f" (timeout={timeout_s:.1f}s, step_timeout={step_timeout_s:.1f}s) =========="
+                "[Shutdown] ========== Graceful Shutdown Initiated =========="
+                " (timeout=%.1fs, step_timeout=%.1fs) ==========",
+                timeout_s,
+                step_timeout_s,
             )
             self._cleanup_task = asyncio.create_task(
                 self._execute_cleanup(timeout_s=timeout_s, step_timeout_s=step_timeout_s)
@@ -179,7 +186,7 @@ class ShutdownCoordinator:
                 logger.info("[Shutdown] ========== Shutdown Sequence Complete ==========")
             else:
                 failed_names = ", ".join(r.name for r in critical_failures)
-                logger.error(f"[Shutdown] Shutdown completed with CRITICAL step failures: {failed_names}")
+                logger.error("[Shutdown] Shutdown completed with CRITICAL step failures: %s", failed_names)
             return self._cleanup_success
         except asyncio.CancelledError:
             self._cleanup_success = False
@@ -187,11 +194,11 @@ class ShutdownCoordinator:
             raise
         except TimeoutError:
             self._cleanup_success = False
-            logger.error(f"[Shutdown] Cleanup timed out after {timeout_s:.1f}s.")
+            logger.error("[Shutdown] Cleanup timed out after %.1fs.", timeout_s)
             return False
         except Exception as ex:
             self._cleanup_success = False
-            logger.error(f"[Shutdown] Cleanup failed unexpectedly: {ex}", exc_info=True)
+            logger.error("[Shutdown] Cleanup failed unexpectedly: %s", ex, exc_info=True)
             return False
         finally:
             self._cleanup_done = True
@@ -234,7 +241,8 @@ class ShutdownCoordinator:
             results.append(result)
             if critical and not result.ok:
                 logger.error(
-                    f"[Shutdown] Critical step '{name}' failed. Continuing remaining steps to release resources."
+                    "[Shutdown] Critical step '%s' failed. Continuing remaining steps to release resources.",
+                    name,
                 )
         if cancelled:
             raise asyncio.CancelledError()
@@ -245,7 +253,7 @@ class ShutdownCoordinator:
         try:
             await asyncio.wait_for(step(), timeout=step_timeout_s)
             elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.info(f"[Shutdown] {name} done in {elapsed_ms:.1f}ms")
+            logger.info("[Shutdown] %s done in %.1fms", name, elapsed_ms)
             return StepResult(
                 name=name,
                 critical=critical,
@@ -255,11 +263,11 @@ class ShutdownCoordinator:
             )
         except asyncio.CancelledError:
             elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.warning(f"[Shutdown] {name} cancelled")
+            logger.warning("[Shutdown] %s cancelled", name)
             raise
         except TimeoutError as ex:
             elapsed_ms = (time.perf_counter() - start) * 1000
-            logger.error(f"[Shutdown] {name} timed out after {step_timeout_s:.1f}s")
+            logger.error("[Shutdown] %s timed out after %.1fs", name, step_timeout_s)
             return StepResult(
                 name=name,
                 critical=critical,
@@ -269,7 +277,7 @@ class ShutdownCoordinator:
                 error=str(ex),
             )
         except Exception as ex:
-            logger.error(f"[Shutdown] {name} failed: {ex}", exc_info=True)
+            logger.error("[Shutdown] %s failed: %s", name, ex, exc_info=True)
             elapsed_ms = (time.perf_counter() - start) * 1000
             return StepResult(
                 name=name,
@@ -343,7 +351,7 @@ class ShutdownCoordinator:
                     await res
                 logger.info("[Shutdown]   - Toast Manager stopped.")
             except Exception as e:
-                logger.debug(f"[Shutdown]   - Toast Manager cleanup skipped: {e}")
+                logger.debug("[Shutdown]   - Toast Manager cleanup skipped: %s", e, exc_info=True)
         else:
             logger.info("[Shutdown]   - Toast Manager not initialized, skipping.")
 

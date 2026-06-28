@@ -289,7 +289,7 @@ class OnboardingViewModel:
         validator = validators.get(config.id)
         if validator is None:
             if config.block_on_missing_validator:
-                logger.warning(f"[OnboardingVM] Validator for '{config.id}' not bound, blocking step")
+                logger.warning("[OnboardingVM] Validator for '%s' not bound, blocking step", config.id)
                 return False
             return True
 
@@ -392,7 +392,7 @@ class OnboardingViewModel:
             if self.on_sync_progress:
                 self.on_sync_progress(0, I18n.get("wizard_status_cancelled"))
         except Exception as e:
-            logger.warning(f"[OnboardingVM] Failed to cancel sync: {e}")
+            logger.warning("[OnboardingVM] Failed to cancel sync: %s", e, exc_info=True)
         finally:
             self.sync_in_progress = False
             if self.on_sync_state_changed:

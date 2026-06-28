@@ -215,7 +215,7 @@ class TaskCenterView(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[TaskCenterView] refresh_locale error: {e}", exc_info=True)
+            logger.warning("[TaskCenterView] refresh_locale error: %s", e, exc_info=True)
 
     def _on_tasks_updated(self, current_tasks):
         if not self._mounted:
@@ -225,7 +225,8 @@ class TaskCenterView(ft.Container):
                 self.page.run_task(self._safe_refresh, current_tasks)
         except Exception as e:
             logger.error(
-                f"[TaskCenterView] Refresh | ❌ Error scheduling UI update: {e}",
+                "[TaskCenterView] Refresh | ❌ Error scheduling UI update: %s",
+                e,
                 exc_info=True,
             )
 
@@ -233,7 +234,7 @@ class TaskCenterView(ft.Container):
         try:
             self._refresh_ui(current_tasks)
         except Exception as e:
-            logger.debug(f"[TaskCenterView] Refresh skipped: {e}")
+            logger.debug("[TaskCenterView] Refresh skipped: %s", e, exc_info=True)
 
     # --- Pagination ---
 
@@ -289,7 +290,7 @@ class TaskCenterView(ft.Container):
             try:
                 self.update()
             except Exception as exc:
-                logger.debug(f"[TaskCenterView] UI update skipped: {exc}")
+                logger.debug("[TaskCenterView] UI update skipped: %s", exc, exc_info=True)
 
     def _build_task_card(self, t: AppTask) -> ft.Container:
         """Build a single task card with status badge, progress, and actions."""

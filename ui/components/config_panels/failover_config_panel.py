@@ -191,7 +191,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.warning(f"[ProviderCredentialDialog] refresh_locale failed: {e}")
+            logger.warning("[ProviderCredentialDialog] refresh_locale failed: %s", e, exc_info=True)
 
     def _on_provider_change(self, e):
         provider = e.control.value
@@ -666,7 +666,7 @@ class FailoverConfigPanel(ft.Container):
             if self.page:
                 self.update()
         except Exception as e:
-            logger.debug(f"[FailoverConfigPanel] Safe update skipped: {e}")
+            logger.debug("[FailoverConfigPanel] Safe update skipped: %s", e, exc_info=True)
 
     def did_mount(self):
         I18n.subscribe(self._on_locale_change)
@@ -680,7 +680,7 @@ class FailoverConfigPanel(ft.Container):
             self._load_config()
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[FailoverConfigPanel] _on_locale_change failed: {e}")
+            logger.warning("[FailoverConfigPanel] _on_locale_change failed: %s", e, exc_info=True)
 
     def reload_config(self):
         self._load_config()

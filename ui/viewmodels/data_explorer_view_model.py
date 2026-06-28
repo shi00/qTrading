@@ -100,12 +100,17 @@ class DataExplorerViewModel:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical(f"[DataExplorerVM] SYSTEM-LEVEL failure in init_tables: {e}", exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in init_tables: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[DataExplorerVM] Recoverable error ({error_info['code']}) in init_tables: {e}")
+                logger.warning(
+                    "[DataExplorerVM] Recoverable error (%s) in init_tables: %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             else:
-                logger.error(f"[DataExplorerVM] Operational error in init_tables: {e}", exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in init_tables: %s", e, exc_info=True)
             self.error_message = get_error_message(error_info)
             return []
 
@@ -129,12 +134,17 @@ class DataExplorerViewModel:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical(f"[DataExplorerVM] SYSTEM-LEVEL failure in load_table_schema: {e}", exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in load_table_schema: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[DataExplorerVM] Recoverable error ({error_info['code']}) in load_table_schema: {e}")
+                logger.warning(
+                    "[DataExplorerVM] Recoverable error (%s) in load_table_schema: %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             else:
-                logger.error(f"[DataExplorerVM] Operational error in load_table_schema: {e}", exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in load_table_schema: %s", e, exc_info=True)
             self.error_message = get_error_message(error_info)
             return []
 
@@ -183,12 +193,17 @@ class DataExplorerViewModel:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical(f"[DataExplorerVM] SYSTEM-LEVEL failure in query_data: {e}", exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in query_data: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[DataExplorerVM] Recoverable error ({error_info['code']}) in query_data: {e}")
+                logger.warning(
+                    "[DataExplorerVM] Recoverable error (%s) in query_data: %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             else:
-                logger.error(f"[DataExplorerVM] Operational error in query_data: {e}", exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in query_data: %s", e, exc_info=True)
             self.error_message = get_error_message(error_info)
             return self.current_data
         finally:
@@ -220,12 +235,17 @@ class DataExplorerViewModel:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical(f"[DataExplorerVM] SYSTEM-LEVEL failure in query_count: {e}", exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in query_count: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[DataExplorerVM] Recoverable error ({error_info['code']}) in query_count: {e}")
+                logger.warning(
+                    "[DataExplorerVM] Recoverable error (%s) in query_count: %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             else:
-                logger.error(f"[DataExplorerVM] Operational error in query_count: {e}", exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in query_count: %s", e, exc_info=True)
             self.error_message = get_error_message(error_info)
             return 0
 
@@ -259,12 +279,17 @@ class DataExplorerViewModel:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical(f"[DataExplorerVM] SYSTEM-LEVEL failure in export_data: {e}", exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in export_data: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[DataExplorerVM] Recoverable error ({error_info['code']}) in export_data: {e}")
+                logger.warning(
+                    "[DataExplorerVM] Recoverable error (%s) in export_data: %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             else:
-                logger.error(f"[DataExplorerVM] Operational error in export_data: {e}", exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in export_data: %s", e, exc_info=True)
             self.error_message = get_error_message(error_info)
             return pd.DataFrame()
 
@@ -289,12 +314,17 @@ class DataExplorerViewModel:
             error_info = classify_error(e, context="db")
             severity = classify_severity(e, context="db")
             if severity == "system":
-                logger.critical(f"[DataExplorerVM] SYSTEM-LEVEL failure in execute_sql: {e}", exc_info=True)
+                logger.critical("[DataExplorerVM] SYSTEM-LEVEL failure in execute_sql: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[DataExplorerVM] Recoverable error ({error_info['code']}) in execute_sql: {e}")
+                logger.warning(
+                    "[DataExplorerVM] Recoverable error (%s) in execute_sql: %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             else:
-                logger.error(f"[DataExplorerVM] Operational error in execute_sql: {e}", exc_info=True)
+                logger.error("[DataExplorerVM] Operational error in execute_sql: %s", e, exc_info=True)
             self.sql_result = {"success": False, "data": None, "error": get_error_message(error_info)}
             return self.sql_result
         finally:
@@ -310,7 +340,8 @@ class DataExplorerViewModel:
         """Set the current sort column index and direction."""
         if col_index is not None and not isinstance(col_index, int):
             logger.warning(
-                f"[DataExplorerVM] set_sort received non-int col_index: {col_index!r}, ignoring.",
+                "[DataExplorerVM] set_sort received non-int col_index: %r, ignoring.",
+                col_index,
             )
             return
         self.sort_col_index = col_index

@@ -98,7 +98,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug(f"[HistoricalSync] get_latest_trade_date failed, using today: {e}")
+            logger.debug("[HistoricalSync] get_latest_trade_date failed, using today: %s", e, exc_info=True)
         return get_now().date()
 
     @log_async_operation(
@@ -147,7 +147,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as qe:
-                    logger.warning(f"[HistoricalSync] Report | Failed to collect quality scores: {qe}")
+                    logger.warning("[HistoricalSync] Report | Failed to collect quality scores: %s", qe, exc_info=True)
 
         except asyncio.CancelledError:
             result.status = "cancelled"
@@ -161,12 +161,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical(f"[HistoricalSync] SYSTEM-LEVEL failure: {e}", exc_info=True)
+                logger.critical("[HistoricalSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning(f"[HistoricalSync] Recoverable error ({error_info['code']}): {e}")
+                logger.warning("[HistoricalSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
             else:
-                logger.error(f"[HistoricalSync] Operational error: {e}", exc_info=True)
+                logger.error("[HistoricalSync] Operational error: %s", e, exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -202,9 +202,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                f"[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed: {e}",
-            )
+            logger.warning("[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed: %s", e, exc_info=True)
             trade_dates = []
 
         if not trade_dates:
@@ -214,8 +212,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         if len(trade_dates) < days:
             logger.warning(
-                f"[HistoricalSync] Calendar | ⚠️ Only {len(trade_dates)} trade dates returned, "
-                f"fewer than the requested {days} trading days. Sync range may be insufficient."
+                "[HistoricalSync] Calendar | ⚠️ Only %s trade dates returned, "
+                "fewer than the requested %s trading days. Sync range may be insufficient.",
+                len(trade_dates),
+                days,
             )
 
         # Breakpoint Resume (Check Cache for all Critical tables)
@@ -227,7 +227,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(f"[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults: {e}")
+            logger.warning(
+                "[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults: %s",
+                e,
+                exc_info=True,
+            )
             QUALITY_THRESHOLD = 80
 
         effective_synced_tables = TushareClient().get_effective_synced_tables(self.SYNCED_TABLES)
@@ -279,7 +283,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         if quality is None:
                             low_quality_dates.append(date)
                             logger.debug(
-                                f"[HistoricalSync] QualityCheck | {date} missing quality result, mark for re-sync"
+                                "[HistoricalSync] QualityCheck | %s missing quality result, mark for re-sync", date
                             )
                             continue
 
@@ -287,13 +291,18 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             low_quality_dates.append(date)
                             issues_str = ", ".join(quality.get("issues", [])[:3])
                             logger.debug(
-                                f"[HistoricalSync] QualityCheck | {date} score={quality.get('score')} < {QUALITY_THRESHOLD}, "
-                                f"expected_base={quality.get('expected_base')}, issues: [{issues_str}]"
+                                "[HistoricalSync] QualityCheck | %s score=%s < %s, expected_base=%s, issues: [%s]",
+                                date,
+                                quality.get("score"),
+                                QUALITY_THRESHOLD,
+                                quality.get("expected_base"),
+                                issues_str,
                             )
 
                     if low_quality_dates:
                         logger.info(
-                            f"[HistoricalSync] QualityCheck | Found {len(low_quality_dates)} low-quality dates, will re-sync"
+                            "[HistoricalSync] QualityCheck | Found %s low-quality dates, will re-sync",
+                            len(low_quality_dates),
                         )
                         for d in low_quality_dates:
                             existing.discard(d)
@@ -301,7 +310,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as qe:
-                    logger.warning(f"[HistoricalSync] QualityCheck | Failed: {qe}")
+                    logger.warning("[HistoricalSync] QualityCheck | Failed: %s", qe, exc_info=True)
 
             original_count = len(trade_dates)
             trade_dates = [d for d in trade_dates if normalize_date(d) not in existing_str]
@@ -310,12 +319,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if skipped > 0:
                 logger.debug(
-                    f"[HistoricalSync] Resume | Skipped {skipped} high-quality dates (threshold={QUALITY_THRESHOLD}).",
+                    "[HistoricalSync] Resume | Skipped %s high-quality dates (threshold=%s).",
+                    skipped,
+                    QUALITY_THRESHOLD,
                 )
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(f"[HistoricalSync] Resume | ⚠️ Cache check failed: {e}")
+            logger.warning("[HistoricalSync] Resume | ⚠️ Cache check failed: %s", e, exc_info=True)
 
         total_days = len(trade_dates)
         concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
@@ -349,7 +360,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             f"Circuit breaker triggered: {consecutive_failures} consecutive failures",
                         )
                         logger.error(
-                            f"[HistoricalSync] CircuitBreaker | ❌ Abort: {consecutive_failures} consecutive failures exceeded threshold {CB_THRESHOLD}",
+                            "[HistoricalSync] CircuitBreaker | ❌ Abort: %s consecutive failures exceeded threshold %s",
+                            consecutive_failures,
+                            CB_THRESHOLD,
                         )
                         return
 
@@ -368,10 +381,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    logger.warning(
-                        f"[HistoricalSync] DaySync | ⚠️ Failed {date_obj}: {e}",
-                        exc_info=True,
-                    )
+                    logger.warning("[HistoricalSync] DaySync | ⚠️ Failed %s: %s", date_obj, e, exc_info=True)
                     async with counter_lock:
                         consecutive_failures += 1
                         failed_dates.append(date_obj)
@@ -398,7 +408,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 retry_round += 1
                 backoff = min(30, 2**retry_round)
                 logger.info(
-                    f"[HistoricalSync] Backoff | {batch_failures} failures in batch, waiting {backoff}s (round {retry_round})",
+                    "[HistoricalSync] Backoff | %s failures in batch, waiting %ss (round %s)",
+                    batch_failures,
+                    backoff,
+                    retry_round,
                 )
                 await asyncio.sleep(backoff)
             else:
@@ -410,7 +423,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         if failed_dates and not self._shutdown_event.is_set() and not abort_sync and not self._cancelled:
             MAX_RETRIES = ConfigHandler.get_sync_retry_count()
             logger.debug(
-                f"[HistoricalSync] Retry | Retrying {len(failed_dates)} failed dates...",
+                "[HistoricalSync] Retry | Retrying %s failed dates...",
+                len(failed_dates),
             )
 
             for _retry_round in range(MAX_RETRIES):
@@ -428,16 +442,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     async with sem:
                         try:
                             await self.sync_daily_market_snapshot(date, force=True, sync_result=result)
-                            logger.debug(
-                                f"[HistoricalSync] Retry | ✅ Recovered {date}",
-                            )
+                            logger.debug("[HistoricalSync] Retry | ✅ Recovered %s", date)
                             result.added += 1
                         except EngineDisposedError:
                             raise
                         except Exception as retry_e:
-                            logger.warning(
-                                f"[HistoricalSync] Retry | ⚠️ Failed {date}: {retry_e}",
-                            )
+                            logger.warning("[HistoricalSync] Retry | ⚠️ Failed %s: %s", date, retry_e, exc_info=True)
                             failed_list.append(date)
 
                 # Batch Retry
@@ -466,11 +476,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
             pass  # Already logged by CircuitBreaker ERROR above
         elif result.status == "partial":
             logger.warning(
-                f"[HistoricalSync] Run | ⚠️ Partial. Added={result.added}, FailedDates={len(failed_dates)}",
+                "[HistoricalSync] Run | ⚠️ Partial. Added=%s, FailedDates=%s",
+                result.added,
+                len(failed_dates),
             )
         else:
             logger.info(
-                f"[HistoricalSync] Run | ✅ Complete. Added={result.added}, FailedDates={len(failed_dates)}",
+                "[HistoricalSync] Run | ✅ Complete. Added=%s, FailedDates=%s",
+                result.added,
+                len(failed_dates),
             )
 
     async def sync_daily_market_snapshot(
@@ -490,9 +504,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             # Check ALL synced tables exist before skipping
             # This ensures data integrity - only skip if all tables have data
             if await self.context.cache.check_data_exists(trade_date):
-                logger.debug(
-                    f"[HistoricalSync] DaySync | Cache hit for {trade_date}, skipping.",
-                )
+                logger.debug("[HistoricalSync] DaySync | Cache hit for %s, skipping.", trade_date)
                 return True
 
         # Define fetch config
@@ -517,13 +529,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except TushareAPIPermissionError as e:
-                logger.warning(
-                    f"[HistoricalSync] DaySync | ⚠️ PERMISSION_DENIED for {name}: {e}",
-                )
+                logger.warning("[HistoricalSync] DaySync | ⚠️ PERMISSION_DENIED for %s: %s", name, e, exc_info=True)
                 return (key, None, "permission_denied")
             except Exception as e:
                 logger.warning(
-                    f"[HistoricalSync] DaySync | ⚠️ Fetch {name} failed for {trade_date}: {e}",
+                    "[HistoricalSync] DaySync | ⚠️ Fetch %s failed for %s: %s",
+                    name,
+                    trade_date,
+                    e,
+                    exc_info=True,
                 )
                 return (key, None, e)
 
@@ -582,7 +596,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
             if df is None:
                 if key in error_map:
-                    logger.warning(f"[HistoricalSync] DaySync | ⚠️ Fetch failed for {key}, skipping sync_status update")
+                    logger.warning("[HistoricalSync] DaySync | ⚠️ Fetch failed for %s, skipping sync_status update", key)
                 return {"saved": None, "fetched": 0, "success": False, "result_status": SYNC_RESULT_FETCH_FAILED}
 
             fetched_count = len(df)
@@ -611,12 +625,17 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 except Exception as e:
                     if critical:
                         logger.error(
-                            f"[HistoricalSync] DaySync | ❌ Critical save failed for {key}: {e}",
+                            "[HistoricalSync] DaySync | ❌ Critical save failed for %s: %s",
+                            key,
+                            e,
                             exc_info=True,
                         )
                         raise e
                     logger.warning(
-                        f"[HistoricalSync] DaySync | ⚠️ Non-critical save {key} failed: {e}, skipping sync_status update",
+                        "[HistoricalSync] DaySync | ⚠️ Non-critical save %s failed: %s, skipping sync_status update",
+                        key,
+                        e,
+                        exc_info=True,
                     )
                     return {
                         "saved": None,
@@ -626,7 +645,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     }
 
             if df is not None and df.empty:
-                logger.debug(f"[HistoricalSync] DaySync | {key} returned empty data, will update sync_status with 0")
+                logger.debug("[HistoricalSync] DaySync | %s returned empty data, will update sync_status with 0", key)
             return {"saved": 0, "fetched": fetched_count, "success": True, "result_status": SYNC_RESULT_EMPTY}
 
         # 1. Quotes (Critical)
@@ -642,12 +661,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
             missing_cols = [c for c in required_quote_cols if c not in df_quotes.columns]
             if missing_cols:
                 logger.warning(
-                    f"[HistoricalSync] DaySync | ⚠️ Critical columns missing in quotes for {trade_date}: {missing_cols}"
+                    "[HistoricalSync] DaySync | ⚠️ Critical columns missing in quotes for %s: %s",
+                    trade_date,
+                    missing_cols,
                 )
             if "adj_factor" not in df_quotes.columns:
                 logger.warning(
-                    f"[HistoricalSync] DaySync | ⚠️ adj_factor column missing in quotes for {trade_date}. "
+                    "[HistoricalSync] DaySync | ⚠️ adj_factor column missing in quotes for %s. "
                     "This may affect price adjustment calculations.",
+                    trade_date,
                 )
                 if sync_result is not None:
                     sync_result.warnings.append(f"adj_factor missing for {trade_date}")
@@ -658,7 +680,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             missing_basic_cols = [c for c in required_basic_cols if c not in df_basic.columns]
             if missing_basic_cols:
                 logger.warning(
-                    f"[HistoricalSync] DaySync | ⚠️ Critical columns missing in basic for {trade_date}: {missing_basic_cols}"
+                    "[HistoricalSync] DaySync | ⚠️ Critical columns missing in basic for %s: %s",
+                    trade_date,
+                    missing_basic_cols,
                 )
 
         # Yield control
@@ -702,12 +726,15 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if len(df_north) == 0:
                         sample_codes = data_map.get("north")["ts_code"].head(5).tolist()  # type: ignore[optional-subscript]
                         logger.debug(
-                            f"[HistoricalSync] DaySync | {filtered_count} records filtered (southbound HK stocks, not northbound A-shares). "
-                            f"Sample ts_codes: {sample_codes}"
+                            "[HistoricalSync] DaySync | %s records filtered (southbound HK stocks, not northbound A-shares). "
+                            "Sample ts_codes: %s",
+                            filtered_count,
+                            sample_codes,
                         )
                     else:
                         logger.debug(
-                            f"[HistoricalSync] DaySync | Filtered {filtered_count} non-A-share records from northbound data"
+                            "[HistoricalSync] DaySync | Filtered %s non-A-share records from northbound data",
+                            filtered_count,
                         )
                 if not df_north.empty:
                     north_rows = await cache.save_northbound(df_north)
@@ -729,9 +756,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                f"[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical): {e}",
-            )
+            logger.warning("[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical): %s", e, exc_info=True)
             north_result = {"saved": None, "fetched": 0, "success": False}
 
         async def safe_update_status(table_name: str, result: typing.Any, trade_date: str | datetime.date | None):
@@ -748,7 +773,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     status="skipped_permission",
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
-                logger.debug(f"[HistoricalSync] Recorded skipped_permission for {table_name}")
+                logger.debug("[HistoricalSync] Recorded skipped_permission for %s", table_name)
                 return
 
             if saved is not None:
@@ -756,8 +781,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if table_name in CRITICAL_EMPTY_TABLES and result_status == SYNC_RESULT_EMPTY:
                     effective_status = "empty"
                     logger.warning(
-                        f"[HistoricalSync] DaySync | ⚠️ Critical table {table_name} returned EMPTY for {trade_date}, "
-                        f"marking sync_status as 'empty' instead of 'success'"
+                        "[HistoricalSync] DaySync | ⚠️ Critical table %s returned EMPTY for %s, "
+                        "marking sync_status as 'empty' instead of 'success'",
+                        table_name,
+                        trade_date,
                     )
                 await cache.update_sync_status(
                     table_name,
@@ -777,7 +804,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     or (SYNC_RESULT_SAVE_FAILED if is_save_failed else SYNC_RESULT_FETCH_FAILED),
                 )
                 logger.debug(
-                    f"[HistoricalSync] Recorded {'save_failed' if is_save_failed else 'fetch_failed'} for {table_name}"
+                    "[HistoricalSync] Recorded %s for %s",
+                    "save_failed" if is_save_failed else "fetch_failed",
+                    table_name,
                 )
 
         def verify_data_integrity(key: str, result_data: typing.Any, strict: bool = False):
@@ -798,8 +827,11 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if strict and saved < fetched * 0.95:
                         sync_result.status = SyncStatus.PARTIAL.value
                         logger.warning(
-                            f"[HistoricalSync] DaySync | ⚠️ Strict mode: {key} data loss > 5% "
-                            f"(saved={saved}, fetched={fetched}), marking sync_result as PARTIAL"
+                            "[HistoricalSync] DaySync | ⚠️ Strict mode: %s data loss > 5%% "
+                            "(saved=%s, fetched=%s), marking sync_result as PARTIAL",
+                            key,
+                            saved,
+                            fetched,
                         )
 
         await safe_update_status("daily_quotes", quotes_rows, trade_date)
@@ -828,10 +860,19 @@ class HistoricalSyncStrategy(ISyncStrategy):
         verify_data_integrity("index_basic", index_basic_result)
 
         logger.debug(
-            f"[HistoricalSync] Sync status update for {trade_date}: "
-            f"quotes={quotes_rows}, basic={basic_rows}, mf={mf_result}, "
-            f"limit={limit_result}, lhb={lhb_result}, block={block_result}, "
-            f"index={index_result}, index_basic={index_basic_result}"
+            "[HistoricalSync] Sync status update for %s: "
+            "quotes=%s, basic=%s, mf=%s, "
+            "limit=%s, lhb=%s, block=%s, "
+            "index=%s, index_basic=%s",
+            trade_date,
+            quotes_rows,
+            basic_rows,
+            mf_result,
+            limit_result,
+            lhb_result,
+            block_result,
+            index_result,
+            index_basic_result,
         )
         return True
 
@@ -852,16 +893,12 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     )
                 return count
         except (ConnectionError, TimeoutError) as e:
-            logger.error(
-                f"[HistoricalSync] MoneyFlow | ❌ Network error: {e}",
-            )
+            logger.error("[HistoricalSync] MoneyFlow | ❌ Network error: %s", e, exc_info=True)
             raise
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                f"[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed: {e}",
-            )
+            logger.warning("[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed: %s", e, exc_info=True)
         return 0
 
     async def sync_northbound(self, trade_date: datetime.date | None = None):
@@ -883,14 +920,10 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         )
                     return count
         except (ConnectionError, TimeoutError) as e:
-            logger.error(
-                f"[HistoricalSync] Northbound | ❌ Network error: {e}",
-            )
+            logger.error("[HistoricalSync] Northbound | ❌ Network error: %s", e, exc_info=True)
             raise
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                f"[HistoricalSync] Northbound | ⚠️ Standalone sync failed: {e}",
-            )
+            logger.warning("[HistoricalSync] Northbound | ⚠️ Standalone sync failed: %s", e, exc_info=True)
         return 0

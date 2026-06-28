@@ -12,6 +12,7 @@ from data.persistence.models import (
     get_model_columns,
     get_model_pk_columns,
 )
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now, to_utc_for_db
 
@@ -172,6 +173,10 @@ class StockDao(BaseDao):
             pk_columns=pk_columns,
         )
 
+    @log_async_operation(
+        operation_name="StockDao.overwrite_concepts",
+        threshold_ms=PerfThreshold.DB_BULK_IO,
+    )
     async def overwrite_concepts(self, df):
         """
         Transactional overwrite of concepts.
@@ -414,6 +419,10 @@ class StockDao(BaseDao):
     AI_CONCEPT_FAILURE_MAX_RETRY = 3
     AI_CONCEPT_FAILURE_COOLDOWN_SECONDS = 24 * 3600
 
+    @log_async_operation(
+        operation_name="StockDao.upsert_ai_concept_failure",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
     async def upsert_ai_concept_failure(
         self,
         ts_code: str,

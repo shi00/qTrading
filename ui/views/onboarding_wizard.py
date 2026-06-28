@@ -1038,7 +1038,7 @@ class OnboardingWizard(ft.Container):
             self._rebuild_steps_after_locale_change()
             self._safe_update()
         except Exception as e:
-            logger.warning(f"[OnboardingWizard] _on_locale_change failed: {e}")
+            logger.warning("[OnboardingWizard] _on_locale_change failed: %s", e, exc_info=True)
 
     def _rebuild_steps_after_locale_change(self):
         """语言切换后重建子面板与 steps_content，并重新绑定 VM 回调。"""
@@ -1094,7 +1094,7 @@ class OnboardingWizard(ft.Container):
             new_locale = self.wizard_language_dropdown.value
             if not ConfigHandler.set_locale(new_locale):
                 self.wizard_language_dropdown.value = I18n.current_locale()
-                logger.warning(f"[OnboardingWizard] Failed to persist locale: {new_locale}")
+                logger.warning("[OnboardingWizard] Failed to persist locale: %s", new_locale)
                 self._safe_update()
                 return
             # I18n.set_locale 会自动触发 _on_locale_change → _rebuild_steps_after_locale_change
@@ -1118,7 +1118,7 @@ class OnboardingWizard(ft.Container):
             if self.page:
                 self.update()
         except Exception as exc:
-            logger.debug(f"[OnboardingWizard] UI update skipped: {exc}")
+            logger.debug("[OnboardingWizard] UI update skipped: %s", exc, exc_info=True)
 
     def _show_loading_overlay(self, show: bool):  # pragma: no cover
         self.loading_overlay.visible = show

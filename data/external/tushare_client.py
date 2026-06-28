@@ -475,6 +475,10 @@ class TushareClient:
                 effective.append(table)
         return effective
 
+    @log_async_operation(
+        operation_name="TushareClient.persist_capabilities_to_app_state",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
     async def persist_capabilities_to_app_state(self) -> None:
         """
         Persist capability cache to AppState for cross-session durability.
@@ -508,6 +512,10 @@ class TushareClient:
         await set_app_state(engine, "tushare_capabilities", json.dumps(payload))
         logger.info("[TushareClient] Persisted %s capabilities to AppState", len(capabilities))
 
+    @log_async_operation(
+        operation_name="TushareClient.load_capabilities_from_app_state",
+        threshold_ms=PerfThreshold.DB_SINGLE_QUERY,
+    )
     async def load_capabilities_from_app_state(self) -> None:
         """
         Load capability cache from AppState on startup.
@@ -542,6 +550,10 @@ class TushareClient:
         except Exception as e:
             logger.warning("[TushareClient] Failed to load capabilities: %s", DataSanitizer.sanitize_error(e))
 
+    @log_async_operation(
+        operation_name="TushareClient.probe_api_capabilities",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def probe_api_capabilities(self) -> dict[str, bool | None]:
         """
         Probe key APIs to determine their availability for current token.
