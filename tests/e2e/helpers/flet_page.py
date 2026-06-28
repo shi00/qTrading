@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Any
 
-from playwright.async_api import Page, Playwright, Browser, BrowserContext
+from playwright.async_api import Page, Playwright, Browser, BrowserContext  # type: ignore[import-untyped]  # e2e optional dep, installed only in e2e CI job
 
 from tests.e2e.timeouts import TIMEOUTS
 

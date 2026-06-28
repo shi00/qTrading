@@ -189,7 +189,7 @@ _assert_columns_subset("SYNC_STATUS_COLUMNS", SYNC_STATUS_COLUMNS, SyncStatus)
 
 @pytest.fixture(scope="session")
 async def e2e_playwright():
-    from playwright.async_api import async_playwright
+    from playwright.async_api import async_playwright  # type: ignore[import-untyped]  # e2e optional dep, installed only in e2e CI job
 
     async with async_playwright() as p:
         yield p
