@@ -134,7 +134,14 @@ async def test_engine():
     if _test_engine is None:
         await _ensure_test_db()
 
-        _test_engine = create_async_engine(TEST_DB_URL, echo=False)
+        # 强制会话时区为 UTC，与生产环境前提对齐（stock_dao.py 注释：PG 时区必须为 UTC）。
+        # 否则 SQL `now()` 返回本地时区时间，与 to_utc_for_db() 写入的 UTC tz-naive 比较时偏移，
+        # 导致 cooldown / next_retry_at 语义错误（本地 Windows PG 默认 Asia/Shanghai 会失败）。
+        _test_engine = create_async_engine(
+            TEST_DB_URL,
+            echo=False,
+            connect_args={"server_settings": {"timezone": "UTC"}},
+        )
 
         from data.persistence.db_migrator import DatabaseMigrator
 
