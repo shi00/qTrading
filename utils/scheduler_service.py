@@ -445,7 +445,10 @@ class SchedulerService:
             tm = TaskManager()
             cancel_event = tm.get_cancel_event(task_id)
             processor = DataProcessor()
-            tm.update_progress(task_id, 0.05, I18n.get("sched_ai_concept_clear_history"))
+            # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
+            # M3 fix: CancelledError 带消息，便于日志区分"调度取消"与"框架取消"
+            if not tm.update_progress(task_id, 0.05, I18n.get("sched_ai_concept_clear_history")):
+                raise asyncio.CancelledError("task cancelled by scheduler (update_progress returned False)")
             # Scheduled run: manual_trigger=False → only sync free data sources, no LLM call
             await processor.run_ai_concept_tagging(
                 task_id=task_id,

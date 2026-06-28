@@ -5,6 +5,7 @@ import datetime
 from unittest.mock import MagicMock, AsyncMock, PropertyMock, patch
 import pandas as pd
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.base import SyncResult, SyncStatus
 
@@ -1002,3 +1003,21 @@ class TestHistoricalSyncRunDeepBranches:
         result = SyncResult()
         await strategy._run_historical_sync(5, None, result)
         assert result is not None
+
+
+class TestHistoricalSyncRunEngineDisposedError:
+    """R5 举一反三 fix: EngineDisposedError 必须 raise 让调用方感知，不可 swallow"""
+
+    @pytest.mark.asyncio
+    async def test_run_reraises_engine_disposed(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = HistoricalSyncStrategy(ctx)
+
+        async def mock_run_hist(days, progress_callback, result):
+            raise EngineDisposedError("Engine disposed")
+
+        strategy._run_historical_sync = mock_run_hist
+        with pytest.raises(EngineDisposedError):
+            await strategy._run_impl()

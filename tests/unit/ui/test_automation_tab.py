@@ -30,6 +30,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -51,6 +53,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -77,6 +81,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -103,6 +109,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -128,6 +136,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -143,6 +153,8 @@ class TestAutomationTab:
                 tab.on_ai_concept_toggle(event)
 
                 mock_ch.set_ai_concept_schedule_enabled.assert_called_once_with(True)
+                # UI-Minor: Switch 从 False → True 时 search_engine 应同步启用
+                assert tab.ai_concept_search_engine.disabled is False
 
     def test_on_ai_concept_time_change(self):
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
@@ -153,6 +165,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -178,6 +192,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -200,6 +216,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -221,6 +239,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -243,6 +263,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "test"
@@ -271,6 +293,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "translated_text"
@@ -284,7 +308,7 @@ class TestAutomationTab:
                 assert tab.schedule_enabled.label == "translated_text"
 
     def test_on_locale_change_preserves_dropdown_value(self):
-        """§5.8 规范 4：_on_locale_change 重建 time_options 后 schedule_time/doubao_time 的 value 必须保留。"""
+        """§5.8 规范 4：_on_locale_change 重建 time_options 后 schedule_time/ai_concept_time 的 value 必须保留。"""
         with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
             mock_ch.is_auto_update_enabled.return_value = True
             mock_ch.get_auto_update_time.return_value = "16:30"
@@ -293,6 +317,8 @@ class TestAutomationTab:
             mock_ch.save_config = MagicMock()
             mock_ch.set_ai_concept_schedule_enabled = MagicMock()
             mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.set_ai_concept_search_engine = MagicMock()
 
             with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
                 mock_i18n.get.return_value = "translated_text"
@@ -303,22 +329,238 @@ class TestAutomationTab:
                 tab.page = _FakePage()
                 # 模拟用户选择了一个不在默认 _build_time_options 中的值
                 tab.schedule_time.value = "08:00"
-                tab.doubao_time.value = "08:00"
+                tab.ai_concept_time.value = "08:00"
 
                 # 重建 options 期间不应丢失 value
                 original_schedule_value = tab.schedule_time.value
-                original_doubao_value = tab.doubao_time.value
+                original_ai_concept_value = tab.ai_concept_time.value
                 tab._on_locale_change("en")
 
                 assert tab.schedule_time.value == original_schedule_value
                 assert tab.schedule_time.value == "08:00"
-                assert tab.doubao_time.value == original_doubao_value
-                assert tab.doubao_time.value == "08:00"
+                assert tab.ai_concept_time.value == original_ai_concept_value
+                assert tab.ai_concept_time.value == "08:00"
                 # options 被重建（新对象，非 None）
                 assert tab.schedule_time.options is not None
                 assert len(tab.schedule_time.options) > 0
-                assert tab.doubao_time.options is not None
-                assert len(tab.doubao_time.options) > 0
+                assert tab.ai_concept_time.options is not None
+                assert len(tab.ai_concept_time.options) > 0
+
+
+class TestAutomationTabSearchEngine:
+    """ai_concept_search_engine Dropdown 配置测试。"""
+
+    def test_init_with_search_engine_default(self):
+        """默认值 search_std 应正确加载到 Dropdown。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_ch.get_auto_update_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "test"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                assert tab.ai_concept_search_engine.value == "search_std"
+                # UI-L2: Switch 初始关闭时 search_engine 应被禁用
+                assert tab.ai_concept_search_engine.disabled is True
+
+    def test_init_with_search_engine_pro(self):
+        """配置返回 search_pro 时应正确加载到 Dropdown。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_ch.get_auto_update_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_pro"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "test"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                assert tab.ai_concept_search_engine.value == "search_pro"
+
+    def test_on_search_engine_change_calls_set(self):
+        """切换 search_engine 后应调用 ConfigHandler.set_ai_concept_search_engine。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_ch.get_auto_update_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "test"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                tab.ai_concept_search_engine.value = "search_pro"
+                tab.on_ai_concept_search_engine_change(MagicMock())
+                mock_ch.set_ai_concept_search_engine.assert_called_once_with("search_pro")
+
+    def test_on_ai_concept_toggle_disables_search_engine(self):
+        """C2：Switch 关闭时应同步禁用 search_engine Dropdown。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_ch.get_auto_update_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "test"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                # 初始 enabled=True，Dropdown 应可编辑
+                assert tab.ai_concept_search_engine.disabled is False
+                # 切换为 False
+                tab.ai_concept_enabled.value = False
+                tab.on_ai_concept_toggle(MagicMock())
+                assert tab.ai_concept_search_engine.disabled is True
+
+    def test_on_locale_change_preserves_search_engine_value(self):
+        """§5.8 规范 4：_on_locale_change 重建 search_engine options 后 value 必须保留。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_ch.get_auto_update_time.return_value = "16:30"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "translated_text"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                tab.ai_concept_search_engine.value = "search_pro"
+                original = tab.ai_concept_search_engine.value
+                tab._on_locale_change("en")
+                assert tab.ai_concept_search_engine.value == original
+                assert tab.ai_concept_search_engine.value == "search_pro"
+                assert tab.ai_concept_search_engine.options is not None
+                assert len(tab.ai_concept_search_engine.options) > 0
+
+    def test_on_locale_change_preserves_disabled_state_when_switch_off(self):
+        """§5.8 场景补全：Switch 关闭时语言切换后 search_engine.disabled 必须仍为 True。
+
+        验证 _on_locale_change 和 _build_content 重建不重置 Dropdown 的 disabled 状态。
+        """
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_ch.get_auto_update_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "translated_text"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                # Switch 关闭时 search_engine 应禁用
+                assert tab.ai_concept_search_engine.disabled is True
+                tab._on_locale_change("en")
+                # 语言切换后 disabled 状态必须保留
+                assert tab.ai_concept_search_engine.disabled is True
+                # value 也应保留
+                assert tab.ai_concept_search_engine.value == "search_std"
+
+    def test_on_locale_change_preserves_disabled_state_when_switch_on(self):
+        """§5.8 场景补全：Switch 开启时语言切换后 search_engine.disabled 必须仍为 False。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = True
+            mock_ch.get_auto_update_time.return_value = "16:30"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_pro"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "translated_text"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                # Switch 开启时 search_engine 应可编辑
+                assert tab.ai_concept_search_engine.disabled is False
+                tab._on_locale_change("en")
+                # 语言切换后 disabled 状态必须保留
+                assert tab.ai_concept_search_engine.disabled is False
+                assert tab.ai_concept_search_engine.value == "search_pro"
+
+    def test_update_theme_refreshes_search_engine_colors(self):
+        """update_theme 应刷新 search_engine Dropdown 的 bgcolor/color/border_color。"""
+        with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+            mock_ch.is_auto_update_enabled.return_value = False
+            mock_ch.get_auto_update_time.return_value = "16:00"
+            mock_ch.is_ai_concept_schedule_enabled.return_value = False
+            mock_ch.get_ai_concept_schedule_time.return_value = "16:00"
+            mock_ch.get_ai_concept_search_engine.return_value = "search_std"
+            mock_ch.save_config = MagicMock()
+            mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+            mock_ch.set_ai_concept_schedule_time = MagicMock()
+            mock_ch.set_ai_concept_search_engine = MagicMock()
+
+            with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+                mock_i18n.get.return_value = "test"
+                mock_i18n.subscribe.return_value = "sub_id"
+                mock_i18n.unsubscribe = MagicMock()
+
+                tab = AutomationTab(MagicMock())
+                tab.page = _FakePage()
+                # 清空颜色以验证 update_theme 会设置
+                tab.ai_concept_search_engine.bgcolor = None
+                tab.ai_concept_search_engine.color = None
+                tab.ai_concept_search_engine.border_color = None
+                tab.update_theme()
+                from ui.theme import AppColors
+
+                assert tab.ai_concept_search_engine.bgcolor == AppColors.INPUT_BG
+                assert tab.ai_concept_search_engine.color == AppColors.INPUT_TEXT
+                assert tab.ai_concept_search_engine.border_color == AppColors.INPUT_BORDER
 
 
 class TestNotificationsTab:

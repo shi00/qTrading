@@ -383,6 +383,7 @@
     "settings_ai_concept_update": "Auto-Rebuild AI Concepts",
     "settings_ai_concept_desc": "Schedule automatic sync of concept data (AKShare sectors + Tushare limit-up reasons)",
     "settings_ai_concept_search_engine": "Search Engine",
+    "settings_ai_concept_search_engine_desc": "Select the Zhipu web search engine for AI concept rebuild",
     "settings_ai_concept_search_std": "Standard Search (¥0.01/call)",
     "settings_ai_concept_search_pro": "Enhanced Search (¥0.03/call, incl. Sogou + Quark)",
     "settings_saturdays": "Saturdays Only",

@@ -931,6 +931,33 @@ class TestAiConceptLogicClosure:
             # 验证 cancel_event 被正确传递给 run_ai_concept_tagging（P0-2 取消链路）
             assert call_kwargs.get("cancel_event") is sentinel_cancel_event
 
+    @pytest.mark.asyncio
+    async def test_t8_update_progress_false_raises_cancelled(self):
+        """T8 fix: update_progress 返回 False 时立即 raise CancelledError 早退。"""
+        import asyncio
+
+        svc = _make_svc()
+        mock_dp = MagicMock()
+        mock_dp.run_ai_concept_tagging = AsyncMock()
+        mock_tm = MagicMock()
+        mock_tm.get_cancel_event.return_value = MagicMock()
+        mock_tm.update_progress = MagicMock(return_value=False)  # 模拟任务已取消
+        now_val = datetime(2024, 6, 15, 10, 0)
+
+        with (
+            patch("utils.scheduler_service.ConfigHandler") as mock_ch,
+            patch("utils.scheduler_service.get_now", return_value=now_val),
+            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("services.task_manager.TaskManager", return_value=mock_tm),
+        ):
+            mock_ch.is_ai_concept_schedule_enabled.return_value = True
+            await svc._run_ai_concept_tagger()
+            factory = mock_tm.submit_task.call_args.kwargs["coroutine_factory"]
+            with pytest.raises(asyncio.CancelledError):
+                await factory("test_task")
+            # 验证后续的 run_ai_concept_tagging 未执行（早退生效）
+            mock_dp.run_ai_concept_tagging.assert_not_called()
+
 
 class TestNightlyPredictionLogicClosure:
     @pytest.mark.asyncio

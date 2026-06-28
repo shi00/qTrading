@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import typing
 from datetime import date, datetime
 
 import pandas as pd
@@ -12,7 +13,7 @@ from data.constants import (
     SYNC_RESULT_SKIPPED_PERMISSION,
 )
 from data.persistence.models import StockSyncStatus, get_model_columns, get_model_pk_columns
-from utils.time_utils import get_now, parse_date
+from utils.time_utils import get_now, parse_date, to_utc_for_db
 
 from .base_dao import BaseDao
 
@@ -49,7 +50,9 @@ class SyncDao(BaseDao):
             else:
                 last_result_status = SYNC_RESULT_FETCH_FAILED
 
-        now = get_now().replace(tzinfo=None)
+        now = typing.cast(
+            datetime, to_utc_for_db(get_now())
+        )  # T4 fix: 与 server_default=now() 时区一致（前提：DB 会话时区为 UTC）
         sql = '''INSERT INTO sync_status ("table_name","last_sync_date","last_data_date","record_count","status","last_result_status","updated_at")
                VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT("table_name") DO UPDATE SET
@@ -102,7 +105,9 @@ class SyncDao(BaseDao):
             return set()
 
     async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):
-        now = get_now().replace(tzinfo=None)
+        now = typing.cast(
+            datetime, to_utc_for_db(get_now())
+        )  # T4 fix: 与 server_default=now() 时区一致（前提：DB 会话时区为 UTC）
         df = pd.DataFrame(
             [
                 {

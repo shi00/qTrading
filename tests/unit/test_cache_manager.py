@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import inspect
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock, PropertyMock
@@ -1795,6 +1796,29 @@ class TestCacheManagerNormalizeNewsItem:
         item = {"content": "test", "time": "invalid_date"}
         result = CacheManager.normalize_news_item(item)
         assert result["publish_time"] is not None
+
+    def test_publish_time_default_is_utc_tz_naive(self):
+        """M1 举一反三 fix: 默认 publish_time 应为 UTC tz-naive，与 server_default=now() 时区一致"""
+        item = {"content": "test"}
+        result = CacheManager.normalize_news_item(item)
+        pt = result["publish_time"]
+        assert isinstance(pt, datetime.datetime)
+        assert pt.tzinfo is None  # tz-naive
+        # 验证近似当前 UTC 时间（避免 8 小时偏差导致写库时间错误）
+        utc_now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        diff = abs((pt - utc_now).total_seconds())
+        assert diff < 60  # 1 分钟内
+
+    def test_publish_time_fallback_on_parse_error_is_utc_tz_naive(self):
+        """M1 举一反三 fix: publish_time 解析失败 fallback 也应为 UTC tz-naive"""
+        item = {"content": "test", "time": "invalid_date"}
+        result = CacheManager.normalize_news_item(item)
+        pt = result["publish_time"]
+        assert isinstance(pt, datetime.datetime)
+        assert pt.tzinfo is None
+        utc_now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+        diff = abs((pt - utc_now).total_seconds())
+        assert diff < 60
 
     def test_with_tags(self):
         item = {"content": "test", "tags": "【政策】"}

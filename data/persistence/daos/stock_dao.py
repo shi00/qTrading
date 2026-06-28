@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import typing
 
 import pandas as pd
 
@@ -12,7 +13,7 @@ from data.persistence.models import (
     get_model_pk_columns,
 )
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
+from utils.time_utils import get_now, to_utc_for_db
 
 from .base_dao import BaseDao, EngineDisposedError
 
@@ -181,7 +182,8 @@ class StockDao(BaseDao):
 
         cols = get_model_columns(StockConcepts, exclude=set())
         df = df.copy()
-        df["updated_at"] = get_now().replace(tzinfo=None)
+        # T4 fix: 与 server_default=now() 保持 UTC 一致（S1-6 fix 模式），避免 tz-naive CST 与 DB 比较偏差 8 小时
+        df["updated_at"] = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
 
         params = await ThreadPoolManager().run_async(
             TaskType.CPU, self._prepare_data_params, df, cols, "stock_concepts"
@@ -425,7 +427,11 @@ class StockDao(BaseDao):
         使用 UPSERT（ON CONFLICT ts_code DO UPDATE）保证幂等。
         """
         cooldown = cooldown_seconds if cooldown_seconds is not None else self.AI_CONCEPT_FAILURE_COOLDOWN_SECONDS
-        now = get_now().replace(tzinfo=None)
+        # T4 fix: 写入 UTC tz-naive（S1-6 fix 模式），与 DB server_default=now() / SQL now() 保持时区一致。
+        # 原代码 get_now().replace(tzinfo=None) 写入 tz-naive CST，与 SQL `next_retry_at <= now()` 比较时
+        # 在非 CST 服务器上会有 8 小时偏差，导致 24h 冷却实际变成 16h 或 32h。
+        # 前提：PostgreSQL 服务器/会话时区为 UTC（生产环境已确认）。
+        now = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
         next_retry = now + datetime.timedelta(seconds=cooldown)
         sql = """
             INSERT INTO ai_concept_failures
@@ -448,7 +454,7 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error(f"[StockDao] upsert_ai_concept_failure failed for {ts_code}: {e}")
+            logger.error(f"[StockDao] upsert_ai_concept_failure failed for {ts_code}: {e}", exc_info=True)
             raise
 
     async def get_ai_concept_failures_for_retry(
@@ -476,7 +482,7 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error(f"[StockDao] get_ai_concept_failures_for_retry failed: {e}")
+            logger.error(f"[StockDao] get_ai_concept_failures_for_retry failed: {e}", exc_info=True)
             return []
         if df is None or df.empty:
             return []
@@ -494,7 +500,7 @@ class StockDao(BaseDao):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.error(f"[StockDao] clear_ai_concept_failure failed for {ts_code}: {e}")
+            logger.error(f"[StockDao] clear_ai_concept_failure failed for {ts_code}: {e}", exc_info=True)
             raise
 
     async def count_ai_concept_failures(self) -> int:
@@ -511,3 +517,25 @@ class StockDao(BaseDao):
         except Exception as e:
             logger.debug(f"[StockDao] count_ai_concept_failures failed: {e}")
             return 0
+
+    async def delete_expired_failures(self, max_retry: int | None = None) -> int:
+        """T5 fix: 清理 retry_count >= max_retry 的错题本记录。
+
+        这些记录已耗尽重试机会，继续保留无意义且会无限累积。
+        建议在 AIConceptTagSyncStrategy 每次运行结束时调用。
+
+        Returns: 被删除的记录数
+        """
+        limit = max_retry if max_retry is not None else self.AI_CONCEPT_FAILURE_MAX_RETRY
+        try:
+            return await self._write_db(
+                "DELETE FROM ai_concept_failures WHERE retry_count >= $1",
+                (limit,),
+            )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] delete_expired_failures failed: {e}", exc_info=True)
+            raise

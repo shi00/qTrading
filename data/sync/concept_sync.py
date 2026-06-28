@@ -308,6 +308,8 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
 
             stock_dao = self.context.cache.stock_dao
             cancel_event = getattr(self.context, "cancel_event", None)
+            # 配置在循环内不变，提到循环外读取一次即可（避免每个标的重复读 config）
+            search_engine = self.context.config.get_ai_concept_search_engine()
 
             # 错题本优先重试：先从失败队列拉取（max_retry + cooldown 过滤）
             # EngineDisposedError 必须传播（R5），不可作为可恢复错误吞掉
@@ -384,6 +386,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         temperature=0.3,
                         timeout=60.0,
                         cancel_event=cancel_event,
+                        search_engine=search_engine,
                     )
                     concepts: list[str] = []
                     content = resp.get("content", "") if isinstance(resp, dict) else ""
@@ -454,6 +457,19 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 result.status = SyncStatus.PARTIAL.value
                 result.errors.extend(failed)
 
+            # T5 fix: 清理已达 max_retry 的错题本记录，避免无限累积。
+            # 放在主流程末尾、错题本写入/清除之后，确保本批次处理的记录状态先稳定。
+            try:
+                expired = await stock_dao.delete_expired_failures()
+                if expired > 0:
+                    logger.info("[AIConceptTagSync] Cleaned %d expired failure records", expired)
+            except asyncio.CancelledError:
+                raise
+            except EngineDisposedError:
+                raise
+            except Exception as fe:
+                logger.warning("[AIConceptTagSync] Failed to clean expired failures: %s", fe)
+
             logger.info(
                 "[AIConceptTagSync] Done | added=%d, failed=%d, retry_cleared=%d",
                 result.added,
@@ -488,6 +504,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
         temperature: float,
         timeout: float,
         cancel_event: typing.Any,
+        search_engine: str = "search_std",
     ) -> dict:
         """LLM 调用包装：每 _AI_TAG_CANCEL_POLL_INTERVAL (2s) 检查 cancel_event。
 
@@ -500,21 +517,36 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 messages,
                 temperature=temperature,
                 timeout=timeout,
+                search_engine=search_engine,
             )
 
         llm_task = asyncio.create_task(
-            ai_service.chat_with_web_search(messages, temperature=temperature, timeout=timeout),
+            ai_service.chat_with_web_search(
+                messages,
+                temperature=temperature,
+                timeout=timeout,
+                search_engine=search_engine,
+            ),
         )
         try:
             while not llm_task.done():
                 if hasattr(cancel_event, "is_set") and cancel_event.is_set():
                     llm_task.cancel()
                     # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
+                    # T7 fix: 记录 llm_task 的原始异常（如有），便于调试；不改变 suppress 行为
+                    # L4 fix: 补充 exc_info=True 保留完整 traceback
+                    # L3 fix: 不在此处 raise，避免覆盖外层 CancelledError；异常链通过 logger.debug 记录
                     try:
                         await llm_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                    raise asyncio.CancelledError()
+                    except asyncio.CancelledError:
+                        pass  # 内部取消被 suppress，外层 raise 传播外层 CancelledError（R2）
+                    except Exception as llm_err:
+                        logger.debug(
+                            "[AIConceptTagSync] llm_task suppressed during cancel: %r",
+                            llm_err,
+                            exc_info=True,
+                        )
+                    raise asyncio.CancelledError("task cancelled by user (cancel_event set in ai concept sync)")
                 try:
                     # shield 防止外部 cancel 传播到 LLM task 内部前被 wait_for 吞掉
                     return await asyncio.wait_for(
@@ -529,8 +561,16 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             if not llm_task.done():
                 llm_task.cancel()
                 # await 清理 llm_task 的异常/资源，suppress 二次异常，保留原始 CancelledError 传播
+                # T7 fix: 同上，记录原始异常便于调试
+                # L3/L4 fix: 同上，保留 traceback；不覆盖外层 CancelledError
                 try:
                     await llm_task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except asyncio.CancelledError:
+                    pass  # 内部取消被 suppress
+                except Exception as llm_err:
+                    logger.debug(
+                        "[AIConceptTagSync] llm_task suppressed during outer cancel: %r",
+                        llm_err,
+                        exc_info=True,
+                    )
             raise

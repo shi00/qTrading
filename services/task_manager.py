@@ -4,14 +4,13 @@ import datetime
 import logging
 import threading
 import time as _time
-import traceback
 import uuid
 from collections.abc import Callable
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 
 from core.i18n import I18n
@@ -514,11 +513,16 @@ class TaskManager:
                 coro = task._coroutine_gen()
                 task.result = await coro
 
-                # If we made it here without CancelledError, it's a success
-                task.status = TaskStatus.COMPLETED
-                task.progress = 1.0
-                task.description = str(task.result) if task.result else I18n.get("task_status_completed")
-                logger.info(f"[TaskManager] Completed: [{task.id}]")
+                # If we made it here without CancelledError, it's a success.
+                # T1 fix: 守卫已被 _cancel_task_impl / cancel_all_running_async 设为 CANCELLED 的状态，
+                # 避免 coro 返回后被覆盖为 COMPLETED（与下面 CancelledError 分支的守卫对称）。
+                if task.status != TaskStatus.CANCELLED:
+                    task.status = TaskStatus.COMPLETED
+                    task.progress = 1.0
+                    task.description = str(task.result) if task.result else I18n.get("task_status_completed")
+                    logger.info(f"[TaskManager] Completed: [{task.id}]")
+                else:
+                    logger.info(f"[TaskManager] Skipping COMPLETED: [{task.id}] already CANCELLED")
 
         except asyncio.CancelledError:
             if task.status != TaskStatus.CANCELLED:
@@ -527,20 +531,34 @@ class TaskManager:
             logger.info(f"[TaskManager] Cancelled processing for: [{task.id}]")
             raise  # Important to re-raise CancelledError for proper asyncio teardown
         except Exception as e:
-            task.status = TaskStatus.FAILED
-            error_info = classify_error(e, context="general")
-            severity = classify_severity(e, context="general")
-            task.error = error_info["message_key"]
-            task.description = I18n.get("task_failed_desc")
-            if severity == "system":
-                logger.critical(
-                    f"[TaskManager] Task {task.id} SYSTEM-LEVEL failure: {e}\n{traceback.format_exc()}",
+            # T3 fix: 守卫已被取消的状态，避免用户协程在 except CancelledError 内抛非取消异常时覆盖 CANCELLED。
+            if task.status == TaskStatus.CANCELLED:
+                # M1 fix: 保留 traceback 便于诊断取消过程中伴随的异常（如 DB 断连）
+                # L1 fix: 重置 description 与 CancelledError 分支保持一致
+                task.description = I18n.get("task_cancelled_desc")
+                logger.info(
+                    f"[TaskManager] Suppressed FAILED (already CANCELLED): [{task.id}] {e}",
+                    exc_info=True,
                 )
             else:
-                logger.error(
-                    f"[TaskManager] Task {task.id} Failed ({severity}): {e}\n{traceback.format_exc()}",
-                )
+                task.status = TaskStatus.FAILED
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                task.error = error_info["message_key"]
+                task.description = I18n.get("task_failed_desc")
+                if severity == "system":
+                    logger.critical(
+                        f"[TaskManager] Task {task.id} SYSTEM-LEVEL failure: {e}",
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        f"[TaskManager] Task {task.id} Failed ({severity}): {e}",
+                        exc_info=True,
+                    )
         finally:
+            # T2 fix: 此处 status 已被 T1/T3 守卫或 CancelledError 分支正确设置为终态，
+            # 即使 cancel_all_running_async 已先行写入 CANCELLED 也不会被覆盖。
             task._asyncio_task = None
             if task.completed_at is None:
                 task.completed_at = get_now()
@@ -622,7 +640,8 @@ class TaskManager:
             )
 
         # 4. Purge old records (>30 days)
-        cutoff_date = (get_now() - datetime.timedelta(days=30)).replace(tzinfo=None)
+        # H1 举一反三 fix: 与 completed_at (UTC tz-naive) 时区一致，避免 8 小时偏差
+        cutoff_date = cast(datetime.datetime, to_utc_for_db(get_now() - datetime.timedelta(days=30)))
         await cache.write_db(
             "DELETE FROM task_history WHERE completed_at < $1",
             (cutoff_date,),

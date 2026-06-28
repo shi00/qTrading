@@ -307,6 +307,7 @@
     "settings_ai_concept_update": "自动重建AI概念",
     "settings_ai_concept_desc": "开启后将定时同步概念数据（AKShare 东财板块 + Tushare 涨停原因）",
     "settings_ai_concept_search_engine": "搜索引擎",
+    "settings_ai_concept_search_engine_desc": "选择 AI 概念重建使用的智谱 web 搜索引擎",
     "settings_ai_concept_search_std": "标准搜索（¥0.01/次）",
     "settings_ai_concept_search_pro": "增强搜索（¥0.03/次，含搜狗+夸克）",
     "settings_saturdays": "限定每个周六执行",

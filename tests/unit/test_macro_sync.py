@@ -621,6 +621,7 @@ class TestMacroSyncEngineDisposedError:
 
     @pytest.mark.asyncio
     async def test_run_handles_engine_disposed_error(self):
+        # R5 举一反三 fix: EngineDisposedError 必须 raise 让调用方感知，不可 swallow
         ctx = MagicMock()
         ctx.cache = MagicMock()
         ctx.cache.engine = MagicMock()
@@ -632,9 +633,8 @@ class TestMacroSyncEngineDisposedError:
         strategy._sync_macro_monthly = mock_monthly
         strategy._sync_shibor_daily = AsyncMock()
         strategy._sync_index_weights = AsyncMock()
-        result = await strategy.run()
-        assert result.status == "failed"
-        assert "Engine disposed" in result.errors[0]
+        with pytest.raises(EngineDisposedError):
+            await strategy.run()
 
     @pytest.mark.asyncio
     async def test_sync_macro_monthly_reraises_engine_disposed(self):

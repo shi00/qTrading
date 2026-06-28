@@ -64,6 +64,8 @@ def _make_ctx(stock_dao, ai_service=None, cancel_event=None):
     ctx.ai_service = ai_service
     ctx.cancel_event = cancel_event
     ctx.processor = None
+    # 策略-L1: 显式设置 search_engine 默认值，避免 MagicMock 自动生成非字符串对象
+    ctx.config.get_ai_concept_search_engine = MagicMock(return_value="search_std")
     return ctx
 
 
@@ -187,6 +189,9 @@ class TestAIConceptTagStrategyE2E:
         # 4. AI 概念应已写入 stock_concepts
         concepts = await stock_dao.get_concepts_by_prefix("AI_LLM_", ts_codes=["000001.SZ"])
         assert len(concepts) > 0
+
+        # 5. 策略-M1: 集成层验证 search_engine 透传到 AIService
+        assert ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_std"
 
     @pytest.mark.asyncio
     async def test_cancel_event_aborts_within_2s(self, stock_dao):

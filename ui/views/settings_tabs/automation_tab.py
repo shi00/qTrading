@@ -79,6 +79,16 @@ class AutomationTab(ft.Container):
             color=AppColors.SUCCESS if ai_concept_enabled else AppColors.TEXT_HINT,
         )
 
+        ai_concept_search_engine = ConfigHandler.get_ai_concept_search_engine()
+        self.ai_concept_search_engine = ft.Dropdown(
+            label=I18n.get("settings_ai_concept_search_engine"),
+            width=_DROPDOWN_WIDTH,
+            value=ai_concept_search_engine,
+            options=self._build_search_engine_options(),
+            on_change=self.on_ai_concept_search_engine_change,
+            disabled=not ai_concept_enabled,
+        )
+
         self._build_content()
 
     def _build_time_options(self):
@@ -90,6 +100,13 @@ class AutomationTab(ft.Container):
             ft.dropdown.Option("17:00", I18n.get("settings_opt_1700")),
             ft.dropdown.Option("18:00", I18n.get("settings_opt_1800")),
             ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
+        ]
+
+    def _build_search_engine_options(self):
+        """构建搜索引擎选项列表"""
+        return [
+            ft.dropdown.Option("search_std", I18n.get("settings_ai_concept_search_std")),
+            ft.dropdown.Option("search_pro", I18n.get("settings_ai_concept_search_pro")),
         ]
 
     def _build_content(self):
@@ -169,12 +186,24 @@ class AutomationTab(ft.Container):
             subtitle_key="settings_saturdays",
         )
 
+        self.row_ai_concept_search_engine = SettingRow(
+            icon=ft.Icons.MANAGE_SEARCH,
+            title=I18n.get("settings_ai_concept_search_engine"),
+            subtitle=I18n.get("settings_ai_concept_search_engine_desc"),
+            control=self.ai_concept_search_engine,
+            icon_color=AppColors.ACCENT,
+            title_key="settings_ai_concept_search_engine",
+            subtitle_key="settings_ai_concept_search_engine_desc",
+        )
+
         self.card_ai_concept = DashboardCard(
             content=ft.Column(
                 [
                     self.row_ai_concept_schedule,
                     ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                     self.row_ai_concept_time,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self.row_ai_concept_search_engine,
                     ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                     ft.Row(
                         [
@@ -227,6 +256,9 @@ class AutomationTab(ft.Container):
         self.ai_concept_time.bgcolor = AppColors.INPUT_BG
         self.ai_concept_time.color = AppColors.INPUT_TEXT
         self.ai_concept_time.border_color = AppColors.INPUT_BORDER
+        self.ai_concept_search_engine.bgcolor = AppColors.INPUT_BG
+        self.ai_concept_search_engine.color = AppColors.INPUT_TEXT
+        self.ai_concept_search_engine.border_color = AppColors.INPUT_BORDER
         ai_concept_enabled = self.ai_concept_enabled.value
         self.ai_concept_status.color = AppColors.SUCCESS if ai_concept_enabled else ft.Colors.ON_SURFACE_VARIANT
 
@@ -278,7 +310,19 @@ class AutomationTab(ft.Container):
                 self.ai_concept_enabled.value,
             )
 
-            for row in [self.row_schedule, self.row_time, self.row_ai_concept_schedule, self.row_ai_concept_time]:
+            self.ai_concept_search_engine.label = I18n.get("settings_ai_concept_search_engine")
+            saved_ai_concept_search_engine = self.ai_concept_search_engine.value
+            self.ai_concept_search_engine.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
+            self.ai_concept_search_engine.options = self._build_search_engine_options()
+            self.ai_concept_search_engine.value = saved_ai_concept_search_engine
+
+            for row in [
+                self.row_schedule,
+                self.row_time,
+                self.row_ai_concept_schedule,
+                self.row_ai_concept_time,
+                self.row_ai_concept_search_engine,
+            ]:
                 row.update_locale()
 
             # 重建整个内容以确保所有文本更新
@@ -327,6 +371,7 @@ class AutomationTab(ft.Container):
         self.ai_concept_status.value = self._get_schedule_status_text(enabled)
         self.ai_concept_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
         self.ai_concept_time.disabled = not enabled
+        self.ai_concept_search_engine.disabled = not enabled
         self.update()
         if self.show_snack:
             self.show_snack(
@@ -341,6 +386,13 @@ class AutomationTab(ft.Container):
             self.show_snack(
                 I18n.get("settings_snack_time_set").format(time=selected_time),
             )
+
+    def on_ai_concept_search_engine_change(self, e):
+        selected_engine = self.ai_concept_search_engine.value
+        ConfigHandler.set_ai_concept_search_engine(selected_engine)  # type: ignore[untyped]
+        self.update()
+        if self.show_snack:
+            self.show_snack(I18n.get("common_saved"))
 
 
 class NotificationsTab(ft.Container):

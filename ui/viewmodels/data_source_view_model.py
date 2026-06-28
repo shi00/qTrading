@@ -46,10 +46,15 @@ class DataSourceViewModel:
         self,
         processor: DataProcessor | None = None,
         cache: CacheManager | None = None,
+        ai_service: AIService | None = None,
     ):
         # Dependencies (constructor injection for testability)
+        # T6 fix: 与 _processor / _cache 一致，AIService 也通过构造注入。
+        # AIService 已是 @register_singleton，AIService() 默认返回同一实例，
+        # 显式注入仅为统一风格、便于测试替换。
         self._processor = processor or DataProcessor()
         self._cache = cache or CacheManager()
+        self._ai_service = ai_service or AIService()
         self._tm = TaskManager()
 
         # Business state
@@ -149,9 +154,13 @@ class DataSourceViewModel:
 
         async def _run_health_check(task_id: str, **kwargs):
             try:
-                self._tm.update_progress(task_id, 0.2, I18n.get("task_progress_checking"))
+                # T8 fix: 检查 update_progress 返回值，False 表示任务已被取消或不再 RUNNING，应早退。
+                # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
+                if not self._tm.update_progress(task_id, 0.2, I18n.get("task_progress_checking")):
+                    raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
                 result = await self._processor.check_data_health()
-                self._tm.update_progress(task_id, 0.9, I18n.get("task_progress_analyzing"))
+                if not self._tm.update_progress(task_id, 0.9, I18n.get("task_progress_analyzing")):
+                    raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
                 if self.on_health_result:
                     self.on_health_result(result)
@@ -192,7 +201,10 @@ class DataSourceViewModel:
 
         async def _daily_logic(task_id: str, **kwargs):
             def _progress(c, t, msg):
-                self._tm.update_progress(task_id, c / t if t else 0, msg)
+                # T8 fix: 若 update_progress 返回 False（任务已取消/不再 RUNNING），抛 CancelledError 早退
+                # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
+                if not self._tm.update_progress(task_id, c / t if t else 0, msg):
+                    raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
             try:
                 await self._processor.run_daily_update(progress_callback=_progress)
@@ -242,14 +254,17 @@ class DataSourceViewModel:
         async def _ai_concept_logic(task_id: str, **kwargs):
             cancel_event = self._tm.get_cancel_event(task_id)
             try:
-                self._tm.update_progress(task_id, 0.05, I18n.get("ds_ai_concept_rebuild_start"))
+                # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
+                # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
+                if not self._tm.update_progress(task_id, 0.05, I18n.get("ds_ai_concept_rebuild_start")):
+                    raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
                 # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
                 await self._processor.run_ai_concept_tagging(
                     task_id=task_id,
                     cancel_event=cancel_event,
                     manual_trigger=True,
-                    ai_service=AIService(),
+                    ai_service=self._ai_service,
                 )
                 if self.on_show_snack:
                     self.on_show_snack(I18n.get("snack_ai_concept_done"), "success")
@@ -349,18 +364,21 @@ class DataSourceViewModel:
                 def _combined_progress(c, t, m):
                     if self.on_progress_update:
                         self.on_progress_update(c / t if t > 0 else 0, m)
-                    self._tm.update_progress(
+                    # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
+                    # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
+                    if not self._tm.update_progress(
                         task_id,
                         c / t if t > 0 else 0,
                         f"[{c:.2f}/{t}] {m}",
-                    )
+                    ):
+                        raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
                 report = await self._processor.initialize_system(
                     progress_callback=_combined_progress,
                 )
 
                 if self._processor.is_cancelled():
-                    raise asyncio.CancelledError()
+                    raise asyncio.CancelledError("task cancelled by user (is_cancelled returned True)")
 
                 if report is None:
                     raise InitSyncError(I18n.get("ds_init_fail_generic"))

@@ -139,6 +139,7 @@ class MacroSyncStrategy(ISyncStrategy):
             logger.warning("[MacroSync] Run | Engine disposed, stopping sync.")
             result.status = "failed"
             result.errors.append("Engine disposed during sync")
+            raise
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")

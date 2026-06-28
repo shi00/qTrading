@@ -543,6 +543,184 @@ class TestTaskManagerCancelTaskImpl:
         assert t._cancel_event.is_set()
 
 
+class TestTaskRunnerStateGuard:
+    """T1/T2/T3 fix: _task_runner 在 coro 返回或抛非取消异常时，
+    必须守卫已被 _cancel_task_impl / cancel_all_running_async 设为 CANCELLED 的状态。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_t1_success_does_not_overwrite_cancelled(self, mock_i18n, mock_tp):
+        """T1: coro 正常返回时，若 status 已被 cancel_task 设为 CANCELLED，
+        不应被覆盖为 COMPLETED。
+
+        模拟时序：
+        1. task 入口为 QUEUED（通过 line 487 的 CANCELLED 早退守卫）
+        2. runner 设 status=RUNNING（line 500）
+        3. coro 内部模拟 _cancel_task_impl 将 status 改为 CANCELLED
+        4. coro 返回成功 → 行 517 守卫拦截，不应覆盖 CANCELLED
+        """
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        mgr._persist_task = MagicMock()
+        mgr._notify_subscribers = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        mgr._tasks[t.id] = t
+
+        async def _coro():
+            # 模拟在 await 期间被 _cancel_task_impl 设为 CANCELLED
+            t.status = TaskStatus.CANCELLED
+            return "ok"
+
+        t._coroutine_gen = _coro
+        asyncio.run(mgr._task_runner(t.id))
+        assert t.status == TaskStatus.CANCELLED  # 未被覆盖为 COMPLETED
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_t3_exception_does_not_overwrite_cancelled(self, mock_i18n, mock_tp):
+        """T3: coro 抛非 CancelledError 异常时，若 status 已为 CANCELLED，
+        不应被覆盖为 FAILED。
+
+        场景：用户协程在 except CancelledError 内部又抛出 RuntimeError，
+        落到 _task_runner 的 except Exception 分支。
+        """
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        mgr._persist_task = MagicMock()
+        mgr._notify_subscribers = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        mgr._tasks[t.id] = t
+
+        async def _coro():
+            # 模拟 cancel_task 已执行，然后用户代码抛非取消异常
+            t.status = TaskStatus.CANCELLED
+            raise RuntimeError("simulated user-code error after cancel")
+
+        t._coroutine_gen = _coro
+        asyncio.run(mgr._task_runner(t.id))
+        assert t.status == TaskStatus.CANCELLED  # 未被覆盖为 FAILED
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_t2_cancel_all_running_does_not_overwrite_on_finally(self, mock_i18n, mock_tp):
+        """T2: 当 status 已被设为 CANCELLED 时（模拟 cancel_all_running_async 已先行执行的场景），
+        runner finally 块的 _persist_task 应当持久化 CANCELLED，而非被错误覆盖为 COMPLETED/FAILED。
+
+        注意：本测试通过在 coro 内直接修改 status 模拟等价场景，未走真实 cancel_all_running_async
+        调用链路。真实链路的端到端验证应由集成测试覆盖。
+        """
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        persisted_statuses: list[TaskStatus] = []
+
+        def _fake_persist(task):
+            persisted_statuses.append(task.status)
+
+        mgr._persist_task = _fake_persist
+        mgr._notify_subscribers = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        mgr._tasks[t.id] = t
+
+        async def _coro():
+            # 模拟 cancel_all_running_async 已先行设置 CANCELLED
+            t.status = TaskStatus.CANCELLED
+            return "ok"
+
+        t._coroutine_gen = _coro
+        asyncio.run(mgr._task_runner(t.id))
+        # finally 持久化的最终状态必须是 CANCELLED
+        assert persisted_statuses[-1] == TaskStatus.CANCELLED
+        assert t.status == TaskStatus.CANCELLED
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_runner_normal_completion_still_works(self, mock_i18n, mock_tp):
+        """回归测试：未取消时正常路径仍写入 COMPLETED（保证守卫不影响正常流程）。"""
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        mgr._persist_task = MagicMock()
+        mgr._notify_subscribers = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        mgr._tasks[t.id] = t
+
+        async def _coro():
+            return "ok"
+
+        t._coroutine_gen = _coro
+        asyncio.run(mgr._task_runner(t.id))
+        assert t.status == TaskStatus.COMPLETED
+        assert t.progress == 1.0
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancelled_error_when_already_cancelled_keeps_cancelled(self, mock_i18n, mock_tp):
+        """G1 fix: coro 抛 CancelledError 且 status 已为 CANCELLED 时，应保持 CANCELLED 并 raise。"""
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        mgr._persist_task = MagicMock()
+        mgr._notify_subscribers = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        mgr._tasks[t.id] = t
+
+        async def _coro():
+            # 模拟 cancel_task 已执行，然后 coro 抛 CancelledError
+            t.status = TaskStatus.CANCELLED
+            raise asyncio.CancelledError()
+
+        t._coroutine_gen = _coro
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(mgr._task_runner(t.id))
+        assert t.status == TaskStatus.CANCELLED
+        # G1 增强: 验证 CancelledError 分支正确设置 description
+        assert t.description == mock_i18n.get.return_value
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancelled_error_when_not_cancelled_sets_cancelled(self, mock_i18n, mock_tp):
+        """G1 fix: coro 抛 CancelledError 且 status 未为 CANCELLED 时（如外部 asyncio.Task.cancel() 未走 _cancel_task_impl），
+        应被设为 CANCELLED 并 raise。"""
+        mgr = TaskManager()
+        mgr._get_semaphore = MagicMock(
+            return_value=MagicMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=None))
+        )
+        mgr._persist_task = MagicMock()
+        mgr._notify_subscribers = MagicMock()
+        mgr._evict_on_complete = MagicMock()
+        t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = asyncio.Event()
+        mgr._tasks[t.id] = t
+
+        async def _coro():
+            raise asyncio.CancelledError()
+
+        t._coroutine_gen = _coro
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(mgr._task_runner(t.id))
+        assert t.status == TaskStatus.CANCELLED
+        # G1 增强: 验证 CancelledError 分支正确设置 description
+        assert t.description == mock_i18n.get.return_value
+
+
 class TestTaskManagerClearFinished:
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
