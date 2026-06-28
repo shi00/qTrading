@@ -274,10 +274,10 @@ class TestFreshDatabaseInitialization:
 
         try:
             # Create async engine for the new database
-            from sqlalchemy.ext.asyncio import create_async_engine
+            from tests._helpers import create_test_engine
 
             db_url = f"postgresql+asyncpg://{params['user']}:{params['password']}@{params['host']}:{params['port']}/{db_name}"
-            schema_engine = create_async_engine(db_url)
+            schema_engine = create_test_engine(db_url)
 
             # Initialize fresh database via init_db (handles fresh DB detection internally)
             await DatabaseMigrator.init_db(schema_engine, auto_migrate=True)

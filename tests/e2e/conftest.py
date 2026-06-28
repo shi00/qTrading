@@ -418,12 +418,12 @@ def _generate_trade_dates(n_days: int = 60) -> list[date]:
 async def _seed_e2e_data() -> None:
     """向测试数据库播种 E2E 所需的基准数据。"""
     import asyncpg
-    from sqlalchemy.ext.asyncio import create_async_engine
+    from tests._helpers import create_test_engine
     from data.persistence.db_migrator import DatabaseMigrator
     from data.persistence.db_url_override import override_db_url
 
     # Ensure tables are migrated before seeding
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+    engine = create_test_engine(TEST_DATABASE_URL, echo=False)
     try:
         with override_db_url(TEST_DATABASE_URL):
             await DatabaseMigrator.init_db(engine, auto_migrate=True)

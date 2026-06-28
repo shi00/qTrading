@@ -7,7 +7,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, insert
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.cache.cache_manager import CacheManager
 from data.persistence.db_url_override import override_db_url
@@ -137,11 +137,9 @@ async def test_engine():
         # 强制会话时区为 UTC，与生产环境前提对齐（stock_dao.py 注释：PG 时区必须为 UTC）。
         # 否则 SQL `now()` 返回本地时区时间，与 to_utc_for_db() 写入的 UTC tz-naive 比较时偏移，
         # 导致 cooldown / next_retry_at 语义错误（本地 Windows PG 默认 Asia/Shanghai 会失败）。
-        _test_engine = create_async_engine(
-            TEST_DB_URL,
-            echo=False,
-            connect_args={"server_settings": {"timezone": "UTC"}},
-        )
+        from tests._helpers import create_test_engine
+
+        _test_engine = create_test_engine(TEST_DB_URL, echo=False)
 
         from data.persistence.db_migrator import DatabaseMigrator
 

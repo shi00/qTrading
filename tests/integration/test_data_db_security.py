@@ -1,7 +1,7 @@
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from tests._helpers import create_test_engine
 from tests.integration.test_infra_base import (
     TEST_DB_URL,
     _AssertionMixin,
@@ -21,7 +21,7 @@ class TestDataExplorerQueryClientSecurity(TestDatabaseBase):
 
         self.db_manager = DataExplorerQueryClient()
 
-        self._ddl_engine = create_async_engine(TEST_DB_URL, echo=False)
+        self._ddl_engine = create_test_engine(TEST_DB_URL, echo=False)
 
         async with self._ddl_engine.begin() as conn:
             await conn.execute(

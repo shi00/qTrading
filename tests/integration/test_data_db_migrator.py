@@ -15,11 +15,11 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from sqlalchemy import create_engine, text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.persistence.db_migrator import DatabaseMigrator, DatabaseMigrationNeeded
 from data.persistence.db_url_override import override_db_url
-from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
+from tests._helpers import build_db_urls, create_test_engine, get_pg_connection_params, make_alembic_cfg
 from tests.conftest import singleton_state as _singleton_state_ctx
 
 pytestmark = pytest.mark.integration
@@ -87,7 +87,7 @@ class TestFreshInstall:
         await _create_isolated_db(params, db_name)
 
         _, async_url = build_db_urls(params, db_name)
-        engine = create_async_engine(async_url)
+        engine = create_test_engine(async_url)
 
         yield engine, db_name
 
@@ -171,7 +171,7 @@ async def _migrated_db_fixture(
         cfg = make_alembic_cfg(sync_url)
         await asyncio.to_thread(command.upgrade, cfg, target_revision)
 
-    async_engine = create_async_engine(async_url)
+    async_engine = create_test_engine(async_url)
 
     return async_engine, db_name, sync_url, sync_engine
 
@@ -196,7 +196,7 @@ class TestEngineBoundMigration:
 
         _, target_async_url = build_db_urls(pg_params, target_db)
         wrong_sync_url, _ = build_db_urls(pg_params, wrong_db)
-        engine = create_async_engine(target_async_url)
+        engine = create_test_engine(target_async_url)
 
         try:
             with override_db_url(wrong_sync_url):
@@ -269,7 +269,7 @@ class TestCheckSchemaStatus:
         await _create_isolated_db(pg_params, db_name)
 
         _, async_url = build_db_urls(pg_params, db_name)
-        engine = create_async_engine(async_url)
+        engine = create_test_engine(async_url)
 
         yield engine, db_name
 
@@ -511,8 +511,8 @@ class TestConcurrentMigration:
         async_url, db_name = concurrent_db_engine
 
         # Create two independent engines (simulating two processes)
-        engine1 = create_async_engine(async_url)
-        engine2 = create_async_engine(async_url)
+        engine1 = create_test_engine(async_url)
+        engine2 = create_test_engine(async_url)
 
         try:
             # Run init_db concurrently on both engines.
@@ -561,7 +561,7 @@ class TestConcurrentMigration:
         sync_url = async_url.replace("+asyncpg", "")
 
         # First, migrate to 0001 only
-        engine1 = create_async_engine(async_url)
+        engine1 = create_test_engine(async_url)
         sync_engine = create_engine(sync_url)
 
         with override_db_url(sync_url):
@@ -569,7 +569,7 @@ class TestConcurrentMigration:
             await asyncio.to_thread(command.upgrade, cfg, "0001")
 
         # Now create a second engine and run init_db concurrently
-        engine2 = create_async_engine(async_url)
+        engine2 = create_test_engine(async_url)
 
         try:
             # Verify engine1 is at 0001
@@ -615,7 +615,7 @@ class TestMigrationInterruptionRecovery:
         await _create_isolated_db(pg_params, db_name)
 
         _, async_url = build_db_urls(pg_params, db_name)
-        engine = create_async_engine(async_url)
+        engine = create_test_engine(async_url)
 
         # Get the head revision
         head_rev = await DatabaseMigrator._get_head_revision()
@@ -719,7 +719,7 @@ class TestOrphanedRevisionHeal:
         params = pg_params
         await _create_isolated_db(params, db_name)
         _, async_url = build_db_urls(params, db_name)
-        engine = create_async_engine(async_url)
+        engine = create_test_engine(async_url)
         yield engine
         await engine.dispose()
         await _drop_isolated_db(params, db_name)

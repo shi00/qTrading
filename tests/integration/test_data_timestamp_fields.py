@@ -5,11 +5,10 @@ from datetime import date, datetime
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.db_url_override import override_db_url
 from data.persistence.models import Base
-from tests._helpers import build_db_urls, get_pg_connection_params
+from tests._helpers import build_db_urls, create_test_engine, get_pg_connection_params
 from tests.integration.test_data_db_migrator import (
     _create_isolated_db,
     _drop_isolated_db,
@@ -81,7 +80,7 @@ async def db_engine():
     db_name = f"test_timestamp_{uuid.uuid4().hex[:8]}"
     await _create_isolated_db(params, db_name)
     _, async_url = build_db_urls(params, db_name)
-    engine = create_async_engine(async_url)
+    engine = create_test_engine(async_url)
 
     with override_db_url(async_url):
         await DatabaseMigrator.init_db(engine, auto_migrate=True)

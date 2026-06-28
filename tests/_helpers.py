@@ -143,6 +143,33 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 from alembic.config import Config
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+
+def create_test_engine(url: str, *, echo: bool = False, **kwargs) -> AsyncEngine:
+    """创建测试用 async engine，强制 PG 会话时区为 UTC。
+
+    统一所有测试 engine 的时区设置，与生产环境前提对齐（stock_dao.py 注释：
+    PG 时区必须为 UTC）。避免本地 Windows PG 默认 Asia/Shanghai 导致
+    to_utc_for_db() 写入的 UTC tz-naive 与 SQL now() 比较时偏移 8 小时，
+    进而让 cooldown / next_retry_at 等时间比较语义错误。
+
+    所有自建 engine 的测试应使用本 helper，而非直接调用 create_async_engine。
+    例外：仅用于 dialect.compile() 不真实连接的 fake engine（如 test_review_round_trip.py）。
+
+    Args:
+        url: 数据库连接 URL（postgresql+asyncpg://...）。
+        echo: 是否开启 SQL echo。
+        **kwargs: 透传给 create_async_engine，connect_args 会被合并（调用方优先）。
+
+    Returns:
+        AsyncEngine，会话时区已强制为 UTC。
+    """
+    connect_args = dict(kwargs.pop("connect_args", {}) or {})
+    server_settings = dict(connect_args.get("server_settings", {}) or {})
+    server_settings.setdefault("timezone", "UTC")
+    connect_args["server_settings"] = server_settings
+    return create_async_engine(url, echo=echo, connect_args=connect_args, **kwargs)
 
 
 def get_pg_connection_params() -> dict:

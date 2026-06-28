@@ -14,11 +14,10 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from sqlalchemy import create_engine, inspect as sa_inspect
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.db_migrator import DatabaseMigrator
 from data.persistence.db_url_override import override_db_url
-from tests._helpers import build_db_urls, get_pg_connection_params, make_alembic_cfg
+from tests._helpers import build_db_urls, create_test_engine, get_pg_connection_params, make_alembic_cfg
 
 pytestmark = pytest.mark.integration
 
@@ -69,7 +68,7 @@ class TestSchemaPathEquivalence:
 
         sync_db_url, async_db_url = build_db_urls(params, db_name)
 
-        engine = create_async_engine(async_db_url)
+        engine = create_test_engine(async_db_url)
 
         # 路径 A: 使用 init_db (内部走 metadata.create_all)
         with override_db_url(sync_db_url):

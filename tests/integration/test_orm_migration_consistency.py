@@ -30,12 +30,11 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import dialect as pg_dialect
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from data.persistence.db_migrator import DatabaseMigrator
 from data.persistence.db_url_override import override_db_url
 from data.persistence.models import Base
-from tests._helpers import build_db_urls, get_pg_connection_params
+from tests._helpers import build_db_urls, create_test_engine, get_pg_connection_params
 
 pytestmark = pytest.mark.integration
 
@@ -290,7 +289,7 @@ class TestOrmMigrationConsistency:
         await _create_isolated_db(pg_params, db_name)
 
         _, async_url = build_db_urls(pg_params, db_name)
-        engine = create_async_engine(async_url, echo=False)
+        engine = create_test_engine(async_url, echo=False)
 
         with override_db_url(async_url):
             await DatabaseMigrator.init_db(engine, auto_migrate=True)
