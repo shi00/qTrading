@@ -73,6 +73,7 @@ dev = [
 ]
 optional = [
     "brotlicffi>=1.2.0.0",
+    "playwright>=1.59.0",  # E2E browser automation for Flet desktop tests
 ]
 
 [tool.ruff]

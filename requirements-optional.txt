@@ -101,8 +101,10 @@ frozenlist==1.8.0
     #   aiosignal
 fsspec==2026.4.0
     # via huggingface-hub
-greenlet==3.5.1 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
-    # via sqlalchemy
+greenlet==3.5.1
+    # via
+    #   playwright
+    #   sqlalchemy
 h11==0.16.0
     # via httpcore
 hf-xet==1.5.1 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
@@ -220,6 +222,8 @@ pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
 pillow==12.2.0
     # via matplotlib
+playwright==1.60.0
+    # via astockscreener (pyproject.toml)
 polars==1.41.2
     # via astockscreener (pyproject.toml)
 polars-runtime-32==1.41.2
@@ -243,6 +247,8 @@ pydantic==2.13.4
     #   openai
 pydantic-core==2.46.4
     # via pydantic
+pyee==13.0.1
+    # via playwright
 pygments==2.20.0
     # via rich
 pyluach==2.3.0
@@ -335,6 +341,7 @@ typing-extensions==4.15.0
     #   openai
     #   pydantic
     #   pydantic-core
+    #   pyee
     #   readerwriterlock
     #   sqlalchemy
     #   typing-inspection
