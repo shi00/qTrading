@@ -13,6 +13,7 @@ from data.sync.concept_sync import (
     AIConceptTagSyncStrategy,
     AKShareConceptSyncStrategy,
     LimitListSyncStrategy,
+    _to_ts_code,
 )
 
 pytestmark = pytest.mark.unit
@@ -70,6 +71,59 @@ def _make_limit_list_df():
             "name": ["平安银行", "浦发银行"],
         }
     )
+
+
+# --- _to_ts_code helper ---
+
+
+class TestToTsCode:
+    """_to_ts_code 纯函数测试：AKShare 6 位代码 → Tushare ts_code 转换。
+
+    覆盖 concept_sync.py:52-60 的所有分支：
+    - SH 交易所（60/68/90 前缀）
+    - SZ 交易所（00/30/20 前缀）
+    - BJ 交易所（43/83/87/92 前缀，lines 58-59）
+    - 未知前缀 fallback → .SZ（line 60）
+    - 非法输入原样返回（line 52-53）
+    """
+
+    @pytest.mark.parametrize(
+        "code,expected",
+        [
+            # SH exchange
+            ("600000", "600000.SH"),
+            ("688001", "688001.SH"),
+            ("900001", "900001.SH"),
+            # SZ exchange
+            ("000001", "000001.SZ"),
+            ("300001", "300001.SZ"),
+            ("200001", "200001.SZ"),
+            # BJ exchange (lines 58-59)
+            ("430001", "430001.BJ"),
+            ("830001", "830001.BJ"),
+            ("870001", "870001.BJ"),
+            ("920001", "920001.BJ"),
+            # Unknown prefix → .SZ fallback (line 60)
+            ("999999", "999999.SZ"),
+            ("123456", "123456.SZ"),
+        ],
+    )
+    def test_valid_6_digit_codes(self, code, expected):
+        assert _to_ts_code(code) == expected
+
+    @pytest.mark.parametrize(
+        "invalid_code",
+        [
+            "",  # 空字符串
+            "12345",  # 长度不足 6
+            "1234567",  # 长度超过 6
+            "600abc",  # 非数字
+            "abcdef",  # 全字母
+        ],
+    )
+    def test_invalid_input_returns_input_unchanged(self, invalid_code):
+        # line 52-53: 非法输入（空/长度不符/含非数字）原样返回
+        assert _to_ts_code(invalid_code) == invalid_code
 
 
 # --- AKShareConceptSyncStrategy ---
@@ -163,6 +217,122 @@ class TestAKShareConceptSync:
         assert result.status == SyncStatus.FAILED.value
         assert len(result.errors) > 0
 
+    @pytest.mark.asyncio
+    async def test_cancel_after_concept_list_fetch(self):
+        """覆盖 concept_sync.py:88-89：concept_list 拉取成功后、启动 constituents 并发前触发取消。
+
+        验证：第二次 _check_cancelled 命中 → 直接返回 CANCELLED，不调用 constituents 拉取。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        strategy = AKShareConceptSyncStrategy(ctx)
+
+        client = AkshareConceptClient()
+
+        async def _cancel_then_return(*args, **kwargs):
+            strategy.cancel()  # 在返回 concept_list 前触发取消标志
+            return _make_concept_list_df()
+
+        client.get_concept_list = AsyncMock(side_effect=_cancel_then_return)
+        client.get_concept_constituents = AsyncMock(return_value=_make_constituents_df())
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        # 取消后不应继续拉取 constituents
+        client.get_concept_constituents.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_gather_before_upsert(self):
+        """覆盖 concept_sync.py:141-142：所有 board 并发拉取完成后、upsert 前触发取消。
+
+        验证：第三次 _check_cancelled 命中 → 返回 CANCELLED，不调用 upsert_em_concepts。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+        strategy = AKShareConceptSyncStrategy(ctx)
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        # constituents 拉取完成后触发取消
+        original = _make_constituents_df()
+
+        async def _cancel_after_constituents(*args, **kwargs):
+            strategy.cancel()
+            return original
+
+        client.get_concept_constituents = AsyncMock(side_effect=_cancel_after_constituents)
+
+        result = await strategy.run()
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_in_constituents_propagates(self):
+        """覆盖 concept_sync.py:115-116：sync_one_board 内部 constituents 拉取抛 CancelledError 必须传播（R2）。
+
+        验证：CancelledError 不被 except Exception 吞掉，直接 raise 到外层 except asyncio.CancelledError。
+        """
+        import asyncio as _asyncio
+
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(side_effect=_asyncio.CancelledError())
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        with pytest.raises(_asyncio.CancelledError):
+            await strategy.run()
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_in_constituents_skips_retry(self):
+        """覆盖 concept_sync.py:117-118：sync_one_board 内部 constituents 拉取抛 EngineDisposedError 时，
+        except EngineDisposedError 分支直接 raise（不进入 except Exception 重试逻辑），
+        由 gather_return_exceptions_propagating_cancel 捕获为返回值，不传播到外层。
+
+        验证：get_concept_constituents 每板只调用 1 次（非 3 次重试），upsert 不执行。
+        """
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+
+        client = AkshareConceptClient()
+        client.get_concept_list = AsyncMock(return_value=_make_concept_list_df())
+        client.get_concept_constituents = AsyncMock(side_effect=EngineDisposedError())
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        result = await strategy.run()
+
+        # EngineDisposedError 被 gather 捕获为返回值，不传播到外层 except
+        assert result.status == SyncStatus.SUCCESS.value
+        # 关键验证：每板只调用 1 次（EngineDisposedError 不进入重试逻辑）
+        # _make_concept_list_df() 返回 2 个板块，所以应调用 2 次（非 6 次）
+        assert client.get_concept_constituents.call_count == 2
+        # records 为空，不调用 upsert
+        ctx.cache.stock_dao.upsert_em_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_system_level_error_propagates(self):
+        """覆盖 concept_sync.py:168-170：system 级别异常（MemoryError）必须 raise，不可降级为 FAILED。
+
+        验证 classify_severity 返回 "system" 时，logger.critical 后 raise，不吞异常。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.upsert_em_concepts = AsyncMock(return_value=0)
+
+        client = AkshareConceptClient()
+        # MemoryError 是 SYSTEM_LEVEL_EXCEPTIONS，classify_severity 返回 "system"
+        client.get_concept_list = AsyncMock(side_effect=MemoryError("out of memory"))
+        client.get_concept_constituents = AsyncMock(return_value=_make_constituents_df())
+
+        strategy = AKShareConceptSyncStrategy(ctx)
+        with pytest.raises(MemoryError):
+            await strategy.run()
+
 
 # --- LimitListSyncStrategy ---
 
@@ -238,6 +408,114 @@ class TestLimitListSync:
 
         assert result.status == SyncStatus.FAILED.value
         assert len(result.errors) > 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_clear_today(self):
+        """覆盖 concept_sync.py:203-204：clear_today_limit_concepts 完成后、拉取 limit_list 前触发取消。
+
+        验证：第二次 _check_cancelled 命中 → 返回 CANCELLED，不调用 get_limit_list。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
+        strategy = LimitListSyncStrategy(ctx)
+
+        async def _cancel_after_clear(*args, **kwargs):
+            strategy.cancel()
+            return 0
+
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(side_effect=_cancel_after_clear)
+
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.api.get_limit_list.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_limit_list_fetch(self):
+        """覆盖 concept_sync.py:236-237：limit_list 拉取完成后、upsert 前触发取消。
+
+        验证：第三次 _check_cancelled 命中 → 返回 CANCELLED，不调用 upsert_limit_concepts。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        strategy = LimitListSyncStrategy(ctx)
+
+        async def _cancel_after_fetch(*args, **kwargs):
+            strategy.cancel()
+            return _make_limit_list_df()
+
+        ctx.api.get_limit_list = AsyncMock(side_effect=_cancel_after_fetch)
+
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.cache.stock_dao.upsert_limit_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_rows_without_ts_code(self):
+        """覆盖 concept_sync.py:225-226：limit_list 中 ts_code 缺失的行应被跳过。
+
+        验证：ts_code 为空字符串的行不进入 records，只 upsert 有效行。
+        注意：pandas 会把 None 转为 nan（truthy），源码用 `if not ts_code` 过滤，
+        所以只有空字符串/None（非 pandas 列场景）触发 skip；此处用空字符串覆盖。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=1)
+        # 混合有效行和无效行（ts_code 为空字符串触发 skip）
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "", ""],
+                "trade_date": ["20240614", "20240614", "20240614"],
+                "name": ["平安银行", "无效1", "无效2"],
+            }
+        )
+        ctx.api.get_limit_list = AsyncMock(return_value=df)
+
+        strategy = LimitListSyncStrategy(ctx)
+        result = await strategy.run(trade_date="20240614")
+
+        assert result.status == SyncStatus.SUCCESS.value
+        # 验证只有 1 条有效记录被 upsert（2 条空 ts_code 行被跳过）
+        upsert_args = ctx.cache.stock_dao.upsert_limit_concepts.call_args.args[0]
+        assert len(upsert_args) == 1
+        assert upsert_args[0]["ts_code"] == "000001.SZ"
+
+    @pytest.mark.asyncio
+    async def test_outer_cancelled_error_propagates(self):
+        """覆盖 concept_sync.py:248-250：外层 except asyncio.CancelledError 必须设置 CANCELLED 状态并 raise（R2）。
+
+        验证：clear_today_limit_concepts 抛 CancelledError → 外层捕获 → 状态设为 CANCELLED → raise。
+        """
+        import asyncio as _asyncio
+
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(side_effect=_asyncio.CancelledError())
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
+
+        strategy = LimitListSyncStrategy(ctx)
+        with pytest.raises(_asyncio.CancelledError):
+            await strategy.run(trade_date="20240614")
+
+    @pytest.mark.asyncio
+    async def test_system_level_error_propagates(self):
+        """覆盖 concept_sync.py:259-261：system 级别异常（PermissionError）必须 raise，不可降级为 FAILED。
+
+        验证 classify_severity 返回 "system" 时，logger.critical 后 raise。
+        """
+        ctx = _make_ctx()
+        ctx.cache.stock_dao.clear_today_limit_concepts = AsyncMock(return_value=0)
+        ctx.cache.stock_dao.upsert_limit_concepts = AsyncMock(return_value=0)
+        # PermissionError 是 system 级别异常
+        ctx.api.get_limit_list = AsyncMock(side_effect=PermissionError("denied"))
+
+        strategy = LimitListSyncStrategy(ctx)
+        with pytest.raises(PermissionError):
+            await strategy.run(trade_date="20240614")
 
 
 # --- AIConceptTagSyncStrategy ---
@@ -888,6 +1166,383 @@ class TestAIConceptTagSync:
         # 时序守卫：取消应在 2s 内（wait_for timeout=2.0）触发，加上清理 < 5s
         assert elapsed < 5.0, f"cancel propagation too slow: {elapsed:.2f}s"
         assert call_count == 1, f"llm_task should be called once, got {call_count}"
+
+    @pytest.mark.asyncio
+    async def test_retry_queue_loading_fails_degrades(self):
+        """覆盖 concept_sync.py:319-325：get_ai_concept_failures_for_retry 抛通用异常应降级为 warning，继续 fresh 拉取。
+
+        验证：retry_pending 降级为 []，不影响后续 fresh_pending 拉取和主流程。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(side_effect=RuntimeError("db error"))
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=1)
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        # retry 队列加载失败，但 fresh 拉取成功，主流程仍 SUCCESS
+        assert result.status == SyncStatus.SUCCESS.value
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retry_queue_loading_cancelled_propagates(self):
+        """覆盖 concept_sync.py:319-320：get_ai_concept_failures_for_retry 抛 CancelledError 必须传播（R2）。"""
+        import asyncio as _asyncio
+
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(side_effect=_asyncio.CancelledError())
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        with pytest.raises(_asyncio.CancelledError):
+            await strategy.run(batch_size=10)
+
+    @pytest.mark.asyncio
+    async def test_fresh_pending_loading_fails_degrades(self):
+        """覆盖 concept_sync.py:333-341：get_stocks_without_ai_concepts 抛通用异常应降级为 warning。
+
+        验证：fresh_pending 降级为 []，若 retry_pending 也为空则提前返回 SUCCESS。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(side_effect=RuntimeError("db error"))
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        # 两个队列都空（retry 空 + fresh 加载失败），提前返回 SUCCESS
+        assert result.status == SyncStatus.SUCCESS.value
+        ctx.cache.stock_dao.upsert_ai_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_fresh_pending_loading_cancelled_propagates(self):
+        """覆盖 concept_sync.py:335-336：get_stocks_without_ai_concepts 抛 CancelledError 必须传播（R2）。"""
+        import asyncio as _asyncio
+
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(side_effect=_asyncio.CancelledError())
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        with pytest.raises(_asyncio.CancelledError):
+            await strategy.run(batch_size=10)
+
+    @pytest.mark.asyncio
+    async def test_cancel_via_cancelled_flag_in_loop(self):
+        """覆盖 concept_sync.py:361-363：for 循环内 self._cancelled 标志触发 CANCELLED 状态并 break。
+
+        验证：第一只股票 LLM 调用完成后设置 _cancelled，第二只股票循环开始时检测到 → break。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行"), ("600000.SH", "浦发银行")],
+        )
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=0)
+        strategy = AIConceptTagSyncStrategy(ctx)
+
+        original_chat = ctx.ai_service.chat_with_web_search
+
+        async def _cancel_after_first_call(*args, **kwargs):
+            strategy.cancel()  # 第一只股票完成后设置取消标志
+            return await original_chat(*args, **kwargs)
+
+        ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=_cancel_after_first_call)
+
+        result = await strategy.run(batch_size=10)
+
+        assert result.status == SyncStatus.CANCELLED.value
+        # 只调用了 1 次 LLM（第二只股票在循环开始时被 _cancelled 跳过）
+        ctx.ai_service.chat_with_web_search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_cancel_after_loop_before_upsert(self):
+        """覆盖 concept_sync.py:432-433：for 循环结束后、upsert 前 _check_cancelled 命中。
+
+        验证：最后一 只股票 LLM 完成后设置 _cancelled，循环结束后检测到 → 返回 CANCELLED，不 upsert。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行"), ("600000.SH", "浦发银行")],
+        )
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=0)
+        strategy = AIConceptTagSyncStrategy(ctx)
+
+        call_count = 0
+        original_chat = ctx.ai_service.chat_with_web_search
+
+        async def _cancel_on_last_call(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:  # 最后一 只股票完成后设置取消
+                strategy.cancel()
+            return await original_chat(*args, **kwargs)
+
+        ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=_cancel_on_last_call)
+
+        result = await strategy.run(batch_size=10)
+
+        assert result.status == SyncStatus.CANCELLED.value
+        ctx.cache.stock_dao.upsert_ai_concepts.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_json_with_brace_but_raw_decode_fails(self):
+        """覆盖 concept_sync.py:402-403：content 含 '{' 但 raw_decode 也失败 → logger.warning，concepts 保持 []。
+
+        验证 JSON 解析第 2 层 fallback 的 except json.JSONDecodeError 分支。
+        """
+        # content 含 '{' 但不是有效 JSON 对象（key 未加引号）
+        content = "分析结果 {invalid json} 结束"
+        ctx = _make_ctx(ai_service=_make_ai_service_mock(response={"content": content}))
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=1)
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        assert result.status == SyncStatus.SUCCESS.value
+        entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
+        # raw_decode 失败 → parsed 保持 None → concepts 保持 []
+        assert entries[0]["concepts"] == []
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_from_llm_propagates(self):
+        """覆盖 concept_sync.py:413-414：LLM 调用抛 EngineDisposedError 必须传播（R5），不可被 except Exception 吞。"""
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cancel_event = None  # 走 _cancellable_llm_call 的 cancel_event=None 直通路径
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=EngineDisposedError())
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        with pytest.raises(EngineDisposedError):
+            await strategy.run(batch_size=10)
+
+    @pytest.mark.asyncio
+    async def test_failure_persist_cancelled_propagates(self):
+        """覆盖 concept_sync.py:421-422：upsert_ai_concept_failure 抛 CancelledError 必须传播（R2）。"""
+        import asyncio as _asyncio
+
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=RuntimeError("llm error"))
+        ctx.cache.stock_dao.upsert_ai_concept_failure = AsyncMock(side_effect=_asyncio.CancelledError())
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        with pytest.raises(_asyncio.CancelledError):
+            await strategy.run(batch_size=10)
+
+    @pytest.mark.asyncio
+    async def test_failure_persist_generic_exception_degrades(self):
+        """覆盖 concept_sync.py:425-426：upsert_ai_concept_failure 抛通用异常应降级为 warning，不影响主流程。
+
+        验证：LLM 失败 + 错题本写入也失败 → 仍标记 PARTIAL，不传播写入异常。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=RuntimeError("llm error"))
+        ctx.cache.stock_dao.upsert_ai_concept_failure = AsyncMock(side_effect=RuntimeError("db write error"))
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        # LLM 失败 → PARTIAL；错题本写入失败被降级为 warning
+        assert result.status == SyncStatus.PARTIAL.value
+        assert len(result.errors) > 0
+
+    @pytest.mark.asyncio
+    async def test_clear_failure_cancelled_propagates(self):
+        """覆盖 concept_sync.py:445-446：clear_ai_concept_failure 抛 CancelledError 必须传播（R2）。"""
+        import asyncio as _asyncio
+
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        # 000001.SZ 在 retry_pending 中 → 成功后触发 clear_ai_concept_failure
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=1)
+        ctx.cache.stock_dao.clear_ai_concept_failure = AsyncMock(side_effect=_asyncio.CancelledError())
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        with pytest.raises(_asyncio.CancelledError):
+            await strategy.run(batch_size=10)
+
+    @pytest.mark.asyncio
+    async def test_clear_failure_generic_exception_degrades(self):
+        """覆盖 concept_sync.py:449-450：clear_ai_concept_failure 抛通用异常应降级为 warning，不影响主流程成功。"""
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=1)
+        ctx.cache.stock_dao.clear_ai_concept_failure = AsyncMock(side_effect=RuntimeError("db error"))
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        # clear 失败被降级为 warning，主流程仍成功
+        assert result.status == SyncStatus.SUCCESS.value
+
+    @pytest.mark.asyncio
+    async def test_expired_failures_cleaned_with_count(self):
+        """覆盖 concept_sync.py:464-465：delete_expired_failures 返回 > 0 时应记录 info 日志。"""
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(return_value=1)
+        ctx.cache.stock_dao.delete_expired_failures = AsyncMock(return_value=5)
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        assert result.status == SyncStatus.SUCCESS.value
+        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_outer_system_level_error_propagates(self):
+        """覆盖 concept_sync.py:487-492：upsert_ai_concepts 抛 MemoryError → system 级别 → logger.critical + raise。
+
+        验证 classify_severity 返回 "system" 时，不可降级为 FAILED，必须 raise。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        # upsert_ai_concepts 不在内部 try/except 中，异常直接到外层 except Exception
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(side_effect=MemoryError("out of memory"))
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        with pytest.raises(MemoryError):
+            await strategy.run(batch_size=10)
+
+    @pytest.mark.asyncio
+    async def test_outer_operational_error_returns_failed(self):
+        """覆盖 concept_sync.py:487-489,493-495：upsert_ai_concepts 抛 RuntimeError → operational → 标记 FAILED。
+
+        验证 classify_severity 返回 "operational" 时，logger.error + 状态设为 FAILED。
+        """
+        ctx = _make_ctx(ai_service=_make_ai_service_mock())
+        ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(return_value=[])
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(
+            return_value=[("000001.SZ", "平安银行")],
+        )
+        ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(side_effect=RuntimeError("db connection lost"))
+
+        strategy = AIConceptTagSyncStrategy(ctx)
+        result = await strategy.run(batch_size=10)
+
+        assert result.status == SyncStatus.FAILED.value
+        assert len(result.errors) > 0
+
+
+# --- _cancellable_llm_call outer cancel paths ---
+
+
+class TestCancellableLlmCallOuterCancel:
+    """覆盖 _cancellable_llm_call 的外层 CancelledError 清理路径（concept_sync.py:560-576）。
+
+    与 cancel_event.is_set() 触发的内部取消不同，这些测试验证外部任务取消时
+    _cancellable_llm_call 如何清理正在运行的 llm_task。
+    """
+
+    @pytest.mark.asyncio
+    async def test_outer_cancel_with_llm_task_running(self):
+        """覆盖 concept_sync.py:560-562,566-569：外层 CancelledError 时 llm_task 仍运行 → cancel + 清理。
+
+        验证：
+        - llm_task.cancel() 被调用（line 562）
+        - await llm_task 抛 CancelledError → suppress（lines 566-569）
+        - 外层 CancelledError 传播
+        """
+        import asyncio as _asyncio
+
+        cancel_event = _asyncio.Event()  # 非 None，但从不 set
+        ai_service = _make_ai_service_mock()
+
+        async def _slow_llm(*args, **kwargs):
+            await _asyncio.sleep(10)  # 长时间阻塞，确保外层取消时 llm_task 仍运行
+            return {"content": "{}"}
+
+        ai_service.chat_with_web_search = AsyncMock(side_effect=_slow_llm)
+
+        strategy = AIConceptTagSyncStrategy(_make_ctx(ai_service=ai_service))
+
+        task = _asyncio.create_task(
+            strategy._cancellable_llm_call(
+                ai_service,
+                [{"role": "user", "content": "test"}],
+                temperature=0.3,
+                timeout=60.0,
+                cancel_event=cancel_event,
+            )
+        )
+
+        await _asyncio.sleep(0.5)  # 等待进入 while 循环
+        task.cancel()  # 外层取消（非 cancel_event 路径）
+
+        with pytest.raises(_asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_outer_cancel_with_llm_task_raising_non_cancel_exception(self):
+        """覆盖 concept_sync.py:560-562,566-567,570-571：外层取消时 llm_task 抛非 CancelledError → logger.debug。
+
+        验证：
+        - llm_task.cancel() 触发 llm 内部异常处理，转换为 RuntimeError
+        - await llm_task 抛 RuntimeError → except Exception → logger.debug（lines 570-571）
+        - 外层 CancelledError 仍传播（不被 RuntimeError 覆盖）
+        """
+        import asyncio as _asyncio
+
+        cancel_event = _asyncio.Event()  # 非 None，但从不 set
+        ai_service = _make_ai_service_mock()
+
+        async def _llm_raises_after_cancel(*args, **kwargs):
+            try:
+                await _asyncio.sleep(10)
+            except _asyncio.CancelledError as ce:
+                # 模拟 LLM 内部将 CancelledError 转为 RuntimeError
+                raise RuntimeError("llm inner error after cancel") from ce
+
+        ai_service.chat_with_web_search = AsyncMock(side_effect=_llm_raises_after_cancel)
+
+        strategy = AIConceptTagSyncStrategy(_make_ctx(ai_service=ai_service))
+
+        task = _asyncio.create_task(
+            strategy._cancellable_llm_call(
+                ai_service,
+                [{"role": "user", "content": "test"}],
+                temperature=0.3,
+                timeout=60.0,
+                cancel_event=cancel_event,
+            )
+        )
+
+        await _asyncio.sleep(0.5)
+        task.cancel()  # 外层取消
+
+        with pytest.raises(_asyncio.CancelledError):
+            await task
 
 
 # --- search_engine 配置透传 ---
