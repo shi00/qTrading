@@ -3,6 +3,7 @@ import datetime
 import logging
 import re
 import threading
+import typing
 from contextlib import asynccontextmanager
 
 import pandas as pd
@@ -30,7 +31,7 @@ from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.loop_local import del_loop_local, get_loop_local
-from utils.time_utils import get_now
+from utils.time_utils import get_now, to_utc_for_db
 
 logger = logging.getLogger(__name__)
 
@@ -215,13 +216,15 @@ class CacheManager:
         """Normalize news item dictionary for DB Insertion"""
         publish_time = item.get("time", item.get("publish_time"))
         if publish_time is None:
-            publish_time = get_now().replace(tzinfo=None)
+            # H1 举一反三 fix: 与 server_default=now() 时区一致，写库使用 UTC tz-naive
+            publish_time = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
         elif isinstance(publish_time, str):
             try:
                 publish_time = pd.to_datetime(publish_time).to_pydatetime()
             except (ValueError, TypeError) as e:
                 logger.debug("[CacheManager] Failed to parse publish_time '%s': %s", publish_time, e)
-                publish_time = get_now().replace(tzinfo=None)
+                # H1 举一反三 fix: 与 server_default=now() 时区一致，写库使用 UTC tz-naive
+                publish_time = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
 
         return {
             "content": item.get("content", "").strip(),

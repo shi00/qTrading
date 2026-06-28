@@ -3,11 +3,16 @@
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from data.external.akshare_concept_client import AkshareConceptClient
     from data.external.news_fetcher import NewsFetcher
     from data.external.tushare_client import TushareClient
 
 
 def __getattr__(name):
+    if name == "AkshareConceptClient":
+        from data.external.akshare_concept_client import AkshareConceptClient
+
+        return AkshareConceptClient
     if name == "NewsFetcher":
         from data.external.news_fetcher import NewsFetcher
 
@@ -19,4 +24,4 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["TushareClient", "NewsFetcher"]
+__all__ = ["AkshareConceptClient", "TushareClient", "NewsFetcher"]

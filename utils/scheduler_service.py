@@ -25,11 +25,11 @@ logger = logging.getLogger(__name__)
 
 _CFG_LAST_DAILY_UPDATE = "scheduler_last_daily_update"
 _CFG_LAST_NIGHTLY_PREDICTION = "scheduler_last_nightly_prediction"
-_CFG_LAST_DOUBAO_REFRESH = "scheduler_last_doubao_refresh"
+_CFG_LAST_AI_CONCEPT_REFRESH = "scheduler_last_ai_concept_refresh"
 
 _DB_KEY_DAILY_UPDATE = "sched_last_daily_update"
 _DB_KEY_NIGHTLY_PREDICTION = "sched_last_nightly_prediction"
-_DB_KEY_DOUBAO_REFRESH = "sched_last_doubao_refresh"
+_DB_KEY_AI_CONCEPT_REFRESH = "sched_last_ai_concept_refresh"
 
 
 from utils.singleton_registry import register_singleton
@@ -110,7 +110,7 @@ class SchedulerService:
         )
         self._last_update_date = ConfigHandler.get_setting(_CFG_LAST_DAILY_UPDATE)
         self._last_pred_date = ConfigHandler.get_setting(_CFG_LAST_NIGHTLY_PREDICTION)
-        self._last_doubao_date = ConfigHandler.get_setting(_CFG_LAST_DOUBAO_REFRESH)
+        self._last_ai_concept_date = ConfigHandler.get_setting(_CFG_LAST_AI_CONCEPT_REFRESH)
         self._db_state_loaded = False
         self._initialized = True
         logger.info("[Scheduler] Initialized (APScheduler, Timezone: Asia/Shanghai)")
@@ -198,19 +198,19 @@ class SchedulerService:
         try:
             db_daily = await get_app_state(engine, _DB_KEY_DAILY_UPDATE)
             db_pred = await get_app_state(engine, _DB_KEY_NIGHTLY_PREDICTION)
-            db_doubao = await get_app_state(engine, _DB_KEY_DOUBAO_REFRESH)
+            db_ai_concept = await get_app_state(engine, _DB_KEY_AI_CONCEPT_REFRESH)
 
             if db_daily is not None:
                 self._last_update_date = db_daily
             if db_pred is not None:
                 self._last_pred_date = db_pred
-            if db_doubao is not None:
-                self._last_doubao_date = db_doubao
+            if db_ai_concept is not None:
+                self._last_ai_concept_date = db_ai_concept
 
             self._db_state_loaded = True
             logger.info(
                 f"[Scheduler] DB state loaded: daily={self._last_update_date}, "
-                f"pred={self._last_pred_date}, doubao={self._last_doubao_date}",
+                f"pred={self._last_pred_date}, ai_concept={self._last_ai_concept_date}",
             )
         except Exception as e:
             logger.warning(f"[Scheduler] Failed to load DB state, using ConfigHandler cache: {e}")
@@ -249,8 +249,8 @@ class SchedulerService:
         return {
             "time": ConfigHandler.get_auto_update_time(),
             "enabled": ConfigHandler.is_auto_update_enabled(),
-            "doubao_time": ConfigHandler.get_doubao_schedule_time(),
-            "doubao_enabled": ConfigHandler.is_doubao_schedule_enabled(),
+            "ai_concept_time": ConfigHandler.get_ai_concept_schedule_time(),
+            "ai_concept_enabled": ConfigHandler.is_ai_concept_schedule_enabled(),
         }
 
     async def _watch_config_changes(self):
@@ -277,8 +277,8 @@ class SchedulerService:
 
         current_time = current_config["time"]
         current_enabled = current_config["enabled"]
-        current_doubao_time = current_config["doubao_time"]
-        current_doubao_enabled = current_config["doubao_enabled"]
+        current_ai_concept_time = current_config["ai_concept_time"]
+        current_ai_concept_enabled = current_config["ai_concept_enabled"]
 
         changed = False
         if current_time != self._last_known_config["time"]:
@@ -293,10 +293,10 @@ class SchedulerService:
             )
             changed = True
 
-        if current_doubao_time != self._last_known_config.get(
-            "doubao_time",
-        ) or current_doubao_enabled != self._last_known_config.get("doubao_enabled"):
-            logger.info("[Scheduler] Detected Doubao schedule config change")
+        if current_ai_concept_time != self._last_known_config.get(
+            "ai_concept_time",
+        ) or current_ai_concept_enabled != self._last_known_config.get("ai_concept_enabled"):
+            logger.info("[Scheduler] Detected AI Concept schedule config change")
             changed = True
 
         if changed:
@@ -307,7 +307,7 @@ class SchedulerService:
     def _schedule_jobs(self):
         """Register jobs with the scheduler"""
         # Only remove business jobs, NOT the config_watchdog
-        for job_id in ["daily_update", "nightly_prediction", "doubao_weekly_refresh"]:
+        for job_id in ["daily_update", "nightly_prediction", "ai_concept_daily_refresh"]:
             existing = self.scheduler.get_job(job_id)
             if existing:
                 existing.remove()
@@ -338,21 +338,21 @@ class SchedulerService:
         )
         logger.info("[Scheduler] Scheduled Nightly Prediction at 20:30")
 
-        # 3. Doubao AI Concept Tagging Job (Weekly on Saturday)
-        doubao_time = ConfigHandler.get_doubao_schedule_time() or "10:00"
+        # 3. AI Concept Tagging Job (Daily)
+        ai_concept_time = ConfigHandler.get_ai_concept_schedule_time() or "18:00"
         try:
-            dh, dm = map(int, doubao_time.split(":"))
+            dh, dm = map(int, ai_concept_time.split(":"))
         except (ValueError, TypeError, AttributeError):
-            dh, dm = 10, 0
+            dh, dm = 18, 0
 
         self.scheduler.add_job(
-            self._run_doubao_tagger,
-            CronTrigger(day_of_week="sat", hour=dh, minute=dm),
-            id="doubao_weekly_refresh",
+            self._run_ai_concept_tagger,
+            CronTrigger(hour=dh, minute=dm),
+            id="ai_concept_daily_refresh",
             replace_existing=True,
         )
         logger.info(
-            f"[Scheduler] Scheduled Doubao Weekly Refresh at {dh:02d}:{dm:02d} on Saturdays",
+            f"[Scheduler] Scheduled AI Concept Daily Refresh at {dh:02d}:{dm:02d}",
         )
 
     async def _run_daily_update(self):
@@ -426,41 +426,45 @@ class SchedulerService:
             unique_key="daily_sync",
         )
 
-    async def _run_doubao_tagger(self):
+    async def _run_ai_concept_tagger(self):
         from utils.correlation import ensure_correlation_id
 
         ensure_correlation_id()
 
-        if not ConfigHandler.is_doubao_schedule_enabled():
+        if not ConfigHandler.is_ai_concept_schedule_enabled():
             return
 
         today_str = get_now().strftime("%Y%m%d")
-        if self._last_doubao_date == today_str:
-            logger.debug(f"[Scheduler] Doubao tagging already done for {today_str}, skipping")
+        if self._last_ai_concept_date == today_str:
+            logger.debug(f"[Scheduler] AI Concept tagging already done for {today_str}, skipping")
             return
 
         from services.task_manager import TaskManager
 
-        async def _doubao_logic(task_id: str, **kwargs):
+        async def _ai_concept_logic(task_id: str, **kwargs):
             tm = TaskManager()
-            task = tm.get_task(task_id)
-            cancel_event = task._cancel_event if task else None
+            cancel_event = tm.get_cancel_event(task_id)
             processor = DataProcessor()
-            tm.update_progress(task_id, 0.05, I18n.get("sched_doubao_clear_history"))
-            await processor.run_doubao_tagging(
+            # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
+            # M3 fix: CancelledError 带消息，便于日志区分"调度取消"与"框架取消"
+            if not tm.update_progress(task_id, 0.05, I18n.get("sched_ai_concept_clear_history")):
+                raise asyncio.CancelledError("task cancelled by scheduler (update_progress returned False)")
+            # Scheduled run: manual_trigger=False → only sync free data sources, no LLM call
+            await processor.run_ai_concept_tagging(
                 task_id=task_id,
                 cancel_event=cancel_event,
+                manual_trigger=False,
             )
-            self._last_doubao_date = today_str
-            await self._persist_run_date_db(_DB_KEY_DOUBAO_REFRESH, _CFG_LAST_DOUBAO_REFRESH, today_str)
-            return I18n.get("sched_doubao_done")
+            self._last_ai_concept_date = today_str
+            await self._persist_run_date_db(_DB_KEY_AI_CONCEPT_REFRESH, _CFG_LAST_AI_CONCEPT_REFRESH, today_str)
+            return I18n.get("sched_ai_concept_done")
 
         TaskManager().submit_task(
-            name=I18n.get("sched_doubao_task_name"),
-            task_type=I18n.get("sched_doubao_task_type"),
-            coroutine_factory=_doubao_logic,
+            name=I18n.get("sched_ai_concept_task_name"),
+            task_type=I18n.get("sched_ai_concept_task_type"),
+            coroutine_factory=_ai_concept_logic,
             cancellable=True,
-            unique_key="doubao_sync",
+            unique_key="ai_concept_sync",
         )
 
     async def _run_nightly_prediction(self):

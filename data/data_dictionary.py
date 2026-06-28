@@ -146,8 +146,18 @@ TABLE_DEFINITIONS = {
     "stock_basic": {"alias": "tab_stock_basic", "columns": {}},
     "stock_concepts": {
         "alias": "tab_stock_concepts",
-        "desc": "股票概念映射表 (包含传统 Tushare 原生概念，以及通过 AI 自动扫描剥离出的 AI_DOUBAO_<sha256> 前缀概念)",
+        "desc": "股票概念映射表 (包含传统 Tushare 原生概念，以及通过 AI 自动扫描剥离出的 AI_LLM_<sha256> 前缀概念)",
         "columns": {},
+    },
+    "ai_concept_failures": {
+        "alias": "tab_ai_concept_failures",
+        "desc": "AI 概念打标错题本：失败股票重试队列，含 retry_count/next_retry_at 等字段",
+        "columns": {
+            "last_error": "col_last_error",
+            "retry_count": "col_retry_count",
+            "last_attempt_at": "col_last_attempt_at",
+            "next_retry_at": "col_next_retry_at",
+        },
     },
     "daily_quotes": {
         "alias": "tab_daily_quotes",

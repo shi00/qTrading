@@ -3,6 +3,7 @@ import datetime
 from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.sync.holder import (
     HolderSyncStrategy,
     _MAX_ERRORS,
@@ -936,3 +937,22 @@ class TestHolderSyncGetRecentQuarterEndsEdge:
     def test_count_large(self):
         result = HolderSyncStrategy._get_recent_quarter_ends(count=10)
         assert len(result) <= 10
+
+
+class TestHolderSyncRunEngineDisposedError:
+    """R5 举一反三 fix: EngineDisposedError 必须 raise 让调用方感知，不可 swallow"""
+
+    @pytest.mark.asyncio
+    async def test_run_reraises_engine_disposed(self):
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_recent_quarter_ends = MagicMock(return_value=["20240331"])
+
+        async def mock_sync(qe):
+            raise EngineDisposedError("Engine disposed")
+
+        strategy._sync_stk_holdernumber = mock_sync
+        with pytest.raises(EngineDisposedError):
+            await strategy._run_impl()

@@ -40,7 +40,7 @@ def mock_processor():
             },
         )
         instance.run_daily_update = AsyncMock()
-        instance.run_doubao_tagging = AsyncMock()
+        instance.run_ai_concept_tagging = AsyncMock()
         instance.initialize_system = AsyncMock(return_value={"success": True})
         instance.request_cancel = AsyncMock()
         instance.is_cancelled = MagicMock(return_value=False)
@@ -53,6 +53,16 @@ def mock_cache():
     with patch("ui.viewmodels.data_source_view_model.CacheManager") as cls:
         instance = MagicMock()
         instance.clear_all_cache = AsyncMock()
+        cls.return_value = instance
+        yield instance
+
+
+@pytest.fixture
+def mock_ai_service():
+    # T6 fix: AIService 通过构造注入到 ViewModel，需 mock 避免真实单例初始化
+    with patch("ui.viewmodels.data_source_view_model.AIService") as cls:
+        instance = MagicMock()
+        instance.is_cloud_available = MagicMock(return_value=True)
         cls.return_value = instance
         yield instance
 
@@ -71,7 +81,7 @@ def mock_task_manager():
 
 
 @pytest.fixture
-def vm(mock_processor, mock_cache, mock_task_manager):
+def vm(mock_processor, mock_cache, mock_ai_service, mock_task_manager):
     return DataSourceViewModel()
 
 
@@ -107,11 +117,14 @@ class TestDataSourceViewModelInit:
         assert vm._processor is not None
         assert vm._cache is not None
         assert vm._tm is not None
+        assert vm._ai_service is not None  # T6 fix: 验证 AIService 注入
 
-    def test_constructor_injection(self, mock_processor, mock_cache):
-        vm = DataSourceViewModel(processor=mock_processor, cache=mock_cache)
+    def test_constructor_injection(self, mock_processor, mock_cache, mock_ai_service):
+        # T6 fix: ai_service 也支持构造注入，与 _processor / _cache 一致
+        vm = DataSourceViewModel(processor=mock_processor, cache=mock_cache, ai_service=mock_ai_service)
         assert vm._processor is mock_processor
         assert vm._cache is mock_cache
+        assert vm._ai_service is mock_ai_service
 
     def test_initial_state(self, vm):
         assert vm.is_syncing is False
@@ -262,23 +275,51 @@ class TestDataSourceViewModelFullDailySync:
         assert "daily_sync" in bound_vm._active_task_ids
         assert bound_vm._active_task_ids["daily_sync"] == "task_123"
 
+    async def test_t8_progress_false_raises_cancelled(self, bound_vm, mock_processor, mock_task_manager):
+        """O1 fix: _daily_logic._progress 回调在 update_progress 返回 False 时应抛 CancelledError 早退。"""
+        mock_task_manager.update_progress = MagicMock(return_value=False)
 
-class TestDataSourceViewModelDoubaoRebuild:
+        async def _call_progress(*args, progress_callback=None, **kwargs):
+            assert progress_callback is not None
+            progress_callback(1, 10, "step1")
+
+        mock_processor.run_daily_update = AsyncMock(side_effect=_call_progress)
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(asyncio.CancelledError):
+            await factory(task_id="task_123")
+        # 副作用验证：CancelledError 被外层 except 捕获后应触发 on_show_snack warning
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("settings_msg_sync_cancelled"), "warning")
+        # finally 应重置 sync busy 状态
+        assert bound_vm.is_syncing is False
+        bound_vm.on_sync_busy_changed.assert_called_with(False, None)
+
+
+class TestDataSourceViewModelAiConceptRebuild:
     def test_execute_sets_sync_busy(self, bound_vm):
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         assert bound_vm.is_syncing is True
-        bound_vm.on_sync_busy_changed.assert_called_with(True, "doubao_sync")
+        bound_vm.on_sync_busy_changed.assert_called_with(True, "ai_concept_sync")
 
     async def test_rebuild_success(self, bound_vm, mock_processor, mock_task_manager):
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
-        bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_doubao_done"), "success")
+        bound_vm.on_show_snack.assert_called_once_with(I18n.get("snack_ai_concept_done"), "success")
+        # 验证通过 get_cancel_event 访问器获取取消事件（P0-2 取消链路）
+        mock_task_manager.get_cancel_event.assert_called_once_with("task_123")
+        # 验证 manual_trigger=True + cancel_event + ai_service 参数正确传递
+        mock_processor.run_ai_concept_tagging.assert_called_once()
+        kwargs = mock_processor.run_ai_concept_tagging.call_args.kwargs
+        assert kwargs.get("manual_trigger") is True
+        assert kwargs.get("cancel_event") is mock_task_manager.get_cancel_event.return_value
+        assert "ai_service" in kwargs
 
     async def test_rebuild_cancelled_propagates(self, bound_vm, mock_processor, mock_task_manager):
-        mock_processor.run_doubao_tagging = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=asyncio.CancelledError())
 
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
         with pytest.raises(asyncio.CancelledError):
@@ -289,8 +330,34 @@ class TestDataSourceViewModelDoubaoRebuild:
 
     def test_task_rejected_resets_busy(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
-        bound_vm.execute_doubao_rebuild()
+        bound_vm.execute_ai_concept_rebuild()
         assert bound_vm.is_syncing is False
+
+    async def test_t8_update_progress_false_raises_cancelled(self, bound_vm, mock_processor, mock_task_manager):
+        """T8 fix: update_progress 返回 False（任务已取消/不再 RUNNING）时，应立即 raise CancelledError 早退。"""
+        mock_task_manager.update_progress = MagicMock(return_value=False)
+        bound_vm.execute_ai_concept_rebuild()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(asyncio.CancelledError):
+            await factory(task_id="task_123")
+        # 验证后续的 processor 调用未执行（早退生效）
+        mock_processor.run_ai_concept_tagging.assert_not_called()
+
+
+class TestDataSourceViewModelHealthCheckT8:
+    """T8 fix: health check 任务（cancellable=True）的 update_progress 早退验证。"""
+
+    async def test_t8_update_progress_false_raises_cancelled(self, bound_vm, mock_processor, mock_task_manager):
+        """health check 第一次 update_progress 返回 False 时立即 raise CancelledError。"""
+        mock_task_manager.update_progress = MagicMock(return_value=False)
+        await bound_vm.check_health()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(asyncio.CancelledError):
+            await factory(task_id="task_123")
+        # 验证后续 processor.check_data_health 未执行
+        mock_processor.check_data_health.assert_not_called()
+        # 验证 on_health_cancelled 被调用（CancelledError 分支处理）
+        bound_vm.on_health_cancelled.assert_called_once()
 
 
 class TestDataSourceViewModelClearCache:
@@ -425,6 +492,30 @@ class TestDataSourceViewModelInitHistorical:
         bound_vm.execute_init_historical_data()
         assert bound_vm.is_syncing is False
         assert bound_vm.init_sync_cancellable is False
+
+    async def test_t8_init_sync_progress_false_raises_cancelled(self, bound_vm, mock_processor, mock_task_manager):
+        """H3 fix: init_sync _combined_progress 在 update_progress 返回 False 时应早退。
+
+        场景：cancellable=True 任务被用户取消，progress_callback 第一次调用时 update_progress
+        返回 False，应立即抛 CancelledError 中断 initialize_system。
+        """
+        mock_task_manager.update_progress = MagicMock(return_value=False)
+
+        # 让 initialize_system 调用 progress_callback 以触发 T8 早退
+        async def _fake_initialize(*args, **kwargs):
+            cb = kwargs.get("progress_callback")
+            if cb:
+                cb(1, 10, "step1")  # 触发 _combined_progress → update_progress 返回 False → raise CancelledError
+            return None
+
+        mock_processor.initialize_system = AsyncMock(side_effect=_fake_initialize)
+
+        bound_vm.execute_init_historical_data()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(asyncio.CancelledError):
+            await factory(task_id="task_123")
+        # 验证 initialize_system 被调用但内部未完成（CancelledError 中断）
+        mock_processor.initialize_system.assert_awaited_once()
 
 
 class TestDataSourceViewModelTaskUpdate:

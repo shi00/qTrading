@@ -216,12 +216,12 @@ class TestOverwriteConcepts:
                 await dao.overwrite_concepts(df)
 
 
-class TestClearAllDoubaoConcepts:
+class TestClearAllAiLlmConcepts:
     @pytest.mark.asyncio
     async def test_success(self):
         dao = _make_dao()
         dao._write_db = AsyncMock(return_value=10)
-        result = await dao.clear_all_doubao_concepts()
+        result = await dao.clear_all_ai_llm_concepts()
         assert result == 10
 
 

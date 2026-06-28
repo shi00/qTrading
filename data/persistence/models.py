@@ -673,6 +673,30 @@ class BacktestResultModel(Base):
     )
 
 
+class AIConceptFailure(Base):
+    """错题本：AI 概念打标失败的股票重试队列。
+
+    每次失败 upsert（retry_count+1, last_attempt_at=now, next_retry_at=now+cooldown）。
+    下次 run 开始时优先从此表拉取 retry_count < max_retry 且 next_retry_at <= now 的股票。
+    成功打标后从队列删除。
+    """
+
+    __tablename__ = "ai_concept_failures"
+    ts_code = Column(String, primary_key=True)
+    name = Column(String)
+    last_error = Column(String)
+    retry_count = Column(Integer, server_default=text("0"), nullable=False)
+    last_attempt_at = Column(DateTime(timezone=False))
+    next_retry_at = Column(DateTime(timezone=False))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"), onupdate=text("now()"))
+
+    __table_args__ = (
+        Index("ix_ai_concept_failures_next_retry", "next_retry_at"),
+        Index("ix_ai_concept_failures_retry_count", "retry_count"),
+    )
+
+
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
     exclude = exclude or {"updated_at", "created_at"}
     return [c.name for c in model_class.__table__.columns if c.name not in exclude]

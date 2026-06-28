@@ -153,11 +153,11 @@ class DataSourceTab(ft.Container):
             self.on_clear_cache,  # pragma: no cover
         )  # pragma: no cover
 
-        self.action_doubao_rebuild = ActionChip(  # pragma: no cover
+        self.action_ai_concept_rebuild = ActionChip(  # pragma: no cover
             ft.Icons.AUTO_FIX_HIGH,  # pragma: no cover
-            I18n.get("ds_btn_doubao_rebuild"),  # pragma: no cover
-            I18n.get("ds_btn_doubao_rebuild_desc"),  # pragma: no cover
-            self.on_doubao_rebuild,  # pragma: no cover
+            I18n.get("ds_btn_ai_concept_rebuild"),  # pragma: no cover
+            I18n.get("ds_btn_ai_concept_rebuild_desc"),  # pragma: no cover
+            self.on_ai_concept_rebuild,  # pragma: no cover
         )  # pragma: no cover
 
         self.action_console = DashboardCard(  # pragma: no cover
@@ -169,7 +169,7 @@ class DataSourceTab(ft.Container):
                         [  # pragma: no cover
                             ft.Column([self.action_full_sync], col={"sm": 12, "md": 4}),  # pragma: no cover
                             ft.Column(  # pragma: no cover
-                                [self.action_doubao_rebuild],  # pragma: no cover
+                                [self.action_ai_concept_rebuild],  # pragma: no cover
                                 col={"sm": 12, "md": 4},  # pragma: no cover
                             ),  # pragma: no cover
                             ft.Column(  # pragma: no cover
@@ -424,9 +424,9 @@ class DataSourceTab(ft.Container):
                 I18n.get("settings_clear_cache"),
                 I18n.get("ds_action_clear"),
             )
-            self.action_doubao_rebuild.set_text(
-                I18n.get("ds_btn_doubao_rebuild"),
-                I18n.get("ds_btn_doubao_rebuild_desc"),
+            self.action_ai_concept_rebuild.set_text(
+                I18n.get("ds_btn_ai_concept_rebuild"),
+                I18n.get("ds_btn_ai_concept_rebuild_desc"),
             )
 
             self._safe_update()
@@ -479,19 +479,19 @@ class DataSourceTab(ft.Container):
             is_destructive=False,
         )
 
-    async def on_doubao_rebuild(self, e):  # pragma: no cover
+    async def on_ai_concept_rebuild(self, e):  # pragma: no cover
         from utils.correlation import ensure_correlation_id
 
         ensure_correlation_id()
-        UILogger.log_action("DataSourceTab", "Click", "btn_doubao_rebuild")
+        UILogger.log_action("DataSourceTab", "Click", "btn_ai_concept_rebuild")
         if self.vm.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
         await self._show_confirm_dialog(
-            title_key="dialog_doubao_rebuild_title",
-            content_key="dialog_doubao_rebuild_content",
+            title_key="dialog_ai_concept_rebuild_title",
+            content_key="dialog_ai_concept_rebuild_content",
             confirm_btn_key="btn_confirm_rebuild",
-            on_confirm_callback=self.vm.execute_doubao_rebuild,
+            on_confirm_callback=self.vm.execute_ai_concept_rebuild,
             is_destructive=True,
         )
 
@@ -548,7 +548,7 @@ class DataSourceTab(ft.Container):
     def _on_vm_sync_busy_changed(self, is_busy: bool, active_key: str | None):
         btn_map = {
             "daily_sync": self.action_full_sync,
-            "doubao_sync": self.action_doubao_rebuild,
+            "ai_concept_sync": self.action_ai_concept_rebuild,
             "cache_clear": self.action_clear_cache,
             "system_init_sync": self.sync_button,
         }
@@ -559,7 +559,7 @@ class DataSourceTab(ft.Container):
         controls = [
             self.action_full_sync,
             self.action_clear_cache,
-            self.action_doubao_rebuild,
+            self.action_ai_concept_rebuild,
             self.sync_button,
         ]
         for ctrl in controls:

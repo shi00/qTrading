@@ -54,6 +54,16 @@ class SyncContext:
     # Optional: request delay provider for testability.
     # Signature: (is_heavy: bool) -> float. None = fall back to ConfigHandler.
     request_delay_provider: Callable[[bool], float] | None = None
+    # Optional: AIService reference injected by DataProcessor for LLM-driven
+    # sync strategies (e.g. AIConceptTagSyncStrategy). Typed as Any to avoid
+    # reverse dependency from data/ → services/ (R1).
+    ai_service: Any = None
+    # Optional: asyncio.Event for fine-grained cancellation signaling. Set by
+    # DataProcessor when invoking strategies so that long-running operations
+    # (e.g. LLM calls) can poll cancel state every ~2 seconds rather than
+    # blocking for the full operation timeout. NOT a class-level primitive —
+    # populated per-run via DI, so R11 (loop-local) does not apply.
+    cancel_event: Any = None
 
     @property
     def processor(self):

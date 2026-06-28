@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import typing
 
 import pandas as pd
 
@@ -12,7 +13,7 @@ from data.persistence.models import (
     get_model_pk_columns,
 )
 from utils.thread_pool import TaskType, ThreadPoolManager
-from utils.time_utils import get_now
+from utils.time_utils import get_now, to_utc_for_db
 
 from .base_dao import BaseDao, EngineDisposedError
 
@@ -20,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 class StockDao(BaseDao):
+    AI_CONCEPT_PREFIX = "AI_LLM_"
+    EM_CONCEPT_PREFIX = "EM_"
+    LIMIT_CONCEPT_PREFIX = "LIMIT_"
+
     async def save_stock_basic(self, df, priority=None):
         if df is None or df.empty:
             return 0
@@ -177,7 +182,8 @@ class StockDao(BaseDao):
 
         cols = get_model_columns(StockConcepts, exclude=set())
         df = df.copy()
-        df["updated_at"] = get_now().replace(tzinfo=None)
+        # T4 fix: 与 server_default=now() 保持 UTC 一致（S1-6 fix 模式），避免 tz-naive CST 与 DB 比较偏差 8 小时
+        df["updated_at"] = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
 
         params = await ThreadPoolManager().run_async(
             TaskType.CPU, self._prepare_data_params, df, cols, "stock_concepts"
@@ -190,8 +196,10 @@ class StockDao(BaseDao):
 
         try:
             async with self._guarded_begin() as conn:
-                # 1. Clear old data
-                await conn.exec_driver_sql("DELETE FROM stock_concepts")
+                # 1. Clear old EM-prefixed concepts only (preserve AI_LLM_ concepts)
+                await conn.exec_driver_sql(
+                    f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.EM_CONCEPT_PREFIX}%'"
+                )
 
                 # 2. Insert new data
                 if params:
@@ -207,22 +215,22 @@ class StockDao(BaseDao):
             logger.error(f"[StockDao] overwrite_concepts failed: {e}")
             raise
 
-    async def clear_all_doubao_concepts(self) -> int:
+    async def clear_all_ai_llm_concepts(self) -> int:
         return await self._write_db(
-            "DELETE FROM stock_concepts WHERE concept_id LIKE 'AI_DOUBAO_%'",
+            f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.AI_CONCEPT_PREFIX}%'",
         )
 
     async def get_stocks_without_ai_concepts(
         self,
         batch_size: int,
-        exclude_codes: list = None,  # type: ignore[untyped]
-    ) -> list:
-        sql = """
+        exclude_codes: list[str] | None = None,
+    ) -> list[tuple[str, str]]:
+        sql = f"""
             SELECT ts_code, name FROM stock_basic
             WHERE list_status = 'L'
               AND NOT EXISTS (
                   SELECT 1 FROM stock_concepts sc
-                  WHERE sc.ts_code = stock_basic.ts_code AND sc.concept_id LIKE 'AI_DOUBAO_%'
+                  WHERE sc.ts_code = stock_basic.ts_code AND sc.concept_id LIKE '{self.AI_CONCEPT_PREFIX}%'
               )
         """
         df = await self._read_db(sql)
@@ -236,7 +244,7 @@ class StockDao(BaseDao):
             :batch_size
         ]
 
-    async def get_concepts(self, ts_codes: list = None):  # type: ignore[untyped]
+    async def get_concepts(self, ts_codes: list[str] | None = None) -> dict[str, list[str]]:
         """
         Get concepts for given stock codes.
         Returns: Dict[ts_code, List[concept_name]]
@@ -284,7 +292,7 @@ class StockDao(BaseDao):
     async def upsert_ai_concepts(self, ai_concept_entries: list):
         """
         AI 专属概念批量入库接口。
-        强制为每一个生成的概念附加唯一的 AI_DOUBAO 前缀哈希 ID，以实现物理隔离。
+        强制为每一个生成的概念附加唯一的 AI_LLM 前缀哈希 ID，以实现物理隔离。
         ai_concept_entries: list of dict, e.g. [{"ts_code": "000001.SZ", "concepts": ["概念1", "概念2"]}]
         """
         import hashlib
@@ -301,7 +309,7 @@ class StockDao(BaseDao):
 
             concepts = item.get("concepts", [])
             if not concepts:
-                dummy_id = f"AI_DOUBAO_{hashlib.sha256(b'NONE').hexdigest()}"
+                dummy_id = f"{self.AI_CONCEPT_PREFIX}{hashlib.sha256(b'NONE').hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,
@@ -312,7 +320,7 @@ class StockDao(BaseDao):
                 continue
 
             for concept in concepts:
-                concept_id = f"AI_DOUBAO_{hashlib.sha256(concept.encode('utf-8')).hexdigest()}"
+                concept_id = f"{self.AI_CONCEPT_PREFIX}{hashlib.sha256(concept.encode('utf-8')).hexdigest()}"
                 records.append(
                     {
                         "ts_code": ts_code,
@@ -334,3 +342,200 @@ class StockDao(BaseDao):
             cols,
             pk_columns=pk_columns,
         )
+
+    async def upsert_em_concepts(self, records: list[dict]) -> int:
+        """
+        东财概念板块成分股入库接口。
+        records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "EM_C1", "concept_name": "概念1"}]
+        """
+        if not records:
+            return 0
+
+        df = pd.DataFrame(records)
+        cols = get_model_columns(StockConcepts)
+        pk_columns = get_model_pk_columns(StockConcepts)
+
+        return await self._save_upsert(
+            df,
+            "stock_concepts",
+            cols,
+            pk_columns=pk_columns,
+        )
+
+    async def upsert_limit_concepts(self, records: list[dict]) -> int:
+        """
+        涨停原因概念入库接口。
+        records: list of dict, e.g. [{"ts_code": "000001.SZ", "concept_id": "LIMIT_C1", "concept_name": "涨停原因1"}]
+        """
+        if not records:
+            return 0
+
+        df = pd.DataFrame(records)
+        cols = get_model_columns(StockConcepts)
+        pk_columns = get_model_pk_columns(StockConcepts)
+
+        return await self._save_upsert(
+            df,
+            "stock_concepts",
+            cols,
+            pk_columns=pk_columns,
+        )
+
+    async def clear_today_limit_concepts(self) -> int:
+        """清空当日 LIMIT_ 前缀概念（涨停原因概念每日重建）。"""
+        return await self._write_db(
+            f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.LIMIT_CONCEPT_PREFIX}%'",
+        )
+
+    async def get_concepts_by_prefix(
+        self,
+        prefix: str,
+        ts_codes: list | None = None,
+    ) -> list[dict]:
+        """
+        按 concept_id 前缀查询概念，可选用 ts_codes 过滤。
+        Returns: list of dict, e.g. [{"ts_code": "...", "concept_id": "...", "concept_name": "..."}]
+        """
+        sql = "SELECT ts_code, concept_id, concept_name FROM stock_concepts WHERE concept_id LIKE $1"
+        params: list = [f"{prefix}%"]
+        if ts_codes:
+            placeholders = ",".join([f"${i + 2}" for i in range(len(ts_codes))])
+            sql += f" AND ts_code IN ({placeholders})"
+            params.extend(ts_codes)
+
+        df = await self._read_db(sql, params)
+        if df is None or df.empty:
+            return []
+        return df.to_dict(orient="records")
+
+    # --- AI Concept Failures (错题本) ---
+
+    # 默认重试上限与冷却期（24h），可由调用方覆盖
+    AI_CONCEPT_FAILURE_MAX_RETRY = 3
+    AI_CONCEPT_FAILURE_COOLDOWN_SECONDS = 24 * 3600
+
+    async def upsert_ai_concept_failure(
+        self,
+        ts_code: str,
+        name: str,
+        error: str,
+        *,
+        cooldown_seconds: int | None = None,
+    ) -> int:
+        """记录/更新一次失败：retry_count+1，刷新 last_attempt_at / next_retry_at。
+
+        使用 UPSERT（ON CONFLICT ts_code DO UPDATE）保证幂等。
+        """
+        cooldown = cooldown_seconds if cooldown_seconds is not None else self.AI_CONCEPT_FAILURE_COOLDOWN_SECONDS
+        # T4 fix: 写入 UTC tz-naive（S1-6 fix 模式），与 DB server_default=now() / SQL now() 保持时区一致。
+        # 原代码 get_now().replace(tzinfo=None) 写入 tz-naive CST，与 SQL `next_retry_at <= now()` 比较时
+        # 在非 CST 服务器上会有 8 小时偏差，导致 24h 冷却实际变成 16h 或 32h。
+        # 前提：PostgreSQL 服务器/会话时区为 UTC（生产环境已确认）。
+        now = typing.cast(datetime.datetime, to_utc_for_db(get_now()))
+        next_retry = now + datetime.timedelta(seconds=cooldown)
+        sql = """
+            INSERT INTO ai_concept_failures
+                (ts_code, name, last_error, retry_count, last_attempt_at, next_retry_at)
+            VALUES ($1, $2, $3, 1, $4, $5)
+            ON CONFLICT (ts_code) DO UPDATE SET
+                name = EXCLUDED.name,
+                last_error = EXCLUDED.last_error,
+                retry_count = ai_concept_failures.retry_count + 1,
+                last_attempt_at = EXCLUDED.last_attempt_at,
+                next_retry_at = EXCLUDED.next_retry_at,
+                updated_at = now()
+        """
+        try:
+            async with self._guarded_begin() as conn:
+                await conn.exec_driver_sql(sql, (ts_code, name, error, now, next_retry))
+            return 1
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] upsert_ai_concept_failure failed for {ts_code}: {e}", exc_info=True)
+            raise
+
+    async def get_ai_concept_failures_for_retry(
+        self,
+        batch_size: int,
+        *,
+        max_retry: int | None = None,
+    ) -> list[tuple[str, str]]:
+        """拉取可重试的失败股票：retry_count < max_retry AND next_retry_at <= now。
+
+        Returns: list of (ts_code, name)
+        """
+        limit = max_retry if max_retry is not None else self.AI_CONCEPT_FAILURE_MAX_RETRY
+        sql = """
+            SELECT ts_code, name FROM ai_concept_failures
+            WHERE retry_count < $1
+              AND (next_retry_at IS NULL OR next_retry_at <= now())
+            ORDER BY last_attempt_at ASC
+            LIMIT $2
+        """
+        try:
+            df = await self._read_db(sql, (limit, batch_size))
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] get_ai_concept_failures_for_retry failed: {e}", exc_info=True)
+            return []
+        if df is None or df.empty:
+            return []
+        return list(df[["ts_code", "name"]].itertuples(index=False, name=None))
+
+    async def clear_ai_concept_failure(self, ts_code: str) -> int:
+        """成功打标后从错题本删除。"""
+        try:
+            return await self._write_db(
+                "DELETE FROM ai_concept_failures WHERE ts_code = $1",
+                (ts_code,),
+            )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] clear_ai_concept_failure failed for {ts_code}: {e}", exc_info=True)
+            raise
+
+    async def count_ai_concept_failures(self) -> int:
+        """统计错题本当前条目数（用于诊断/监控）。"""
+        try:
+            df = await self._read_db("SELECT COUNT(*) AS cnt FROM ai_concept_failures")
+            if df is None or df.empty:
+                return 0
+            return int(df["cnt"].iloc[0] or 0)
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.debug(f"[StockDao] count_ai_concept_failures failed: {e}")
+            return 0
+
+    async def delete_expired_failures(self, max_retry: int | None = None) -> int:
+        """T5 fix: 清理 retry_count >= max_retry 的错题本记录。
+
+        这些记录已耗尽重试机会，继续保留无意义且会无限累积。
+        建议在 AIConceptTagSyncStrategy 每次运行结束时调用。
+
+        Returns: 被删除的记录数
+        """
+        limit = max_retry if max_retry is not None else self.AI_CONCEPT_FAILURE_MAX_RETRY
+        try:
+            return await self._write_db(
+                "DELETE FROM ai_concept_failures WHERE retry_count >= $1",
+                (limit,),
+            )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.error(f"[StockDao] delete_expired_failures failed: {e}", exc_info=True)
+            raise

@@ -483,20 +483,28 @@ class ConfigHandler:
         return ConfigHandler.get_typed("auto_update_time", str, "16:30")
 
     @classmethod
-    def is_doubao_schedule_enabled(cls) -> bool:
-        return ConfigHandler.get_typed("doubao_schedule_enabled", bool, False)
+    def is_ai_concept_schedule_enabled(cls) -> bool:
+        return ConfigHandler.get_typed("ai_concept_schedule_enabled", bool, False)
 
     @classmethod
-    def set_doubao_schedule_enabled(cls, enabled: bool):
-        return ConfigHandler.set_typed("doubao_schedule_enabled", bool(enabled))
+    def set_ai_concept_schedule_enabled(cls, enabled: bool):
+        return ConfigHandler.set_typed("ai_concept_schedule_enabled", bool(enabled))
 
     @classmethod
-    def get_doubao_schedule_time(cls) -> str:
-        return ConfigHandler.get_typed("doubao_schedule_time", str, "10:00")
+    def get_ai_concept_schedule_time(cls) -> str:
+        return ConfigHandler.get_typed("ai_concept_schedule_time", str, "18:00")
 
     @classmethod
-    def set_doubao_schedule_time(cls, time_str: str):
-        return ConfigHandler.set_typed("doubao_schedule_time", str(time_str))
+    def set_ai_concept_schedule_time(cls, time_str: str):
+        return ConfigHandler.set_typed("ai_concept_schedule_time", str(time_str))
+
+    @classmethod
+    def get_ai_concept_search_engine(cls) -> str:
+        return ConfigHandler.get_typed("ai_concept_search_engine", str, "search_std")
+
+    @classmethod
+    def set_ai_concept_search_engine(cls, engine: str):
+        return ConfigHandler.set_typed("ai_concept_search_engine", str(engine))
 
     @staticmethod
     def get_log_max_mb():

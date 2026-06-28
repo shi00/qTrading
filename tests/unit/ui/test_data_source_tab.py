@@ -76,7 +76,7 @@ def _make_tab() -> DataSourceTab:
     tab.sync_button = _make_mock_button()
     tab.action_full_sync = _make_mock_action_chip()
     tab.action_clear_cache = _make_mock_action_chip()
-    tab.action_doubao_rebuild = _make_mock_action_chip()
+    tab.action_ai_concept_rebuild = _make_mock_action_chip()
 
     tab.metric_sync = _make_mock_metric_card()
     tab.metric_coverage = _make_mock_metric_card()
@@ -191,9 +191,9 @@ class TestOnVmSyncBusyChanged:
         # Should call _update_sync_buttons with action_full_sync as active
         tab.action_full_sync.set_loading.assert_called_with(True)
 
-    def test_doubao_sync_active(self, tab):
-        tab._on_vm_sync_busy_changed(True, "doubao_sync")
-        tab.action_doubao_rebuild.set_loading.assert_called_with(True)
+    def test_ai_concept_sync_active(self, tab):
+        tab._on_vm_sync_busy_changed(True, "ai_concept_sync")
+        tab.action_ai_concept_rebuild.set_loading.assert_called_with(True)
 
     def test_cache_clear_active(self, tab):
         tab._on_vm_sync_busy_changed(True, "cache_clear")
@@ -228,26 +228,26 @@ class TestUpdateSyncButtons:
     def test_non_active_buttons_disabled_when_busy(self, tab):
         tab._update_sync_buttons(True, tab.action_full_sync)
         assert tab.action_clear_cache.disabled is True
-        assert tab.action_doubao_rebuild.disabled is True
+        assert tab.action_ai_concept_rebuild.disabled is True
         assert tab.sync_button.disabled is True
 
     def test_non_active_action_chips_dimmed_when_busy(self, tab):
         tab._update_sync_buttons(True, tab.action_full_sync)
         assert tab.action_clear_cache.opacity == 0.5
-        assert tab.action_doubao_rebuild.opacity == 0.5
+        assert tab.action_ai_concept_rebuild.opacity == 0.5
 
     def test_not_busy_resets_all_buttons(self, tab):
         tab._update_sync_buttons(False, None)
         assert tab.action_full_sync.disabled is False
         assert tab.action_clear_cache.disabled is False
-        assert tab.action_doubao_rebuild.disabled is False
+        assert tab.action_ai_concept_rebuild.disabled is False
         assert tab.sync_button.disabled is False
         tab.action_full_sync.set_loading.assert_called_with(False)
         tab.action_clear_cache.set_loading.assert_called_with(False)
-        tab.action_doubao_rebuild.set_loading.assert_called_with(False)
+        tab.action_ai_concept_rebuild.set_loading.assert_called_with(False)
         assert tab.action_full_sync.opacity == 1.0
         assert tab.action_clear_cache.opacity == 1.0
-        assert tab.action_doubao_rebuild.opacity == 1.0
+        assert tab.action_ai_concept_rebuild.opacity == 1.0
 
     def test_no_page_skips_update_call(self, tab):
         tab.page = None

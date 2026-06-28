@@ -56,27 +56,37 @@ class AutomationTab(ft.Container):
             color=AppColors.SUCCESS if auto_update_enabled else AppColors.TEXT_HINT,
         )
 
-        doubao_enabled = ConfigHandler.is_doubao_schedule_enabled()
-        doubao_time = ConfigHandler.get_doubao_schedule_time()
+        ai_concept_enabled = ConfigHandler.is_ai_concept_schedule_enabled()
+        ai_concept_time = ConfigHandler.get_ai_concept_schedule_time()
 
-        self.doubao_enabled = ft.Switch(
-            label=I18n.get("settings_doubao_update"),
-            value=doubao_enabled,
-            on_change=self.on_doubao_toggle,
+        self.ai_concept_enabled = ft.Switch(
+            label=I18n.get("settings_ai_concept_update"),
+            value=ai_concept_enabled,
+            on_change=self.on_ai_concept_toggle,
         )
-        self.doubao_time = ft.Dropdown(
+        self.ai_concept_time = ft.Dropdown(
             label=I18n.get("settings_update_time"),
             width=_DROPDOWN_WIDTH,
-            value=doubao_time,
+            value=ai_concept_time,
             options=self._build_time_options(),
-            on_change=self.on_doubao_time_change,
-            disabled=not doubao_enabled,
+            on_change=self.on_ai_concept_time_change,
+            disabled=not ai_concept_enabled,
         )
 
-        self.doubao_status = ft.Text(
-            self._get_schedule_status_text(doubao_enabled),
+        self.ai_concept_status = ft.Text(
+            self._get_schedule_status_text(ai_concept_enabled),
             size=_FONT_SIZE_SMALL,
-            color=AppColors.SUCCESS if doubao_enabled else AppColors.TEXT_HINT,
+            color=AppColors.SUCCESS if ai_concept_enabled else AppColors.TEXT_HINT,
+        )
+
+        ai_concept_search_engine = ConfigHandler.get_ai_concept_search_engine()
+        self.ai_concept_search_engine = ft.Dropdown(
+            label=I18n.get("settings_ai_concept_search_engine"),
+            width=_DROPDOWN_WIDTH,
+            value=ai_concept_search_engine,
+            options=self._build_search_engine_options(),
+            on_change=self.on_ai_concept_search_engine_change,
+            disabled=not ai_concept_enabled,
         )
 
         self._build_content()
@@ -90,6 +100,13 @@ class AutomationTab(ft.Container):
             ft.dropdown.Option("17:00", I18n.get("settings_opt_1700")),
             ft.dropdown.Option("18:00", I18n.get("settings_opt_1800")),
             ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
+        ]
+
+    def _build_search_engine_options(self):
+        """构建搜索引擎选项列表"""
+        return [
+            ft.dropdown.Option("search_std", I18n.get("settings_ai_concept_search_std")),
+            ft.dropdown.Option("search_pro", I18n.get("settings_ai_concept_search_pro")),
         ]
 
     def _build_content(self):
@@ -147,34 +164,46 @@ class AutomationTab(ft.Container):
             ),
         )
 
-        self.row_doubao_schedule = SettingRow(
+        self.row_ai_concept_schedule = SettingRow(
             icon=ft.Icons.AUTO_AWESOME,
-            title=I18n.get("settings_doubao_update"),
+            title=I18n.get("settings_ai_concept_update"),
             subtitle=I18n.get(
-                "settings_doubao_desc",
+                "settings_ai_concept_desc",
             ),
-            control=self.doubao_enabled,
+            control=self.ai_concept_enabled,
             icon_color=AppColors.PRIMARY,
-            title_key="settings_doubao_update",
-            subtitle_key="settings_doubao_desc",
+            title_key="settings_ai_concept_update",
+            subtitle_key="settings_ai_concept_desc",
         )
 
-        self.row_doubao_time = SettingRow(
+        self.row_ai_concept_time = SettingRow(
             icon=ft.Icons.ACCESS_TIME,
             title=I18n.get("settings_update_time"),
             subtitle=I18n.get("settings_saturdays"),
-            control=self.doubao_time,
+            control=self.ai_concept_time,
             icon_color=AppColors.ACCENT,
             title_key="settings_update_time",
             subtitle_key="settings_saturdays",
         )
 
-        self.card_doubao = DashboardCard(
+        self.row_ai_concept_search_engine = SettingRow(
+            icon=ft.Icons.MANAGE_SEARCH,
+            title=I18n.get("settings_ai_concept_search_engine"),
+            subtitle=I18n.get("settings_ai_concept_search_engine_desc"),
+            control=self.ai_concept_search_engine,
+            icon_color=AppColors.ACCENT,
+            title_key="settings_ai_concept_search_engine",
+            subtitle_key="settings_ai_concept_search_engine_desc",
+        )
+
+        self.card_ai_concept = DashboardCard(
             content=ft.Column(
                 [
-                    self.row_doubao_schedule,
+                    self.row_ai_concept_schedule,
                     ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    self.row_doubao_time,
+                    self.row_ai_concept_time,
+                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                    self.row_ai_concept_search_engine,
                     ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
                     ft.Row(
                         [
@@ -183,7 +212,7 @@ class AutomationTab(ft.Container):
                                 size=_ICON_SIZE_SMALL,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
-                            self.doubao_status,
+                            self.ai_concept_status,
                         ],
                     ),
                 ],
@@ -204,7 +233,7 @@ class AutomationTab(ft.Container):
                     self.txt_desc_main,
                     ft.Container(height=_SPACING_SMALL),
                     self.card_main,
-                    self.card_doubao,
+                    self.card_ai_concept,
                     self.txt_hint_bg,
                 ],
                 spacing=_SPACING_DEFAULT,
@@ -224,11 +253,14 @@ class AutomationTab(ft.Container):
         enabled = self.schedule_enabled.value
         self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
 
-        self.doubao_time.bgcolor = AppColors.INPUT_BG
-        self.doubao_time.color = AppColors.INPUT_TEXT
-        self.doubao_time.border_color = AppColors.INPUT_BORDER
-        doubao_enabled = self.doubao_enabled.value
-        self.doubao_status.color = AppColors.SUCCESS if doubao_enabled else ft.Colors.ON_SURFACE_VARIANT
+        self.ai_concept_time.bgcolor = AppColors.INPUT_BG
+        self.ai_concept_time.color = AppColors.INPUT_TEXT
+        self.ai_concept_time.border_color = AppColors.INPUT_BORDER
+        self.ai_concept_search_engine.bgcolor = AppColors.INPUT_BG
+        self.ai_concept_search_engine.color = AppColors.INPUT_TEXT
+        self.ai_concept_search_engine.border_color = AppColors.INPUT_BORDER
+        ai_concept_enabled = self.ai_concept_enabled.value
+        self.ai_concept_status.color = AppColors.SUCCESS if ai_concept_enabled else ft.Colors.ON_SURFACE_VARIANT
 
         if self.page:
             self.update()
@@ -266,19 +298,31 @@ class AutomationTab(ft.Container):
                 self.schedule_enabled.value,
             )
 
-            self.doubao_enabled.label = I18n.get(
-                "settings_doubao_update",
+            self.ai_concept_enabled.label = I18n.get(
+                "settings_ai_concept_update",
             )
-            self.doubao_time.label = I18n.get("settings_update_time")
-            saved_doubao_time = self.doubao_time.value
-            self.doubao_time.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.doubao_time.options = self._build_time_options()
-            self.doubao_time.value = saved_doubao_time
-            self.doubao_status.value = self._get_schedule_status_text(
-                self.doubao_enabled.value,
+            self.ai_concept_time.label = I18n.get("settings_update_time")
+            saved_ai_concept_time = self.ai_concept_time.value
+            self.ai_concept_time.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
+            self.ai_concept_time.options = self._build_time_options()
+            self.ai_concept_time.value = saved_ai_concept_time
+            self.ai_concept_status.value = self._get_schedule_status_text(
+                self.ai_concept_enabled.value,
             )
 
-            for row in [self.row_schedule, self.row_time, self.row_doubao_schedule, self.row_doubao_time]:
+            self.ai_concept_search_engine.label = I18n.get("settings_ai_concept_search_engine")
+            saved_ai_concept_search_engine = self.ai_concept_search_engine.value
+            self.ai_concept_search_engine.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
+            self.ai_concept_search_engine.options = self._build_search_engine_options()
+            self.ai_concept_search_engine.value = saved_ai_concept_search_engine
+
+            for row in [
+                self.row_schedule,
+                self.row_time,
+                self.row_ai_concept_schedule,
+                self.row_ai_concept_time,
+                self.row_ai_concept_search_engine,
+            ]:
                 row.update_locale()
 
             # 重建整个内容以确保所有文本更新
@@ -321,26 +365,34 @@ class AutomationTab(ft.Container):
                 I18n.get("settings_snack_time_set").format(time=selected_time),
             )
 
-    def on_doubao_toggle(self, e):
-        enabled = self.doubao_enabled.value
-        ConfigHandler.set_doubao_schedule_enabled(enabled)
-        self.doubao_status.value = self._get_schedule_status_text(enabled)
-        self.doubao_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-        self.doubao_time.disabled = not enabled
+    def on_ai_concept_toggle(self, e):
+        enabled = self.ai_concept_enabled.value
+        ConfigHandler.set_ai_concept_schedule_enabled(enabled)
+        self.ai_concept_status.value = self._get_schedule_status_text(enabled)
+        self.ai_concept_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+        self.ai_concept_time.disabled = not enabled
+        self.ai_concept_search_engine.disabled = not enabled
         self.update()
         if self.show_snack:
             self.show_snack(
                 I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
             )
 
-    def on_doubao_time_change(self, e):
-        selected_time = self.doubao_time.value
-        ConfigHandler.set_doubao_schedule_time(selected_time)  # type: ignore[untyped]
+    def on_ai_concept_time_change(self, e):
+        selected_time = self.ai_concept_time.value
+        ConfigHandler.set_ai_concept_schedule_time(selected_time)  # type: ignore[untyped]
         self.update()
         if self.show_snack:
             self.show_snack(
                 I18n.get("settings_snack_time_set").format(time=selected_time),
             )
+
+    def on_ai_concept_search_engine_change(self, e):
+        selected_engine = self.ai_concept_search_engine.value
+        ConfigHandler.set_ai_concept_search_engine(selected_engine)  # type: ignore[untyped]
+        self.update()
+        if self.show_snack:
+            self.show_snack(I18n.get("common_saved"))
 
 
 class NotificationsTab(ft.Container):

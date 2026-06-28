@@ -86,6 +86,7 @@ LLM_PROVIDERS = {
         "models": [
             {"id": "glm-5.1", "name": "GLM-5.1", "context": 200000, "tag": "tag_latest"},
             {"id": "glm-5", "name": "GLM-5", "context": 200000, "tag": ["tag_flagship", "reasoning"]},
+            {"id": "glm-4.7-flash", "name": "GLM-4.7 Flash (Free)", "context": 200000, "tag": "tag_recommend"},
         ],
         "key_prefix": "",
         "litellm_prefix": "openai",
