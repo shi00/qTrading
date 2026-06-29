@@ -1201,3 +1201,49 @@ class TestScreenerView:
         view.refresh_locale()
         assert view.strategy_dropdown.value == "ma_cross"
         assert view.page_size_dropdown.value == "20"
+
+    def test_refresh_locale_updates_ai_card_placeholder(self, mock_page):
+        """§5.8 规范 5：refresh_locale 必须刷新 in-flight AI 占位卡的"分析中"文本。
+
+        场景：异步分析期间用户切换语言，占位卡文本应跟随更新。
+        """
+        view = self._make_view(mock_page)
+        content_md = ft.Markdown("旧语言文本")
+        view._ai_cards["000001.SZ"] = {
+            "card": MagicMock(),
+            "content_md": content_md,
+            "card_content": MagicMock(),
+            "progress_ring": MagicMock(),
+        }
+        view.refresh_locale()
+        assert content_md.value == "ai_card_analyzing"
+
+    def test_refresh_locale_updates_multiple_ai_cards(self, mock_page):
+        """§5.8 规范 5：多个并发 AI 占位卡时 refresh_locale 全部刷新。"""
+        view = self._make_view(mock_page)
+        md1 = ft.Markdown("旧1")
+        md2 = ft.Markdown("旧2")
+        view._ai_cards["000001.SZ"] = {
+            "content_md": md1,
+            "card": MagicMock(),
+            "card_content": MagicMock(),
+            "progress_ring": MagicMock(),
+        }
+        view._ai_cards["000002.SZ"] = {
+            "content_md": md2,
+            "card": MagicMock(),
+            "card_content": MagicMock(),
+            "progress_ring": MagicMock(),
+        }
+        view.refresh_locale()
+        assert md1.value == "ai_card_analyzing"
+        assert md2.value == "ai_card_analyzing"
+
+    def test_refresh_locale_empty_ai_cards_safe(self, mock_page):
+        """§5.8 规范 9：_ai_cards 为空时 refresh_locale 安全（无 in-flight 占位卡）。"""
+        view = self._make_view(mock_page)
+        assert view._ai_cards == {}
+        # 不应抛异常
+        view.refresh_locale()
+        # 空字典场景下 refresh_locale 不产生副作用
+        assert view._ai_cards == {}

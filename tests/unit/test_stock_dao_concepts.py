@@ -56,8 +56,13 @@ class TestOverwriteConceptsDeleteScope:
         sql_calls = [call.args[0] for call in mock_conn.exec_driver_sql.call_args_list]
         delete_calls = [s for s in sql_calls if s.strip().upper().startswith("DELETE")]
         assert len(delete_calls) == 1, f"应只有一条 DELETE 语句，实际: {delete_calls}"
-        assert "concept_id LIKE 'EM_%'" in delete_calls[0], f"DELETE 应限定 EM_ 前缀，实际: {delete_calls[0]}"
+        assert "concept_id LIKE $1" in delete_calls[0], f"DELETE 应使用参数化 LIKE $1，实际: {delete_calls[0]}"
         assert delete_calls[0].strip().upper() != "DELETE FROM STOCK_CONCEPTS"
+        # 验证参数正确传入（R4 参数化）
+        delete_call = next(
+            c for c in mock_conn.exec_driver_sql.call_args_list if c.args[0].strip().upper().startswith("DELETE")
+        )
+        assert delete_call.args[1] == [f"{StockDao.EM_CONCEPT_PREFIX}%"]
 
     @pytest.mark.asyncio
     async def test_does_not_delete_ai_llm_concepts(self):
@@ -90,8 +95,12 @@ class TestClearAllAiLlmConcepts:
         result = await dao.clear_all_ai_llm_concepts()
         assert result == 10
         sql_arg = dao._write_db.call_args.args[0]
-        assert "concept_id LIKE 'AI_LLM_%'" in sql_arg
+        assert "concept_id LIKE $1" in sql_arg
+        assert "AI_LLM_" not in sql_arg  # SQL 不应含字面量（R4 参数化）
         assert "AI_DOUBAO_" not in sql_arg
+        # 验证参数正确传入（R4 参数化）
+        params_arg = dao._write_db.call_args.args[1]
+        assert params_arg == [f"{StockDao.AI_CONCEPT_PREFIX}%"]
 
     def test_old_method_removed(self):
         """旧的 clear_all_doubao_concepts 方法不应再存在"""
@@ -136,8 +145,12 @@ class TestGetStocksWithoutAiConceptsPrefixMigration:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]}))
         await dao.get_stocks_without_ai_concepts(batch_size=10)
         sql_arg = dao._read_db.call_args.args[0]
-        assert "AI_LLM_%" in sql_arg
+        assert "concept_id LIKE $1" in sql_arg
+        assert "AI_LLM_" not in sql_arg  # SQL 不应含字面量（R4 参数化）
         assert "AI_DOUBAO_" not in sql_arg
+        # 验证参数正确传入（R4 参数化）
+        params_arg = dao._read_db.call_args.args[1]
+        assert params_arg == [f"{StockDao.AI_CONCEPT_PREFIX}%"]
 
 
 class TestUpsertEmConcepts:
@@ -204,15 +217,19 @@ class TestClearTodayLimitConcepts:
 
     @pytest.mark.asyncio
     async def test_clear_today_limit_concepts_deletes_limit_prefix(self):
-        """验证 SQL 含 WHERE concept_id LIKE 'LIMIT_%'"""
+        """验证 SQL 含 WHERE concept_id LIKE $1 参数化（R4）"""
         dao = _make_dao()
         dao._write_db = AsyncMock(return_value=1)
         result = await dao.clear_today_limit_concepts()
         assert result == 1
         dao._write_db.assert_called_once()
         sql_arg = dao._write_db.call_args.args[0]
-        assert "concept_id LIKE 'LIMIT_%'" in sql_arg
+        assert "concept_id LIKE $1" in sql_arg
+        assert "LIMIT_" not in sql_arg  # SQL 不应含字面量（R4 参数化）
         assert "DELETE FROM stock_concepts" in sql_arg
+        # 验证参数正确传入（R4 参数化）
+        params_arg = dao._write_db.call_args.args[1]
+        assert params_arg == [f"{StockDao.LIMIT_CONCEPT_PREFIX}%"]
 
 
 class TestGetConceptsByPrefix:

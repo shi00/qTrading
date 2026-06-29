@@ -3,13 +3,21 @@
 提供统一的回测编排，集成引擎运行与持久化。
 位于 services 层，负责策略查找、引擎实例化和结果持久化。
 UI / 任务系统通过此服务调用回测，不直接实例化引擎。
+
+依赖注入契约：
+- `engine_factory` 与 `strategy_lookup` 由调用方（如 ui 层 viewmodel）注入，
+  避免 services 层运行时依赖 strategies 层（CLAUDE.md §3.1 R1 红线）。
+- `get_result` / `list_results` / `delete_result` / `_persist_result` 不需要工厂注入。
+- `run_backtest` 需要 `engine_factory` + `strategy_lookup`。
+- `run_backtest_with_strategy` 仅需要 `engine_factory`。
+- 若调用方未注入所需工厂，对应方法会 `raise RuntimeError`（fail-late）。
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from data.cache.cache_manager import CacheManager
 
@@ -25,20 +33,24 @@ class BacktestService:
     回测服务入口。
 
     功能：
-    1. 按策略 key 查找并实例化策略
-    2. 运行回测引擎
+    1. 按策略 key 查找并实例化策略（通过 `strategy_lookup` 注入）
+    2. 运行回测引擎（通过 `engine_factory` 注入）
     3. 持久化回测结果
     """
 
     def __init__(
         self,
         cache: CacheManager,
-        data_processor=None,
+        data_processor: Any = None,
+        engine_factory: Callable[[CacheManager, BacktestConfig, Any | None], Any] | None = None,
+        strategy_lookup: Callable[[str], type | None] | None = None,
     ):
         if cache is None:
             raise ValueError("BacktestService requires a CacheManager instance (dependency injection).")
         self.cache = cache
         self.data_processor = data_processor
+        self._engine_factory = engine_factory
+        self._strategy_lookup = strategy_lookup
 
     async def run_backtest(
         self,
@@ -53,9 +65,7 @@ class BacktestService:
         if strategy is None:
             raise ValueError(f"Strategy not found: {strategy_key}")
 
-        from strategies.backtest.engine import VectorBacktestEngine
-
-        engine = VectorBacktestEngine(self.cache, config, data_processor=self.data_processor)
+        engine = self._create_engine(config)
 
         result = await engine.run(
             strategy=strategy,
@@ -78,9 +88,7 @@ class BacktestService:
         persist: bool = True,
         cancel_check: Callable[[], bool] | None = None,
     ) -> BacktestResult:
-        from strategies.backtest.engine import VectorBacktestEngine
-
-        engine = VectorBacktestEngine(self.cache, config, data_processor=self.data_processor)
+        engine = self._create_engine(config)
 
         result = await engine.run(
             strategy=strategy,
@@ -115,17 +123,36 @@ class BacktestService:
             new_warnings = list(result.data_warnings) + [f"persist_failed: {e}"]
             return result.with_warnings(new_warnings)
 
-    def _get_strategy(self, strategy_key: str) -> BaseStrategy | None:
-        from strategies.base_strategy import get_strategy_registry
+    def _create_engine(self, config: BacktestConfig) -> Any:
+        """通过注入的 engine_factory 创建引擎实例。
 
-        registry = get_strategy_registry()
-        strategy_class = registry.get(strategy_key)
+        Raises:
+            RuntimeError: 若未注入 engine_factory。
+        """
+        if self._engine_factory is None:
+            raise RuntimeError("BacktestService requires 'engine_factory' to be injected to run backtest.")
+        return self._engine_factory(self.cache, config, self.data_processor)
+
+    def _get_strategy(self, strategy_key: str) -> BaseStrategy | None:
+        """按 key 查找策略类并实例化。
+
+        - 实例化职责保留在 services 层（编排逻辑）。
+        - 仅 "查 registry" 委托给注入的 strategy_lookup。
+
+        Raises:
+            RuntimeError: 若未注入 strategy_lookup。
+        """
+        if self._strategy_lookup is None:
+            raise RuntimeError(
+                "BacktestService requires 'strategy_lookup' to be injected to resolve strategy for run_backtest."
+            )
+        strategy_class = self._strategy_lookup(strategy_key)
         if strategy_class is None:
             return None
 
         try:
-            instance = strategy_class()
-            instance.key = strategy_key
+            instance: BaseStrategy = strategy_class()  # type: ignore[call-arg]  # 子类 __init__ 签名各异
+            instance.key = strategy_key  # type: ignore[attr-defined]  # 动态打标，pre-existing 行为
             return instance
         except Exception as e:
             logger.error(

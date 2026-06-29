@@ -12,15 +12,16 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def mock_i18n():
     with patch("ui.components.news_feed.I18n") as m:
-        m.get.side_effect = lambda key, **kw: key
-        return m
+        # 模拟真实 I18n.get：key 不在 locale 中时返回 default（若提供），否则返回 key 本身
+        m.get.side_effect = lambda key, default=None, **kw: default if default is not None else key
+        yield m
 
 
 @pytest.fixture
 def mock_app_styles():
     with patch("ui.components.news_feed.AppStyles") as m:
         m.card.return_value = {"bgcolor": "#ffffff", "border_radius": 8, "border": None}
-        return m
+        yield m
 
 
 @pytest.fixture
@@ -35,7 +36,7 @@ def mock_app_colors():
         m.DOWN = "#aa0000"
         m.TRANSPARENT = "transparent"
         m.with_opacity = MagicMock(return_value="#rgba")
-        return m
+        yield m
 
 
 @pytest.fixture
@@ -204,6 +205,32 @@ class TestNewsFeed:
         feed = NewsFeed()
         feed.page = mock_page
         feed.update_locale()
+        # 验证 load_more_text 实例属性引用一致性（消除链式 content 访问脆弱，§5.8 规范5）
+        assert feed.load_more_text.value == "news_load_more"
+        assert feed.load_more_btn.content.content is feed.load_more_text
+        assert feed.empty_text.value == "home_news_empty"
+
+    def test_update_locale_with_cached_news_preserves_load_more_text(
+        self, mock_i18n, mock_app_styles, mock_app_colors, mock_page
+    ):
+        """update_locale 在 _cached_news 非空时调用 set_news 重建控件，load_more_text 引用必须保持一致。"""
+        feed = NewsFeed()
+        feed.page = mock_page
+        feed.news_list.page = mock_page
+        news_data = pd.DataFrame(
+            {
+                "content": ["Test news"],
+                "publish_time": ["2024-06-15 10:30:00"],
+                "tags": ["公告"],
+            }
+        )
+        feed.set_news(news_data, has_more=True)
+        feed.update_locale()
+        # 重建后引用一致性保持（核心修复目标）
+        assert feed.load_more_btn.content.content is feed.load_more_text
+        assert feed.load_more_text.value == "news_load_more"
+        # has_more=True 时按钮仍在控件列表末尾
+        assert feed.news_list.controls[-1] is feed.load_more_btn
 
     def test_translate_tag_empty(self, mock_i18n, mock_app_styles, mock_app_colors):
         feed = NewsFeed()

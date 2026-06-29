@@ -63,9 +63,11 @@ class NewsFeed(ft.Container):
             expand=True,
         )
 
+        self.load_more_text = ft.Text(I18n.get("news_load_more"), color=ft.Colors.WHITE)
+
         self.load_more_btn = ft.Container(
             content=ft.ElevatedButton(
-                content=ft.Text(I18n.get("news_load_more"), color=ft.Colors.WHITE),
+                content=self.load_more_text,
                 style=ft.ButtonStyle(
                     bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
                     shape=ft.RoundedRectangleBorder(radius=8),
@@ -88,7 +90,7 @@ class NewsFeed(ft.Container):
         """Update static text when locale changes"""
         try:
             self.empty_text.value = I18n.get("home_news_empty")
-            self.load_more_btn.content.content.value = I18n.get("news_load_more")  # type: ignore[untyped]
+            self.load_more_text.value = I18n.get("news_load_more")
             # 重建已渲染新闻项，刷新 tag 翻译（_translate_tag 在渲染时固化，与 update_theme 一致）
             if not self._cached_news.empty:
                 self.set_news(self._cached_news, self._cached_has_more)

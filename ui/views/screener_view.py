@@ -436,6 +436,10 @@ class ScreenerView(ft.Container):
             if hasattr(self, "log_title_text"):
                 self.log_title_text.value = I18n.get("ai_analysis_report")
 
+            # AI 占位卡：刷新"分析中"文本（in-flight 占位卡，已完成的卡片由 _append_log pop 移除）
+            for entry in self._ai_cards.values():
+                entry["content_md"].value = I18n.get("ai_card_analyzing")
+
             # 结果表格列：失效列别名缓存后重建表头与行（label 来自 MetaDataManager）
             try:
                 MetaDataManager.invalidate_cache()

@@ -26,6 +26,24 @@ class TestBacktestViewModel:
         assert vm.result is None
         assert vm.is_running is False
 
+    def test_init_assembles_default_engine_factory_and_strategy_lookup(self):
+        """未显式注入 service 时，viewmodel 应装配默认 engine_factory 和 strategy_lookup。
+
+        回归保障：若未来重构误删装配代码，本测试可捕获。
+        """
+        vm = BacktestViewModel()
+        assert vm.service._engine_factory is not None
+        assert vm.service._strategy_lookup is not None
+
+        # strategy_lookup 应委托给 get_strategy_registry（未知 key 返回 None）
+        assert vm.service._strategy_lookup("__nonexistent_key__") is None
+
+        # engine_factory 调用应实例化 VectorBacktestEngine（验证延迟 import 装配正确）
+        with patch("strategies.backtest.engine.VectorBacktestEngine") as mock_engine_cls:
+            engine = vm.service._engine_factory(MagicMock(), MagicMock(), None)
+            mock_engine_cls.assert_called_once()
+            assert engine is mock_engine_cls.return_value
+
     def test_bind_callbacks(self):
         """测试绑定回调。"""
         vm = BacktestViewModel()

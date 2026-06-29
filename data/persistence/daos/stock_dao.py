@@ -203,7 +203,8 @@ class StockDao(BaseDao):
             async with self._guarded_begin() as conn:
                 # 1. Clear old EM-prefixed concepts only (preserve AI_LLM_ concepts)
                 await conn.exec_driver_sql(
-                    f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.EM_CONCEPT_PREFIX}%'"
+                    "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
+                    [f"{self.EM_CONCEPT_PREFIX}%"],
                 )
 
                 # 2. Insert new data
@@ -222,7 +223,8 @@ class StockDao(BaseDao):
 
     async def clear_all_ai_llm_concepts(self) -> int:
         return await self._write_db(
-            f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.AI_CONCEPT_PREFIX}%'",
+            "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
+            [f"{self.AI_CONCEPT_PREFIX}%"],
         )
 
     async def get_stocks_without_ai_concepts(
@@ -230,15 +232,15 @@ class StockDao(BaseDao):
         batch_size: int,
         exclude_codes: list[str] | None = None,
     ) -> list[tuple[str, str]]:
-        sql = f"""
+        sql = """
             SELECT ts_code, name FROM stock_basic
             WHERE list_status = 'L'
               AND NOT EXISTS (
                   SELECT 1 FROM stock_concepts sc
-                  WHERE sc.ts_code = stock_basic.ts_code AND sc.concept_id LIKE '{self.AI_CONCEPT_PREFIX}%'
+                  WHERE sc.ts_code = stock_basic.ts_code AND sc.concept_id LIKE $1
               )
         """
-        df = await self._read_db(sql)
+        df = await self._read_db(sql, [f"{self.AI_CONCEPT_PREFIX}%"])
         if df is None or df.empty:
             return []
         if exclude_codes:
@@ -389,7 +391,8 @@ class StockDao(BaseDao):
     async def clear_today_limit_concepts(self) -> int:
         """清空当日 LIMIT_ 前缀概念（涨停原因概念每日重建）。"""
         return await self._write_db(
-            f"DELETE FROM stock_concepts WHERE concept_id LIKE '{self.LIMIT_CONCEPT_PREFIX}%'",
+            "DELETE FROM stock_concepts WHERE concept_id LIKE $1",
+            [f"{self.LIMIT_CONCEPT_PREFIX}%"],
         )
 
     async def get_concepts_by_prefix(

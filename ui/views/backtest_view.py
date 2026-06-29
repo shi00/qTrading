@@ -9,15 +9,18 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 import flet as ft
 
-from strategies.backtest.config import BacktestConfig, BacktestResult
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
 from utils.log_decorators import UILogger
+
+if TYPE_CHECKING:
+    from strategies.backtest.config import BacktestConfig, BacktestResult
 
 logger = logging.getLogger(__name__)
 

@@ -42,7 +42,24 @@ class BacktestViewModel:
         service: BacktestService | None = None,
     ):
         self.cache = cache or CacheManager()
-        self.service = service or BacktestService(cache=self.cache)
+        if service is None:
+            # 装配默认工厂：ui 层可导入 strategies（CLAUDE.md §4.1 允许 strategies ← ui），
+            # 通过依赖注入传给 BacktestService，避免 services 层运行时依赖 strategies（R1 红线）。
+
+            def _default_engine_factory(cache, config, data_processor):
+                from strategies.backtest.engine import VectorBacktestEngine
+
+                return VectorBacktestEngine(cache, config, data_processor=data_processor)
+
+            def _default_strategy_lookup(strategy_key):
+                return get_strategy_registry().get(strategy_key)
+
+            service = BacktestService(
+                cache=self.cache,
+                engine_factory=_default_engine_factory,
+                strategy_lookup=_default_strategy_lookup,
+            )
+        self.service = service
 
         self._result: BacktestResult | None = None
         self._is_running: bool = False

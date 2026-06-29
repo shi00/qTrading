@@ -101,27 +101,42 @@ class TestBacktestService:
             initial_capital=1_000_000.0,
         )
 
+    @pytest.fixture
+    def real_engine_factory(self):
+        """提供真实 VectorBacktestEngine 工厂（保持端到端测试风格）。
+
+        通过依赖注入传给 BacktestService，避免 services 层运行时导入 strategies。
+        """
+
+        def _factory(cache, config, data_processor):
+            from strategies.backtest.engine import VectorBacktestEngine
+
+            return VectorBacktestEngine(cache, config, data_processor=data_processor)
+
+        return _factory
+
     @pytest.mark.asyncio
     async def test_service_runs_backtest_with_strategy_key(
         self,
         mock_cache: MagicMock,
         backtest_config: BacktestConfig,
+        real_engine_factory,
     ) -> None:
-        with patch(
-            "strategies.base_strategy.get_strategy_registry",
-            return_value={"mock_strategy": MockStrategy},
-        ):
-            service = BacktestService(cache=mock_cache)
+        service = BacktestService(
+            cache=mock_cache,
+            engine_factory=real_engine_factory,
+            strategy_lookup=lambda k: MockStrategy if k == "mock_strategy" else None,
+        )
 
-            result = await service.run_backtest(
-                strategy_key="mock_strategy",
-                config=backtest_config,
-                persist=False,
-            )
+        result = await service.run_backtest(
+            strategy_key="mock_strategy",
+            config=backtest_config,
+            persist=False,
+        )
 
-            assert result is not None
-            assert isinstance(result, BacktestResult)
-            assert result.strategy_name == "mock_strategy"
+        assert result is not None
+        assert isinstance(result, BacktestResult)
+        assert result.strategy_name == "mock_strategy"
 
     @pytest.mark.asyncio
     async def test_service_raises_on_unknown_strategy(
@@ -129,45 +144,51 @@ class TestBacktestService:
         mock_cache: MagicMock,
         backtest_config: BacktestConfig,
     ) -> None:
-        with patch(
-            "strategies.base_strategy.get_strategy_registry",
-            return_value={},
-        ):
-            service = BacktestService(cache=mock_cache)
+        # 仅注入 strategy_lookup（返回 None）；engine_factory 不需要，因为 _get_strategy 先抛 ValueError
+        service = BacktestService(
+            cache=mock_cache,
+            strategy_lookup=lambda k: None,
+        )
 
-            with pytest.raises(ValueError, match="Strategy not found"):
-                await service.run_backtest(
-                    strategy_key="unknown_strategy",
-                    config=backtest_config,
-                )
+        with pytest.raises(ValueError, match="Strategy not found"):
+            await service.run_backtest(
+                strategy_key="unknown_strategy",
+                config=backtest_config,
+            )
 
     @pytest.mark.asyncio
     async def test_service_persists_results(
         self,
         mock_cache: MagicMock,
         backtest_config: BacktestConfig,
+        real_engine_factory,
     ) -> None:
-        with patch(
-            "strategies.base_strategy.get_strategy_registry",
-            return_value={"mock_strategy": MockStrategy},
-        ):
-            service = BacktestService(cache=mock_cache)
+        service = BacktestService(
+            cache=mock_cache,
+            engine_factory=real_engine_factory,
+            strategy_lookup=lambda k: MockStrategy if k == "mock_strategy" else None,
+        )
 
-            await service.run_backtest(
-                strategy_key="mock_strategy",
-                config=backtest_config,
-                persist=True,
-            )
+        await service.run_backtest(
+            strategy_key="mock_strategy",
+            config=backtest_config,
+            persist=True,
+        )
 
-            mock_cache.backtest_dao.save_result.assert_called_once()
+        mock_cache.backtest_dao.save_result.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_service_runs_backtest_with_strategy_instance(
         self,
         mock_cache: MagicMock,
         backtest_config: BacktestConfig,
+        real_engine_factory,
     ) -> None:
-        service = BacktestService(cache=mock_cache)
+        # run_backtest_with_strategy 不调用 _get_strategy，仅需 engine_factory
+        service = BacktestService(
+            cache=mock_cache,
+            engine_factory=real_engine_factory,
+        )
 
         strategy = MockStrategy()
 
@@ -227,26 +248,24 @@ class TestBacktestService:
 
     def test_get_strategy_sets_key_attribute(self):
         """_get_strategy 应设置 instance.key = strategy_key"""
-        with patch(
-            "strategies.base_strategy.get_strategy_registry",
-            return_value={"mock_strategy": MockStrategy},
-        ):
-            service = BacktestService(cache=MagicMock())
-            strategy = service._get_strategy("mock_strategy")
+        service = BacktestService(
+            cache=MagicMock(),
+            strategy_lookup=lambda k: MockStrategy if k == "mock_strategy" else None,
+        )
+        strategy = service._get_strategy("mock_strategy")
 
-            assert strategy is not None
-            assert strategy.key == "mock_strategy"
+        assert strategy is not None
+        assert strategy.key == "mock_strategy"
 
     def test_get_strategy_returns_none_for_unknown(self):
         """_get_strategy 对未知策略返回 None"""
-        with patch(
-            "strategies.base_strategy.get_strategy_registry",
-            return_value={},
-        ):
-            service = BacktestService(cache=MagicMock())
-            strategy = service._get_strategy("nonexistent")
+        service = BacktestService(
+            cache=MagicMock(),
+            strategy_lookup=lambda k: None,
+        )
+        strategy = service._get_strategy("nonexistent")
 
-            assert strategy is None
+        assert strategy is None
 
     def test_init_requires_cache_manager(self):
         """Task 6.7: BacktestService 必须注入 CacheManager，传 None 应 fail-fast。"""
@@ -303,3 +322,195 @@ class TestBacktestService:
         assert saved_dict["execution_price"] == config.execution_price
         assert "app_version" in saved_dict
         assert saved_dict["metrics"] == result.metrics
+
+    # ------------------------------------------------------------------
+    # 依赖注入 fail-late 分支测试（CLAUDE.md §3.1 R1 修复配套）
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_raises_when_engine_factory_none(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        """未注入 engine_factory 时，run_backtest 应 raise RuntimeError（fail-late）。"""
+        service = BacktestService(
+            cache=mock_cache,
+            strategy_lookup=lambda k: MockStrategy if k == "mock_strategy" else None,
+        )
+
+        with pytest.raises(RuntimeError, match="engine_factory"):
+            await service.run_backtest(
+                strategy_key="mock_strategy",
+                config=backtest_config,
+                persist=False,
+            )
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_with_strategy_raises_when_engine_factory_none(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+    ) -> None:
+        """未注入 engine_factory 时，run_backtest_with_strategy 应 raise RuntimeError（fail-late）。"""
+        service = BacktestService(cache=mock_cache)
+
+        with pytest.raises(RuntimeError, match="engine_factory"):
+            await service.run_backtest_with_strategy(
+                strategy=MockStrategy(),
+                config=backtest_config,
+                persist=False,
+            )
+
+    def test_get_strategy_raises_when_strategy_lookup_none(self):
+        """未注入 strategy_lookup 时，_get_strategy 应 raise RuntimeError（fail-late）。"""
+        service = BacktestService(cache=MagicMock())
+
+        with pytest.raises(RuntimeError, match="strategy_lookup"):
+            service._get_strategy("any_strategy")
+
+    def test_get_strategy_returns_none_on_instantiate_error(self):
+        """_get_strategy 实例化失败时应返回 None 并记录 error，不向上抛异常。"""
+
+        class _BoomStrategy:
+            def __init__(self):
+                raise RuntimeError("boom")
+
+        service = BacktestService(
+            cache=MagicMock(),
+            strategy_lookup=lambda k: _BoomStrategy,
+        )
+
+        with patch("services.backtest_service.logger.error") as mock_error:
+            strategy = service._get_strategy("boom_strategy")
+
+        assert strategy is None
+        mock_error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_persist_result_returns_result_with_warning_on_save_failure(
+        self,
+        mock_cache: MagicMock,
+    ) -> None:
+        """_persist_result 在 save_result 抛异常时应返回带 persist_failed 警告的结果（fail-soft）。"""
+        from datetime import datetime
+
+        import polars as pl
+
+        from strategies.backtest.config import BacktestConfig
+
+        service = BacktestService(cache=mock_cache)
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            initial_capital=1_000_000.0,
+        )
+        original_warnings: tuple = ()
+        result = BacktestResult(
+            config=config,
+            strategy_name="mock_strategy",
+            params_snapshot={"p": 1},
+            nav_curve=pl.DataFrame({"trade_date": [date(2024, 1, 2)], "nav": [1_000_000.0]}),
+            daily_returns=pl.Series([0.0]),
+            benchmark_returns=pl.Series([0.0]),
+            trades=pl.DataFrame(),
+            positions=pl.DataFrame(),
+            skipped_orders=pl.DataFrame(),
+            metrics={"total_return": 0.0},
+            ic_series=pl.Series([0.0]),
+            period_stats=pl.DataFrame(),
+            data_warnings=original_warnings,
+            failed_signal_dates=(),
+            run_id="run_002",
+            executed_at=datetime(2024, 1, 4, 12, 0, 0),
+            duration_ms=100,
+        )
+
+        mock_cache.backtest_dao.save_result = AsyncMock(side_effect=RuntimeError("db down"))
+
+        returned = await service._persist_result(result)
+
+        # fail-soft：返回原 result 但 data_warnings 末尾追加 persist_failed 前缀
+        assert returned is not None
+        assert len(returned.data_warnings) == 1
+        assert returned.data_warnings[0].startswith("persist_failed: db down")
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_with_strategy_persists_results(
+        self,
+        mock_cache: MagicMock,
+        backtest_config: BacktestConfig,
+        real_engine_factory,
+    ) -> None:
+        """run_backtest_with_strategy 在 persist=True 时应调用 save_result（与 run_backtest 对称）。"""
+        service = BacktestService(
+            cache=mock_cache,
+            engine_factory=real_engine_factory,
+        )
+
+        await service.run_backtest_with_strategy(
+            strategy=MockStrategy(),
+            config=backtest_config,
+            persist=True,
+        )
+
+        mock_cache.backtest_dao.save_result.assert_called_once()
+
+    def test_get_strategy_returns_none_when_lookup_returns_non_type(self):
+        """strategy_lookup 返回非 type 对象（如字符串）时，_get_strategy 应捕获 TypeError 返回 None。"""
+        service = BacktestService(
+            cache=MagicMock(),
+            strategy_lookup=lambda k: "not a class",  # type: ignore[return-value]  # 故意测试非 type 输入
+        )
+
+        with patch("services.backtest_service.logger.error") as mock_error:
+            strategy = service._get_strategy("any_key")
+
+        assert strategy is None
+        mock_error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_persist_result_uses_dev_fallback_when_version_lookup_fails(
+        self,
+        mock_cache: MagicMock,
+    ) -> None:
+        """_get_app_version 在 importlib.metadata.version 抛异常时应返回 'dev' fallback。"""
+        from datetime import datetime
+
+        import polars as pl
+
+        from strategies.backtest.config import BacktestConfig
+
+        service = BacktestService(cache=mock_cache)
+
+        config = BacktestConfig(
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 4),
+            initial_capital=1_000_000.0,
+        )
+        result = BacktestResult(
+            config=config,
+            strategy_name="mock_strategy",
+            params_snapshot={"p": 1},
+            nav_curve=pl.DataFrame({"trade_date": [date(2024, 1, 2)], "nav": [1_000_000.0]}),
+            daily_returns=pl.Series([0.0]),
+            benchmark_returns=pl.Series([0.0]),
+            trades=pl.DataFrame(),
+            positions=pl.DataFrame(),
+            skipped_orders=pl.DataFrame(),
+            metrics={"total_return": 0.0},
+            ic_series=pl.Series([0.0]),
+            period_stats=pl.DataFrame(),
+            data_warnings=(),
+            failed_signal_dates=(),
+            run_id="run_003",
+            executed_at=datetime(2024, 1, 4, 12, 0, 0),
+            duration_ms=100,
+        )
+
+        with patch("importlib.metadata.version", side_effect=ModuleNotFoundError("no package")):
+            await service._persist_result(result)
+
+        saved_dict = mock_cache.backtest_dao.save_result.call_args[0][0]
+        assert saved_dict["app_version"] == "dev"
