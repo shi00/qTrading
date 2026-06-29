@@ -231,7 +231,13 @@ async def main(page: ft.Page):
         page.window.on_event = _on_window_event
 
     async def _on_resize(e):
-        """窗口 resize 回调 — 委托给 AppLayout 防抖处理。"""
+        """窗口 resize 回调 — 委托给 AppLayout 防抖处理。
+
+        Flet 0.28.3 的正确属性名为 ``on_resized``（带 d），
+        ``WindowResizeEvent`` 携带实时 width/height。
+        注意：``page.width`` / ``page.window.width`` 只在页面连接时更新一次，
+        resize 事件中不会刷新，因此必须从事件对象读取实时尺寸。
+        """
         if not page.controls:
             return
         layout = page.controls[0]
@@ -239,9 +245,11 @@ async def main(page: ft.Page):
         from ui.app_layout import AppLayout
 
         if isinstance(layout, AppLayout):
-            layout.schedule_resize()
+            width = getattr(e, "width", 0) or 0
+            height = getattr(e, "height", 0) or 0
+            layout.schedule_resize(width, height)
 
-    page.on_resize = _on_resize
+    page.on_resized = _on_resize
 
     async def _on_disconnect(e):
         if locale_subscription_id is not None:

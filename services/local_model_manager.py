@@ -13,7 +13,7 @@ import traceback
 from typing import Any
 
 from utils.config_handler import ConfigHandler
-from utils.loop_local import get_loop_local
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -167,6 +167,7 @@ class LocalModelManager:
                     logger.warning("[LocalModel] Error during reset shutdown: %s", e, exc_info=True)
             cls._instance = None
             cls._initialized = False
+        del_loop_local("local_load_lock")
 
     @classmethod
     def _atexit_cleanup(cls):

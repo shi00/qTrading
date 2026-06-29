@@ -10,6 +10,20 @@ from tests.unit.ui.conftest import set_page
 pytestmark = pytest.mark.unit
 
 
+async def _run_async_passthrough(task_type, func, *args, **kwargs):
+    """Mock helper: 立即同步执行 func 并返回结果，模拟线程池 offload。"""
+    return func(*args, **kwargs)
+
+
+def _patch_thread_pool():
+    """Patch system_tab 模块级 ThreadPoolManager，run_async 直接同步执行。"""
+    mock_tpm = MagicMock()
+    mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+    mock_tpm.submit = MagicMock()
+    mock_tpm.reload_config = MagicMock()
+    return patch("ui.views.settings_tabs.system_tab.ThreadPoolManager", return_value=mock_tpm)
+
+
 class TestSystemTabInit:
     """SystemTab 初始化测试"""
 
@@ -201,21 +215,27 @@ class TestSystemTabThemeChange:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_on_theme_change_applies_theme(self, mock_page):
+    async def test_on_theme_change_applies_theme(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.theme_dropdown.value = "light"
-        with patch("ui.theme.apply_page_theme") as mock_apply:
-            tab.on_theme_change(None)
+        with (
+            patch("ui.theme.apply_page_theme") as mock_apply,
+            _patch_thread_pool(),
+        ):
+            await tab._do_theme_change_async()
             mock_apply.assert_called_once_with(mock_page, "light")
 
-    def test_on_theme_change_updates_page(self, mock_page):
+    async def test_on_theme_change_updates_page(self, mock_page):
         tab = self._make_tab()
         page = MagicMock()
         set_page(tab, page)
         tab.theme_dropdown.value = "navy"
-        with patch("ui.theme.apply_page_theme"):
-            tab.on_theme_change(None)
+        with (
+            patch("ui.theme.apply_page_theme"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_theme_change_async()
         page.update.assert_called_once()
 
     def test_on_theme_change_without_page_no_error(self, mock_page):
@@ -225,16 +245,20 @@ class TestSystemTabThemeChange:
         tab.theme_dropdown.value = "dark"
         with patch("ui.theme.apply_page_theme"):
             tab.on_theme_change(None)
-        snack.assert_called_once_with("settings_snack_theme_updated")
+        # 无 page → 不调度 async → 不触发 snack
+        snack.assert_not_called()
 
-    def test_on_theme_change_exception_shows_error_snack(self, mock_page):
+    async def test_on_theme_change_exception_shows_error_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         set_page(tab, mock_page)
         tab.theme_dropdown.value = "dark"
-        with patch("ui.theme.apply_page_theme", side_effect=Exception("theme error")):
-            tab.on_theme_change(None)
+        with (
+            patch("ui.theme.apply_page_theme", side_effect=Exception("theme error")),
+            _patch_thread_pool(),
+        ):
+            await tab._do_theme_change_async()
         snack.assert_called_once()
         call_args = snack.call_args
         assert call_args.kwargs.get("color") == self.mock_ac.ERROR or "Theme Error" in str(call_args)
@@ -272,14 +296,15 @@ class TestSystemTabLanguageChange:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_on_language_change_empty_value_skips(self, mock_page):
+    async def test_on_language_change_empty_value_skips(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.language_dropdown.value = None
-        tab.on_language_change(None)
+        with _patch_thread_pool():
+            await tab._do_language_change_async()
         self.mock_i18n.set_locale.assert_not_called()
 
-    def test_on_language_change_persist_failure_reverts_dropdown(self, mock_page):
+    async def test_on_language_change_persist_failure_reverts_dropdown(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
@@ -289,13 +314,14 @@ class TestSystemTabLanguageChange:
         self.mock_i18n.current_locale.return_value = "zh_CN"
         tab.language_dropdown.value = "en_US"
 
-        tab.on_language_change(None)
+        with _patch_thread_pool():
+            await tab._do_language_change_async()
 
         self.mock_i18n.set_locale.assert_not_called()
         assert tab.language_dropdown.value == "zh_CN"
         snack.assert_called_once_with("settings_language_save_failed", color=self.mock_ac.ERROR)
 
-    def test_on_language_change_exception_shows_error(self, mock_page):
+    async def test_on_language_change_exception_shows_error(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
@@ -303,13 +329,14 @@ class TestSystemTabLanguageChange:
         self.mock_ch.set_locale.side_effect = Exception("config error")
         tab.language_dropdown.value = "en_US"
 
-        tab.on_language_change(None)
+        with _patch_thread_pool():
+            await tab._do_language_change_async()
 
         snack.assert_called_once()
         call_args = snack.call_args
         assert call_args.kwargs.get("color") == self.mock_ac.ERROR
 
-    def test_on_language_change_success_updates_locale_configuration(self, mock_page):
+    async def test_on_language_change_success_updates_locale_configuration(self, mock_page):
         import flet as ft
 
         mock_page.locale_configuration = MagicMock()
@@ -322,7 +349,8 @@ class TestSystemTabLanguageChange:
         tab.language_dropdown.value = "en_US"
         self.mock_i18n.current_locale.return_value = "en_US"
 
-        tab.on_language_change(None)
+        with _patch_thread_pool():
+            await tab._do_language_change_async()
 
         self.mock_i18n.set_locale.assert_called_once_with("en_US")
         assert mock_page.locale_configuration.current_locale.language_code == "en"
@@ -363,21 +391,27 @@ class TestSystemTabLogLevelChange:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_on_log_level_change_calls_update_log_level(self, mock_page):
+    async def test_on_log_level_change_calls_update_log_level(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.log_level_dropdown.value = "WARNING"
-        with patch("utils.logger.update_log_level") as mock_update:
-            tab.on_log_level_change(None)
+        with (
+            patch("utils.logger.update_log_level") as mock_update,
+            _patch_thread_pool(),
+        ):
+            await tab._do_log_level_change_async()
             mock_update.assert_called_once_with("WARNING")
 
-    def test_on_log_level_change_calls_snack(self, mock_page):
+    async def test_on_log_level_change_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.log_level_dropdown.value = "ERROR"
-        with patch("utils.logger.update_log_level"):
-            tab.on_log_level_change(None)
+        with (
+            patch("utils.logger.update_log_level"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_log_level_change_async()
         snack.assert_called_once()
         assert "ERROR" in snack.call_args[0][0]
 
@@ -414,26 +448,29 @@ class TestSystemTabConcurrency:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_save_concurrency_boundary_min(self, mock_page):
+    async def test_save_concurrency_boundary_min(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.concurrency_input.value = "1"
-        tab.save_concurrency(None)
+        with _patch_thread_pool():
+            await tab._do_save_concurrency_async()
         self.mock_ch.set_sync_max_concurrent_heavy.assert_called_with(1)
 
-    def test_save_concurrency_boundary_max(self, mock_page):
+    async def test_save_concurrency_boundary_max(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.concurrency_input.value = "32"
-        tab.save_concurrency(None)
+        with _patch_thread_pool():
+            await tab._do_save_concurrency_async()
         self.mock_ch.set_sync_max_concurrent_heavy.assert_called_with(32)
 
-    def test_save_concurrency_calls_snack_on_success(self, mock_page):
+    async def test_save_concurrency_calls_snack_on_success(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.concurrency_input.value = "4"
-        tab.save_concurrency(None)
+        with _patch_thread_pool():
+            await tab._do_save_concurrency_async()
         snack.assert_called_once()
         assert snack.call_args.kwargs.get("color") == self.mock_ac.SUCCESS
 
@@ -470,62 +507,68 @@ class TestSystemTabDBPoolSettings:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_save_db_pool_settings_pool_size_too_high(self, mock_page):
+    async def test_save_db_pool_settings_pool_size_too_high(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "100"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        with _patch_thread_pool():
+            await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("sys_snack_pool_range", color=self.mock_ac.ERROR)
 
-    def test_save_db_pool_settings_overflow_negative(self, mock_page):
+    async def test_save_db_pool_settings_overflow_negative(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "5"
         tab.db_overflow_input.value = "-1"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        with _patch_thread_pool():
+            await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("settings_db_overflow: 0-50", color=self.mock_ac.ERROR)
 
-    def test_save_db_pool_settings_timeout_too_high(self, mock_page):
+    async def test_save_db_pool_settings_timeout_too_high(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "5"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "500"
-        tab.save_db_pool_settings(None)
+        with _patch_thread_pool():
+            await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("settings_db_timeout: 5-300", color=self.mock_ac.ERROR)
 
-    def test_save_db_pool_settings_boundary_pool_size_min(self, mock_page):
+    async def test_save_db_pool_settings_boundary_pool_size_min(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.pool_size_input.value = "1"
         tab.db_overflow_input.value = "0"
         tab.db_timeout_input.value = "5"
-        tab.save_db_pool_settings(None)
+        with _patch_thread_pool():
+            await tab._do_save_db_pool_settings_async()
         self.mock_ch.set_db_connection_pool_size.assert_called_with(1)
 
-    def test_save_db_pool_settings_boundary_pool_size_max(self, mock_page):
+    async def test_save_db_pool_settings_boundary_pool_size_max(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.pool_size_input.value = "50"
         tab.db_overflow_input.value = "0"
         tab.db_timeout_input.value = "5"
-        tab.save_db_pool_settings(None)
+        with _patch_thread_pool():
+            await tab._do_save_db_pool_settings_async()
         self.mock_ch.set_db_connection_pool_size.assert_called_with(50)
 
-    def test_save_db_pool_settings_calls_snack_on_success(self, mock_page):
+    async def test_save_db_pool_settings_calls_snack_on_success(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "5"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        with _patch_thread_pool():
+            await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("settings_db_pool_saved", color=self.mock_ac.SUCCESS)
 
 
@@ -566,10 +609,7 @@ class TestSystemTabThreadPoolSettings:
         set_page(tab, mock_page)
         tab.io_workers_input.value = "4"
         tab.cpu_workers_input.value = "1"
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm_instance.reload_config = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
+        with _patch_thread_pool():
             await tab.save_thread_pool_settings(None)
         self.mock_ch.set_max_io_workers.assert_called_with(4)
 
@@ -578,10 +618,7 @@ class TestSystemTabThreadPoolSettings:
         set_page(tab, mock_page)
         tab.io_workers_input.value = "512"
         tab.cpu_workers_input.value = "4"
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm_instance.reload_config = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
+        with _patch_thread_pool():
             await tab.save_thread_pool_settings(None)
         self.mock_ch.set_max_io_workers.assert_called_with(512)
 
@@ -590,10 +627,7 @@ class TestSystemTabThreadPoolSettings:
         set_page(tab, mock_page)
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "1"
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm_instance.reload_config = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
+        with _patch_thread_pool():
             await tab.save_thread_pool_settings(None)
         self.mock_ch.set_max_cpu_workers.assert_called_with(1)
 
@@ -602,10 +636,7 @@ class TestSystemTabThreadPoolSettings:
         set_page(tab, mock_page)
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "64"
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm_instance.reload_config = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
+        with _patch_thread_pool():
             await tab.save_thread_pool_settings(None)
         self.mock_ch.set_max_cpu_workers.assert_called_with(64)
 
@@ -634,10 +665,7 @@ class TestSystemTabThreadPoolSettings:
         set_page(tab, mock_page)
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "4"
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm_instance = MagicMock()
-            mock_tpm_instance.reload_config = MagicMock()
-            mock_tpm.return_value = mock_tpm_instance
+        with _patch_thread_pool():
             await tab.save_thread_pool_settings(None)
         # First call is "common_preparing", second is success
         assert snack.call_count == 2
@@ -676,31 +704,40 @@ class TestSystemTabPointTier:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_save_point_tier_saves_config(self, mock_page):
+    async def test_save_point_tier_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.update = MagicMock()
         tab.point_tier_dropdown.value = "pro"
-        with patch("data.external.tushare_client.TushareClient"):
-            tab.save_point_tier(None)
+        with (
+            patch("data.external.tushare_client.TushareClient"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_save_point_tier_async("pro")
         self.mock_ch.set_tushare_point_tier.assert_called_with("pro")
 
-    def test_save_point_tier_enables_rate_limit_when_custom(self, mock_page):
+    async def test_save_point_tier_enables_rate_limit_when_custom(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.update = MagicMock()
         tab.point_tier_dropdown.value = "custom"
-        with patch("data.external.tushare_client.TushareClient"):
-            tab.save_point_tier(None)
+        with (
+            patch("data.external.tushare_client.TushareClient"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_save_point_tier_async("custom")
         assert tab.rate_limit_input.disabled is False
 
-    def test_save_point_tier_disables_rate_limit_when_not_custom(self, mock_page):
+    async def test_save_point_tier_disables_rate_limit_when_not_custom(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.update = MagicMock()
         tab.point_tier_dropdown.value = "free"
-        with patch("data.external.tushare_client.TushareClient"):
-            tab.save_point_tier(None)
+        with (
+            patch("data.external.tushare_client.TushareClient"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_save_point_tier_async("free")
         assert tab.rate_limit_input.disabled is True
 
     def test_save_point_tier_empty_value_skips(self, mock_page):
@@ -710,26 +747,32 @@ class TestSystemTabPointTier:
         tab.save_point_tier(None)
         self.mock_ch.set_tushare_point_tier.assert_not_called()
 
-    def test_save_point_tier_calls_snack(self, mock_page):
+    async def test_save_point_tier_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         set_page(tab, mock_page)
         tab.rate_limit_input.update = MagicMock()
         tab.point_tier_dropdown.value = "standard"
-        with patch("data.external.tushare_client.TushareClient"):
-            tab.save_point_tier(None)
+        with (
+            patch("data.external.tushare_client.TushareClient"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_save_point_tier_async("standard")
         snack.assert_called_once()
 
-    def test_save_point_tier_reloads_rate_limiters(self, mock_page):
+    async def test_save_point_tier_reloads_rate_limiters(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.update = MagicMock()
         tab.point_tier_dropdown.value = "pro"
-        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+        with (
+            patch("data.external.tushare_client.TushareClient") as mock_tc,
+            _patch_thread_pool(),
+        ):
             mock_tc_instance = MagicMock()
             mock_tc.return_value = mock_tc_instance
-            tab.save_point_tier(None)
+            await tab._do_save_point_tier_async("pro")
             mock_tc_instance.reload_rate_limiters.assert_called_once()
 
 
@@ -765,33 +808,41 @@ class TestSystemTabRateLimit:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_save_rate_limit_non_custom_tier_hint(self, mock_page):
+    async def test_save_rate_limit_non_custom_tier_hint(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
+        set_page(tab, mock_page)
         tab.show_snack = snack
         self.mock_ch.get_tushare_point_tier.return_value = "free"
         tab.rate_limit_input.value = "200"
-        tab.save_rate_limit(None)
+        with _patch_thread_pool():
+            await tab._do_save_rate_limit_async()
         snack.assert_called_once_with("sys_snack_tier_override_hint")
 
-    def test_save_rate_limit_negative_disables(self, mock_page):
+    async def test_save_rate_limit_negative_disables(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         self.mock_ch.get_tushare_point_tier.return_value = "custom"
         tab.rate_limit_input.value = "-5"
-        with patch("data.external.tushare_client.TushareClient"):
-            tab.save_rate_limit(None)
+        with (
+            patch("data.external.tushare_client.TushareClient"),
+            _patch_thread_pool(),
+        ):
+            await tab._do_save_rate_limit_async()
         self.mock_ch.set_tushare_api_limit.assert_called_with(0)
 
-    def test_save_rate_limit_reloads_rate_limiters(self, mock_page):
+    async def test_save_rate_limit_reloads_rate_limiters(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         self.mock_ch.get_tushare_point_tier.return_value = "custom"
         tab.rate_limit_input.value = "200"
-        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+        with (
+            patch("data.external.tushare_client.TushareClient") as mock_tc,
+            _patch_thread_pool(),
+        ):
             mock_tc_instance = MagicMock()
             mock_tc.return_value = mock_tc_instance
-            tab.save_rate_limit(None)
+            await tab._do_save_rate_limit_async()
             mock_tc_instance.reload_rate_limiters.assert_called_once()
 
 
@@ -827,53 +878,49 @@ class TestSystemTabNoProxyDomains:
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_save_no_proxy_domains_strips_whitespace(self, mock_page):
+    async def test_save_no_proxy_domains_strips_whitespace(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.no_proxy_input.value = "  localhost , 127.0.0.1 , example.com  "
         with (
             patch("utils.proxy_manager.ProxyManager"),
-            patch("utils.thread_pool.ThreadPoolManager"),
-            patch("utils.thread_pool.TaskType"),
+            _patch_thread_pool(),
         ):
-            tab.save_no_proxy_domains(None)
+            await tab._do_save_no_proxy_domains_async()
         self.mock_ch.set_no_proxy_domains.assert_called_with(["localhost", "127.0.0.1", "example.com"])
 
-    def test_save_no_proxy_domains_filters_empty_entries(self, mock_page):
+    async def test_save_no_proxy_domains_filters_empty_entries(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.no_proxy_input.value = "localhost,,127.0.0.1,"
         with (
             patch("utils.proxy_manager.ProxyManager"),
-            patch("utils.thread_pool.ThreadPoolManager"),
-            patch("utils.thread_pool.TaskType"),
+            _patch_thread_pool(),
         ):
-            tab.save_no_proxy_domains(None)
+            await tab._do_save_no_proxy_domains_async()
         self.mock_ch.set_no_proxy_domains.assert_called_with(["localhost", "127.0.0.1"])
 
-    def test_save_no_proxy_domains_calls_snack_on_success(self, mock_page):
+    async def test_save_no_proxy_domains_calls_snack_on_success(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.no_proxy_input.value = "localhost"
         with (
             patch("utils.proxy_manager.ProxyManager"),
-            patch("utils.thread_pool.ThreadPoolManager"),
-            patch("utils.thread_pool.TaskType"),
+            _patch_thread_pool(),
         ):
-            tab.save_no_proxy_domains(None)
+            await tab._do_save_no_proxy_domains_async()
         snack.assert_called_once_with("settings_snack_no_proxy_saved", color=self.mock_ac.SUCCESS)
 
-    def test_save_no_proxy_domains_submits_proxy_reapply(self, mock_page):
+    async def test_save_no_proxy_domains_submits_proxy_reapply(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.no_proxy_input.value = "localhost"
         with (
             patch("utils.proxy_manager.ProxyManager"),
-            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
-            patch("utils.thread_pool.TaskType"),
+            _patch_thread_pool() as mock_tpm,
         ):
-            tab.save_no_proxy_domains(None)
+            await tab._do_save_no_proxy_domains_async()
             mock_tpm.return_value.submit.assert_called_once()
 
 

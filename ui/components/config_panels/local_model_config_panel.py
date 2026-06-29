@@ -19,6 +19,7 @@ from ui.components.settings_widgets import SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -184,17 +185,19 @@ class LocalModelConfigPanel(ft.Container):
 
         self.file_picker = ft.FilePicker(on_result=self._on_file_picked)
 
+        self._advanced_title = ft.Text(
+            I18n.get("ai_advanced_settings"),
+            size=14 if not self._compact else 12,
+            weight=ft.FontWeight.BOLD,
+        )
+        self._advanced_subtitle = ft.Text(
+            I18n.get("settings_hint_restart"),
+            size=11,
+            color=AppColors.WARNING,
+        )
         self.advanced_tile = ft.ExpansionTile(
-            title=ft.Text(
-                I18n.get("ai_advanced_settings"),
-                size=14 if not self._compact else 12,
-                weight=ft.FontWeight.BOLD,
-            ),
-            subtitle=ft.Text(
-                I18n.get("settings_hint_restart"),
-                size=11,
-                color=AppColors.WARNING,
-            ),
+            title=self._advanced_title,
+            subtitle=self._advanced_subtitle,
             controls=[
                 ft.Container(height=10),
                 ft.ResponsiveRow(
@@ -243,10 +246,10 @@ class LocalModelConfigPanel(ft.Container):
             initially_expanded=False,
         )
 
-        header_text = SectionHeader(I18n.get("settings_sec_local_ai"))
-        header_text.visible = not self._compact
+        self._header_text = SectionHeader(I18n.get("settings_sec_local_ai"), title_key="settings_sec_local_ai")
+        self._header_text.visible = not self._compact
 
-        desc_text = ft.Text(
+        self._desc_text = ft.Text(
             value=I18n.get("settings_local_ai_desc"),
             size=12,
             color=AppColors.TEXT_SECONDARY,
@@ -267,8 +270,8 @@ class LocalModelConfigPanel(ft.Container):
 
         form_content = ft.Column(
             controls=[
-                header_text,
-                desc_text,
+                self._header_text,
+                self._desc_text,
                 ft.Container(height=10) if not self._compact else ft.Container(height=5),
                 ft.Row(
                     [
@@ -367,11 +370,19 @@ class LocalModelConfigPanel(ft.Container):
             self.on_verify_success()
 
     def _on_save_click(self, e):
-        result = self.save_config()
-        if result:
-            self._show_success(I18n.get("wizard_model_configured"))
-            if self.on_save:
-                self.on_save()
+        if self.page:
+            self.page.run_task(self._do_save_click_async)
+
+    async def _do_save_click_async(self):
+        try:
+            result = await ThreadPoolManager().run_async(TaskType.IO, self.save_config)
+            if result:
+                self._show_success(I18n.get("wizard_model_configured"))
+                if self.on_save:
+                    self.on_save()
+        except Exception as e:
+            logger.error("[LocalModelConfigPanel] Save failed: %s", e, exc_info=True)
+            self._show_error(I18n.get("sys_snack_save_err"))
 
     def verify_model(self) -> bool:  # pragma: no cover — stub method; async_verify_model() is the real implementation
         return False
@@ -570,60 +581,34 @@ class LocalModelConfigPanel(ft.Container):
 
         LocalModelManager.cancel_verification_if_active()
 
-    def _on_locale_change(self, new_locale: str | None = None):  # pragma: no cover
+    def _on_locale_change(self, new_locale: str | None = None):
         try:
-            saved_values = {
-                "model_path": self.model_path_input.value,
-                "timeout": self.timeout_input.value,
-                "threads": self.threads_input.value,
-                "gpu_auto": self.gpu_auto_switch.value,
-                "gpu_layers": self.gpu_layers_input.value,
-                "batch": self.batch_input.value,
-                "ctx": self.ctx_input.value,
-                "flash_attn": self.flash_attn_switch.value,
-                "advanced_expanded": getattr(self, "advanced_tile", None)
-                and getattr(self.advanced_tile, "expanded", False),
-                "status_visible": getattr(self, "status_icon", None) and self.status_icon.visible,
-                "status_text": getattr(self, "status_text", None) and self.status_text.value or "",
-                "status_color": getattr(self, "status_text", None) and self.status_text.color,
-                "status_icon_name": getattr(self, "status_icon", None) and getattr(self.status_icon, "icon", None),
-            }
-
-            # 保存旧的 file_picker 引用，用于从 overlay 中移除
-            old_file_picker = getattr(self, "file_picker", None)
-
-            self._build_ui()
-
-            self.model_path_input.value = saved_values["model_path"]
-            self.timeout_input.value = saved_values["timeout"]
-            self.threads_input.value = saved_values["threads"]
-            self.threads_input.tooltip = str(saved_values["threads"])
-            self.gpu_auto_switch.value = saved_values["gpu_auto"]
-            self.gpu_layers_input.value = saved_values["gpu_layers"]
-            self.gpu_layers_input.tooltip = str(saved_values["gpu_layers"])
-            self.gpu_layers_input.visible = not saved_values["gpu_auto"]
-            self.batch_input.value = saved_values["batch"]
-            self.ctx_input.value = saved_values["ctx"]
-            self.flash_attn_switch.value = saved_values["flash_attn"]
-
-            # 恢复高级设置展开状态
-            if saved_values["advanced_expanded"] and hasattr(self, "advanced_tile"):
-                self.advanced_tile.expanded = True  # type: ignore[reportAttributeAccessIssue]  # Flet ExpansionTile.expanded is writable at runtime
-
-            # 恢复状态提示
-            if saved_values["status_visible"]:
-                self.status_icon.visible = True
-                self.status_text.value = saved_values["status_text"]
-                self.status_text.color = saved_values["status_color"]
-                self.status_icon.icon = saved_values["status_icon_name"]  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-                self.status_icon.color = saved_values["status_color"]
-
-            # 更新 page.overlay 中的 file_picker：移除旧的，添加新的
-            if self.page:
-                if old_file_picker and old_file_picker in self.page.overlay:
-                    self.page.overlay.remove(old_file_picker)
-                self.page.overlay.append(self.file_picker)
-                self.page.update()
+            if hasattr(self, "model_path_input"):
+                self.model_path_input.label = I18n.get("settings_local_model_path")
+            if hasattr(self, "btn_select_file"):
+                self.btn_select_file.text = I18n.get("settings_btn_select_file")
+            if hasattr(self, "timeout_input"):
+                self.timeout_input.label = I18n.get("settings_local_ai_timeout")
+            if hasattr(self, "gpu_auto_switch"):
+                self.gpu_auto_switch.label = I18n.get("settings_local_gpu_auto")
+            if hasattr(self, "batch_input"):
+                self.batch_input.label = I18n.get("settings_local_batch")
+            if hasattr(self, "ctx_input"):
+                self.ctx_input.label = I18n.get("settings_local_ctx")
+            if hasattr(self, "flash_attn_switch"):
+                self.flash_attn_switch.label = I18n.get("settings_local_flash_attn")
+            if hasattr(self, "verify_button"):
+                self.verify_button.text = I18n.get("wizard_btn_verify_model")
+            if hasattr(self, "save_button"):
+                self.save_button.text = I18n.get("settings_save_config")
+            if hasattr(self, "_header_text"):
+                self._header_text.update_locale()
+            if hasattr(self, "_desc_text"):
+                self._desc_text.value = I18n.get("settings_local_ai_desc")
+            if hasattr(self, "_advanced_title"):
+                self._advanced_title.value = I18n.get("ai_advanced_settings")
+            if hasattr(self, "_advanced_subtitle"):
+                self._advanced_subtitle.value = I18n.get("settings_hint_restart")
 
             self._safe_update()
         except Exception as e:

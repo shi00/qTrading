@@ -684,11 +684,18 @@ class _OnboardingWizardBase:
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
         self.mock_ch = MagicMock()
+        # ThreadPoolManager mock: run_async 直接同步调用 func 并返回结果，
+        # 避免 _do_language_change_wizard_async 等协程测试依赖真实线程池。
+        self.mock_tpm = MagicMock()
+        self.mock_tpm.return_value.run_async = AsyncMock(
+            side_effect=lambda task_type, func, *args, **kwargs: func(*args, **kwargs)
+        )
         self.patches = [
             patch("ui.views.onboarding_wizard.I18n", self.mock_i18n),
             patch("ui.views.onboarding_wizard.AppColors", self.mock_ac),
             patch("ui.views.onboarding_wizard.AppStyles", self.mock_as),
             patch("ui.views.onboarding_wizard.ConfigHandler", self.mock_ch),
+            patch("ui.views.onboarding_wizard.ThreadPoolManager", self.mock_tpm),
             patch("ui.viewmodels.onboarding_view_model.DataProcessor"),
             patch("ui.views.onboarding_wizard.DatabaseConfigPanel", MagicMock()),
             patch("ui.views.onboarding_wizard.TushareConfigPanel", MagicMock()),
@@ -845,13 +852,23 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         assert wizard.wizard_language_dropdown.options is not None
         assert len(wizard.wizard_language_dropdown.options) > 0
 
+    def test_on_locale_change_updates_btn_sync_later_text(self, mock_page):
+        """§5.8 规范 3：_on_locale_change 必须更新 btn_sync_later.text（避免重建步骤时丢失翻译）"""
+        wizard = self._make_wizard(mock_page)
+        set_page(wizard, mock_page)
+        original_btn = wizard.btn_sync_later
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_btn_sync_later" else key
+        wizard._on_locale_change()
+        assert original_btn.text == "en_wizard_btn_sync_later"
+        assert wizard.btn_sync_later is original_btn
+
     def test_header_title_is_in_ui_tree(self, mock_page):
         wizard = self._make_wizard(mock_page)
         header_column = wizard.header_container
         assert wizard.header_title in header_column.controls
         assert wizard.header_desc in header_column.controls
 
-    def test_on_language_change_wizard_preserves_header_reference(self, mock_page):
+    async def test_on_language_change_wizard_preserves_header_reference(self, mock_page):
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         original_header_container = wizard.header_container
@@ -859,12 +876,12 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         original_header_desc = wizard.header_desc
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
-        wizard._on_language_change_wizard(MagicMock())
+        await wizard._do_language_change_wizard_async()
         assert wizard.header_container is original_header_container
         assert wizard.header_title is original_header_title
         assert wizard.header_desc is original_header_desc
 
-    def test_on_language_change_wizard_updates_header_title_directly(self, mock_page):
+    async def test_on_language_change_wizard_updates_header_title_directly(self, mock_page):
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         original_title = wizard.header_title
@@ -874,13 +891,13 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         self.mock_i18n.set_locale.side_effect = lambda locale: wizard._on_locale_change()
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
-        wizard._on_language_change_wizard(MagicMock())
+        await wizard._do_language_change_wizard_async()
         assert original_title.value == "en_wizard_welcome_title"
         assert original_desc.value == "en_wizard_welcome_desc_with_time"
         assert wizard.header_title is original_title
         self.mock_ch.set_locale.assert_called_with("en_US")
 
-    def test_on_language_change_wizard_updates_locale_configuration(self, mock_page):
+    async def test_on_language_change_wizard_updates_locale_configuration(self, mock_page):
         import flet as ft
 
         mock_page.locale_configuration = MagicMock()
@@ -892,13 +909,13 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
         self.mock_i18n.current_locale.return_value = "en_US"
-        wizard._on_language_change_wizard(MagicMock())
+        await wizard._do_language_change_wizard_async()
 
         assert mock_page.locale_configuration.current_locale.language_code == "en"
         assert mock_page.locale_configuration.current_locale.country_code == "US"
         mock_page.update.assert_called()
 
-    def test_on_language_change_wizard_persist_failure_skips_i18n_set(self, mock_page):
+    async def test_on_language_change_wizard_persist_failure_skips_i18n_set(self, mock_page):
         """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown。"""
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
@@ -908,18 +925,18 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
 
-        wizard._on_language_change_wizard(MagicMock())
+        await wizard._do_language_change_wizard_async()
 
         self.mock_i18n.set_locale.assert_not_called()
         assert wizard.wizard_language_dropdown.value == "zh_CN"
 
-    def test_language_change_rebinds_panel_callbacks(self, mock_page):
+    async def test_language_change_rebinds_panel_callbacks(self, mock_page):
         """语言切换后 VM 回调指向新面板"""
         wizard = self._make_wizard(mock_page)
         set_page(wizard, mock_page)
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
-        wizard._on_language_change_wizard(MagicMock())
+        await wizard._do_language_change_wizard_async()
         # 验证回调已更新为新面板的方法
         assert wizard.vm.fn_validate_database is not None
         assert wizard.vm.fn_validate_database is wizard.database_panel.save_config
@@ -996,23 +1013,37 @@ class TestOnboardingWizardLoading(_OnboardingWizardBase):
 class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
     """OnboardingWizard 语言切换重建行为测试（§5.8 规范 3/6）。"""
 
-    def test_rebuild_calls_old_panel_will_unmount(self, mock_page):
-        """§5.8 规范 6：重建子 panel 前必须调用旧 panel 的 will_unmount，避免 I18n 订阅泄漏"""
+    def test_rebuild_cascades_panel_locale_refresh(self, mock_page):
+        """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）"""
         wizard = self._make_wizard(mock_page)
-        # 保存旧 panel 引用并替换 will_unmount 为独立 MagicMock 以便断言
-        old_panels = {
+        panels_and_methods = [
+            (wizard.database_panel, "_on_locale_change"),
+            (wizard.tushare_panel, "refresh_locale"),
+            (wizard.llm_config_panel, "_on_locale_change"),
+            (wizard.local_model_panel, "_on_locale_change"),
+        ]
+        for panel, method_name in panels_and_methods:
+            setattr(panel, method_name, MagicMock())
+
+        wizard._rebuild_steps_after_locale_change()
+
+        for panel, method_name in panels_and_methods:
+            getattr(panel, method_name).assert_called_once()
+
+    def test_rebuild_does_not_recreate_panels(self, mock_page):
+        """§5.8 规范 3 纯 UI：语言切换后子面板实例必须保持不变（构造函数会触发 keyring IO）"""
+        wizard = self._make_wizard(mock_page)
+        original_panels = {
             "database_panel": wizard.database_panel,
             "tushare_panel": wizard.tushare_panel,
             "llm_config_panel": wizard.llm_config_panel,
             "local_model_panel": wizard.local_model_panel,
         }
-        for panel in old_panels.values():
-            panel.will_unmount = MagicMock()
 
         wizard._rebuild_steps_after_locale_change()
 
-        for panel in old_panels.values():
-            panel.will_unmount.assert_called_once()
+        for attr, original_panel in original_panels.items():
+            assert getattr(wizard, attr) is original_panel
 
     def test_rebuild_preserves_schedule_values(self, mock_page):
         """§5.8 规范 3：重建后必须保留 schedule_enabled.value 和 schedule_time.value"""

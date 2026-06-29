@@ -111,9 +111,14 @@ class ScreenerViewModel:
         self.on_task_unlock = None
         self._main_loop = None
 
-        for f in self._threadsafe_futures:
+        for f in list(self._threadsafe_futures):
             f.cancel()
         self._threadsafe_futures.clear()
+
+        for t in list(self._background_tasks):
+            if not t.done():
+                t.cancel()
+        self._background_tasks.clear()
 
         self._full_results = None
         self._ai_buffer = []

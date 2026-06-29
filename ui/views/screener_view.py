@@ -17,6 +17,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -322,8 +323,13 @@ class ScreenerView(ft.Container):
         # Subscribe to I18n locale changes
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
-    def handle_resize(self):
-        """窗口 resize 通知 — 刷新虚拟表格视口。"""
+    def handle_resize(self, width: float = 0, height: float = 0):
+        """窗口 resize 通知 — 刷新虚拟表格视口。
+
+        Args:
+            width: 当前窗口宽度 (来自 WindowResizeEvent)，0 表示未知
+            height: 当前窗口高度 (来自 WindowResizeEvent)，0 表示未知
+        """
         table = getattr(self, "result_table", None)
         if table and hasattr(table, "refresh_viewport"):
             table.refresh_viewport()
@@ -369,7 +375,7 @@ class ScreenerView(ft.Container):
             saved_strategy = self.strategy_dropdown.value
             self.strategy_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             try:
-                self.vm.strategy_mgr.invalidate_dependency_cache()
+                # 复用依赖缓存，避免语言切换触发 IO（§5.8 规范：refresh_locale 纯 UI）
                 strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
                 options = []
                 for key, info in strategies_with_dep.items():
@@ -877,6 +883,8 @@ class ScreenerView(ft.Container):
                 ex,
                 exc_info=True,
             )
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(I18n.get("screener_load_failed"), "error")  # type: ignore[untyped]
 
     def _on_tree_item_click(self, trade_date: str, strategy_name=None, run_id=None):  # pragma: no cover
         """Handle click on a tree node to load historical records."""
@@ -1204,51 +1212,15 @@ class ScreenerView(ft.Container):
 
                     def make_restore_default(strat, ctrl_field):
                         def restore_default(e):
-                            from strategies.strategy_prompts import get_base_prompt
-                            from utils.config_handler import ConfigHandler
-
-                            ConfigHandler.set_strategy_prompt(strat, None)
-                            ctrl_field.value = str(get_base_prompt(strat))
-                            ctrl_field.update()
-                            if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(  # type: ignore[untyped]
-                                    I18n.get(
-                                        "ai_settings_restored",
-                                    ),
-                                    "info",
-                                )
+                            if self.page:
+                                self.page.run_task(self._do_restore_default_async, strat, ctrl_field)
 
                         return restore_default
 
                     def make_save_prompt(strat, ctrl_field):
                         def save_prompt(e):
-                            from utils.config_handler import ConfigHandler
-                            from utils.prompt_guard import validate_prompt, MAX_PROMPT_LENGTH
-
-                            prompt_val = ctrl_field.value or ""
-                            is_valid, warning = validate_prompt(prompt_val)
-                            if not is_valid:
-                                if self.page and hasattr(self.page, "show_toast"):
-                                    msg = I18n.get(warning, warning)
-                                    if warning == "prompt_err_length":
-                                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                                    self.page.show_toast(  # type: ignore[attr-defined]
-                                        f"⚠ {msg}",
-                                        "warning",
-                                    )
-                                return
-
-                            ConfigHandler.set_strategy_prompt(strat, prompt_val)
-                            UILogger.log_action(
-                                "ScreenerView",
-                                "SavePrompt",
-                                f"strategy={strat}",
-                            )
-                            if self.page and hasattr(self.page, "show_toast"):
-                                self.page.show_toast(  # type: ignore[untyped]
-                                    I18n.get("ai_settings_saved"),
-                                    "success",
-                                )
+                            if self.page:
+                                self.page.run_task(self._do_save_prompt_async, strat, ctrl_field)
 
                         return save_prompt
 
@@ -1341,6 +1313,60 @@ class ScreenerView(ft.Container):
         extract(self.params_container.controls)
         return params
 
+    async def _do_restore_default_async(self, strat, ctrl_field):
+        try:
+            from strategies.strategy_prompts import get_base_prompt
+            from utils.config_handler import ConfigHandler
+
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
+            ctrl_field.value = str(get_base_prompt(strat))
+            ctrl_field.update()
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(  # type: ignore[untyped]
+                    I18n.get(
+                        "ai_settings_restored",
+                    ),
+                    "info",
+                )
+        except Exception as ex:
+            logger.error("[ScreenerView] Restore default prompt failed: %s", ex, exc_info=True)
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(I18n.get("sys_snack_save_err"), "error")  # type: ignore[untyped]
+
+    async def _do_save_prompt_async(self, strat, ctrl_field):
+        try:
+            from utils.config_handler import ConfigHandler
+            from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
+
+            prompt_val = ctrl_field.value or ""
+            is_valid, warning = validate_prompt(prompt_val)
+            if not is_valid:
+                if self.page and hasattr(self.page, "show_toast"):
+                    msg = I18n.get(warning, warning)
+                    if warning == "prompt_err_length":
+                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+                    self.page.show_toast(  # type: ignore[attr-defined]
+                        f"⚠ {msg}",
+                        "warning",
+                    )
+                return
+
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, prompt_val)
+            UILogger.log_action(
+                "ScreenerView",
+                "SavePrompt",
+                f"strategy={strat}",
+            )
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(  # type: ignore[untyped]
+                    I18n.get("ai_settings_saved"),
+                    "success",
+                )
+        except Exception as ex:
+            logger.error("[ScreenerView] Save prompt failed: %s", ex, exc_info=True)
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(I18n.get("sys_snack_save_err"), "error")  # type: ignore[untyped]
+
     def _toggle_progress(self, visible):
         if not self.page:
             return
@@ -1405,6 +1431,8 @@ class ScreenerView(ft.Container):
             except Exception as ex:
                 logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
                 logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
+                if self.page and hasattr(self.page, "show_toast"):
+                    self.page.show_toast(I18n.get("data_export_fail"), "error")  # type: ignore[untyped]
             finally:
                 self.export_btn.disabled = False
                 self.export_btn.update()

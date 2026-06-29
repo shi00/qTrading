@@ -10,6 +10,11 @@ from tests.unit.ui.conftest import set_page, wrap_mock_page
 pytestmark = pytest.mark.unit
 
 
+async def _run_async_passthrough(task_type, func, *args, **kwargs):
+    """Mock helper: 立即同步执行 func 并返回结果，模拟线程池 offload。"""
+    return func(*args, **kwargs)
+
+
 class TestAutomationTab:
     patches: list
 
@@ -32,16 +37,24 @@ class TestAutomationTab:
                 stack.enter_context(p)
             yield
 
+    @pytest.fixture(autouse=True)
+    def _patch_thread_pool(self):
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+        with patch("ui.views.settings_tabs.automation_tab.ThreadPoolManager", return_value=mock_tpm):
+            yield mock_tpm
+
     def _make_tab(self):
         from ui.views.settings_tabs.automation_tab import AutomationTab
 
         return AutomationTab(show_snack_callback=MagicMock())
 
-    def test_on_schedule_toggle_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_toggle_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.schedule_enabled.value = True
-        tab.on_schedule_toggle(None)
+        await tab._do_schedule_toggle_async()
         self.mock_ch.save_config.assert_called_with({"auto_update_enabled": True})
 
     def test_on_schedule_toggle_disables_time(self, mock_page):
@@ -51,43 +64,48 @@ class TestAutomationTab:
         tab.on_schedule_toggle(None)
         assert tab.schedule_time.disabled is True
 
-    def test_on_schedule_toggle_enables_time(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_toggle_enables_time(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.schedule_enabled.value = True
-        tab.on_schedule_toggle(None)
+        await tab._do_schedule_toggle_async()
         assert tab.schedule_time.disabled is False
 
-    def test_on_schedule_toggle_calls_snack(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_toggle_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
         tab.schedule_enabled.value = True
-        tab.on_schedule_toggle(None)
+        await tab._do_schedule_toggle_async()
         snack.assert_called_once_with("settings_snack_auto_on")
 
-    def test_on_schedule_time_change_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_time_change_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.schedule_time.value = "16:30"
-        tab.on_schedule_time_change(None)
+        await tab._do_schedule_time_change_async()
         self.mock_ch.save_config.assert_called_with({"auto_update_time": "16:30"})
 
-    def test_on_schedule_time_change_calls_snack(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_time_change_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
         tab.schedule_time.value = "16:30"
-        tab.on_schedule_time_change(None)
+        await tab._do_schedule_time_change_async()
         snack.assert_called_once_with("settings_snack_time_set")
 
-    def test_on_ai_concept_toggle_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_toggle_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.ai_concept_enabled.value = True
-        tab.on_ai_concept_toggle(None)
+        await tab._do_ai_concept_toggle_async()
         self.mock_ch.set_ai_concept_schedule_enabled.assert_called_with(True)
 
     def test_on_ai_concept_toggle_disables_time(self, mock_page):
@@ -97,11 +115,12 @@ class TestAutomationTab:
         tab.on_ai_concept_toggle(None)
         assert tab.ai_concept_time.disabled is True
 
-    def test_on_ai_concept_time_change_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_time_change_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.ai_concept_time.value = "20:00"
-        tab.on_ai_concept_time_change(None)
+        await tab._do_ai_concept_time_change_async()
         self.mock_ch.set_ai_concept_schedule_time.assert_called_with("20:00")
 
     def test_did_mount_subscribes_i18n(self, mock_page):
@@ -238,29 +257,32 @@ class TestAutomationTab:
         tab._get_schedule_status_text(False)
         self.mock_i18n.get.assert_called_with("settings_status_auto_off")
 
-    def test_on_ai_concept_toggle_enables_time(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_toggle_enables_time(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.ai_concept_enabled.value = True
-        tab.on_ai_concept_toggle(None)
+        await tab._do_ai_concept_toggle_async()
         assert tab.ai_concept_time.disabled is False
 
-    def test_on_ai_concept_toggle_calls_snack(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_toggle_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
         tab.ai_concept_enabled.value = True
-        tab.on_ai_concept_toggle(None)
+        await tab._do_ai_concept_toggle_async()
         snack.assert_called_once_with("settings_snack_auto_on")
 
-    def test_on_ai_concept_time_change_calls_snack(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_time_change_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
         tab.ai_concept_time.value = "20:00"
-        tab.on_ai_concept_time_change(None)
+        await tab._do_ai_concept_time_change_async()
         snack.assert_called_once_with("settings_snack_time_set")
 
     def test_safe_update_with_page(self, mock_page):
@@ -297,19 +319,21 @@ class TestAutomationTab:
         assert tab.row_ai_concept_schedule is not None
         assert tab.row_ai_concept_time is not None
 
-    def test_on_schedule_toggle_no_snack_callback(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_toggle_no_snack_callback(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = None
         tab.schedule_enabled.value = True
-        tab.on_schedule_toggle(None)
+        await tab._do_schedule_toggle_async()
         self.mock_ch.save_config.assert_called_with({"auto_update_enabled": True})
 
-    def test_on_schedule_toggle_updates_status_text(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_toggle_updates_status_text(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.schedule_enabled.value = True
-        tab.on_schedule_toggle(None)
+        await tab._do_schedule_toggle_async()
         self.mock_i18n.get.assert_any_call("settings_status_auto_on")
 
     def test_on_schedule_toggle_disabled_status_color(self, mock_page):
@@ -319,27 +343,30 @@ class TestAutomationTab:
         tab.on_schedule_toggle(None)
         assert tab.schedule_status.color == ft.Colors.ON_SURFACE_VARIANT
 
-    def test_on_schedule_toggle_enabled_status_color(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_toggle_enabled_status_color(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.schedule_enabled.value = True
-        tab.on_schedule_toggle(None)
+        await tab._do_schedule_toggle_async()
         assert tab.schedule_status.color == self.mock_ac.SUCCESS
 
-    def test_on_schedule_time_change_no_snack_callback(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_schedule_time_change_no_snack_callback(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = None
         tab.schedule_time.value = "17:00"
-        tab.on_schedule_time_change(None)
+        await tab._do_schedule_time_change_async()
         self.mock_ch.save_config.assert_called_with({"auto_update_time": "17:00"})
 
-    def test_on_ai_concept_toggle_no_snack_callback(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_toggle_no_snack_callback(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = None
         tab.ai_concept_enabled.value = True
-        tab.on_ai_concept_toggle(None)
+        await tab._do_ai_concept_toggle_async()
         self.mock_ch.set_ai_concept_schedule_enabled.assert_called_with(True)
 
     def test_on_ai_concept_toggle_updates_status_text(self, mock_page):
@@ -356,19 +383,21 @@ class TestAutomationTab:
         tab.on_ai_concept_toggle(None)
         assert tab.ai_concept_status.color == ft.Colors.ON_SURFACE_VARIANT
 
-    def test_on_ai_concept_toggle_enabled_status_color(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_toggle_enabled_status_color(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.ai_concept_enabled.value = True
-        tab.on_ai_concept_toggle(None)
+        await tab._do_ai_concept_toggle_async()
         assert tab.ai_concept_status.color == self.mock_ac.SUCCESS
 
-    def test_on_ai_concept_time_change_no_snack_callback(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_ai_concept_time_change_no_snack_callback(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = None
         tab.ai_concept_time.value = "16:00"
-        tab.on_ai_concept_time_change(None)
+        await tab._do_ai_concept_time_change_async()
         self.mock_ch.set_ai_concept_schedule_time.assert_called_with("16:00")
 
     def test_on_locale_change_exception_handled(self, mock_page):
@@ -748,158 +777,174 @@ class TestSystemTab:
                 stack.enter_context(p)
             yield
 
+    @pytest.fixture(autouse=True)
+    def _patch_thread_pool(self):
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+        with patch("ui.views.settings_tabs.system_tab.ThreadPoolManager", return_value=mock_tpm):
+            yield mock_tpm
+
     def _make_tab(self):
         from ui.views.settings_tabs.system_tab import SystemTab
 
         return SystemTab(show_snack_callback=MagicMock())
 
-    def test_on_theme_change_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_theme_change_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.theme_dropdown.value = "dark"
         with patch("ui.theme.apply_page_theme"):
-            tab.on_theme_change(None)
+            await tab._do_theme_change_async()
         self.mock_ch.set_theme_name.assert_called_with("dark")
 
-    def test_on_theme_change_calls_snack(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_theme_change_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         set_page(tab, mock_page)
         tab.theme_dropdown.value = "dark"
         with patch("ui.theme.apply_page_theme"):
-            tab.on_theme_change(None)
+            await tab._do_theme_change_async()
         snack.assert_called_once_with("settings_snack_theme_updated")
 
-    def test_on_log_level_change_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_log_level_change_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.log_level_dropdown.value = "DEBUG"
         with patch("utils.logger.update_log_level"):
-            tab.on_log_level_change(None)
+            await tab._do_log_level_change_async()
         self.mock_ch.set_log_level.assert_called_with("DEBUG")
 
-    def test_save_concurrency_valid(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_concurrency_valid(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.concurrency_input.value = "4"
-        tab.save_concurrency(None)
+        await tab._do_save_concurrency_async()
         self.mock_ch.set_sync_max_concurrent_heavy.assert_called_with(4)
 
-    def test_save_concurrency_too_low(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_concurrency_too_low(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.concurrency_input.value = "0"
-        tab.save_concurrency(None)
+        await tab._do_save_concurrency_async()
         snack.assert_called_once_with("sys_snack_concurrency_range", color=self.mock_ac.ERROR)
 
-    def test_save_concurrency_too_high(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_concurrency_too_high(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.concurrency_input.value = "64"
-        tab.save_concurrency(None)
+        await tab._do_save_concurrency_async()
         snack.assert_called_once_with("sys_snack_concurrency_range", color=self.mock_ac.ERROR)
 
-    def test_save_concurrency_invalid_format(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_concurrency_invalid_format(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.concurrency_input.value = "abc"
-        tab.save_concurrency(None)
+        await tab._do_save_concurrency_async()
         snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
-    def test_save_rate_limit_valid(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_rate_limit_valid(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.value = "200"
-        tab.save_rate_limit(None)
+        await tab._do_save_rate_limit_async()
         self.mock_ch.set_tushare_api_limit.assert_called_with(200)
 
-    def test_save_rate_limit_empty_disables(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_rate_limit_empty_disables(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.value = ""
-        tab.save_rate_limit(None)
+        await tab._do_save_rate_limit_async()
         self.mock_ch.set_tushare_api_limit.assert_called_with(0)
 
-    def test_save_rate_limit_zero_disables(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_rate_limit_zero_disables(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.rate_limit_input.value = "0"
-        tab.save_rate_limit(None)
+        await tab._do_save_rate_limit_async()
         self.mock_ch.set_tushare_api_limit.assert_called_with(0)
 
-    def test_save_rate_limit_too_low(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_rate_limit_too_low(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.rate_limit_input.value = "5"
-        tab.save_rate_limit(None)
+        await tab._do_save_rate_limit_async()
         snack.assert_called_once_with("sys_snack_limit_min")
 
-    def test_save_rate_limit_invalid_format(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_rate_limit_invalid_format(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.rate_limit_input.value = "abc"
-        tab.save_rate_limit(None)
+        await tab._do_save_rate_limit_async()
         snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
-    def test_save_no_proxy_domains(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_no_proxy_domains(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.no_proxy_input.value = "localhost, 127.0.0.1"
-        with (
-            patch("utils.proxy_manager.ProxyManager"),
-            patch("utils.thread_pool.ThreadPoolManager"),
-            patch("utils.thread_pool.TaskType"),
-        ):
-            tab.save_no_proxy_domains(None)
+        with patch("utils.proxy_manager.ProxyManager"):
+            await tab._do_save_no_proxy_domains_async()
         self.mock_ch.set_no_proxy_domains.assert_called_with(["localhost", "127.0.0.1"])
 
-    def test_save_no_proxy_domains_empty(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_no_proxy_domains_empty(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.no_proxy_input.value = ""
-        with (
-            patch("utils.proxy_manager.ProxyManager"),
-            patch("utils.thread_pool.ThreadPoolManager"),
-            patch("utils.thread_pool.TaskType"),
-        ):
-            tab.save_no_proxy_domains(None)
+        with patch("utils.proxy_manager.ProxyManager"):
+            await tab._do_save_no_proxy_domains_async()
         self.mock_ch.set_no_proxy_domains.assert_called_with([])
 
-    def test_save_db_pool_settings_valid(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_db_pool_settings_valid(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.pool_size_input.value = "5"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        await tab._do_save_db_pool_settings_async()
         self.mock_ch.set_db_connection_pool_size.assert_called_with(5)
         self.mock_ch.set_db_max_overflow.assert_called_with(10)
         self.mock_ch.set_db_pool_timeout.assert_called_with(30)
 
-    def test_save_db_pool_settings_pool_size_too_low(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_db_pool_settings_pool_size_too_low(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "0"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("sys_snack_pool_range", color=self.mock_ac.ERROR)
 
-    def test_on_theme_change_exception(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_theme_change_exception(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         set_page(tab, mock_page)
         tab.theme_dropdown.value = "dark"
         with patch("ui.theme.apply_page_theme", side_effect=Exception("theme error")):
-            tab.on_theme_change(None)
+            await tab._do_theme_change_async()
         snack.assert_called_once()
 
     @pytest.mark.asyncio
@@ -994,74 +1039,82 @@ class TestSystemTab:
         await tab.save_thread_pool_settings(None)
         snack.assert_called_once_with("sys_snack_save_err", color=self.mock_ac.ERROR)
 
-    def test_save_no_proxy_domains_exception(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_no_proxy_domains_exception(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         set_page(tab, mock_page)
         tab.no_proxy_input.value = "localhost"
         self.mock_ch.set_no_proxy_domains.side_effect = Exception("save error")
-        tab.save_no_proxy_domains(None)
+        await tab._do_save_no_proxy_domains_async()
         snack.assert_called_once()
 
-    def test_save_db_pool_settings_overflow_too_high(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_db_pool_settings_overflow_too_high(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "5"
         tab.db_overflow_input.value = "100"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("settings_db_overflow: 0-50", color=self.mock_ac.ERROR)
 
-    def test_save_db_pool_settings_timeout_too_low(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_db_pool_settings_timeout_too_low(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "5"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "1"
-        tab.save_db_pool_settings(None)
+        await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("settings_db_timeout: 5-300", color=self.mock_ac.ERROR)
 
-    def test_save_db_pool_settings_invalid_format(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_db_pool_settings_invalid_format(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
         tab.pool_size_input.value = "abc"
         tab.db_overflow_input.value = "10"
         tab.db_timeout_input.value = "30"
-        tab.save_db_pool_settings(None)
+        await tab._do_save_db_pool_settings_async()
         snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
-    def test_on_language_change_calls_set_locale(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_language_change_calls_set_locale(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.language_dropdown.value = "en_US"
-        tab.on_language_change(None)
+        await tab._do_language_change_async()
         self.mock_i18n.set_locale.assert_called_with("en_US")
         self.mock_ch.set_locale.assert_called_with("en_US")
 
-    def test_on_language_change_calls_snack(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_language_change_calls_snack(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
         tab.language_dropdown.value = "en_US"
-        tab.on_language_change(None)
+        await tab._do_language_change_async()
         snack.assert_called_once_with("settings_language_changed")
 
-    def test_on_language_change_exception_handled(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_language_change_exception_handled(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.show_snack = snack
         self.mock_i18n.set_locale.side_effect = Exception("test error")
         tab.language_dropdown.value = "en_US"
-        tab.on_language_change(None)
+        await tab._do_language_change_async()
         snack.assert_called_once()
 
-    def test_on_language_change_persist_failure_skips_i18n_set(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_language_change_persist_failure_skips_i18n_set(self, mock_page):
         """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown，显示失败提示。"""
         snack = MagicMock()
         tab = self._make_tab()
@@ -1072,7 +1125,7 @@ class TestSystemTab:
         self.mock_i18n.current_locale.return_value = "zh_CN"
         tab.language_dropdown.value = "en_US"
 
-        tab.on_language_change(None)
+        await tab._do_language_change_async()
 
         self.mock_i18n.set_locale.assert_not_called()
         assert tab.language_dropdown.value == "zh_CN"
@@ -1165,15 +1218,23 @@ class TestDataSourceTab:
                 stack.enter_context(p)
             yield
 
+    @pytest.fixture(autouse=True)
+    def _patch_thread_pool(self):
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+        with patch("ui.views.settings_tabs.data_source_tab.ThreadPoolManager", return_value=mock_tpm):
+            yield mock_tpm
+
     def _make_tab(self):
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         return DataSourceTab(show_snack_callback=MagicMock())
 
-    def test_on_tushare_save_delegates_to_vm(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_tushare_save_delegates_to_vm(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_tushare_save({"token": "abc123"})
+        await tab._do_tushare_save_async("abc123")
         tab.vm.save_tushare_token.assert_called_with("abc123")
 
     def test_on_tushare_save_empty_token_skips(self, mock_page):
@@ -1182,12 +1243,13 @@ class TestDataSourceTab:
         tab._on_tushare_save({"token": "  "})
         tab.vm.save_tushare_token.assert_not_called()
 
-    def test_on_history_years_change_delegates_to_vm(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_history_years_change_delegates_to_vm(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         e = MagicMock()
         e.control.value = "3"
-        tab.on_history_years_change(e)
+        await tab._do_history_years_change_async(e)
         tab.vm.set_history_years.assert_called_with(3)
 
     def test_vm_sync_busy_changes_buttons(self, mock_page):
@@ -1309,6 +1371,13 @@ class TestNotificationsTab:
                 stack.enter_context(p)
             yield
 
+    @pytest.fixture(autouse=True)
+    def _patch_thread_pool(self):
+        mock_tpm = MagicMock()
+        mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+        with patch("ui.views.settings_tabs.automation_tab.ThreadPoolManager", return_value=mock_tpm):
+            yield mock_tpm
+
     def _make_tab(self):
         from ui.views.settings_tabs.automation_tab import NotificationsTab
 
@@ -1319,11 +1388,12 @@ class TestNotificationsTab:
         assert tab.news_alerts_enabled is not None
         assert tab.news_interval is not None
 
-    def test_toggle_notification_saves_config(self, mock_page):
+    @pytest.mark.asyncio
+    async def test_toggle_notification_saves_config(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.news_alerts_enabled.value = True
-        tab.on_news_toggle(None)
+        await tab._do_news_toggle_async()
         self.mock_ch.save_config.assert_called_with({"enable_news_alerts": True})
 
     def test_did_mount_subscribes_i18n(self, mock_page):

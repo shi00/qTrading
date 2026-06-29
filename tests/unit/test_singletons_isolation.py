@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
+from services.ai_service import AIService
 from services.local_model_manager import LocalModelManager
+from services.news_subscription_service import NewsSubscriptionService
 from services.task_manager import TaskManager, AppTask, TaskStatus
 from utils.scheduler_service import SchedulerService
 
@@ -219,3 +221,52 @@ class TestTaskManagerSingletonIsolation:
 
         assert len(set(instances)) == 1, "Multiple instances created across threads"
         TaskManager._reset_singleton()
+
+
+class TestSingletonResetClearsLoopLocal:
+    """Verify _reset_singleton invokes del_loop_local with correct keys (Stage 2 fix)."""
+
+    def test_cache_manager_reset_clears_loop_local_keys(self):
+        with patch("data.cache.cache_manager.del_loop_local") as mock_del:
+            CacheManager._reset_singleton()
+            keys = {call.args[0] for call in mock_del.call_args_list}
+            assert keys == {"cache_maint_event", "cache_init_lock"}
+
+    def test_ai_service_reset_clears_loop_local_keys(self):
+        with patch("services.ai_service.del_loop_local") as mock_del:
+            AIService._reset_singleton()
+            keys = {call.args[0] for call in mock_del.call_args_list}
+            assert keys == {"ai_setup_lock", "ai_analysis_semaphore", "ai_news_semaphore"}
+
+    def test_data_processor_reset_clears_loop_local_keys(self):
+        with patch("data.data_processor.del_loop_local") as mock_del:
+            DataProcessor._reset_singleton()
+            mock_del.assert_called_once_with("processor_cancel_evt")
+
+    def test_news_subscription_reset_clears_loop_local_keys(self):
+        with patch("services.news_subscription_service.del_loop_local") as mock_del:
+            NewsSubscriptionService._reset_singleton()
+            keys = {call.args[0] for call in mock_del.call_args_list}
+            assert keys == {"news_processing_queue", "news_queue_put_lock"}
+
+    def test_local_model_manager_reset_clears_loop_local_keys(self):
+        with patch("services.local_model_manager.del_loop_local") as mock_del:
+            LocalModelManager._reset_singleton()
+            mock_del.assert_called_once_with("local_load_lock")
+
+    def test_news_subscription_reset_clears_listeners(self):
+        """Verify _reset_singleton clears _listeners and _alert_listeners on existing instance."""
+        from services.news_subscription_service import NewsSubscriptionService
+
+        # Simulate an existing instance with listeners
+        inst = NewsSubscriptionService.__new__(NewsSubscriptionService)
+        inst._listeners = {"dummy_listener"}
+        inst._alert_listeners = {"dummy_alert"}
+        NewsSubscriptionService._instance = inst
+        NewsSubscriptionService._initialized = True
+
+        with patch("services.news_subscription_service.del_loop_local"):
+            NewsSubscriptionService._reset_singleton()
+
+        assert inst._listeners == set()
+        assert inst._alert_listeners == set()

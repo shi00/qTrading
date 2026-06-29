@@ -21,6 +21,7 @@ from ui.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -459,7 +460,9 @@ class DatabaseConfigPanel(ft.Container):
                 self._show_error(msg)
                 return False
 
-            ConfigHandler.save_db_config(
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.save_db_config,
                 host=config["host"],
                 port=config["port"],
                 user=config["user"],
@@ -537,7 +540,6 @@ class DatabaseConfigPanel(ft.Container):
             }
 
             self._init_controls()
-            self._load_config()
 
             self.db_host_input.value = saved_values["host"]
             self.db_port_input.value = saved_values["port"]

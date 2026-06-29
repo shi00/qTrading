@@ -61,6 +61,9 @@ class CacheManager:
             cls._instance = None
             cls._initialized = False
 
+        del_loop_local("cache_maint_event")
+        del_loop_local("cache_init_lock")
+
     @classmethod
     def _atexit_cleanup(cls):
         """C-P2-3: Centralized atexit cleanup via singleton_registry.

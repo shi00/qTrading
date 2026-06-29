@@ -27,6 +27,7 @@ from utils.llm_providers import (
     is_recommended_model,
 )
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -395,7 +396,7 @@ class LLMConfigPanel(ft.Container):
             self._show_azure_fields(False)
 
             if provider == "custom":
-                self._load_custom_model_history(provider)
+                self._load_custom_model_history(provider, llm_config)
                 self.custom_model_input.visible = True
                 self.model_dropdown.visible = False
                 self.base_url_input.read_only = False
@@ -409,7 +410,7 @@ class LLMConfigPanel(ft.Container):
                     self.model_dropdown.visible = False
                     self.custom_model_input.visible = True
                     self.custom_model_input.value = model
-                    self._load_custom_model_history(provider)
+                    self._load_custom_model_history(provider, llm_config)
                 elif models:
                     recommended = next(
                         (m.get("id") for m in models if is_recommended_model(m)),
@@ -444,61 +445,77 @@ class LLMConfigPanel(ft.Container):
             self.custom_model_input.visible = False
 
     def _on_provider_change(self, e):
-        provider_id = e.control.value
-        self._current_provider = provider_id
+        if not self.page:
+            return
 
-        provider = LLM_PROVIDERS.get(provider_id, {})
-        provider_name = self._get_provider_name(provider, provider_id)
+        self.page.run_task(self._on_provider_change_async, e)
 
-        self.model_dropdown.options = self._build_model_options(provider_id)
-        self.model_dropdown.value = None
+    async def _on_provider_change_async(self, e):
+        try:
+            provider_id = e.control.value
+            self._current_provider = provider_id
 
-        # 尝试加载该供应商已存储的专属凭证（不回退到全局 Key，避免显示错误供应商的 Key）
-        stored_cred = ConfigHandler.get_provider_credential(provider_id, fallback_to_global=False)
-        stored_key = stored_cred.get("api_key", "") or ""
-        stored_base_url = stored_cred.get("base_url", "")
+            provider = LLM_PROVIDERS.get(provider_id, {})
+            provider_name = self._get_provider_name(provider, provider_id)
 
-        self.api_key_input.value = stored_key
-        # Do NOT mark as modified when loading stored key - only user edits should trigger modification
-        self._api_key_modified = False
+            self.model_dropdown.options = self._build_model_options(provider_id)
+            self.model_dropdown.value = None
 
-        if provider_id == "azure":
-            self._is_azure = True
-            self._show_azure_fields(True)
-            self.base_url_input.value = ""
-            self.custom_model_input.visible = False
-            self.refresh_models_button.visible = False
-            self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
-        elif provider_id == "custom":
-            self._is_azure = False
-            self._show_azure_fields(False)
-            self.custom_model_input.visible = True
-            self.model_dropdown.visible = False
-            self.refresh_models_button.visible = True
-            self.base_url_input.value = stored_base_url
-            self.base_url_input.read_only = False
-            self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
-            self._load_custom_model_history(provider_id)
-        else:
-            self._is_azure = False
-            self._show_azure_fields(False)
-            self.custom_model_input.visible = False
-            self.model_dropdown.visible = True
-            self.refresh_models_button.visible = provider_id in MODELS_API_COMPATIBLE
-            self.base_url_input.value = stored_base_url or provider.get("base_url", "")
-            self.base_url_input.read_only = True
-            self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
+            # 尝试加载该供应商已存储的专属凭证（不回退到全局 Key，避免显示错误供应商的 Key）
+            stored_cred = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.get_provider_credential,
+                provider_id,
+                fallback_to_global=False,
+            )
+            stored_key = stored_cred.get("api_key", "") or ""
+            stored_base_url = stored_cred.get("base_url", "")
 
-            models = provider.get("models", [])
-            if models:
-                recommended = next(
-                    (m.get("id") for m in models if is_recommended_model(m)),
-                    None,
-                )
-                self.model_dropdown.value = recommended or models[0].get("id")
+            self.api_key_input.value = stored_key
+            # Do NOT mark as modified when loading stored key - only user edits should trigger modification
+            self._api_key_modified = False
 
-        self._update_links_row()
-        self.update()
+            if provider_id == "azure":
+                self._is_azure = True
+                self._show_azure_fields(True)
+                self.base_url_input.value = ""
+                self.custom_model_input.visible = False
+                self.refresh_models_button.visible = False
+                self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
+            elif provider_id == "custom":
+                self._is_azure = False
+                self._show_azure_fields(False)
+                self.custom_model_input.visible = True
+                self.model_dropdown.visible = False
+                self.refresh_models_button.visible = True
+                self.base_url_input.value = stored_base_url
+                self.base_url_input.read_only = False
+                self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
+                custom_llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
+                self._load_custom_model_history(provider_id, custom_llm_config)
+            else:
+                self._is_azure = False
+                self._show_azure_fields(False)
+                self.custom_model_input.visible = False
+                self.model_dropdown.visible = True
+                self.refresh_models_button.visible = provider_id in MODELS_API_COMPATIBLE
+                self.base_url_input.value = stored_base_url or provider.get("base_url", "")
+                self.base_url_input.read_only = True
+                self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
+
+                models = provider.get("models", [])
+                if models:
+                    recommended = next(
+                        (m.get("id") for m in models if is_recommended_model(m)),
+                        None,
+                    )
+                    self.model_dropdown.value = recommended or models[0].get("id")
+
+            self._update_links_row()
+            self.update()
+        except Exception as ex:
+            logger.error("[LLMConfigPanel] Provider change failed: %s", DataSanitizer.sanitize_error(ex))
+            self._show_error(I18n.get("settings_save_failed"))
 
     def _update_links_row(self):  # pragma: no cover
         provider = LLM_PROVIDERS.get(self._current_provider, {})
@@ -542,9 +559,10 @@ class LLMConfigPanel(ft.Container):
 
         self._links_row.controls = links
 
-    def _load_custom_model_history(self, provider_id: str):  # pragma: no cover
+    def _load_custom_model_history(self, provider_id: str, llm_config: dict | None = None):  # pragma: no cover
         """Load custom model history for the given provider."""
-        llm_config = ConfigHandler.get_llm_config()
+        if llm_config is None:
+            llm_config = ConfigHandler.get_llm_config()
         custom_models = llm_config.get("custom_models", {})
 
         provider_models = custom_models.get(provider_id, [])
@@ -862,6 +880,15 @@ class LLMConfigPanel(ft.Container):
                 "[LLMConfigPanel] Automatically removed primary provider %s models from failover list", provider
             )
 
+    @staticmethod
+    async def _remove_primary_from_failover_async(provider: str) -> None:
+        """Async wrapper that offloads _remove_primary_from_failover to the IO thread pool (R16)."""
+        await ThreadPoolManager().run_async(
+            TaskType.IO,
+            LLMConfigPanel._remove_primary_from_failover,
+            provider,
+        )
+
     async def _save_config(self):
         provider = self._current_provider
         # Strip whitespace from api_key; if modified, use stripped value, else None
@@ -888,12 +915,21 @@ class LLMConfigPanel(ft.Container):
             model = self.model_dropdown.value or self.custom_model_input.value or ""
             base_url = self._normalize_base_url(self.base_url_input.value or "")
 
-            custom_models_update = self._build_custom_models_update(provider or "", model, is_azure=False)
-            if custom_models_update is not None:
-                kwargs["custom_models"] = custom_models_update
-
         try:
-            ConfigHandler.save_llm_config(
+            if not self._is_azure:
+                custom_models_update = await ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    self._build_custom_models_update,
+                    provider or "",
+                    model,
+                    is_azure=False,
+                )
+                if custom_models_update is not None:
+                    kwargs["custom_models"] = custom_models_update
+
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.save_llm_config,
                 provider=provider,
                 model=model or "",
                 base_url=base_url,
@@ -903,10 +939,13 @@ class LLMConfigPanel(ft.Container):
 
             self._api_key_modified = False
 
-            self._remove_primary_from_failover(provider)
+            await self._remove_primary_from_failover_async(provider)
 
-            custom_models = kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
-            self._sync_provider_credential_to_failover(provider, api_key, base_url, custom_models.get(provider))
+            llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
+            custom_models = kwargs.get("custom_models", llm_config.get("custom_models", {}))
+            await self._sync_provider_credential_to_failover_async(
+                provider, api_key, base_url, custom_models.get(provider)
+            )
 
             if self.on_reload_service:
                 await self.on_reload_service()
@@ -961,10 +1000,10 @@ class LLMConfigPanel(ft.Container):
 
         return result
 
-    def save_current_config(self) -> bool:
+    async def save_current_config(self) -> bool:
         """
         Save current configuration to ConfigHandler.
-        This is a sync method for external callers.
+        All ConfigHandler IO is offloaded to the IO thread pool (R16).
 
         Returns:
             bool: True if saved successfully
@@ -977,17 +1016,23 @@ class LLMConfigPanel(ft.Container):
             kwargs["azure_resource_name"] = config.get("azure_resource_name", "")
             kwargs["azure_deployment_name"] = config.get("azure_deployment_name", "")
 
-        custom_models_update = self._build_custom_models_update(
-            config["provider"], config["model"], is_azure=self._is_azure
-        )
-        if custom_models_update is not None:
-            kwargs["custom_models"] = custom_models_update
-
         # 未修改 API Key 时传 None，避免不必要的重加密
         api_key_to_save = config["api_key"] if self._api_key_modified else None
 
         try:
-            ConfigHandler.save_llm_config(
+            custom_models_update = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                self._build_custom_models_update,
+                config["provider"],
+                config["model"],
+                is_azure=self._is_azure,
+            )
+            if custom_models_update is not None:
+                kwargs["custom_models"] = custom_models_update
+
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.save_llm_config,
                 provider=config["provider"],
                 model=config["model"],
                 base_url=config["base_url"],
@@ -995,9 +1040,10 @@ class LLMConfigPanel(ft.Container):
                 **kwargs,
             )
             self._api_key_modified = False
-            self._remove_primary_from_failover(config["provider"])
-            custom_models = kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
-            self._sync_provider_credential_to_failover(
+            await self._remove_primary_from_failover_async(config["provider"])
+            llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
+            custom_models = kwargs.get("custom_models", llm_config.get("custom_models", {}))
+            await self._sync_provider_credential_to_failover_async(
                 config["provider"],
                 api_key_to_save,
                 config["base_url"],
@@ -1059,6 +1105,23 @@ class LLMConfigPanel(ft.Container):
                     break
         except Exception as e:
             logger.debug("[LLMConfigPanel] Failed to sync failover credential: %s", DataSanitizer.sanitize_error(e))
+
+    @staticmethod
+    async def _sync_provider_credential_to_failover_async(
+        provider: str,
+        api_key: str | None,
+        base_url: str,
+        models: list[str] | None = None,
+    ) -> None:
+        """Async wrapper that offloads _sync_provider_credential_to_failover to the IO thread pool (R16)."""
+        await ThreadPoolManager().run_async(
+            TaskType.IO,
+            LLMConfigPanel._sync_provider_credential_to_failover,
+            provider,
+            api_key,
+            base_url,
+            models,
+        )
 
     def _show_success(self, message: str):  # pragma: no cover
         self.status_text.value = message

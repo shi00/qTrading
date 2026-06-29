@@ -32,6 +32,7 @@ from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIG
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -177,8 +178,9 @@ class OnboardingWizard(ft.Container):
 
     async def _validate_cloud_ai_via_panel(self) -> bool:  # pragma: no cover
         if await self.llm_config_panel.async_verify_connection():
-            if not self.llm_config_panel.save_current_config():
+            if not await self.llm_config_panel.save_current_config():
                 logger.error("[OnboardingWizard] Failed to save LLM config")
+                self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
                 return False
             return True
         self._safe_update()
@@ -189,8 +191,9 @@ class OnboardingWizard(ft.Container):
         if not model_path:
             return True
         if await self.local_model_panel.async_verify_model():
-            if not self.local_model_panel.save_config():
+            if not await ThreadPoolManager().run_async(TaskType.IO, self.local_model_panel.save_config):
                 logger.error("[OnboardingWizard] Failed to save local model config")
+                self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
                 return False
             return True
         self._safe_update()
@@ -1020,6 +1023,8 @@ class OnboardingWizard(ft.Container):
             self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
             self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
             self.btn_cancel_sync.text = I18n.get("wizard_btn_cancel")
+            if hasattr(self, "btn_sync_later"):
+                self.btn_sync_later.text = I18n.get("wizard_btn_sync_later")
             self.schedule_enabled.label = I18n.get("wizard_schedule_label")
             self.schedule_time.label = I18n.get("wizard_schedule_time_label")
             self.loading_overlay_text.value = I18n.get("wizard_validating")
@@ -1041,35 +1046,31 @@ class OnboardingWizard(ft.Container):
             logger.warning("[OnboardingWizard] _on_locale_change failed: %s", e, exc_info=True)
 
     def _rebuild_steps_after_locale_change(self):
-        """语言切换后重建子面板与 steps_content，并重新绑定 VM 回调。"""
-        # 取消旧面板的 i18n 订阅，避免泄漏
-        for panel_attr in ("database_panel", "tushare_panel", "llm_config_panel", "local_model_panel"):
-            old_panel = getattr(self, panel_attr, None)
-            if old_panel and hasattr(old_panel, "will_unmount"):
-                try:
-                    old_panel.will_unmount()
-                except Exception as e:
-                    logger.debug("Onboarding panel cleanup failed: %s", e, exc_info=True)
+        """语言切换后刷新 steps_content 并级联调用子面板 locale 刷新方法。
 
-        # 保留用户在 schedule 控件上的未保存输入，避免重建后丢失（§5.8 规范 3 纯 UI 操作的副作用保护）
-        saved_schedule_enabled = (
-            getattr(self.schedule_enabled, "value", True) if hasattr(self, "schedule_enabled") else True
-        )
-        saved_schedule_time = getattr(self.schedule_time, "value", None) if hasattr(self, "schedule_time") else None
+        不重建子面板实例：构造函数会触发 keyring IO（如 DatabaseConfigPanel._load_config），
+        违反 §5.8 纯 UI 规范。子面板已通过各自 did_mount() 订阅 I18n 通知，此处显式
+        级联调用作为兜底，确保刷新生效。schedule 控件不重建，用户输入自然保留。
+        """
+        # 级联调用子面板的 locale 刷新方法（纯 UI 文本更新，不触发 keyring IO）
+        for panel_attr, method_name in (
+            ("database_panel", "_on_locale_change"),
+            ("tushare_panel", "refresh_locale"),
+            ("llm_config_panel", "_on_locale_change"),
+            ("local_model_panel", "_on_locale_change"),
+        ):
+            panel = getattr(self, panel_attr, None)
+            if panel is None:
+                continue
+            method = getattr(panel, method_name, None)
+            if method is None:
+                continue
+            try:
+                method()
+            except Exception as e:
+                logger.debug("Onboarding panel %s locale refresh failed: %s", panel_attr, e, exc_info=True)
 
-        self._init_database_controls()
-        self._init_token_controls()
-        self._init_cloud_ai_controls()
-        self._init_local_model_controls()
-        self._init_sync_controls()
-        self._init_schedule_controls()
-
-        # 恢复用户输入的 schedule 值（_init_schedule_controls 默认 value=True，从 ConfigHandler 读 time）
-        if hasattr(self, "schedule_enabled"):
-            self.schedule_enabled.value = saved_schedule_enabled
-        if hasattr(self, "schedule_time") and saved_schedule_time is not None:
-            self.schedule_time.value = saved_schedule_time
-
+        # 重建 steps_content 以更新步骤标题/描述等纯 UI 文本（子面板实例保持不变）
         self.steps_content = [
             self._build_welcome_step(),
             self._build_database_step(),
@@ -1085,14 +1086,16 @@ class OnboardingWizard(ft.Container):
         self.step_indicators.controls = self._build_step_indicators()
         self._update_navigation_buttons()
 
-        # Rebind panel callbacks to new panels
-        self._rebind_panel_callbacks()
-
     def _on_language_change_wizard(self, e):  # pragma: no cover
         """Handle language change in Onboarding Wizard"""
+        if self.app_page:
+            self.app_page.run_task(self._do_language_change_wizard_async)
+
+    async def _do_language_change_wizard_async(self):  # pragma: no cover
         try:
             new_locale = self.wizard_language_dropdown.value
-            if not ConfigHandler.set_locale(new_locale):
+            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
+            if not success:
                 self.wizard_language_dropdown.value = I18n.current_locale()
                 logger.warning("[OnboardingWizard] Failed to persist locale: %s", new_locale)
                 self._safe_update()
@@ -1112,6 +1115,16 @@ class OnboardingWizard(ft.Container):
                     logger.debug("[OnboardingWizard] Failed to update page locale configuration: %s", ex, exc_info=True)
         except Exception as ex:
             logger.error("[OnboardingWizard] Language change failed: %s", DataSanitizer.sanitize_error(ex))
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
+
+    def _show_snack(self, msg: str, color: str):  # pragma: no cover
+        if self.app_page:
+            # 清理旧的 SnackBar 避免累积
+            self.app_page.overlay[:] = [s for s in self.app_page.overlay if not isinstance(s, ft.SnackBar)]
+            snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
+            self.app_page.overlay.append(snack)
+            snack.open = True
+            self.app_page.update()
 
     def _safe_update(self):  # pragma: no cover
         try:

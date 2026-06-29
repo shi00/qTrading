@@ -20,6 +20,7 @@ from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS, get_display_tag
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         on_test_connection: Callable[..., Awaitable[dict]] | None = None,
         edit_item: FailoverItem | None = None,
         existing_providers: list[str] | None = None,
+        edit_credential: dict | None = None,
     ):
         self._on_confirm = on_confirm
         self._test_connection_callback = on_test_connection
@@ -55,6 +57,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self._is_edit = edit_item is not None
         self._page_ref = page
         self._locale_subscription_id: object | None = None
+        # 注入的 credential，避免 __init__ 中同步 keyring IO（R16）
+        self._edit_credential = edit_credential
 
         super().__init__()
 
@@ -150,7 +154,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self.provider_dropdown.value = self._edit_item.provider
         self._on_provider_change_internal(self._edit_item.provider)
 
-        cred = ConfigHandler.get_provider_credential(self._edit_item.provider)
+        # 优先使用注入的 credential，避免 __init__ 中同步 keyring IO（R16）
+        if self._edit_credential is not None:
+            cred = self._edit_credential
+        else:
+            cred = ConfigHandler.get_provider_credential(self._edit_item.provider)
         self.model_dropdown.value = self._edit_item.model
         self.base_url_input.value = cred.get("base_url", "")
         if cred.get("api_key"):
@@ -306,6 +314,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
                     AppColors.ERROR,
                 )
         except Exception as ex:
+            logger.error("[ProviderCredentialDialog] test connection failed: %s", ex, exc_info=True)
             self._show_snack(
                 I18n.get("failover_test_failed") + f": {DataSanitizer.sanitize_error(ex)}",
                 AppColors.ERROR,
@@ -337,43 +346,64 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self._show_snack(I18n.get("llm_test_need_key"), AppColors.WARNING)
             return
 
-        # 编辑模式下清空 API Key 时提示警告（允许用户有意清除）
-        if self._is_edit and not api_key:
-            existing_cred = ConfigHandler.get_provider_credential(provider)
-            if existing_cred.get("api_key"):
-                # 显示警告但不阻止保存（用户可能有意清除凭证）
+        if self.page:
+            self.page.run_task(self._do_confirm_click_async, provider, model, base_url, api_key)
+
+    async def _do_confirm_click_async(self, provider: str, model: str, base_url: str, api_key: str | None):
+        try:
+            # 合并 5 次 IO 到单个闭包，减少 run_async 调用次数
+            def _save_sync():
+                # 编辑模式下清空 API Key 时查询原有凭证（用于警告提示）
+                existing_cred = None
+                if self._is_edit and not api_key:
+                    existing_cred = ConfigHandler.get_provider_credential(provider)
+
+                # 主供应商检查（不允许添加与主供应商相同的 failover）
+                primary_provider = ConfigHandler.load_config().get("llm_provider", "")
+                if provider == primary_provider:
+                    return existing_cred, primary_provider
+
+                # 保存凭证
+                ConfigHandler.save_provider_credential(
+                    provider=provider,
+                    api_key=api_key,
+                    base_url=base_url,
+                    models=[model],
+                )
+
+                # 加载并更新 failover 列表
+                failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
+                new_entry = f"{provider}/{model}"
+                if self._is_edit and self._edit_item is not None:
+                    old_entry = self._edit_item.to_config_string()
+                    failover_models = [new_entry if m == old_entry else m for m in failover_models]
+                else:
+                    if new_entry not in failover_models:
+                        failover_models.append(new_entry)
+
+                ConfigHandler.save_config({"llm_failover_models": failover_models})
+                return existing_cred, primary_provider
+
+            existing_cred, primary_provider = await ThreadPoolManager().run_async(TaskType.IO, _save_sync)
+
+            # UI 更新（事件循环线程，安全）
+            # 编辑模式下清空 API Key 时提示警告（允许用户有意清除）
+            if self._is_edit and not api_key and existing_cred and existing_cred.get("api_key"):
                 self._show_snack(I18n.get("failover_clear_key_warning"), AppColors.WARNING)
 
-        primary_provider = ConfigHandler.load_config().get("llm_provider", "")
-        if provider == primary_provider:
-            self._show_snack(I18n.get("failover_primary_in_list"), AppColors.WARNING)
-            return
+            if provider == primary_provider:
+                self._show_snack(I18n.get("failover_primary_in_list"), AppColors.WARNING)
+                return
 
-        ConfigHandler.save_provider_credential(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            models=[model],
-        )
+            self.open = False
+            if self.page:
+                self.page.close(self)
 
-        failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
-        new_entry = f"{provider}/{model}"
-
-        if self._is_edit and self._edit_item is not None:
-            old_entry = self._edit_item.to_config_string()
-            failover_models = [new_entry if m == old_entry else m for m in failover_models]
-        else:
-            if new_entry not in failover_models:
-                failover_models.append(new_entry)
-
-        ConfigHandler.save_config({"llm_failover_models": failover_models})
-
-        self.open = False
-        if self.page:
-            self.page.close(self)
-
-        if self._on_confirm:
-            self._on_confirm()
+            if self._on_confirm:
+                self._on_confirm()
+        except Exception as ex:
+            logger.error("[ProviderCredentialDialog] confirm failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
 
 class FailoverConfigPanel(ft.Container):
@@ -446,11 +476,12 @@ class FailoverConfigPanel(ft.Container):
             spacing=4,
         )
 
-    def _load_config(self):
+    def _load_config_sync(self) -> list[FailoverItem]:
+        """同步加载配置（IO 部分），返回 FailoverItem 列表。"""
         config = ConfigHandler.load_config()
         failover_models = config.get("llm_failover_models", [])
 
-        self._failover_items = []
+        items: list[FailoverItem] = []
         for entry in failover_models:
             if "/" not in entry:
                 continue
@@ -462,7 +493,7 @@ class FailoverConfigPanel(ft.Container):
             if has_key and cred["api_key"]:
                 key_masked = DataSanitizer.sanitize_token(cred["api_key"])
 
-            self._failover_items.append(
+            items.append(
                 FailoverItem(
                     provider=provider,
                     model=model,
@@ -471,7 +502,17 @@ class FailoverConfigPanel(ft.Container):
                     api_key_masked=key_masked,
                 )
             )
+        return items
 
+    def _load_config(self):
+        """同步加载配置并渲染（仅用于 __init__，避免事件循环中调用）。"""
+        self._failover_items = self._load_config_sync()
+        self._render_list()
+
+    async def _load_config_async(self):
+        """异步加载配置并渲染（用于 async 方法，避免阻塞事件循环）。"""
+        items = await ThreadPoolManager().run_async(TaskType.IO, self._load_config_sync)
+        self._failover_items = items
         self._render_list()
 
     def _render_list(self):
@@ -574,56 +615,106 @@ class FailoverConfigPanel(ft.Container):
         )
 
     def _on_add_click(self, e):
-        existing = [item.provider for item in self._failover_items]
-        primary_provider = ConfigHandler.load_config().get("llm_provider", "")
-        if primary_provider and primary_provider not in existing:
-            existing.append(primary_provider)
-        dialog = ProviderCredentialDialog(
-            page=self.page,
-            on_confirm=self._on_dialog_confirmed,
-            on_test_connection=self.on_test_connection,
-            existing_providers=existing,
-        )
         if self.page:
-            self.page.open(dialog)
+            self.page.run_task(self._do_add_click_async)
+
+    async def _do_add_click_async(self):
+        try:
+            existing = [item.provider for item in self._failover_items]
+            primary_provider = await ThreadPoolManager().run_async(
+                TaskType.IO, lambda: ConfigHandler.load_config().get("llm_provider", "")
+            )
+            if primary_provider and primary_provider not in existing:
+                existing.append(primary_provider)
+            dialog = ProviderCredentialDialog(
+                page=self.page,
+                on_confirm=self._on_dialog_confirmed,
+                on_test_connection=self.on_test_connection,
+                existing_providers=existing,
+            )
+            if self.page:
+                self.page.open(dialog)
+        except Exception as ex:
+            logger.error("[FailoverConfigPanel] add click failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
     def _on_edit_item(self, index: int):
-        item = self._failover_items[index]
-        dialog = ProviderCredentialDialog(
-            page=self.page,
-            on_confirm=self._on_dialog_confirmed,
-            on_test_connection=self.on_test_connection,
-            edit_item=item,
-        )
         if self.page:
-            self.page.open(dialog)
+            self.page.run_task(self._do_edit_item_async, index)
+
+    async def _do_edit_item_async(self, index: int):
+        try:
+            item = self._failover_items[index]
+            # 先 offload 获取 credential，避免 dialog __init__ 中同步 keyring IO（R16）
+            cred = await ThreadPoolManager().run_async(
+                TaskType.IO, ConfigHandler.get_provider_credential, item.provider
+            )
+            dialog = ProviderCredentialDialog(
+                page=self.page,
+                on_confirm=self._on_dialog_confirmed,
+                on_test_connection=self.on_test_connection,
+                edit_item=item,
+                edit_credential=cred,
+            )
+            if self.page:
+                self.page.open(dialog)
+        except Exception as ex:
+            logger.error("[FailoverConfigPanel] edit item failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
     def _on_delete_item(self, index: int):
-        item = self._failover_items[index]
-        failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
-        entry = item.to_config_string()
-        if entry in failover_models:
-            failover_models.remove(entry)
-            ConfigHandler.save_config({"llm_failover_models": failover_models})
-        self._load_config()
+        if self.page:
+            self.page.run_task(self._do_delete_item_async, index)
+
+    async def _do_delete_item_async(self, index: int):
+        try:
+            item = self._failover_items[index]
+            entry = item.to_config_string()
+
+            def _delete_sync():
+                failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
+                if entry in failover_models:
+                    failover_models.remove(entry)
+                    ConfigHandler.save_config({"llm_failover_models": failover_models})
+
+            await ThreadPoolManager().run_async(TaskType.IO, _delete_sync)
+            await self._load_config_async()
+        except Exception as ex:
+            logger.error("[FailoverConfigPanel] delete item failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
     def _on_move_up(self, index: int):
         if index <= 0:
             return
-        self._failover_items[index], self._failover_items[index - 1] = (
-            self._failover_items[index - 1],
-            self._failover_items[index],
-        )
-        self._persist_order()
+        if self.page:
+            self.page.run_task(self._do_move_item_async, index, -1)
 
     def _on_move_down(self, index: int):
         if index >= len(self._failover_items) - 1:
             return
-        self._failover_items[index], self._failover_items[index + 1] = (
-            self._failover_items[index + 1],
-            self._failover_items[index],
-        )
-        self._persist_order()
+        if self.page:
+            self.page.run_task(self._do_move_item_async, index, 1)
+
+    async def _do_move_item_async(self, index: int, direction: int):
+        target = index + direction
+        # 先记录原始顺序，便于失败时回滚
+        original_order = list(self._failover_items)
+        try:
+            self._failover_items[index], self._failover_items[target] = (
+                self._failover_items[target],
+                self._failover_items[index],
+            )
+            ordered = [item.to_config_string() for item in self._failover_items]
+            await ThreadPoolManager().run_async(
+                TaskType.IO, ConfigHandler.save_config, {"llm_failover_models": ordered}
+            )
+            self._render_list()
+        except Exception as ex:
+            # 回滚列表顺序，保持内存状态与配置一致
+            self._failover_items = original_order
+            self._render_list()
+            logger.error("[FailoverConfigPanel] move item failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
     def _persist_order(self):
         ordered = [item.to_config_string() for item in self._failover_items]
@@ -631,18 +722,26 @@ class FailoverConfigPanel(ft.Container):
         self._render_list()
 
     def _on_validate_all(self, e):
-        missing = ConfigHandler.validate_failover_credentials()
-        if missing:
-            providers_str = ", ".join(missing)
-            self._show_snack(
-                I18n.get("failover_validation_missing").format(providers=providers_str),
-                AppColors.WARNING,
-            )
-        else:
-            self._show_snack(
-                I18n.get("failover_validation_complete"),
-                AppColors.SUCCESS,
-            )
+        if self.page:
+            self.page.run_task(self._do_validate_all_async)
+
+    async def _do_validate_all_async(self):
+        try:
+            missing = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.validate_failover_credentials)
+            if missing:
+                providers_str = ", ".join(missing)
+                self._show_snack(
+                    I18n.get("failover_validation_missing").format(providers=providers_str),
+                    AppColors.WARNING,
+                )
+            else:
+                self._show_snack(
+                    I18n.get("failover_validation_complete"),
+                    AppColors.SUCCESS,
+                )
+        except Exception as ex:
+            logger.error("[FailoverConfigPanel] validate all failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
     def _on_save_click(self, e):
         if self.on_save:
@@ -650,7 +749,15 @@ class FailoverConfigPanel(ft.Container):
         self._show_snack(I18n.get("settings_verify_success"), AppColors.SUCCESS)
 
     def _on_dialog_confirmed(self):
-        self._load_config()
+        if self.page:
+            self.page.run_task(self._do_dialog_confirmed_async)
+
+    async def _do_dialog_confirmed_async(self):
+        try:
+            await self._load_config_async()
+        except Exception as ex:
+            logger.error("[FailoverConfigPanel] dialog confirmed reload failed: %s", ex, exc_info=True)
+            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
@@ -676,8 +783,9 @@ class FailoverConfigPanel(ft.Container):
 
     def _on_locale_change(self, new_locale: str | None = None):
         try:
-            self._build_ui()
-            self._load_config()
+            self._build_ui()  # 仅重建 UI 控件文本，不重新加载配置
+            # 注意：不调用 _load_config()，保留已有的 _failover_items 数据
+            self._render_list()  # 用已有数据重新渲染列表
             self._safe_update()
         except Exception as e:
             logger.warning("[FailoverConfigPanel] _on_locale_change failed: %s", e, exc_info=True)

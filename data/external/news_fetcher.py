@@ -261,9 +261,9 @@ class NewsFetcher:
                 "Accept": "application/json, text/plain, */*",
                 "Referer": "https://www.cls.cn/telegraph",
             }
-            resp = requests.get(url, headers=headers, timeout=5.0)
-            resp.raise_for_status()
-            return resp.json()
+            with requests.get(url, headers=headers, timeout=5.0) as resp:
+                resp.raise_for_status()
+                return resp.json()
 
         try:
             # 使用全局 IO 线程池异步执行请求，防止阻塞 asyncio 事件循环
@@ -408,45 +408,45 @@ class NewsFetcher:
             from utils.proxy_manager import ProxyManager
 
             proxy_config = ProxyManager.get_requests_proxy_config()
-            resp = requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {}))  # type: ignore[arg-type]
-            content = resp.text
+            with requests.get(url, params=params, headers=headers, timeout=10, **(proxy_config or {})) as resp:  # type: ignore[arg-type]
+                content = resp.text
 
-            start = content.find("(")
-            end = content.rfind(")")
-            if start != -1 and end != -1 and start < end:
-                json_str = content[start + 1 : end]
-                try:
-                    data = json.loads(json_str)
-                    # SEC-006: schema validation — reject unexpected structures
-                    # that could result from MITM tampering on legacy HTTP.
-                    if not isinstance(data, dict):
-                        logger.warning("[News] Sina US API returned non-dict JSON, skipping")
-                        _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
-                        return []
-                    result = data.get("data", [])
-                    if not isinstance(result, list):
-                        logger.warning("[News] Sina US API 'data' field is not a list, skipping")
-                        _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
-                        return []
-                    if result:
-                        _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
-                    else:
+                start = content.find("(")
+                end = content.rfind(")")
+                if start != -1 and end != -1 and start < end:
+                    json_str = content[start + 1 : end]
+                    try:
+                        data = json.loads(json_str)
+                        # SEC-006: schema validation — reject unexpected structures
+                        # that could result from MITM tampering on legacy HTTP.
+                        if not isinstance(data, dict):
+                            logger.warning("[News] Sina US API returned non-dict JSON, skipping")
+                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                            return []
+                        result = data.get("data", [])
+                        if not isinstance(result, list):
+                            logger.warning("[News] Sina US API 'data' field is not a list, skipping")
+                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                            return []
+                        if result:
+                            _SINA_CONSECUTIVE_EMPTY["us_api"] = 0
+                        else:
+                            _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
+                            count = _SINA_CONSECUTIVE_EMPTY["us_api"]
+                            if count >= _SINA_EMPTY_THRESHOLD:
+                                logger.warning(
+                                    "[News] Sina US API returned empty data %d consecutive times. Data source may be degraded.",
+                                    count,
+                                )
+                            else:
+                                logger.warning("[News] Sina US API returned empty data (consecutive: %d)", count)
+                        return result
+                    except json.JSONDecodeError:
                         _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
                         count = _SINA_CONSECUTIVE_EMPTY["us_api"]
-                        if count >= _SINA_EMPTY_THRESHOLD:
-                            logger.warning(
-                                "[News] Sina US API returned empty data %d consecutive times. Data source may be degraded.",
-                                count,
-                            )
-                        else:
-                            logger.warning("[News] Sina US API returned empty data (consecutive: %d)", count)
-                    return result
-                except json.JSONDecodeError:
-                    _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
-                    count = _SINA_CONSECUTIVE_EMPTY["us_api"]
-                    log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning
-                    log_fn("[News] Failed to decode JSON from Sina US API (consecutive: %d)", count)
-                    return []
+                        log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning
+                        log_fn("[News] Failed to decode JSON from Sina US API (consecutive: %d)", count)
+                        return []
             _SINA_CONSECUTIVE_EMPTY["us_api"] += 1
             count = _SINA_CONSECUTIVE_EMPTY["us_api"]
             log_fn = logger.error if count >= _SINA_EMPTY_THRESHOLD else logger.warning

@@ -33,6 +33,15 @@ class ProxyManager:
     _env_lock: threading.RLock = threading.RLock()
     _config_lock: threading.RLock = threading.RLock()  # Lock for config mutation (domains, initialized)
 
+    @classmethod
+    def _reset_singleton(cls):
+        """Reset class-level state for testing only. NEVER call in production."""
+        with cls._env_lock, cls._config_lock:
+            cls._no_proxy_domains = set()
+            cls._initialized = False
+            cls._original_no_proxy = None
+            cls._env_written = False
+
     @staticmethod
     def apply_smart_proxy_policy():
         """

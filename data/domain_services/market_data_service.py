@@ -64,8 +64,11 @@ class MarketDataService:
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
+            inst = cls._instance
             cls._instance = None
             cls._initialized = False
+        if inst is not None:
+            inst._listeners.clear()
 
     @classmethod
     def _atexit_cleanup(cls):

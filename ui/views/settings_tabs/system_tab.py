@@ -9,6 +9,7 @@ from ui.theme import AppColors, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -433,10 +434,15 @@ class SystemTab(ft.Container):
     def on_language_change(self, e):  # pragma: no cover
         """Handle language change"""
         UILogger.log_action("SystemTab", "Select", f"language={self.language_dropdown.value}")
+        if self.page:  # pragma: no cover
+            self.page.run_task(self._do_language_change_async)
+
+    async def _do_language_change_async(self):
         try:
             new_locale = self.language_dropdown.value
             if new_locale:
-                if not ConfigHandler.set_locale(new_locale):
+                success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
+                if not success:
                     self.language_dropdown.value = I18n.current_locale()
                     self.show_snack(I18n.get("settings_language_save_failed"), color=AppColors.ERROR)
                     self._safe_update()
@@ -569,9 +575,13 @@ class SystemTab(ft.Container):
     def on_theme_change(self, e):
         """Handle theme change"""
         UILogger.log_action("SystemTab", "Select", f"theme={self.theme_dropdown.value}")
+        if self.page:
+            self.page.run_task(self._do_theme_change_async)
+
+    async def _do_theme_change_async(self):
         try:
             theme_name = self.theme_dropdown.value
-            ConfigHandler.set_theme_name(theme_name)
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_theme_name, theme_name)
 
             from ui.theme import apply_page_theme
 
@@ -591,15 +601,27 @@ class SystemTab(ft.Container):
             "Select",
             f"log_level={self.log_level_dropdown.value}",
         )
-        level = self.log_level_dropdown.value
-        ConfigHandler.set_log_level(level)
-        from utils.logger import update_log_level
+        if self.page:
+            self.page.run_task(self._do_log_level_change_async)
 
-        update_log_level(level)
-        self.show_snack(I18n.get("sys_log_label") + ": " + level)  # type: ignore[untyped]
+    async def _do_log_level_change_async(self):
+        try:
+            level = self.log_level_dropdown.value
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_log_level, level)
+            from utils.logger import update_log_level
+
+            update_log_level(level)
+            self.show_snack(I18n.get("sys_log_label") + ": " + level)  # type: ignore[untyped]
+        except Exception as ex:
+            logger.error("[SystemTab] LogLevel | ❌ Change failed: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def save_concurrency(self, e):
         """Save concurrency setting"""
+        if self.page:
+            self.page.run_task(self._do_save_concurrency_async)
+
+    async def _do_save_concurrency_async(self):
         try:
             val = int(self.concurrency_input.value)  # type: ignore[untyped]
             if val < 1 or val > 32:
@@ -608,16 +630,23 @@ class SystemTab(ft.Container):
                     color=AppColors.ERROR,
                 )
                 return
-            ConfigHandler.set_sync_max_concurrent_heavy(val)
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_sync_max_concurrent_heavy, val)
             self.show_snack(
                 I18n.get("sys_sync_heavy") + " " + I18n.get("common_saved"),
                 color=AppColors.SUCCESS,
             )
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except Exception as ex:
+            logger.error("[SystemTab] Concurrency | ❌ Save failed: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def save_db_pool_settings(self, e):
         """Save DB connection pool settings (pool_size, max_overflow, timeout)"""
+        if self.page:
+            self.page.run_task(self._do_save_db_pool_settings_async)
+
+    async def _do_save_db_pool_settings_async(self):
         try:
             pool_size = int(self.pool_size_input.value)  # type: ignore[untyped]
             max_overflow = int(self.db_overflow_input.value)  # type: ignore[untyped]
@@ -638,9 +667,12 @@ class SystemTab(ft.Container):
                 )
                 return
 
-            ConfigHandler.set_db_connection_pool_size(pool_size)
-            ConfigHandler.set_db_max_overflow(max_overflow)
-            ConfigHandler.set_db_pool_timeout(timeout)
+            def _save_db_pool_sync():
+                ConfigHandler.set_db_connection_pool_size(pool_size)
+                ConfigHandler.set_db_max_overflow(max_overflow)
+                ConfigHandler.set_db_pool_timeout(timeout)
+
+            await ThreadPoolManager().run_async(TaskType.IO, _save_db_pool_sync)
 
             self.show_snack(
                 I18n.get("settings_db_pool_saved"),
@@ -648,6 +680,9 @@ class SystemTab(ft.Container):
             )
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except Exception as ex:
+            logger.error("[SystemTab] DBPool | ❌ Save failed: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def update_theme(self):  # pragma: no cover
         """Update styles on theme change — only Layer 2 custom colors (INPUT_*)."""  # pragma: no cover
@@ -676,8 +711,6 @@ class SystemTab(ft.Container):
 
     async def save_thread_pool_settings(self, e):
         """Async handler to avoid blocking UI during reload."""
-        from utils.thread_pool import ThreadPoolManager
-
         try:
             io_str = self.io_workers_input.value.strip()  # type: ignore[untyped]
             cpu_str = self.cpu_workers_input.value.strip()  # type: ignore[untyped]
@@ -699,8 +732,11 @@ class SystemTab(ft.Container):
                 self.show_snack(I18n.get("sys_snack_cpu_range"), color=AppColors.ERROR)
                 return
 
-            ConfigHandler.set_max_io_workers(io_val)
-            ConfigHandler.set_max_cpu_workers(cpu_val)
+            def _save_thread_pool_sync():
+                ConfigHandler.set_max_io_workers(io_val)
+                ConfigHandler.set_max_cpu_workers(cpu_val)
+
+            await ThreadPoolManager().run_async(TaskType.IO, _save_thread_pool_sync)
 
             self.show_snack(I18n.get("common_preparing"))
 
@@ -728,23 +764,36 @@ class SystemTab(ft.Container):
         tier = self.point_tier_dropdown.value
         if not tier:
             return
-        ConfigHandler.set_tushare_point_tier(tier)
-        self.rate_limit_input.disabled = tier != "custom"
-        self.rate_limit_input.update()
-        self._reload_rate_limiters_safe()
-        self.show_snack(I18n.get("sys_snack_tier_set").format(tier=tier))
-        logger.info("[SystemTab] Tushare point tier set to %s", tier)
+        if self.page:
+            self.page.run_task(self._do_save_point_tier_async, tier)
+
+    async def _do_save_point_tier_async(self, tier):
+        try:
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_point_tier, tier)
+            self.rate_limit_input.disabled = tier != "custom"
+            self.rate_limit_input.update()
+            self._reload_rate_limiters_safe()
+            self.show_snack(I18n.get("sys_snack_tier_set").format(tier=tier))
+            logger.info("[SystemTab] Tushare point tier set to %s", tier)
+        except Exception as ex:
+            logger.error("[SystemTab] PointTier | ❌ Save failed: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def save_rate_limit(self, e):
         """Save API rate limit setting."""
-        tier = ConfigHandler.get_tushare_point_tier()
-        if tier != "custom":
-            self.show_snack(I18n.get("sys_snack_tier_override_hint"))
-            return
+        if self.page:
+            self.page.run_task(self._do_save_rate_limit_async)
+
+    async def _do_save_rate_limit_async(self):
         try:
+            tier = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_point_tier)
+            if tier != "custom":
+                self.show_snack(I18n.get("sys_snack_tier_override_hint"))
+                return
+
             limit_str = self.rate_limit_input.value.strip()  # type: ignore[untyped]
             if not limit_str:
-                ConfigHandler.set_tushare_api_limit(0)
+                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_api_limit, 0)
                 self._reload_rate_limiters_safe()
                 self.show_snack(I18n.get("sys_snack_limit_off"))
                 logger.info("Tushare API rate limit disabled (Unlimited)")
@@ -752,7 +801,7 @@ class SystemTab(ft.Container):
 
             limit = int(limit_str)
             if limit <= 0:
-                ConfigHandler.set_tushare_api_limit(0)
+                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_api_limit, 0)
                 self._reload_rate_limiters_safe()
                 self.show_snack(I18n.get("sys_snack_limit_off"))
                 return
@@ -761,12 +810,15 @@ class SystemTab(ft.Container):
                 self.show_snack(I18n.get("sys_snack_limit_min"))
                 return
 
-            ConfigHandler.set_tushare_api_limit(limit)
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_api_limit, limit)
             self._reload_rate_limiters_safe()
             self.show_snack(I18n.get("sys_snack_limit_set").format(limit=limit))
             logger.info("Tushare API rate limit updated to %s", limit)
         except ValueError:
             self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except Exception as ex:
+            logger.error("[SystemTab] RateLimit | ❌ Save failed: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def _reload_rate_limiters_safe(self):
         try:
@@ -778,6 +830,10 @@ class SystemTab(ft.Container):
 
     def save_no_proxy_domains(self, e):
         """Save no-proxy domain list."""
+        if self.page:
+            self.page.run_task(self._do_save_no_proxy_domains_async)
+
+    async def _do_save_no_proxy_domains_async(self):
         try:
             raw_text = self.no_proxy_input.value
             if not raw_text:
@@ -785,7 +841,7 @@ class SystemTab(ft.Container):
             else:
                 domains = [d.strip() for d in raw_text.split(",") if d.strip()]
 
-            ConfigHandler.set_no_proxy_domains(domains)
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_no_proxy_domains, domains)
             self.show_snack(
                 I18n.get("settings_snack_no_proxy_saved"),
                 color=AppColors.SUCCESS,
@@ -793,7 +849,6 @@ class SystemTab(ft.Container):
             logger.info("No-Proxy domains updated: %s", domains)
 
             from utils.proxy_manager import ProxyManager
-            from utils.thread_pool import TaskType, ThreadPoolManager
 
             ThreadPoolManager().submit(
                 TaskType.IO,

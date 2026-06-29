@@ -51,6 +51,9 @@ class AppLayout(ft.Container):
         self._resize_debounce_task = None
         self.RESIZE_DEBOUNCE_MS = 100
         self._nav_collapsed = False
+        # 缓存来自 WindowResizeEvent 的实时尺寸 (page.width/page.window.width 仅连接时更新)
+        self._current_width: float = 0
+        self._current_height: float = 0
 
         # UI Components Placeholders
         self.nav_rail = None
@@ -88,8 +91,18 @@ class AppLayout(ft.Container):
         self._mounted = False
         AppColors.unsubscribe(self.update_theme)
 
-    def schedule_resize(self):
-        """从同步 on_resize 回调入口，调度防抖处理。"""
+    def schedule_resize(self, width: float = 0, height: float = 0):
+        """从 on_resized 回调入口，调度防抖处理。
+
+        Args:
+            width: 来自 ``WindowResizeEvent.width`` 的实时窗口宽度，0 表示未知
+                (如 nav 折叠触发的内部 resize，此时复用缓存值)
+            height: 来自 ``WindowResizeEvent.height`` 的实时窗口高度，0 表示未知
+        """
+        if width:
+            self._current_width = width
+        if height:
+            self._current_height = height
         if self._resize_debounce_task:
             self._resize_debounce_task.cancel()
         self._resize_debounce_task = self.page.run_task(self._handle_resize)
@@ -109,9 +122,10 @@ class AppLayout(ft.Container):
             return
 
         # 鸭子类型：视图自愿实现 handle_resize 即被通知
+        # 传递缓存的实时尺寸 (来自 WindowResizeEvent)，不依赖 page.width (仅连接时更新)
         if hasattr(current_view, "handle_resize"):
             try:
-                current_view.handle_resize()  # type: ignore[untyped]
+                current_view.handle_resize(self._current_width, self._current_height)  # type: ignore[untyped]
             except Exception as e:
                 logger.debug("[AppLayout] Resize handler error: %s", e, exc_info=True)
 
@@ -122,6 +136,8 @@ class AppLayout(ft.Container):
         self.collapse_btn.selected = self._nav_collapsed
         self.brand_text.visible = not self._nav_collapsed
         self.nav_rail.update()
+        # nav 折叠/展开改变内容区可用宽度 (180↔80)，必须通知视图重新布局
+        self.schedule_resize()
 
     def _init_ui(self):  # pragma: no cover
         """Initialize all UI components"""  # pragma: no cover
@@ -320,6 +336,8 @@ class AppLayout(ft.Container):
                 self.page.update()  # type: ignore[untyped]
         except Exception as e:
             logger.warning("[AppLayout] _on_locale_change failed: %s", e, exc_info=True)
+        # 语言切换后文案长度变化可能导致布局溢出，触发 resize 重新验证布局
+        self.schedule_resize()
 
     def _on_nav_change(self, e):
         """Handle Navigation Rail Change"""
@@ -422,6 +440,14 @@ class AppLayout(ft.Container):
                 refresh_fn()
             except Exception as ex:
                 logger.debug("[AppLayout] View locale refresh skipped: %s", ex, exc_info=True)
+
+        # 响应式兜底：延迟挂载的视图首次显示时，缓存的尺寸可能已过时 (窗口在后台 resize)，
+        # 挂载完成后显式调用 handle_resize，确保布局基于当前窗口尺寸。
+        if hasattr(new_view, "handle_resize"):
+            try:
+                new_view.handle_resize(self._current_width, self._current_height)  # type: ignore[untyped]
+            except Exception as ex:
+                logger.debug("[AppLayout] View handle_resize on mount skipped: %s", ex, exc_info=True)
         logger.debug(
             "[AppLayout] Tab switch done in %.1fms",
             (_time.perf_counter() - _t0) * 1000,

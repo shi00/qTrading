@@ -1,10 +1,25 @@
-from unittest.mock import MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
 import pytest
 
 
 pytestmark = pytest.mark.unit
+
+
+async def _run_async_passthrough(task_type, func, *args, **kwargs):
+    """Mock helper: 立即同步执行 func 并返回结果，模拟线程池 offload。"""
+    return func(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _patch_thread_pool():
+    """Patch automation_tab 模块级 ThreadPoolManager，run_async 直接同步执行。"""
+    mock_tpm = MagicMock()
+    mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+    with patch("ui.views.settings_tabs.automation_tab.ThreadPoolManager", return_value=mock_tpm):
+        yield
 
 
 class _FakePage:
@@ -18,6 +33,10 @@ class _FakePage:
 
     def update(self, control=None):
         self._update_count += 1
+
+    def run_task(self, coro_func, *args, **kwargs):
+        """同步执行协程，模拟 Flet page.run_task 调度。"""
+        asyncio.run(coro_func(*args, **kwargs))
 
 
 class TestAutomationTab:

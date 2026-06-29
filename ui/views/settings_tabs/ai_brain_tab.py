@@ -210,12 +210,16 @@ class AIBrainTab(ft.Container):
             tooltip=I18n.get("settings_hint_ai_model"),  # pragma: no cover
         )  # pragma: no cover
 
+        self.section_header_tuning = SectionHeader(  # pragma: no cover
+            I18n.get("settings_sec_tuning"),
+            title_key="settings_sec_tuning",  # pragma: no cover
+        )  # pragma: no cover
         self.card_tuning = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     ft.Row(  # pragma: no cover
                         [  # pragma: no cover
-                            SectionHeader(I18n.get("settings_sec_tuning")),  # pragma: no cover
+                            self.section_header_tuning,  # pragma: no cover
                             ft.Icon(ft.Icons.TUNE, size=20, color=AppColors.PRIMARY),  # pragma: no cover
                         ],  # pragma: no cover
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
@@ -285,12 +289,20 @@ class AIBrainTab(ft.Container):
             color=AppColors.TEXT_HINT,  # pragma: no cover
         )  # pragma: no cover
 
+        self.section_header_persona = SectionHeader(  # pragma: no cover
+            I18n.get("ai_sec_persona"),
+            title_key="ai_sec_persona",  # pragma: no cover
+        )  # pragma: no cover
+        self.section_header_news_prompt = SectionHeader(  # pragma: no cover
+            I18n.get("settings_news_prompt"),
+            title_key="settings_news_prompt",  # pragma: no cover
+        )  # pragma: no cover
         self.card_prompt = DashboardCard(  # pragma: no cover
             content=ft.Column(  # pragma: no cover
                 [  # pragma: no cover
                     ft.Row(  # pragma: no cover
                         [  # pragma: no cover
-                            SectionHeader(I18n.get("ai_sec_persona")),  # pragma: no cover
+                            self.section_header_persona,  # pragma: no cover
                             self.btn_reset_prompt,  # pragma: no cover
                         ],  # pragma: no cover
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
@@ -305,7 +317,7 @@ class AIBrainTab(ft.Container):
                     ft.Divider(height=20, color=AppColors.BORDER),  # pragma: no cover
                     ft.Row(  # pragma: no cover
                         [  # pragma: no cover
-                            SectionHeader(I18n.get("settings_news_prompt")),  # pragma: no cover
+                            self.section_header_news_prompt,  # pragma: no cover
                             self.btn_reset_news_prompt,  # pragma: no cover
                         ],  # pragma: no cover
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
@@ -395,40 +407,76 @@ class AIBrainTab(ft.Container):
         except Exception as e:  # pragma: no cover
             logger.debug("Safe update skipped: %s", e)  # pragma: no cover
 
-    def _on_locale_change(self):  # pragma: no cover
-        """语言变更回调 - 重建整个 UI"""  # pragma: no cover
-        try:  # pragma: no cover
-            saved_values = {  # pragma: no cover
-                "max_cand": self.ai_max_candidates_input.value,  # pragma: no cover
-                "min_turn": self.strategy_min_turnover_input.value,  # pragma: no cover
-                "concurrency": self.ai_concurrency_input.value,  # pragma: no cover
-                "news_concurrency": self.ai_news_concurrency_input.value,  # pragma: no cover
-                "prompt": self.ai_prompt_input.value,  # pragma: no cover
-                "news_prompt": self.ai_news_prompt_input.value,  # pragma: no cover
-            }  # pragma: no cover
+    def _on_locale_change(self):
+        """语言变更回调 - 仅更新控件 i18n 文本，不重建控件（避免同步 IO）"""
+        try:
+            # 仅更新 _build_controls() 中创建控件的 i18n 文本，保留控件当前值
+            if hasattr(self, "ai_max_candidates_input"):
+                self.ai_max_candidates_input.label = I18n.get("settings_max_candidates")
+                self.ai_max_candidates_input.hint_text = I18n.get("ai_hint_default").format(val=30)
+                self.ai_max_candidates_input.tooltip = I18n.get("settings_hint_ai_cost")
+            if hasattr(self, "strategy_min_turnover_input"):
+                self.strategy_min_turnover_input.label = I18n.get("settings_min_turnover")
+                self.strategy_min_turnover_input.hint_text = I18n.get("ai_hint_default").format(val=2.0)
+                self.strategy_min_turnover_input.tooltip = I18n.get("settings_hint_turnover")
+            if hasattr(self, "ai_concurrency_input"):
+                self.ai_concurrency_input.label = I18n.get("settings_ai_concurrency")
+                self.ai_concurrency_input.hint_text = I18n.get("ai_hint_default").format(val=5)
+                self.ai_concurrency_input.tooltip = I18n.get("settings_hint_ai_model")
+            if hasattr(self, "ai_news_concurrency_input"):
+                self.ai_news_concurrency_input.label = I18n.get("settings_ai_news_concurrency")
+                self.ai_news_concurrency_input.hint_text = I18n.get("ai_hint_default").format(val=1)
+                self.ai_news_concurrency_input.tooltip = I18n.get("settings_hint_ai_news_concurrency")
+            if hasattr(self, "ai_prompt_input"):
+                self.ai_prompt_input.label = I18n.get("settings_ai_prompt")
+                self.ai_prompt_input.hint_text = I18n.get("settings_ai_prompt_hint")
+            if hasattr(self, "ai_news_prompt_input"):
+                self.ai_news_prompt_input.label = I18n.get("settings_news_prompt")
+                self.ai_news_prompt_input.hint_text = I18n.get("settings_news_prompt_hint")
+            if hasattr(self, "btn_reset_prompt"):
+                self.btn_reset_prompt.text = I18n.get("settings_reset_prompt")
+            if hasattr(self, "btn_reset_news_prompt"):
+                self.btn_reset_news_prompt.text = I18n.get("settings_reset_prompt")
+            if hasattr(self, "btn_save_ai"):
+                self.btn_save_ai.text = I18n.get("settings_save_ai")
 
-            # 重建前调用旧 panel 的 will_unmount，取消 I18n 订阅避免泄漏
+            # 更新 _build_content() 中创建的布局控件 i18n 文本（不重建控件，避免触发同步 IO）
+            if hasattr(self, "txt_tuning_desc"):
+                self.txt_tuning_desc.value = I18n.get("ai_tuning_desc")
+            if hasattr(self, "icon_help_max"):
+                self.icon_help_max.tooltip = I18n.get("ai_hint_cap")
+            if hasattr(self, "icon_help_min"):
+                self.icon_help_min.tooltip = I18n.get("ai_hint_turnover_min")
+            if hasattr(self, "icon_help_conc"):
+                self.icon_help_conc.tooltip = I18n.get("settings_hint_ai_model")
+            if hasattr(self, "txt_prompt_hint"):
+                self.txt_prompt_hint.value = I18n.get("settings_ai_prompt_hint")
+            if hasattr(self, "txt_news_prompt_hint"):
+                self.txt_news_prompt_hint.value = I18n.get("settings_news_prompt_hint")
+            if hasattr(self, "section_header_tuning"):
+                self.section_header_tuning.update_locale()
+            if hasattr(self, "section_header_persona"):
+                self.section_header_persona.update_locale()
+            if hasattr(self, "section_header_news_prompt"):
+                self.section_header_news_prompt.update_locale()
+
+            # 级联调用子面板的 locale 刷新方法（子面板已通过各自 did_mount() 订阅 I18n 通知，
+            # 此处显式级联调用作为兜底，确保刷新生效；不重建 panel，无需 will_unmount）
             for panel_attr in ("llm_config_panel", "failover_panel", "local_model_panel"):
-                old_panel = getattr(self, panel_attr, None)
-                if old_panel and hasattr(old_panel, "will_unmount"):
-                    try:  # pragma: no cover
-                        old_panel.will_unmount()
-                    except Exception as e:  # pragma: no cover
-                        logger.debug("[AIBrainTab] Old panel cleanup failed: %s", e, exc_info=True)
+                panel = getattr(self, panel_attr, None)
+                if panel is None:
+                    continue
+                method = getattr(panel, "_on_locale_change", None)
+                if method is None:
+                    continue
+                try:
+                    method()
+                except Exception as e:
+                    logger.debug("[AIBrainTab] Panel %s locale refresh failed: %s", panel_attr, e, exc_info=True)
 
-            self._build_controls()  # pragma: no cover
-
-            self.ai_max_candidates_input.value = saved_values["max_cand"]  # pragma: no cover
-            self.strategy_min_turnover_input.value = saved_values["min_turn"]  # pragma: no cover
-            self.ai_concurrency_input.value = saved_values["concurrency"]  # pragma: no cover
-            self.ai_news_concurrency_input.value = saved_values["news_concurrency"]  # pragma: no cover
-            self.ai_prompt_input.value = saved_values["prompt"]  # pragma: no cover
-            self.ai_news_prompt_input.value = saved_values["news_prompt"]  # pragma: no cover
-
-            self._build_content()  # pragma: no cover
-            self._safe_update()  # pragma: no cover
-        except Exception as e:  # pragma: no cover
-            logger.warning("[AIBrainTab] Failed to update locale: %s", e)  # pragma: no cover
+            self._safe_update()
+        except Exception as e:
+            logger.warning("[AIBrainTab] Failed to update locale: %s", e)
 
     # =========================================================================
     # Event Handlers
@@ -595,8 +643,12 @@ class AIBrainTab(ft.Container):
                 llm_kwargs["azure_resource_name"] = llm_config.get("azure_resource_name", "")
                 llm_kwargs["azure_deployment_name"] = llm_config.get("azure_deployment_name", "")
 
-            custom_models_update = self.llm_config_panel._build_custom_models_update(
-                llm_config["provider"], llm_config["model"], is_azure=is_azure
+            custom_models_update = await ThreadPoolManager().run_async(
+                TaskType.IO,
+                self.llm_config_panel._build_custom_models_update,
+                llm_config["provider"],
+                llm_config["model"],
+                is_azure=is_azure,
             )
             if custom_models_update is not None:
                 llm_kwargs["custom_models"] = custom_models_update

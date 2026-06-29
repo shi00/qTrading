@@ -18,6 +18,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -437,19 +438,31 @@ class DataSourceTab(ft.Container):
 
     def _on_tushare_save(self, config: dict):
         token = config.get("token", "").strip()
-        if token:
-            self.vm.save_tushare_token(token)
+        if token and self.page:
+            self.page.run_task(self._do_tushare_save_async, token)
+
+    async def _do_tushare_save_async(self, token: str):
+        try:
+            await ThreadPoolManager().run_async(TaskType.IO, self.vm.save_tushare_token, token)
             self.show_snack(I18n.get("settings_msg_saved"), color=AppColors.SUCCESS)
+        except Exception as ex:
+            logger.error("[DataSourceTab] Tushare save failed: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_history_years_change(self, e):
+        if self.page:
+            self.page.run_task(self._do_history_years_change_async, e)
+
+    async def _do_history_years_change_async(self, e):
         try:
             val = int(e.control.value)
-            self.vm.set_history_years(val)
+            await ThreadPoolManager().run_async(TaskType.IO, self.vm.set_history_years, val)
             self.history_years_dropdown.value = str(val)
             self.show_snack(I18n.get("common_saved"), color=AppColors.SUCCESS)
             self._safe_update()
         except Exception as ex:
             logger.error("[DataSourceTab] HistoryRange | Failed to set config: %s", ex, exc_info=True)
+            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     # --- View Event Handlers (delegate to ViewModel) ---
 

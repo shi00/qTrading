@@ -8,7 +8,6 @@ Provides a unified UI for Tushare Token configuration with:
 - i18n support with hot reload
 """
 
-import asyncio
 import logging
 import webbrowser
 from collections.abc import Callable
@@ -19,6 +18,7 @@ from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -296,8 +296,10 @@ class TushareConfigPanel(ft.Container):
 
             ts.set_token(token)
             # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
-            temp_pro = ts.pro_api(token=token, timeout=ConfigHandler.get_tushare_timeout())
-            await asyncio.to_thread(
+            timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
+            temp_pro = ts.pro_api(token=token, timeout=timeout_val)
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
                 temp_pro.trade_cal,
                 exchange="SSE",
                 start_date="20250101",
@@ -307,7 +309,7 @@ class TushareConfigPanel(ft.Container):
             from data.external.tushare_client import TushareClient
             from strategies.all_strategies import StrategyManager
 
-            ConfigHandler.save_token(token)
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
 
             client = TushareClient()
             needs_probe = client.set_token(token)

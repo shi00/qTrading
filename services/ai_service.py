@@ -15,7 +15,7 @@ from core.i18n import I18n
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
 from utils.config_models import NEWS_CATEGORY_MAP
-from utils.loop_local import get_loop_local
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 
@@ -291,6 +291,10 @@ class AIService:
         with cls._lock:
             cls._instance = None
             cls._initialized = False
+
+        del_loop_local("ai_setup_lock")
+        del_loop_local("ai_analysis_semaphore")
+        del_loop_local("ai_news_semaphore")
 
     def __init__(self):
         if self._initialized:

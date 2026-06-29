@@ -254,6 +254,8 @@ class TestGetLatestGlobalNews:
     async def test_success_with_data(self, mock_get, mock_tpm):
         """成功获取数据，ctime 秒级时间戳正确转换。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -281,6 +283,8 @@ class TestGetLatestGlobalNews:
     async def test_success_with_millisecond_ctime(self, mock_get, mock_tpm):
         """ctime 毫秒级时间戳自动检测并除以 1000。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -305,6 +309,8 @@ class TestGetLatestGlobalNews:
     async def test_success_with_missing_ctime(self, mock_get, mock_tpm):
         """ctime 缺失时回退到 get_now()。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -329,6 +335,8 @@ class TestGetLatestGlobalNews:
     async def test_success_with_invalid_ctime(self, mock_get, mock_tpm):
         """ctime 非法值时回退到 get_now()。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -352,6 +360,8 @@ class TestGetLatestGlobalNews:
     async def test_title_fallback_to_content(self, mock_get, mock_tpm):
         """title 缺失时回退到 content。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -375,6 +385,8 @@ class TestGetLatestGlobalNews:
     async def test_empty_title_and_content_uses_i18n(self, mock_get, mock_tpm):
         """title 和 content 均空时使用 I18n 默认值。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -398,6 +410,8 @@ class TestGetLatestGlobalNews:
     async def test_empty_roll_data(self, mock_get, mock_tpm):
         """roll_data 为空列表时返回空列表。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {"data": {"roll_data": []}}
         mock_get.return_value = mock_response
@@ -415,6 +429,8 @@ class TestGetLatestGlobalNews:
     async def test_missing_data_structure(self, mock_get, mock_tpm):
         """返回 JSON 缺少 data/roll_data 键时返回空列表。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {"unexpected": "structure"}
         mock_get.return_value = mock_response
@@ -465,6 +481,8 @@ class TestGetLatestGlobalNews:
         import data.external.news_fetcher as nf_mod
 
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.raise_for_status.side_effect = requests.HTTPError("403 Forbidden")
         mock_get.return_value = mock_response
 
@@ -482,6 +500,8 @@ class TestGetLatestGlobalNews:
     async def test_limit_truncates_results(self, mock_get, mock_tpm):
         """limit 参数截断结果数量。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {"roll_data": [{"title": f"新闻{i}", "content": "", "ctime": 1718330400 + i} for i in range(10)]}
@@ -501,6 +521,8 @@ class TestGetLatestGlobalNews:
     async def test_sorted_desc_by_time(self, mock_get, mock_tpm):
         """结果按时间降序排列。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {
             "data": {
@@ -533,6 +555,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_success_with_data(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
         mock_get.return_value = mock_resp
         mock_tpm_instance = MagicMock()
@@ -577,6 +601,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_jsonp_parse_failure(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "invalid response without jsonp"
         mock_get.return_value = mock_resp
         mock_tpm_instance = MagicMock()
@@ -591,6 +617,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_high_pct_movers(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = (
             'IO({"data": [{"name": "UNKNOWN", "cname": "未知", "price": "10.0", "diff": "0.5", "chg": "5.0"}]});'
         )
@@ -617,6 +645,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_no_giants_fallback(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "SMALL1", "cname": "小公司1", "price": "1.0", "diff": "0.01", "chg": "0.5"}, {"name": "SMALL2", "cname": "小公司2", "price": "2.0", "diff": "0.02", "chg": "0.3"}, {"name": "SMALL3", "cname": "小公司3", "price": "3.0", "diff": "0.03", "chg": "0.1"}, {"name": "SMALL4", "cname": "小公司4", "price": "4.0", "diff": "0.04", "chg": "0.2"}, {"name": "SMALL5", "cname": "小公司5", "price": "5.0", "diff": "0.05", "chg": "0.4"}]});'
         mock_get.return_value = mock_resp
         mock_tpm_instance = MagicMock()
@@ -639,6 +669,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_invalid_chg_value(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = (
             'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "invalid"}]});'
         )
@@ -665,6 +697,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_json_decode_error(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "IO(not valid json);"
         mock_get.return_value = mock_resp
         mock_tpm_instance = MagicMock()
@@ -679,6 +713,8 @@ class TestGetUsMajorMoves:
     @patch("data.external.news_fetcher.requests.get")
     async def test_exception_in_processing(self, mock_get, mock_tpm):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
         mock_get.return_value = mock_resp
         mock_tpm_instance = MagicMock()
@@ -910,6 +946,8 @@ class TestNewsFetcherGetLatestGlobalNews:
     async def test_get_latest_global_news(self, mock_get, mock_tpm):
         """基本冒烟测试：返回 list 类型。"""
         mock_response = MagicMock()
+        mock_response.__enter__ = MagicMock(return_value=mock_response)
+        mock_response.__exit__ = MagicMock(return_value=False)
         mock_response.status_code = 200
         mock_response.json.return_value = {"data": {"roll_data": []}}
         mock_get.return_value = mock_response
@@ -1235,6 +1273,8 @@ class TestGetLatestGlobalNewsDirectExecution:
     async def test_direct_success_ctime_seconds(self, mock_get):
         """秒级 ctime 直接执行成功。"""
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "data": {
@@ -1261,6 +1301,8 @@ class TestGetLatestGlobalNewsDirectExecution:
     async def test_direct_success_ctime_milliseconds(self, mock_get):
         """毫秒级 ctime 自动检测并转换。"""
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "data": {
@@ -1285,6 +1327,8 @@ class TestGetLatestGlobalNewsDirectExecution:
     async def test_direct_missing_data_key(self, mock_get):
         """返回 JSON 缺少 data 键时返回空列表。"""
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"no_data": True}
         mock_get.return_value = mock_resp
@@ -1303,6 +1347,8 @@ class TestGetUsMajorMovesDirectExecution:
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_fetch_direct_success(self, mock_get):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA", "cname": "英伟达", "price": "135.2", "diff": "3.2", "chg": "2.45"}, {"name": "TSLA", "cname": "特斯拉", "price": "200.0", "diff": "-2.0", "chg": "-1.0"}]});'
         mock_get.return_value = mock_resp
 
@@ -1319,6 +1365,8 @@ class TestGetUsMajorMovesDirectExecution:
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_empty_data_warning(self, mock_get):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": []});'
         mock_get.return_value = mock_resp
 
@@ -1335,6 +1383,8 @@ class TestGetUsMajorMovesDirectExecution:
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_json_decode_error(self, mock_get):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "IO(not valid json);"
         mock_get.return_value = mock_resp
 
@@ -1350,6 +1400,8 @@ class TestGetUsMajorMovesDirectExecution:
     @patch("data.external.news_fetcher.requests.get")
     async def test_sina_invalid_jsonp_structure(self, mock_get):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = "no jsonp structure here"
         mock_get.return_value = mock_resp
 
@@ -1366,6 +1418,8 @@ class TestGetUsMajorMovesDirectExecution:
     async def test_sina_consecutive_empty_threshold_error(self, mock_get):
         _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": []});'
         mock_get.return_value = mock_resp
 
@@ -1384,6 +1438,8 @@ class TestGetUsMajorMovesDirectExecution:
         """Empty-data degradation threshold must log WARNING, not ERROR (CLAUDE.md §5.4)."""
         _SINA_CONSECUTIVE_EMPTY["us_api"] = _SINA_EMPTY_THRESHOLD - 1
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": []});'
         mock_get.return_value = mock_resp
 
@@ -1409,6 +1465,8 @@ class TestGetUsMajorMovesDirectExecution:
     @patch("data.external.news_fetcher.requests.get")
     async def test_us_moves_processing_exception(self, mock_get):
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.text = 'IO({"data": [{"name": "NVDA"}]});'
         mock_get.return_value = mock_resp
 
@@ -1574,6 +1632,8 @@ class TestCLSCircuitBreaker:
         nf_mod._CLS_CIRCUIT_OPENED_AT = base_time.timestamp()
 
         mock_resp = MagicMock()
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "data": {"roll_data": [{"title": "探活成功", "content": "", "ctime": 1718330400}]}

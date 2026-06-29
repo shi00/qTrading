@@ -1,5 +1,6 @@
 """FailoverConfigPanel 和 ProviderCredentialDialog 单元测试"""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
@@ -12,6 +13,21 @@ from ui.components.config_panels.failover_config_panel import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+async def _run_async_passthrough(task_type, func, *args, **kwargs):
+    """Mock helper: 立即同步执行 func 并返回结果，模拟线程池 offload。"""
+    return func(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _patch_thread_pool():
+    """Patch failover_config_panel 模块级 ThreadPoolManager，run_async 直接同步执行。"""
+    mock_tpm = MagicMock()
+    mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+    with patch("ui.components.config_panels.failover_config_panel.ThreadPoolManager", return_value=mock_tpm):
+        yield
+
 
 # ── 通用 Mock 数据 ──────────────────────────────────────────────────────────
 
@@ -118,6 +134,12 @@ def mock_page():
     page.close = MagicMock(spec=[])
     page.launch_url = MagicMock(spec=[])
     page.update = MagicMock(spec=[])
+
+    def _run_task(coro_func, *args, **kwargs):
+        """同步执行协程，模拟 Flet page.run_task 调度。"""
+        asyncio.run(coro_func(*args, **kwargs))
+
+    page.run_task = _run_task
     return page
 
 
@@ -842,11 +864,57 @@ class TestFailoverConfigPanelLifecycle:
             mock_section_header,
             mock_page,
         )
-        # _on_locale_change 会调用 _build_ui 和 _load_config
+        initial_count = mock_config_handler.load_config.call_count
+        # _on_locale_change 仅重建 UI（_build_ui + _render_list），不重新加载配置（避免 keyring IO）
+        with (
+            patch.object(panel, "_safe_update"),
+            patch.object(panel, "_build_ui") as mock_build_ui,
+            patch.object(panel, "_render_list") as mock_render_list,
+        ):
+            panel._on_locale_change("zh_CN")
+        mock_build_ui.assert_called_once()
+        mock_render_list.assert_called_once()
+        # 不应再调用 load_config（即不触发 _load_config）
+        assert mock_config_handler.load_config.call_count == initial_count
+
+    def test_on_locale_change_preserves_failover_items(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """§5.8 规范 3：_on_locale_change 仅重建 UI 文本，必须保留已有 _failover_items 数据"""
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["deepseek/deepseek-chat", "openai/gpt-4o"],
+            "llm_provider": "deepseek",
+        }
+        mock_config_handler.get_provider_credential.return_value = {
+            "api_key": "test_token_mock",
+            "base_url": "",
+        }
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        # 记录调用前 _failover_items 的内容快照
+        items_before = [(item.provider, item.model, item.has_credential) for item in panel._failover_items]
+        assert len(items_before) == 2
+
         with patch.object(panel, "_safe_update"):
             panel._on_locale_change("zh_CN")
-        # load_config 应被再次调用 (通过 _load_config)
-        assert mock_config_handler.load_config.call_count >= 2
+
+        # 调用后 _failover_items 内容必须保持不变（不重新 _load_config）
+        items_after = [(item.provider, item.model, item.has_credential) for item in panel._failover_items]
+        assert items_after == items_before
 
     def test_reload_config(
         self,

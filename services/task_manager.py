@@ -726,7 +726,25 @@ class TaskManager:
     def _schedule_coro(self, coro):
         """Schedule a coroutine on the main event loop.  Thread-safe."""
         if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.create_task, coro)
+
+            def _launch():
+                try:
+                    task = self._loop.create_task(coro)
+                except RuntimeError:
+                    coro.close()
+                    logger.debug("[TaskManager] Loop closed before _launch, coroutine dropped.")
+                    return
+                # Keep a strong reference to the task to prevent garbage collection
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
+
+            try:
+                self._loop.call_soon_threadsafe(_launch)
+            except RuntimeError:
+                # Loop closed between is_running() check and call_soon_threadsafe
+                coro.close()
+                logger.debug("[TaskManager] Loop closed before call_soon_threadsafe, coroutine dropped.")
+                return False
             return True
         coro.close()
         logger.debug("[TaskManager] No event loop available, coroutine dropped.")

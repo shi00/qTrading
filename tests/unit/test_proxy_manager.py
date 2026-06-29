@@ -11,10 +11,7 @@ pytestmark = pytest.mark.unit
 
 class TestProxyManagerNoEnvironWrite:
     def setup_method(self):
-        ProxyManager._no_proxy_domains = set()
-        ProxyManager._initialized = False
-        ProxyManager._original_no_proxy = None
-        ProxyManager._env_written = False
+        ProxyManager._reset_singleton()
 
     def test_apply_does_not_write_to_os_environ(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
@@ -68,10 +65,7 @@ class TestProxyManagerNoEnvironWrite:
 
 class TestProxyManagerSnapshotOriginal:
     def setup_method(self):
-        ProxyManager._no_proxy_domains = set()
-        ProxyManager._initialized = False
-        ProxyManager._original_no_proxy = None
-        ProxyManager._env_written = False
+        ProxyManager._reset_singleton()
 
     def test_snapshots_original_env_on_first_call(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
@@ -132,6 +126,7 @@ class TestProxyManagerGetNoProxyString:
 
 class TestProxyManagerShouldBypassProxy:
     def setup_method(self):
+        ProxyManager._reset_singleton()
         ProxyManager._no_proxy_domains = {"tushare.pro", "localhost"}
         ProxyManager._initialized = True
 
@@ -199,10 +194,7 @@ class TestProxyManagerGetRequestsProxyConfig:
 
 class TestProxyManagerMergesExistingEnv:
     def setup_method(self):
-        ProxyManager._no_proxy_domains = set()
-        ProxyManager._initialized = False
-        ProxyManager._original_no_proxy = None
-        ProxyManager._env_written = False
+        ProxyManager._reset_singleton()
 
     def test_merges_existing_no_proxy(self):
         with patch("utils.proxy_manager.ConfigHandler") as mock_ch:
@@ -241,6 +233,7 @@ class TestProxyManagerLogSafety:
 
 class TestProxyManagerLitellmEnvContext:
     def setup_method(self):
+        ProxyManager._reset_singleton()
         ProxyManager._no_proxy_domains = {"tushare.pro", "localhost"}
         ProxyManager._initialized = True
         ProxyManager._env_written = False

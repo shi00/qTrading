@@ -10,7 +10,7 @@ from collections import OrderedDict
 
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.loop_local import get_loop_local
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -48,8 +48,14 @@ class NewsSubscriptionService:
     def _reset_singleton(cls):
         """Reset singleton for testing only. NEVER call in production."""
         with cls._lock:
+            inst = cls._instance
             cls._instance = None
             cls._initialized = False
+        del_loop_local("news_processing_queue")
+        del_loop_local("news_queue_put_lock")
+        if inst is not None:
+            inst._listeners.clear()
+            inst._alert_listeners.clear()
 
     @classmethod
     def _atexit_cleanup(cls):

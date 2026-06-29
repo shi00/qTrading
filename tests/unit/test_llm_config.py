@@ -506,7 +506,8 @@ class TestLLMConfigPanel:
         assert config["azure_deployment_name"] == "gpt-5.4-deployment"
         assert config["api_version"] == "2024-08-01-preview"
 
-    def test_save_current_config(self, isolated_config):
+    @pytest.mark.asyncio
+    async def test_save_current_config(self, isolated_config):
         """Test: save_current_config persists config correctly"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
         from utils.config_handler import ConfigHandler
@@ -522,7 +523,7 @@ class TestLLMConfigPanel:
         panel.base_url_input.value = "https://api.openai.com"
         panel.api_key_input.value = "openai-key"
 
-        result = panel.save_current_config()
+        result = await panel.save_current_config()
 
         assert result is True
 
@@ -889,7 +890,8 @@ class TestRemovePrimaryFromFailover:
 class TestSaveCurrentConfigReloadsAIService:
     """验证 save_current_config 保存后调度 AIService reload"""
 
-    def test_save_current_config_schedules_ai_service_reload(self, isolated_config, mock_keyring):
+    @pytest.mark.asyncio
+    async def test_save_current_config_schedules_ai_service_reload(self, isolated_config, mock_keyring):
         """save_current_config 应通过 page.run_task 调度 on_reload_service 回调"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
@@ -915,12 +917,13 @@ class TestSaveCurrentConfigReloadsAIService:
 
         panel.page = MockPage()
 
-        result = panel.save_current_config()
+        result = await panel.save_current_config()
         assert result is True
         # 应调度了一个异步任务（on_reload_service 回调）
         assert len(run_task_calls) == 1
 
-    def test_save_current_config_without_page_still_saves(self, isolated_config, mock_keyring):
+    @pytest.mark.asyncio
+    async def test_save_current_config_without_page_still_saves(self, isolated_config, mock_keyring):
         """无 page 时 save_current_config 仍应保存成功（只是不调度 reload）"""
         from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 
@@ -936,7 +939,7 @@ class TestSaveCurrentConfigReloadsAIService:
         panel._api_key_modified = True
         panel.page = None
 
-        result = panel.save_current_config()
+        result = await panel.save_current_config()
         assert result is True
 
 

@@ -715,3 +715,177 @@ class TestAIBrainTabSaveAISettings:
             mock_ch.save_ai_system_prompt.side_effect = RuntimeError("disk full")
             await tab._save_ai_settings(None)
             tab.show_snack.assert_called_once_with("settings_snack_ai_error", color=self.mock_ac.ERROR)
+
+
+class TestAIBrainTabLocaleChange:
+    """_on_locale_change 方法单元测试 - 验证仅更新 i18n 文本，不重建控件，级联刷新子面板"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.views.settings_tabs.ai_brain_tab.I18n", self.mock_i18n),
+            patch("ui.views.settings_tabs.ai_brain_tab.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_tab(self):
+        from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
+
+        with (
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
+            patch("services.ai_service.AIService"),
+            patch("services.local_model_manager.LocalModelManager"),
+            patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
+        ):
+            mock_ch.get_ai_max_candidates.return_value = 30
+            mock_ch.get_strategy_min_turnover.return_value = 2.0
+            mock_ch.get_ai_max_concurrent_analysis.return_value = 5
+            mock_ch.get_ai_news_max_concurrent.return_value = 1
+            mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
+            mock_ch.get_ai_news_prompt.return_value = "Classify this news."
+            return AIBrainTab(show_snack_callback=MagicMock())
+
+    def _setup_panels(self, tab):
+        """用 MagicMock 替换子面板，便于断言级联调用"""
+        tab.llm_config_panel = MagicMock()
+        tab.failover_panel = MagicMock()
+        tab.local_model_panel = MagicMock()
+
+    def test_on_locale_change_does_not_call_build_content(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        with patch.object(tab, "_build_content") as mock_build_content:
+            tab._on_locale_change()
+            mock_build_content.assert_not_called()
+
+    def test_on_locale_change_does_not_call_build_controls(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        with patch.object(tab, "_build_controls") as mock_build_controls:
+            tab._on_locale_change()
+            mock_build_controls.assert_not_called()
+
+    def test_on_locale_change_updates_input_labels(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        tab._on_locale_change()
+
+        assert tab.ai_max_candidates_input.label == "settings_max_candidates"
+        assert tab.ai_max_candidates_input.hint_text == "ai_hint_default"
+        assert tab.ai_max_candidates_input.tooltip == "settings_hint_ai_cost"
+        assert tab.strategy_min_turnover_input.label == "settings_min_turnover"
+        assert tab.strategy_min_turnover_input.hint_text == "ai_hint_default"
+        assert tab.strategy_min_turnover_input.tooltip == "settings_hint_turnover"
+        assert tab.ai_concurrency_input.label == "settings_ai_concurrency"
+        assert tab.ai_concurrency_input.hint_text == "ai_hint_default"
+        assert tab.ai_concurrency_input.tooltip == "settings_hint_ai_model"
+        assert tab.ai_news_concurrency_input.label == "settings_ai_news_concurrency"
+        assert tab.ai_news_concurrency_input.hint_text == "ai_hint_default"
+        assert tab.ai_news_concurrency_input.tooltip == "settings_hint_ai_news_concurrency"
+
+    def test_on_locale_change_updates_prompt_inputs(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        tab._on_locale_change()
+
+        assert tab.ai_prompt_input.label == "settings_ai_prompt"
+        assert tab.ai_prompt_input.hint_text == "settings_ai_prompt_hint"
+        assert tab.ai_news_prompt_input.label == "settings_news_prompt"
+        assert tab.ai_news_prompt_input.hint_text == "settings_news_prompt_hint"
+
+    def test_on_locale_change_updates_buttons(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        tab._on_locale_change()
+
+        assert tab.btn_reset_prompt.text == "settings_reset_prompt"
+        assert tab.btn_reset_news_prompt.text == "settings_reset_prompt"
+        assert tab.btn_save_ai.text == "settings_save_ai"
+
+    def test_on_locale_change_preserves_input_values(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        original_values = {
+            "ai_max_candidates_input": tab.ai_max_candidates_input.value,
+            "strategy_min_turnover_input": tab.strategy_min_turnover_input.value,
+            "ai_concurrency_input": tab.ai_concurrency_input.value,
+            "ai_news_concurrency_input": tab.ai_news_concurrency_input.value,
+            "ai_prompt_input": tab.ai_prompt_input.value,
+            "ai_news_prompt_input": tab.ai_news_prompt_input.value,
+        }
+
+        tab._on_locale_change()
+
+        assert tab.ai_max_candidates_input.value == original_values["ai_max_candidates_input"]
+        assert tab.strategy_min_turnover_input.value == original_values["strategy_min_turnover_input"]
+        assert tab.ai_concurrency_input.value == original_values["ai_concurrency_input"]
+        assert tab.ai_news_concurrency_input.value == original_values["ai_news_concurrency_input"]
+        assert tab.ai_prompt_input.value == original_values["ai_prompt_input"]
+        assert tab.ai_news_prompt_input.value == original_values["ai_news_prompt_input"]
+
+    def test_on_locale_change_cascades_to_panels(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        tab._on_locale_change()
+
+        tab.llm_config_panel._on_locale_change.assert_called_once()
+        tab.failover_panel._on_locale_change.assert_called_once()
+        tab.local_model_panel._on_locale_change.assert_called_once()
+
+    def test_on_locale_change_calls_safe_update(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+
+        tab._on_locale_change()
+
+        tab._safe_update.assert_called_once()
+
+    def test_on_locale_change_updates_section_headers(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+        tab.section_header_tuning = MagicMock()
+        tab.section_header_persona = MagicMock()
+        tab.section_header_news_prompt = MagicMock()
+
+        tab._on_locale_change()
+
+        tab.section_header_tuning.update_locale.assert_called_once()
+        tab.section_header_persona.update_locale.assert_called_once()
+        tab.section_header_news_prompt.update_locale.assert_called_once()
+
+    def test_on_locale_change_when_panel_method_missing_skips_silently(self):
+        tab = self._make_tab()
+        self._setup_panels(tab)
+        tab._safe_update = MagicMock()
+        # 模拟子面板无 _on_locale_change 方法（getattr 返回 None）
+        tab.llm_config_panel._on_locale_change = None
+        tab.failover_panel._on_locale_change = None
+        tab.local_model_panel._on_locale_change = None
+
+        # 不应抛出异常，且 _safe_update 仍被调用
+        tab._on_locale_change()
+
+        tab._safe_update.assert_called_once()

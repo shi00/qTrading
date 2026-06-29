@@ -974,26 +974,39 @@ class TestAppLayout:
         assert layout._resize_debounce_task is None
 
     def test_schedule_resize_cancels_existing_task(self, mock_page):
-        """覆盖 app_layout.py:93-94，schedule_resize 取消已有 task。"""
+        """覆盖 schedule_resize 取消已有 task。"""
         layout = self._make_layout(mock_page)
         mock_old_task = MagicMock()
         layout._resize_debounce_task = mock_old_task
         mock_page.run_task = MagicMock(return_value=MagicMock())
-        layout.schedule_resize()
+        layout.schedule_resize(1280, 800)
         mock_old_task.cancel.assert_called_once()
+        # 验证实时尺寸被缓存
+        assert layout._current_width == 1280
+        assert layout._current_height == 800
 
     def test_schedule_resize_creates_new_task(self, mock_page):
-        """覆盖 app_layout.py:95，schedule_resize 创建新 task。"""
+        """覆盖 schedule_resize 创建新 task。"""
         layout = self._make_layout(mock_page)
         mock_new_task = MagicMock()
         mock_page.run_task = MagicMock(return_value=mock_new_task)
-        layout.schedule_resize()
+        layout.schedule_resize(1280, 800)
         mock_page.run_task.assert_called_once_with(layout._handle_resize)
         assert layout._resize_debounce_task == mock_new_task
 
+    def test_schedule_resize_preserves_cached_size_when_zero(self, mock_page):
+        """schedule_resize 传入 0 时保留缓存的尺寸 (nav 折叠场景)。"""
+        layout = self._make_layout(mock_page)
+        layout._current_width = 1280
+        layout._current_height = 800
+        mock_page.run_task = MagicMock(return_value=MagicMock())
+        layout.schedule_resize()  # 不传参数，模拟 nav 折叠触发
+        assert layout._current_width == 1280  # 缓存值未被覆盖
+        assert layout._current_height == 800
+
     @pytest.mark.asyncio
     async def test_handle_resize_propagates_cancelled_error(self, mock_page):
-        """覆盖 app_layout.py:101-102，CancelledError 必须传播（R2 红线）。"""
+        """覆盖 CancelledError 必须传播（R2 红线）。"""
         layout = self._make_layout(mock_page)
         with pytest.raises(asyncio.CancelledError):
             with patch("asyncio.sleep", side_effect=asyncio.CancelledError):
@@ -1001,7 +1014,7 @@ class TestAppLayout:
 
     @pytest.mark.asyncio
     async def test_handle_resize_returns_without_page(self, mock_page):
-        """覆盖 app_layout.py:104-105，page 缺失时提前返回。"""
+        """覆盖 page 缺失时提前返回。"""
         layout = self._make_layout(mock_page)
         layout.page = None
         mock_view = MagicMock()
@@ -1014,7 +1027,7 @@ class TestAppLayout:
 
     @pytest.mark.asyncio
     async def test_handle_resize_returns_without_cached_view(self, mock_page):
-        """覆盖 app_layout.py:107-109，视图未缓存时提前返回。"""
+        """覆盖视图未缓存时提前返回。"""
         layout = self._make_layout(mock_page)
         layout._current_tab_index = 99  # 无缓存的索引
         mock_page.run_task = MagicMock()
@@ -1025,19 +1038,21 @@ class TestAppLayout:
 
     @pytest.mark.asyncio
     async def test_handle_resize_calls_view_handle_resize(self, mock_page):
-        """覆盖 app_layout.py:112-114，成功调用视图 handle_resize。"""
+        """覆盖成功调用视图 handle_resize，并传递缓存尺寸。"""
         layout = self._make_layout(mock_page)
+        layout._current_width = 1280
+        layout._current_height = 800
         mock_view = MagicMock()
         mock_view.handle_resize = MagicMock()
         layout._view_cache[0] = mock_view
         layout._current_tab_index = 0
         with patch("asyncio.sleep", new_callable=AsyncMock):
             await layout._handle_resize()
-            mock_view.handle_resize.assert_called_once()
+            mock_view.handle_resize.assert_called_once_with(1280, 800)
 
     @pytest.mark.asyncio
     async def test_handle_resize_catches_view_handler_exception(self, mock_page):
-        """覆盖 app_layout.py:115-116，视图 handle_resize 异常时降级为 debug log。"""
+        """覆盖视图 handle_resize 异常时降级为 debug log。"""
         layout = self._make_layout(mock_page)
         mock_view = MagicMock()
         mock_view.handle_resize = MagicMock(side_effect=RuntimeError("resize error"))

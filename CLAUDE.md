@@ -3,7 +3,7 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.8.0，最后校对：2026-06-26
+> **对应版本**：0.9.0，最后校对：2026-06-29
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
 
 ---
@@ -84,6 +84,7 @@
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
 | 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
+| 修改 UI 布局/响应式 | CONTRIBUTING.md「响应式布局规范 (Responsive Layout)」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py` (`handle_resize`)；新增视图必须实现 `handle_resize()` |
 
 ### 1.9 关键验证命令
 
@@ -158,6 +159,7 @@ pre-commit run --all-files  # 全量 hook 检查
 - 涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
 - **UI 语言切换响应**：新增/修改 UI 视图或组件必须遵守 [CONTRIBUTING.md「语言切换响应 (I18n Hot Reload)」](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload) 的 9 条规范（订阅机制、回调命名、纯 UI 操作、options 重建、实例属性提取、子组件级联、生命周期兜底、MetaDataManager 缓存失效、异常降级）。
+- **UI 响应式布局**：新增/修改 UI 视图或组件必须遵守 [CONTRIBUTING.md「响应式布局规范 (Responsive Layout)」](./CONTRIBUTING.md#响应式布局规范-responsive-layout) 的 10 条规范（断点分级、侧栏动态宽度、handle_resize 实现、控件宽度策略、ResponsiveRow 强制配置、scroll 兜底、max_width 约束、触发时机完整性、高度维度、i18n 与响应式交互）。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
@@ -278,6 +280,12 @@ app → 编排所有层，仅被 main.py 调用
 新增/修改 UI 视图或组件必须遵守 9 条规范（订阅机制、回调命名、纯 UI 操作、options 重建、实例属性提取、子组件级联、生命周期兜底、MetaDataManager 缓存失效、异常降级）。
 
 **完整规范、判定决策树、标准 View 模板、测试要求见 [CONTRIBUTING.md「语言切换响应 (I18n Hot Reload)」](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload)。**
+
+### 5.9 响应式布局规范 (Responsive Layout)
+
+新增/修改 UI 视图或组件必须遵守 10 条规范（断点分级、侧栏动态宽度、handle_resize 实现、控件宽度策略、ResponsiveRow 强制配置、scroll 兜底、max_width 约束、触发时机完整性、高度维度、i18n 与响应式交互）。
+
+**完整规范、断点定义表、handle_resize 模板、标准 View 检查清单、测试要求见 [CONTRIBUTING.md「响应式布局规范 (Responsive Layout)」](./CONTRIBUTING.md#响应式布局规范-responsive-layout)。**
 
 ---
 

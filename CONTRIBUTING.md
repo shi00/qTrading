@@ -36,6 +36,7 @@
   - [测试规范](#测试规范)
   - [CI/CD 流水线与门禁](#cicd-流水线与门禁)
   - [语言切换响应 (I18n Hot Reload)](#语言切换响应-i18n-hot-reload)
+  - [响应式布局规范 (Responsive Layout)](#响应式布局规范-responsive-layout)
   - [标准开发工作流 (How-To)](#标准开发工作流-how-to)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
@@ -906,6 +907,356 @@ def _rebuild_steps_after_locale_change(self):
 - 重建子 panel 后用户输入状态保留断言
 - 涉及 MetaDataManager 的视图必须断言 `invalidate_cache()` 被调用
 
+## 响应式布局规范 (Responsive Layout)
+
+> 对应 [CLAUDE.md §5.9](./CLAUDE.md#59-响应式布局规范-responsive-layout)。
+
+本规范确保应用在 960px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 7 条规范。
+
+### 背景与约束
+
+- 项目仅桌面端 (Flet 0.28.3)，`main.py` 设置 `page.window.min_width = 960`、`min_height = 640`、默认 `width = 1280`。
+- 内容区净宽 = 窗口宽度 − nav_rail (展开 180 / 折叠 80) − divider (1) − body padding (40)。
+- `AppLayout` 已实现 `page.on_resized` 的 100ms 防抖分发：通过鸭子类型调用 `current_view.handle_resize(width, height)` (见 `ui/app_layout.py` 的 `_handle_resize`)。
+- **Flet 0.28.3 API 关键约束**：
+  - 正确的事件属性名为 `page.on_resized`（带 d），**不是** `on_resize`。
+  - `WindowResizeEvent` 携带实时 `width` / `height` 属性。
+  - `page.width` / `page.window.width` 仅在页面连接时 (`fetch_page_details_async`) 更新一次，**resize 事件中不会刷新**，返回过时值或 0。因此 `handle_resize` 必须通过参数接收实时尺寸，**禁止**在 `handle_resize` 内读取 `self.page.width`。
+- Web 模式 (`_is_web_mode()`) 下跳过窗口约束，但 resize 分发机制仍然生效。
+
+### 断点分级表
+
+基于 `handle_resize` 接收的 `width` 参数 (来自 `WindowResizeEvent.width`) 的 4 级断点，新增到 `AppStyles` (见 `ui/theme.py`)：
+
+| 断点常量 | 阈值 (px) | 典型场景 | 内容区净宽 (nav 展开) |
+|---------|-----------|---------|---------------------|
+| `BREAKPOINT_COMPACT` | `< 1200` | 最小窗口 960，笔记本竖屏 | 739 ~ 979 |
+| `BREAKPOINT_STANDARD` | `1200 ~ 1599` | 默认窗口 1280，1080p | 979 ~ 1379 |
+| `BREAKPOINT_WIDE` | `1600 ~ 2399` | 2K 显示器 | 1379 ~ 2179 |
+| `BREAKPOINT_ULTRA_WIDE` | `≥ 2400` | 4K / 带鱼屏 | ≥ 2179 |
+
+> **注意**：Flet 内置 `ResponsiveRow` 断点 (xs<576, sm≥576, md≥768, lg≥992, xl≥1200) 在 `min_width=960` 约束下，xs/sm 基本触发不到，实际有效的是 md/lg/xl。本项目断点常量用于 `handle_resize()` 中的条件判断，与 `ResponsiveRow` 的 col 配置互补。
+>
+> **设计选择**：断点基于 `WindowResizeEvent.width`（窗口总宽度）而非内容区净宽，这是有意的设计。同一窗口宽度下 nav 折叠/展开会改变内容区净宽，但断点保持稳定，避免 nav 切换导致侧栏宽度跳变。nav 折叠带来的额外空间由 `expand=True` 的主内容区自然吸收。
+
+### 10 条规范
+
+#### 规范 1：断点分级 — 视图必须感知当前窗口尺寸
+
+新增视图时，在 `handle_resize(width, height)` 中通过 `width` 参数 (来自 `WindowResizeEvent.width`) 读取实时窗口宽度，对照断点表调整布局。**禁止**读取 `self.page.width` (仅连接时更新，resize 时返回过时值)。
+
+```python
+# ui/theme.py — AppStyles 类中新增
+BREAKPOINT_COMPACT = 1200      # < 此值视为紧凑模式
+BREAKPOINT_STANDARD = 1600     # < 此值视为标准模式
+BREAKPOINT_ULTRA_WIDE = 2400   # ≥ 此值视为超宽屏
+
+@staticmethod
+def get_breakpoint(page_width: int | None) -> str:
+    """返回当前断点级别: 'compact' | 'standard' | 'wide' | 'ultra_wide'。"""
+    if page_width is None or page_width < AppStyles.BREAKPOINT_COMPACT:
+        return "compact"
+    if page_width < AppStyles.BREAKPOINT_STANDARD:
+        return "standard"
+    if page_width < AppStyles.BREAKPOINT_ULTRA_WIDE:
+        return "wide"
+    return "ultra_wide"
+```
+
+#### 规范 2：侧栏动态宽度 — 禁止固定像素宽度
+
+包含侧栏 (sidebar) 的视图 (如 `BacktestView`、`ScreenerView`) 必须根据断点动态计算侧栏宽度，禁止硬编码固定值。
+
+| 断点 | 侧栏宽度 | 理由 |
+|------|---------|------|
+| compact (<1200) | 280px | 内容区仅 739px，侧栏 280px 后主区保留 449px |
+| standard (1200~1599) | 340px | 内容区 ~1059px，主区保留 707px |
+| wide/ultra_wide (≥1600) | 380px | 内容区充足，侧栏可放宽 |
+
+```python
+# ui/theme.py — AppStyles 类中新增
+SIDEBAR_WIDTH_COMPACT = 280
+SIDEBAR_WIDTH_STANDARD = 340
+SIDEBAR_WIDTH_WIDE = 380
+
+@staticmethod
+def get_sidebar_width(page_width: int | None) -> int:
+    """根据窗口宽度返回合适的侧栏宽度。"""
+    breakpoint = AppStyles.get_breakpoint(page_width)
+    if breakpoint == "compact":
+        return AppStyles.SIDEBAR_WIDTH_COMPACT
+    if breakpoint == "standard":
+        return AppStyles.SIDEBAR_WIDTH_STANDARD
+    return AppStyles.SIDEBAR_WIDTH_WIDE
+```
+
+#### 规范 3：handle_resize 实现 — 所有视图必须实现
+
+`AppLayout` 已通过鸭子类型调用 `current_view.handle_resize()`。**所有视图必须实现此方法**，即使为空方法也必须存在并注释 `# No responsive adjustment needed`，以表明已评估响应式需求。这与 I18n 规范"所有展示文案的视图必须订阅"对称。
+
+以下布局类型的视图必须在 `handle_resize` 中实现实际逻辑：
+
+- 左右分栏 (如 config_panel + result_panel) → 动态调整侧栏宽度
+- 侧栏显隐切换 (如 history_tree) → 刷新主内容区
+- 表格视口刷新 (如虚拟表格) → 重新计算可见行数
+- 图表/数据密集区域 → 根据高度调整最小高度或可见行数
+- 任何依赖窗口尺寸的动态布局
+
+**标准模板**：
+
+```python
+def handle_resize(self, width: float = 0, height: float = 0) -> None:
+    """窗口尺寸变化时调整布局。由 AppLayout 防抖后调用 (约 100ms)。
+
+    Args:
+        width: 当前窗口宽度 (来自 WindowResizeEvent.width)，0 表示未知
+            (如 nav 折叠触发的内部 resize，此时视图应保留当前布局)
+        height: 当前窗口高度 (来自 WindowResizeEvent.height)，0 表示未知
+    """
+    if not width:
+        # width=0 表示是 nav 折叠等内部触发，无新尺寸；保留当前布局即可
+        return
+    try:
+        new_sidebar = AppStyles.get_sidebar_width(width)
+        # 仅在宽度实际变化时更新，避免无意义 refresh
+        sidebar_container = self._get_sidebar_container()  # 视图自行实现获取逻辑
+        if sidebar_container.width != new_sidebar:
+            sidebar_container.width = new_sidebar
+            sidebar_container.update()  # 局部更新，不用 self.update()
+    except Exception as e:
+        logger.debug("[%s] handle_resize skipped: %s", self.__class__.__name__, e)
+```
+
+**性能约束**（必须遵守）：
+
+- **禁止重建 content**：`handle_resize` 内禁止 `self.content = self._build_content()`，只能修改已有控件属性 (如 `.width`、`.visible`)。重建 content 会销毁所有子控件状态 (滚动位置、输入值、选中态)。
+- **禁止 IO/CPU 密集操作**：`handle_resize` 在 resize 防抖后同步调用，阻塞 UI 线程。禁止查询数据库、加载文件、执行策略计算。
+- **局部更新优先**：仅调用发生变化的子控件的 `.update()`，避免 `self.update()` 触发整树 diff。复杂视图 (如 BacktestView 含图表+表格) 尤其重要。
+- **幂等性**：相同 `page.width` 多次调用必须产生相同结果，`handle_resize` 不得有副作用 (如计数器自增、状态修改)。
+
+**已实现**：`ScreenerView.handle_resize` (刷新表格视口)。
+**待补实现**：`BacktestView`、`DataExplorerView`、`HomeView` (空方法)、`TaskCenterView` (空方法)、`SettingsView` (空方法)。
+
+#### 规范 4：控件宽度策略 — expand 优先，禁止裸硬编码
+
+| 场景 | 允许 | 禁止 |
+|------|------|------|
+| 容器内自适应控件 | `expand=True` | `width=200` 等裸数字 |
+| 侧栏内表单控件 | `AppStyles.COL_HALF` / `COL_FULL` 配合 `ResponsiveRow` | `width=AppStyles.CONTROL_WIDTH_MD` |
+| Dialog / 弹窗内控件 | `AppStyles.CONTROL_WIDTH_LG` 等常量 | 裸数字 (但 Dialog 场景尺寸相对固定，可放宽) |
+| 图标/进度条等装饰性元素 | 固定小尺寸 (如 `width=20`) | — |
+
+**例外**：`AppStyles.CONTROL_WIDTH_*` 常量可用于**顶层全宽 Row** 中的独立控件——即该 Row 不嵌套在任何固定/动态宽度容器 (侧栏、卡片面板) 内，宽度由 body 内容区直接决定。例如 `BacktestView` 的 `strategy_dropdown` 位于左右分栏之上的全宽行，`width=CONTROL_WIDTH_LG` 合理。嵌套在侧栏内的 Row 不属于顶层全宽 Row。
+
+#### 规范 5：ResponsiveRow 强制配置 col — 禁止无 col 的 ResponsiveRow
+
+`ft.ResponsiveRow` 必须为每个子 `Column`/`Container` 指定 `col` 参数，使用 `AppStyles.COL_*` 常量。
+
+```python
+# ✅ 正确
+ft.ResponsiveRow(
+    [ft.Column([control], col=AppStyles.COL_HALF)],
+)
+
+# ❌ 错误 — 退化为纵向 Column，浪费横向空间
+ft.ResponsiveRow([ft.Column([control])])
+```
+
+**侧栏 (固定/动态宽度容器) 内**：只能使用 `COL_HALF` 或 `COL_FULL`，禁止 `COL_THIRD`/`COL_QUARTER` (侧栏宽度不足以支撑 3+ 列)。
+
+#### 规范 6：scroll 兜底 — 作为最后防线而非主要手段
+
+- 工具栏等横向密集区域应在 `ft.Row` 上设置 `scroll=ft.ScrollMode.AUTO` 作为兜底。
+- 但 **scroll 不得作为掩盖布局缺陷的手段**：若控件累计宽度经常超过容器宽度，应优先改用 `ResponsiveRow` 或 `wrap=True`。
+- `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.padding.only(right=8)` 避免内容与滚动条重叠。
+
+#### 规范 7：max_width 约束 — 防止超宽屏内容过度拉伸
+
+在 `ui/app_layout.py` 的 `body` Container 上设置最大宽度，防止 4K 屏内容全宽铺开导致阅读困难。
+
+**实现方式**：在 `AppLayout._handle_resize()` 中统一处理 (而非每个视图各自处理)。注意 Flet 的 `Container.alignment` 控制的是**内容在 Container 内的对齐**，不是 Container 自身在父容器中的对齐。因此 `body` 设置 `width` 后需要用外层 Row 的 `alignment` 来实现居中：
+
+```python
+# ui/app_layout.py — 常量
+MAX_CONTENT_WIDTH = 2200  # 4K 屏内容区最大宽度
+
+# ui/app_layout.py — _init_ui 中，main_layout Row 包裹 body
+# main_layout = ft.Row([nav_rail, divider, body_wrapper], expand=True)
+# body_wrapper = ft.Row([body], alignment=ft.MainAxisAlignment.CENTER)  # 居中容器
+
+async def _handle_resize(self):
+    # ... 现有防抖逻辑 ...
+    if self.page:
+        nav_width = 80 if self._nav_collapsed else 180
+        available = self.page.width - nav_width - 1  # 减去 divider
+        body_width = min(available, MAX_CONTENT_WIDTH)
+        if self.body.width != body_width:
+            self.body.width = body_width
+            self.body.update()
+    # ... 现有 handle_resize 分发 ...
+```
+
+> **关键**：`body` 的父容器 (main_layout Row) 需通过 `alignment=ft.MainAxisAlignment.CENTER` 实现居中。若 `body.width < available`，Row 会将 body 居中显示；若 `body.width == available`，Row 铺满。
+
+#### 规范 8：触发时机完整性 — 任何改变内容区宽度的操作都必须分发 resize
+
+`AppLayout._handle_resize()` 是 resize 事件的唯一分发入口。**任何改变内容区可用宽度的操作**，不仅是窗口拖拽，都必须触发 `schedule_resize()` 分发，否则视图会基于过时的 `page.width` 渲染。
+
+当前状态：
+
+| 操作 | 状态 | 说明 |
+|------|------|------|
+| 窗口拖拽 | ✅ 已修复 | `page.on_resized` → `schedule_resize(width, height)` → 100ms 防抖 → `handle_resize(width, height)` |
+| **nav_rail 折叠/展开** (`_toggle_nav`) | ✅ 已修复 | `_toggle_nav` 末尾调用 `schedule_resize()` (复用缓存尺寸) |
+| **tab 切换挂载新视图** | ✅ 已修复 | `_execute_tab_switch` 中 `refresh_locale` 后追加 `handle_resize` 兜底 |
+| **i18n 语言切换** | ✅ 已修复 | `_on_locale_change` 末尾调用 `schedule_resize()` 重新验证布局 |
+| 侧栏显隐切换 (如 `ScreenerView` history_tree) | 视图内部处理 | 视图内部处理可接受 |
+
+**实现方式** (已完成)：
+
+```python
+# main.py — on_resized 回调，传递实时尺寸
+async def _on_resize(e):
+    # ...
+    width = getattr(e, "width", 0) or 0
+    height = getattr(e, "height", 0) or 0
+    layout.schedule_resize(width, height)
+
+page.on_resized = _on_resize  # 注意：是 on_resized (带 d)
+
+# ui/app_layout.py — _toggle_nav 末尾
+def _toggle_nav(self, e):
+    # ... 现有折叠/展开逻辑 ...
+    self.schedule_resize()  # 复用缓存尺寸，不传新参数
+
+# ui/app_layout.py — _execute_tab_switch 中，refresh_locale 之后
+if hasattr(new_view, "handle_resize"):
+    new_view.handle_resize(self._current_width, self._current_height)
+
+# ui/app_layout.py — _on_locale_change 末尾
+self.schedule_resize()  # 语言切换后重新验证布局
+```
+
+#### 规范 9：高度维度 — 对高度敏感的视图必须响应 `page.height`
+
+规范 1-8 仅关注宽度，但 `min_height=640` 下多个视图存在高度维度问题：
+
+- `BacktestView` 配置面板内容溢出 (scroll 兜底，但用户需大量滚动)
+- `DataExplorerView` 表格每页行数固定，低高度下只能看到 3-4 行
+- 图表区在低高度下被压缩到不可读
+
+**要求**：对高度敏感的视图 (含图表、表格、长表单) 必须在 `handle_resize` 中同时处理 `height` 参数：
+
+```python
+def handle_resize(self, width: float = 0, height: float = 0) -> None:
+    if not width:
+        return
+    try:
+        # 宽度维度
+        new_sidebar = AppStyles.get_sidebar_width(width)
+        if self._sidebar_container.width != new_sidebar:
+            self._sidebar_container.width = new_sidebar
+            self._sidebar_container.update()
+        # 高度维度 (对高度敏感的视图)
+        if height and height < 720:  # 紧凑高度
+            self._table_page_size = 10  # 减少可见行数
+        elif height:
+            self._table_page_size = 20
+    except Exception as e:
+        logger.debug("[%s] handle_resize skipped: %s", self.__class__.__name__, e)
+```
+
+**判定标准**：视图包含以下元素之一即为"高度敏感"：
+- `ft.DataTable` / 虚拟表格 (行数受高度影响)
+- 图表组件 (最小可读高度)
+- 超过 5 个表单项的长表单 (低高度下需折叠或分页)
+
+#### 规范 10：i18n 与响应式交互 — 语言切换后必须重新验证布局
+
+语言切换后文案长度变化 (中文"调仓频率"4 字 vs 英文"Rebalance Frequency"18 字符)，可能导致之前不溢出的布局突然溢出。
+
+**要求**：`refresh_locale()` 完成 content 重建后，若视图实现了 `handle_resize`，必须一并调用以重新验证布局。
+
+**实现方式** (已完成)：在 `AppLayout` 的 i18n 订阅回调中，`refresh_locale` 之后追加 `schedule_resize`：
+
+```python
+# ui/app_layout.py — _on_locale_change 末尾
+def _on_locale_change(self):
+    # ... 现有 refresh_locale 逻辑 ...
+    # 语言切换后文案长度变化可能导致布局溢出，触发 resize 重新验证布局
+    self.schedule_resize()  # 复用缓存尺寸
+```
+
+> **注意**：`refresh_locale` 重建 content 后控件树变化，`handle_resize` 中对控件属性的引用必须基于新 content。若 `handle_resize` 通过索引访问控件 (如 `self.content.controls[4].controls[0]`)，需确保索引在重建后仍然有效。推荐在视图上保存控件引用 (如 `self._sidebar_container`) 而非依赖索引。
+
+### 判定决策树
+
+按顺序自问，命中则需遵守对应子规范：
+
+```
+我的视图/组件包含布局控件吗？
+├─ 有左右分栏 (sidebar + main) 吗？
+│   └─ 是 → 规范 2 (侧栏动态宽度) + 规范 3 (handle_resize)
+├─ 有 ft.ResponsiveRow 吗？
+│   └─ 是 → 规范 5 (强制配置 col)
+├─ ResponsiveRow 在侧栏/固定宽度容器内吗？
+│   └─ 是 → 只用 COL_HALF / COL_FULL (规范 5)
+├─ 有硬编码 width=数字 的控件吗？
+│   └─ 是 → 改为 expand=True 或 AppStyles 常量 (规范 4)
+├─ 有 scroll=ft.ScrollMode.AUTO 的 Column 吗？
+│   └─ 是 → 设置 padding=ft.padding.only(right=8) (规范 6)
+├─ 有改变内容区宽度的操作 (nav 折叠、tab 切换) 吗？
+│   └─ 是 → 规范 8 (触发时机完整性)
+├─ 含表格/图表/长表单等高度敏感元素吗？
+│   └─ 是 → 规范 9 (高度维度)
+├─ 视图展示 i18n 文案吗？
+│   └─ 是 → 规范 10 (i18n 与响应式交互)
+└─ 视图在 960×640 最小窗口下验证过吗？
+    └─ 是 → 确认无溢出、无截断、无重叠 (规范 1 断点验证)
+```
+
+### 标准 View 检查清单
+
+新增/修改视图时，对照此清单逐项确认：
+
+- [ ] 视图在 960×640 最小窗口下无横向溢出、无纵向截断 (内容区净宽 ~739px)
+- [ ] 视图在 1280×800 默认窗口下布局合理 (内容区净宽 ~1059px)
+- [ ] 视图在 1920×1080 宽屏下不出现内容过度拉伸
+- [ ] 视图已实现 `handle_resize()` (含分栏布局的须有实际逻辑，纯纵向的须有空方法)
+- [ ] `handle_resize` 遵守性能约束 (无重建 content、无 IO、局部更新、幂等)
+- [ ] 侧栏宽度通过 `AppStyles.get_sidebar_width()` 动态计算，非硬编码
+- [ ] 所有 `ResponsiveRow` 子元素已配置 `col` 参数 (使用 `AppStyles.COL_*` 常量)
+- [ ] 侧栏内的 `ResponsiveRow` 只使用 `COL_HALF` 或 `COL_FULL`
+- [ ] 无裸 `width=数字` 硬编码 (Dialog 场景除外)
+- [ ] `scroll=ft.ScrollMode.AUTO` 的 Column 已设置右侧 padding 避让滚动条
+- [ ] 控件在 `refresh_locale()` 重建 content 后，Container 层级样式 (bgcolor/border 等) 不丢失
+- [ ] `handle_resize` 中控件引用基于实例属性 (如 `self._sidebar_container`)，不依赖 content 索引
+
+### 现有视图合规状态 (截至 2026-06-29)
+
+| 视图 | 合规状态 | 待修复项 |
+|------|---------|---------|
+| `HomeView` | ⚠️ 部分 | 未实现 `handle_resize` (需补空方法) |
+| `ScreenerView` | ⚠️ 部分 | 参数面板 3×`width=200` 无 wrap；已实现 `handle_resize` |
+| `BacktestView` | ❌ 不合规 | `expand=1/2` 比例分栏；Slider `width=200` 硬编码；未实现 `handle_resize` |
+| `DataExplorerView` | ⚠️ 部分 | 工具栏累计 ~840px 硬编码 (有 scroll 兜底)；新闻 cell `width=400` 反模式；未实现 `handle_resize`；高度敏感未处理 |
+| `TaskCenterView` | ⚠️ 部分 | 双重 padding (body 20px + view 20px)；未实现 `handle_resize` (需补空方法) |
+| `SettingsView` | ⚠️ 部分 | 未实现 `handle_resize` (需补空方法) |
+| `MarketDashboard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，4 张卡退化为纵向堆叠 |
+| `OnboardingWizard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，6 张卡纵向堆叠 |
+| `AppLayout` | ✅ 已修复 | `on_resized` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
+
+### 测试要求
+
+新增/修改视图的响应式布局时，必须编写以下测试：
+
+1. **断点函数单元测试**：`AppStyles.get_breakpoint()` 和 `get_sidebar_width()` 的边界值覆盖 (959/960/1199/1200/1599/1600/2399/2400/None)。
+2. **handle_resize 单元测试**：调用 `handle_resize(width, height)` 传入各断点值 (959/960/1199/1200/1599/1600/2399/2400)，断言侧栏 Container 的 `width` 属性变化正确；断言相同参数多次调用结果不变 (幂等性)；断言 `width=0` 时提前返回不修改布局。
+3. **handle_resize 性能约束测试**：mock 后断言 `handle_resize` 内未调用 `self.content = ...` (重建 content)、未调用数据库/文件 IO 方法。
+4. **handle_resize 异常降级测试**：mock 控件引用为 None 或抛异常，断言 `handle_resize` 不抛出 (降级为 `logger.debug`)。
+5. **空方法验证**：纯纵向视图 (HomeView 等) 必须断言 `hasattr(view, "handle_resize")` 为 True，即使为空方法。
+6. **960×640 最小窗口布局验证** (手工或 E2E)：确认无横向溢出、无控件截断、无滚动条与控件重叠。
+
 ## 标准开发工作流 (How-To)
 
 ### 1. 新增一张数据表
@@ -942,6 +1293,7 @@ def _rebuild_steps_after_locale_change(self):
 4. UI 事件回调使用 `@log_ui_action` 装饰器埋点。
 5. 异步耗时操作必须通过 `ThreadPoolManager.run_async()` 或 `TaskManager.submit_task()` 提交。
 6. 若视图展示 i18n 文案，必须遵守 [语言切换响应 (I18n Hot Reload)](#语言切换响应-i18n-hot-reload)。
+7. 若视图含分栏布局或依赖窗口尺寸，必须实现 `handle_resize()` 并遵守 [响应式布局规范 (Responsive Layout)](#响应式布局规范-responsive-layout)。对照标准 View 检查清单逐项确认。
 
 ### 5. 新增一个外部数据源
 

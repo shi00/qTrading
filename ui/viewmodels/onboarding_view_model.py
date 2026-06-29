@@ -15,6 +15,7 @@ from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error, get_error_message
+from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
 
 logger = logging.getLogger(__name__)
@@ -323,13 +324,19 @@ class OnboardingViewModel:
         if self.on_schedule_time_normalized:
             self.on_schedule_time_normalized(time_str)
 
-        ConfigHandler.save_config(
-            {
-                "auto_update_enabled": enabled,
-                "auto_update_time": time_str,
-            }
-        )
-        return True
+        try:
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.save_config,
+                {
+                    "auto_update_enabled": enabled,
+                    "auto_update_time": time_str,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error("[OnboardingVM] Save schedule failed: %s", e, exc_info=True)
+            return False
 
     def set_schedule_state(self, enabled: bool, time_str: str):
         self._schedule_enabled = enabled

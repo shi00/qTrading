@@ -121,29 +121,30 @@ def generate_kline_png(
     dpi = 100
     figsize = (width / dpi, height / dpi)
 
-    mpf.plot(
-        chart_df,
-        type="candle",
-        style=style,
-        title=title,
-        mav=mav,
-        volume=has_volume,
-        figsize=figsize,
-        tight_layout=True,
-        savefig=dict(fname=buf, dpi=dpi, bbox_inches="tight"),
-    )
-    buf.seek(0)
+    try:
+        mpf.plot(
+            chart_df,
+            type="candle",
+            style=style,
+            title=title,
+            mav=mav,
+            volume=has_volume,
+            figsize=figsize,
+            tight_layout=True,
+            savefig=dict(fname=buf, dpi=dpi, bbox_inches="tight"),
+        )
+        buf.seek(0)
 
-    # ── 5. Base64 encode ─────────────────────────────────────────
-    b64 = base64.b64encode(buf.read()).decode("ascii")
-    buf.close()
+        # ── 5. Base64 encode ─────────────────────────────────────
+        b64 = base64.b64encode(buf.read()).decode("ascii")
+        return b64
+    finally:
+        # 确保异常路径也释放资源（M17）
+        buf.close()
+        # ── 6. Cleanup matplotlib figures to prevent memory leak ─
+        import matplotlib.pyplot as plt
 
-    # ── 6. Cleanup matplotlib figures to prevent memory leak ─────
-    import matplotlib.pyplot as plt
-
-    plt.close("all")
-
-    return b64
+        plt.close("all")
 
 
 # ── Legacy compatibility wrappers (kept for any external callers) ──

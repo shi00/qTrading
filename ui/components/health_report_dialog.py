@@ -621,6 +621,7 @@ class HealthScanDialog(ft.AlertDialog):
         self._data_processor = data_processor
         self._locale_subscription_id: object | None = None
         self._last_result: dict | None = None
+        self._progress_futures: set = set()
         # 缓存对话框尺寸
         self._cached_width, self._cached_height = self._dialog_size()
         self.progress_bar = ft.ProgressBar(
@@ -680,6 +681,10 @@ class HealthScanDialog(ft.AlertDialog):
         if self._locale_subscription_id is not None:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
+        for f in list(self._progress_futures):
+            if not f.done():
+                f.cancel()
+        self._progress_futures.clear()
 
     def refresh_locale(self):
         """Refresh i18n text on locale change (pure UI)."""
@@ -704,7 +709,9 @@ class HealthScanDialog(ft.AlertDialog):
 
             def on_progress(current, total, msg):
                 # Schedule UI update on main event loop instead of direct cross-thread call
-                asyncio.run_coroutine_threadsafe(self._update_progress(current, total, msg), loop)
+                fut = asyncio.run_coroutine_threadsafe(self._update_progress(current, total, msg), loop)
+                self._progress_futures.add(fut)
+                fut.add_done_callback(self._progress_futures.discard)
 
             result = await self._data_processor.run_quality_scan(
                 sample_size=50,
@@ -713,6 +720,10 @@ class HealthScanDialog(ft.AlertDialog):
             self.show_results(result)
         except Exception as ex:
             logger.error("[HealthScanDialog] Scan failed: %s", ex, exc_info=True)
+            for f in list(self._progress_futures):
+                if not f.done():
+                    f.cancel()
+            self._progress_futures.clear()
             self.status_text.value = I18n.get("db_err_format")
             self.page_ref.update()
 

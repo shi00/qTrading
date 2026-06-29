@@ -7,6 +7,7 @@ from ui.components.settings_widgets import DashboardCard, SettingRow
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -344,55 +345,119 @@ class AutomationTab(ft.Container):
 
     def on_schedule_toggle(self, e):
         """处理自动更新开关切换"""
-        enabled = self.schedule_enabled.value
-        ConfigHandler.save_config({"auto_update_enabled": enabled})
-        self.schedule_status.value = self._get_schedule_status_text(enabled)
-        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-        self.schedule_time.disabled = not enabled
-        self.update()
-        if self.show_snack:
-            self.show_snack(
-                I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
+        if self.page:
+            self.page.run_task(self._do_schedule_toggle_async)
+
+    async def _do_schedule_toggle_async(self):
+        try:
+            enabled = self.schedule_enabled.value
+            await ThreadPoolManager().run_async(
+                TaskType.IO, ConfigHandler.save_config, {"auto_update_enabled": enabled}
             )
+            self.schedule_status.value = self._get_schedule_status_text(enabled)
+            self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+            self.schedule_time.disabled = not enabled
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(
+                    I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
+                )
+        except Exception as ex:
+            logger.error("[AutomationTab] schedule toggle save failed: %s", ex, exc_info=True)
+            self.schedule_enabled.value = not enabled
+            self.schedule_time.disabled = enabled
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_schedule_time_change(self, e):
         """处理更新时间变更"""
-        selected_time = self.schedule_time.value
-        ConfigHandler.save_config({"auto_update_time": selected_time})
-        self.update()
-        if self.show_snack:
-            self.show_snack(
-                I18n.get("settings_snack_time_set").format(time=selected_time),
+        if self.page:
+            self.page.run_task(self._do_schedule_time_change_async)
+
+    async def _do_schedule_time_change_async(self):
+        try:
+            selected_time = self.schedule_time.value
+            await ThreadPoolManager().run_async(
+                TaskType.IO, ConfigHandler.save_config, {"auto_update_time": selected_time}
             )
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(
+                    I18n.get("settings_snack_time_set").format(time=selected_time),
+                )
+        except Exception as ex:
+            logger.error("[AutomationTab] schedule time save failed: %s", ex, exc_info=True)
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_ai_concept_toggle(self, e):
-        enabled = self.ai_concept_enabled.value
-        ConfigHandler.set_ai_concept_schedule_enabled(enabled)
-        self.ai_concept_status.value = self._get_schedule_status_text(enabled)
-        self.ai_concept_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-        self.ai_concept_time.disabled = not enabled
-        self.ai_concept_search_engine.disabled = not enabled
-        self.update()
-        if self.show_snack:
-            self.show_snack(
-                I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
-            )
+        if self.page:
+            self.page.run_task(self._do_ai_concept_toggle_async)
+
+    async def _do_ai_concept_toggle_async(self):
+        try:
+            enabled = self.ai_concept_enabled.value
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_ai_concept_schedule_enabled, enabled)
+            self.ai_concept_status.value = self._get_schedule_status_text(enabled)
+            self.ai_concept_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
+            self.ai_concept_time.disabled = not enabled
+            self.ai_concept_search_engine.disabled = not enabled
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(
+                    I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
+                )
+        except Exception as ex:
+            logger.error("[AutomationTab] ai concept toggle save failed: %s", ex, exc_info=True)
+            self.ai_concept_enabled.value = not enabled
+            self.ai_concept_time.disabled = enabled
+            self.ai_concept_search_engine.disabled = enabled
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_ai_concept_time_change(self, e):
-        selected_time = self.ai_concept_time.value
-        ConfigHandler.set_ai_concept_schedule_time(selected_time)  # type: ignore[untyped]
-        self.update()
-        if self.show_snack:
-            self.show_snack(
-                I18n.get("settings_snack_time_set").format(time=selected_time),
+        if self.page:
+            self.page.run_task(self._do_ai_concept_time_change_async)
+
+    async def _do_ai_concept_time_change_async(self):
+        try:
+            selected_time = self.ai_concept_time.value
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.set_ai_concept_schedule_time,
+                selected_time,  # type: ignore[untyped]
             )
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(
+                    I18n.get("settings_snack_time_set").format(time=selected_time),
+                )
+        except Exception as ex:
+            logger.error("[AutomationTab] ai concept time save failed: %s", ex, exc_info=True)
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_ai_concept_search_engine_change(self, e):
-        selected_engine = self.ai_concept_search_engine.value
-        ConfigHandler.set_ai_concept_search_engine(selected_engine)  # type: ignore[untyped]
-        self.update()
-        if self.show_snack:
-            self.show_snack(I18n.get("common_saved"))
+        if self.page:
+            self.page.run_task(self._do_ai_concept_search_engine_change_async)
+
+    async def _do_ai_concept_search_engine_change_async(self):
+        try:
+            selected_engine = self.ai_concept_search_engine.value
+            await ThreadPoolManager().run_async(
+                TaskType.IO,
+                ConfigHandler.set_ai_concept_search_engine,
+                selected_engine,  # type: ignore[untyped]
+            )
+            self._safe_update()
+            if self.show_snack:
+                self.show_snack(I18n.get("common_saved"))
+        except Exception as ex:
+            logger.error("[AutomationTab] ai concept search engine save failed: %s", ex, exc_info=True)
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
 
 class NotificationsTab(ft.Container):
@@ -548,27 +613,50 @@ class NotificationsTab(ft.Container):
 
     def on_news_toggle(self, e):
         """处理新闻推送开关切换"""
-        enabled = self.news_alerts_enabled.value
-        ConfigHandler.save_config({"enable_news_alerts": enabled})
+        page = self._page_ref() if self._page_ref else None
+        if page:
+            page.run_task(self._do_news_toggle_async)
 
-        # Update visibility -> disabled state for UI consistency
-        self.news_interval.disabled = not enabled
-        self.update()
+    async def _do_news_toggle_async(self):
+        try:
+            enabled = self.news_alerts_enabled.value
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"enable_news_alerts": enabled})
+            # Update visibility -> disabled state for UI consistency
+            self.news_interval.disabled = not enabled
+            self._safe_update()
 
-        if enabled:
+            if enabled:
+                if self.show_snack:
+                    self.show_snack(I18n.get("settings_snack_news_on"))
+            elif self.show_snack:
+                self.show_snack(I18n.get("settings_snack_news_off"))
+        except Exception as ex:
+            logger.error("[NotificationsTab] news toggle save failed: %s", ex, exc_info=True)
+            self.news_alerts_enabled.value = not enabled
+            self.news_interval.disabled = enabled
+            self._safe_update()
             if self.show_snack:
-                self.show_snack(I18n.get("settings_snack_news_on"))
-        elif self.show_snack:
-            self.show_snack(I18n.get("settings_snack_news_off"))
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_interval_change(self, e):
         """处理拉取间隔变更"""
+        page = self._page_ref() if self._page_ref else None
+        if page:
+            page.run_task(self._do_interval_change_async)
+
+    async def _do_interval_change_async(self):
         try:
             val = int(self.news_interval.value)  # type: ignore[untyped]
-            ConfigHandler.save_config({"news_poll_interval": val})
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"news_poll_interval": val})
             if self.show_snack:
                 self.show_snack(
                     I18n.get("settings_snack_interval_set").format(interval=val),
                 )
         except ValueError:
-            pass
+            logger.warning("[NotificationsTab] interval invalid value: %s", self.news_interval.value)
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except Exception as ex:
+            logger.error("[NotificationsTab] interval save failed: %s", ex, exc_info=True)
+            if self.show_snack:
+                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)

@@ -11,6 +11,40 @@ from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 pytestmark = pytest.mark.unit
 
 
+# --- ThreadPoolManager passthrough helper ---
+
+
+async def _run_async_passthrough(task_type, func, *args, **kwargs):
+    """Mock helper: 立即同步执行 func 并返回结果，模拟线程池 offload。"""
+    return func(*args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _mock_thread_pool_for_panels():
+    """Patch tushare/database/local_model config panel 模块级 ThreadPoolManager，run_async 直接同步执行。
+
+    autouse：所有 verify_token / save_config / _on_save_click 路径均经 ThreadPoolManager offload，
+    需统一 mock 避免触达真实线程池单例。仅作用于此三个模块，不影响 LLM 面板。
+    """
+    mock_tpm = MagicMock()
+    mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
+    with (
+        patch(
+            "ui.components.config_panels.tushare_config_panel.ThreadPoolManager",
+            return_value=mock_tpm,
+        ),
+        patch(
+            "ui.components.config_panels.database_config_panel.ThreadPoolManager",
+            return_value=mock_tpm,
+        ),
+        patch(
+            "ui.components.config_panels.local_model_config_panel.ThreadPoolManager",
+            return_value=mock_tpm,
+        ),
+    ):
+        yield mock_tpm
+
+
 @pytest.fixture
 def mock_ch_for_panels():
     with patch("ui.components.config_panels.tushare_config_panel.ConfigHandler") as m:
@@ -481,7 +515,8 @@ class TestLLMConfigPanel:
 
         assert result is False
 
-    def test_save_current_config_calls_config_handler(
+    @pytest.mark.asyncio
+    async def test_save_current_config_calls_config_handler(
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
@@ -490,7 +525,7 @@ class TestLLMConfigPanel:
         panel.base_url_input.value = "https://api.deepseek.com"
         panel.api_key_input.value = "sk-test"
 
-        result = panel.save_current_config()
+        result = await panel.save_current_config()
 
         assert result is True
         mock_config_handler_llm.save_llm_config.assert_called_once()
@@ -528,7 +563,8 @@ class TestLLMConfigPanel:
     def test_normalize_base_url_empty_returns_empty(self):
         assert LLMConfigPanel._normalize_base_url("") == ""
 
-    def test_provider_change_loads_key_without_marking_modified(
+    @pytest.mark.asyncio
+    async def test_provider_change_loads_key_without_marking_modified(
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
@@ -537,7 +573,7 @@ class TestLLMConfigPanel:
             "base_url": "https://api.deepseek.com",
         }
 
-        panel._on_provider_change(MagicMock(control=MagicMock(value="deepseek")))
+        await panel._on_provider_change_async(MagicMock(control=MagicMock(value="deepseek")))
 
         assert panel.api_key_input.value == "sk-stored"
         assert panel.api_key_modified is False
@@ -779,7 +815,8 @@ class TestLocalModelConfigPanel:
 
         assert result is True
 
-    def test_on_save_click_calls_save_and_on_save(self, mock_config_handler_local, mock_i18n_local, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_save_click_calls_save_and_on_save(self, mock_config_handler_local, mock_i18n_local, mock_page):
         on_save = MagicMock()
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_save=on_save)
         panel.model_path_input.value = "/models/test.gguf"
@@ -791,7 +828,8 @@ class TestLocalModelConfigPanel:
         panel.ctx_input.value = "4096"
         panel.flash_attn_switch.value = True
 
-        panel._on_save_click(MagicMock())
+        # MockFletPage.run_task 不执行协程，直接 await 验证协程执行结果
+        await panel._do_save_click_async()
 
         mock_config_handler_local.save_local_ai_config.assert_called_once()
         on_save.assert_called_once()
@@ -1183,32 +1221,41 @@ class TestLLMConfigPanelExtended:
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         assert panel.refresh_models_button.visible is True
 
-    def test_on_provider_change_to_azure(self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_provider_change_to_azure(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         e = MagicMock()
         e.control.value = "azure"
-        panel._on_provider_change(e)
+        await panel._on_provider_change_async(e)
         assert panel._is_azure is True
         assert panel._current_provider == "azure"
         assert panel.custom_model_input.visible is False
         assert panel.refresh_models_button.visible is False
 
-    def test_on_provider_change_to_custom(self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_provider_change_to_custom(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         e = MagicMock()
         e.control.value = "custom"
-        panel._on_provider_change(e)
+        await panel._on_provider_change_async(e)
         assert panel._is_azure is False
         assert panel._current_provider == "custom"
         assert panel.custom_model_input.visible is True
         assert panel.model_dropdown.visible is False
         assert panel.refresh_models_button.visible is True
 
-    def test_on_provider_change_to_openai(self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_provider_change_to_openai(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         e = MagicMock()
         e.control.value = "openai"
-        panel._on_provider_change(e)
+        await panel._on_provider_change_async(e)
         assert panel._is_azure is False
         assert panel._current_provider == "openai"
         assert panel.custom_model_input.visible is False
@@ -1216,7 +1263,8 @@ class TestLLMConfigPanelExtended:
         assert panel.refresh_models_button.visible is True
         assert panel.model_dropdown.value == "gpt-4o"
 
-    def test_on_provider_change_resets_api_key(
+    @pytest.mark.asyncio
+    async def test_on_provider_change_resets_api_key(
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
         """切换到新供应商（无已存储凭证）时清空 API Key"""
@@ -1230,11 +1278,12 @@ class TestLLMConfigPanelExtended:
         }
         e = MagicMock()
         e.control.value = "openai"
-        panel._on_provider_change(e)
+        await panel._on_provider_change_async(e)
         assert panel.api_key_input.value == ""
         assert panel._api_key_modified is False
 
-    def test_on_provider_change_loads_stored_credential(
+    @pytest.mark.asyncio
+    async def test_on_provider_change_loads_stored_credential(
         self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
     ):
         """切换到已配置过的供应商时加载已存储的凭证 (Fix 3)"""
@@ -1246,7 +1295,7 @@ class TestLLMConfigPanelExtended:
         }
         e = MagicMock()
         e.control.value = "openai"
-        panel._on_provider_change(e)
+        await panel._on_provider_change_async(e)
         assert panel.api_key_input.value == "stored_openai_key"
         # Loading stored credential should NOT mark as modified - only user edits trigger modification
         assert panel._api_key_modified is False
@@ -1627,17 +1676,23 @@ class TestLLMConfigPanelExtended:
             await panel._save_config()
         on_save.assert_called_once()
 
-    def test_save_current_config_exception(self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_current_config_exception(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
         panel.provider_dropdown.value = "deepseek"
         panel.model_dropdown.value = "deepseek-chat"
         panel.base_url_input.value = "https://api.deepseek.com"
         panel.api_key_input.value = "sk-test"
         mock_config_handler_llm.save_llm_config.side_effect = Exception("save error")
-        result = panel.save_current_config()
+        result = await panel.save_current_config()
         assert result is False
 
-    def test_save_current_config_azure(self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page):
+    @pytest.mark.asyncio
+    async def test_save_current_config_azure(
+        self, mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page
+    ):
         mock_config_handler_llm.get_llm_config.return_value = {
             "provider": "azure",
             "model": "deploy",
@@ -1648,7 +1703,7 @@ class TestLLMConfigPanelExtended:
             "api_version": "2024-02-01",
         }
         panel = _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page)
-        result = panel.save_current_config()
+        result = await panel.save_current_config()
         assert result is True
         call_kwargs = mock_config_handler_llm.save_llm_config.call_args.kwargs
         assert call_kwargs["api_version"] == "2024-02-01"
@@ -1833,7 +1888,8 @@ class TestLocalModelConfigPanelExtended:
         panel._on_file_picked(mock_event)
         on_change.assert_called_once()
 
-    def test_on_save_click_calls_on_save(self, mock_config_handler_local, mock_i18n_local, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_save_click_calls_on_save(self, mock_config_handler_local, mock_i18n_local, mock_page):
         on_save = MagicMock()
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_save=on_save)
         panel.model_path_input.value = "/path/to/model.gguf"
@@ -1844,7 +1900,8 @@ class TestLocalModelConfigPanelExtended:
         panel.batch_input.value = "512"
         panel.ctx_input.value = "4096"
         panel.flash_attn_switch.value = True
-        panel._on_save_click(None)
+        # MockFletPage.run_task 不执行协程，直接 await 验证协程执行结果
+        await panel._do_save_click_async()
         on_save.assert_called_once()
 
     def test_did_mount_adds_file_picker(self, mock_config_handler_local, mock_i18n_local, mock_page):

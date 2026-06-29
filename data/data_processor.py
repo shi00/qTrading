@@ -21,7 +21,7 @@ from data.sync.macro import MacroSyncStrategy
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.loop_local import get_loop_local
+from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
@@ -56,6 +56,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         with cls._lock:
             cls._instance = None
             cls._initialized = False
+
+        del_loop_local("processor_cancel_evt")
 
     @classmethod
     def _atexit_cleanup(cls):
