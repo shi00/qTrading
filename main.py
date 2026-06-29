@@ -65,6 +65,7 @@ async def main(page: ft.Page):
     close_confirm_visible = False
     shutdown_requested = False
     active_dialog = None
+    locale_subscription_id = None
     _scheduled_tasks: set = set()
 
     def _schedule_async(coro):
@@ -173,6 +174,21 @@ async def main(page: ft.Page):
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
+    def _refresh_close_dialog_locale():
+        try:
+            if close_confirm_dialog:
+                close_confirm_dialog.title.value = I18n.get("exit_confirm_title")
+                close_confirm_dialog.content.value = I18n.get("exit_confirm_content")
+                if len(close_confirm_dialog.actions) >= 2:
+                    close_confirm_dialog.actions[0].text = I18n.get("common_cancel")
+                    close_confirm_dialog.actions[1].text = I18n.get("common_confirm")
+                if close_confirm_visible:
+                    close_confirm_dialog.update()
+        except Exception as e:
+            logger.warning("[Main] Failed to update close confirm dialog locale: %s", e)
+
+    locale_subscription_id = I18n.subscribe(_refresh_close_dialog_locale, sync_immediately=False)
+
     def _show_close_confirm_dialog():
         nonlocal close_confirm_visible
         logger.debug(
@@ -228,6 +244,8 @@ async def main(page: ft.Page):
     page.on_resize = _on_resize
 
     async def _on_disconnect(e):
+        if locale_subscription_id is not None:
+            I18n.unsubscribe(locale_subscription_id)
         coordinator.start_watchdog(25)
         cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
 
