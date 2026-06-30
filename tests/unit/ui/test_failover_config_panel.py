@@ -871,7 +871,7 @@ class TestFailoverConfigPanelLifecycle:
             patch.object(panel, "_build_ui") as mock_build_ui,
             patch.object(panel, "_render_list") as mock_render_list,
         ):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         mock_build_ui.assert_called_once()
         mock_render_list.assert_called_once()
         # 不应再调用 load_config（即不触发 _load_config）
@@ -910,7 +910,7 @@ class TestFailoverConfigPanelLifecycle:
         assert len(items_before) == 2
 
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
 
         # 调用后 _failover_items 内容必须保持不变（不重新 _load_config）
         items_after = [(item.provider, item.model, item.has_credential) for item in panel._failover_items]

@@ -528,7 +528,7 @@ class DatabaseConfigPanel(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[DatabaseConfigPanel] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str | None = None):
+    def _on_locale_change(self):
         try:
             saved_values = {
                 "host": self.db_host_input.value,

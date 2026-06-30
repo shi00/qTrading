@@ -402,7 +402,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
             if self._on_confirm:
                 self._on_confirm()
         except Exception as ex:
-            logger.error("[ProviderCredentialDialog] confirm failed: %s", ex, exc_info=True)
+            logger.error(
+                "[ProviderCredentialDialog] confirm failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
 
@@ -781,7 +785,7 @@ class FailoverConfigPanel(ft.Container):
     def will_unmount(self):
         I18n.unsubscribe(self._on_locale_change)
 
-    def _on_locale_change(self, new_locale: str | None = None):
+    def _on_locale_change(self):
         try:
             self._build_ui()  # 仅重建 UI 控件文本，不重新加载配置
             # 注意：不调用 _load_config()，保留已有的 _failover_items 数据

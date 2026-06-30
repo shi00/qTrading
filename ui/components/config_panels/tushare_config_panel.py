@@ -294,7 +294,8 @@ class TushareConfigPanel(ft.Container):
         try:
             import tushare as ts
 
-            ts.set_token(token)
+            # ts.set_token 写入 ~/tk.csv 文件 (同步文件 IO)，必须 offload
+            await ThreadPoolManager().run_async(TaskType.IO, ts.set_token, token)
             # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
             timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
             temp_pro = ts.pro_api(token=token, timeout=timeout_val)

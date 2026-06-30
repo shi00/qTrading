@@ -581,7 +581,7 @@ class LocalModelConfigPanel(ft.Container):
 
         LocalModelManager.cancel_verification_if_active()
 
-    def _on_locale_change(self, new_locale: str | None = None):
+    def _on_locale_change(self):
         try:
             if hasattr(self, "model_path_input"):
                 self.model_path_input.label = I18n.get("settings_local_model_path")

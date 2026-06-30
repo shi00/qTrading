@@ -1319,7 +1319,8 @@ class ScreenerView(ft.Container):
             from utils.config_handler import ConfigHandler
 
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
-            ctrl_field.value = str(get_base_prompt(strat))
+            # get_base_prompt 内部调用 ConfigHandler.load_config() (同步文件/keyring IO)，必须 offload
+            ctrl_field.value = str(await ThreadPoolManager().run_async(TaskType.IO, get_base_prompt, strat))
             ctrl_field.update()
             if self.page and hasattr(self.page, "show_toast"):
                 self.page.show_toast(  # type: ignore[untyped]

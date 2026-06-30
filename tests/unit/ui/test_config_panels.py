@@ -1785,7 +1785,7 @@ class TestDatabaseConfigPanelExtended:
         panel.db_password_input.value = "mypass"
         panel.db_name_input.value = "mydb"
         panel.db_create_checkbox.value = False
-        panel._on_locale_change("zh_CN")
+        panel._on_locale_change()
         assert panel.db_host_input.value == "myhost"
         assert panel.db_port_input.value == "5433"
         assert panel.db_user_input.value == "myuser"
@@ -1796,7 +1796,7 @@ class TestDatabaseConfigPanelExtended:
     def test_on_locale_change_exception_handled(self, mock_config_handler_db, mock_i18n_db, mock_page):
         panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
         mock_i18n_db.get.side_effect = RuntimeError("i18n error")
-        panel._on_locale_change("zh_CN")
+        panel._on_locale_change()
 
     def test_on_input_change_calls_callback(self, mock_config_handler_db, mock_i18n_db, mock_page):
         on_change = MagicMock()

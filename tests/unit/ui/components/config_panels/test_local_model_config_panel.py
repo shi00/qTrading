@@ -120,7 +120,7 @@ class TestLocalModelConfigPanelLocaleChange:
             patch.object(panel, "_safe_update"),
             patch.object(panel, "_build_ui") as mock_build_ui,
         ):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         mock_build_ui.assert_not_called()
         # 不应再调用 ConfigHandler（即不触发 IO）
         assert mock_config_handler.get_local_ai_config.call_count == initial_cfg_count
@@ -145,7 +145,7 @@ class TestLocalModelConfigPanelLocaleChange:
             mock_page,
         )
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         assert panel.model_path_input.label == "settings_local_model_path"
         assert panel.btn_select_file.text == "settings_btn_select_file"
         assert panel.timeout_input.label == "settings_local_ai_timeout"
@@ -173,7 +173,7 @@ class TestLocalModelConfigPanelLocaleChange:
             mock_page,
         )
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         assert panel.verify_button.text == "wizard_btn_verify_model"
         assert panel.save_button.text == "settings_save_config"
 
@@ -203,7 +203,7 @@ class TestLocalModelConfigPanelLocaleChange:
         panel.gpu_auto_switch.value = False
         panel.flash_attn_switch.value = False
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         # value 不应变
         assert panel.model_path_input.value == "/models/test.gguf"
         assert panel.timeout_input.value == "120"
@@ -231,7 +231,7 @@ class TestLocalModelConfigPanelLocaleChange:
             mock_page,
         )
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         panel._header_text.update_locale.assert_called_once()
 
     def test_on_locale_change_updates_desc_and_advanced(
@@ -253,7 +253,7 @@ class TestLocalModelConfigPanelLocaleChange:
             mock_page,
         )
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         assert panel._desc_text.value == "settings_local_ai_desc"
         assert panel._advanced_title.value == "ai_advanced_settings"
         assert panel._advanced_subtitle.value == "settings_hint_restart"
@@ -277,7 +277,7 @@ class TestLocalModelConfigPanelLocaleChange:
             mock_page,
         )
         with patch.object(panel, "_safe_update") as mock_safe_update:
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         mock_safe_update.assert_called_once()
 
     def test_on_locale_change_preserves_file_picker_instance(
@@ -300,5 +300,5 @@ class TestLocalModelConfigPanelLocaleChange:
         )
         original_file_picker = panel.file_picker
         with patch.object(panel, "_safe_update"):
-            panel._on_locale_change("zh_CN")
+            panel._on_locale_change()
         assert panel.file_picker is original_file_picker

@@ -18,6 +18,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -446,7 +447,11 @@ class DataSourceTab(ft.Container):
             await ThreadPoolManager().run_async(TaskType.IO, self.vm.save_tushare_token, token)
             self.show_snack(I18n.get("settings_msg_saved"), color=AppColors.SUCCESS)
         except Exception as ex:
-            logger.error("[DataSourceTab] Tushare save failed: %s", ex, exc_info=True)
+            logger.error(
+                "[DataSourceTab] Tushare save failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     def on_history_years_change(self, e):

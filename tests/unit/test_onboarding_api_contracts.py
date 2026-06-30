@@ -382,59 +382,46 @@ class TestLocaleChangeSignature:
 
         assert params == ["self"]
 
-    # --- 历史遗留签名（带可选 new_locale 参数，校验存在性与参数列表）---
+    # --- 零参签名（§5.8 规范 2：回调方法签名无参数）---
 
-    def test_database_config_panel_locale_change_accepts_optional_new_locale(self):
-        """DatabaseConfigPanel._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+    def test_database_config_panel_locale_change_is_zero_arg(self):
+        """DatabaseConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
         import inspect
 
         from ui.components.config_panels.database_config_panel import (
             DatabaseConfigPanel,
         )
 
-        assert hasattr(DatabaseConfigPanel, "_on_locale_change")
         sig = inspect.signature(DatabaseConfigPanel._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "self" in params
-        assert "new_locale" in params
-        # new_locale 必须有默认值（可选参数），保证零参调用兼容 I18n.subscribe
-        new_locale_param = sig.parameters["new_locale"]
-        assert new_locale_param.default is not inspect.Parameter.empty
+        assert params == ["self"]
 
-    def test_failover_config_panel_locale_change_accepts_optional_new_locale(self):
-        """FailoverConfigPanel._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+    def test_failover_config_panel_locale_change_is_zero_arg(self):
+        """FailoverConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
         import inspect
 
         from ui.components.config_panels.failover_config_panel import (
             FailoverConfigPanel,
         )
 
-        assert hasattr(FailoverConfigPanel, "_on_locale_change")
         sig = inspect.signature(FailoverConfigPanel._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "self" in params
-        assert "new_locale" in params
-        new_locale_param = sig.parameters["new_locale"]
-        assert new_locale_param.default is not inspect.Parameter.empty
+        assert params == ["self"]
 
-    def test_local_model_config_panel_locale_change_accepts_optional_new_locale(self):
-        """LocalModelConfigPanel._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+    def test_local_model_config_panel_locale_change_is_zero_arg(self):
+        """LocalModelConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
         import inspect
 
         from ui.components.config_panels.local_model_config_panel import (
             LocalModelConfigPanel,
         )
 
-        assert hasattr(LocalModelConfigPanel, "_on_locale_change")
         sig = inspect.signature(LocalModelConfigPanel._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "self" in params
-        assert "new_locale" in params
-        new_locale_param = sig.parameters["new_locale"]
-        assert new_locale_param.default is not inspect.Parameter.empty
+        assert params == ["self"]
 
     def test_system_tab_locale_change_accepts_optional_new_locale(self):
         """SystemTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
