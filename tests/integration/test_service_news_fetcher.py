@@ -101,6 +101,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
     def test_get_global_news_success(self, mock_get, mock_pool):
         """成功获取全球新闻"""
         mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "data": {
@@ -137,6 +138,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
     def test_get_global_news_empty(self, mock_get, mock_pool):
         """空 roll_data 返回空列表"""
         mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"data": {"roll_data": []}}
         mock_get.return_value = mock_resp
@@ -156,6 +158,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
     def test_get_global_news_none_response(self, mock_get, mock_pool):
         """返回 None 时返回空列表"""
         mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = None
         mock_get.return_value = mock_resp
@@ -191,6 +194,7 @@ class TestGetLatestGlobalNews(unittest.TestCase):
     def test_get_global_news_missing_structure(self, mock_get, mock_pool):
         """返回 JSON 缺少 data 键时返回空列表"""
         mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"unexpected": "structure"}
         mock_get.return_value = mock_resp
