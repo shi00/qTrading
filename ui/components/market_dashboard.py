@@ -107,10 +107,13 @@ class MarketDashboard(ft.Column):
 
         # Hot Concepts Container (Dynamic Content)
         self.concepts_row = ft.ResponsiveRow(run_spacing=10)
-        self.concepts_placeholder = ft.Text(
-            I18n.get("home_hot_concepts_empty"),
-            size=12,
-            color=AppColors.TEXT_HINT,
+        self.concepts_placeholder = ft.Container(
+            col=AppStyles.COL_FULL,
+            content=ft.Text(
+                I18n.get("home_hot_concepts_empty"),
+                size=12,
+                color=AppColors.TEXT_HINT,
+            ),
         )
 
         # --- Layout Construction ---
@@ -162,7 +165,7 @@ class MarketDashboard(ft.Column):
         # 4. Update Hot Concepts Styles
         # Concept cards are in self.concepts_row.controls
         for container in self.concepts_row.controls:
-            if isinstance(container, ft.Container):
+            if isinstance(container, ft.Container) and container.data is not None:
                 container.bgcolor = AppColors.SURFACE
                 container.border = ft.border.all(1, AppColors.BORDER)
                 # Text inside might need update too...
@@ -200,7 +203,7 @@ class MarketDashboard(ft.Column):
             self.cyb_title.value = I18n.get("home_index_cyb")
             self.hsgt_title.value = I18n.get("home_northbound")
             self.concepts_title.value = I18n.get("home_hot_concepts")
-            self.concepts_placeholder.value = I18n.get("home_hot_concepts_empty")
+            self.concepts_placeholder.content.value = I18n.get("home_hot_concepts_empty")
             if self.page:
                 self.update()
         except Exception as e:

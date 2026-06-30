@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import flet as ft
 
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
+from ui.components.resizable_splitter import ResizableSplitter
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
@@ -129,24 +130,50 @@ class BacktestView(ft.Container):
                 ),
                 ft.Row([self.progress_bar, self.progress_text, self.cancel_button], spacing=8),
                 ft.Container(height=16),
-                ft.Row(
-                    [
-                        ft.Container(
-                            content=self.config_panel,
-                            expand=1,
-                        ),
-                        ft.Container(
-                            content=self.result_panel,
-                            expand=2,
-                        ),
-                    ],
-                    expand=True,
-                    spacing=AppStyles.SPACING_MD,
+                ResizableSplitter(
+                    left_content=self.config_panel,
+                    right_content=self.result_panel,
+                    config_key="ui_splitter_backtest_config",
+                    default_width=360,
+                    min_width=280,
+                    max_width=600,
                 ),
             ],
             spacing=12,
             expand=True,
         )
+
+    def _fixed_vertical_chrome_height(self) -> int:
+        """估算视图固定纵向 chrome 高度（不含 splitter 内部内容）。
+
+        估算依据：
+        - nav_rail 高度 56
+        - tabs 高度 40
+        - body 上下 padding 32
+        - splitter 自身 padding 16
+        - 其他留白 16
+        合计 ≈ 160
+        """
+        return 160
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口尺寸变化时调整高度维度布局。
+
+        width 参数由 splitter 管理宽度维度，此处忽略；仅处理 height 维度：
+        根据 available_height 与 COMPACT_HEIGHT_THRESHOLD 的关系，调整图表最小高度。
+        """
+        if height <= 0:
+            return
+        try:
+            # 懒导入避免与 app_layout.py 的循环导入（app_layout 顶部导入 BacktestView）
+            from ui.app_layout import COMPACT_HEIGHT_THRESHOLD
+
+            available_height = max(0, height - self._fixed_vertical_chrome_height())
+            chart_min_height = 240 if available_height < COMPACT_HEIGHT_THRESHOLD else 360
+            if self.result_panel is not None:
+                self.result_panel.set_chart_min_height(chart_min_height)
+        except Exception as e:
+            logger.debug("[BacktestView] handle_resize skipped: %s", e)
 
     def _load_strategies(self):
         """加载可用策略列表。"""

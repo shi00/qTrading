@@ -525,3 +525,32 @@ class TestMainLocaleChangeUpdate:
         await on_disconnect(MagicMock())
         # The listener should have unsubscribed
         assert len(app_main.I18n._listeners) == 0
+
+
+@pytest.mark.asyncio
+async def test_min_window_size_and_web_skip(monkeypatch):
+    """窗口最小尺寸 1280x720 与默认 1280x800；Web 模式跳过窗口尺寸设置。
+
+    响应式布局修复方案 v4.3 Task 2：窗口最小尺寸提升。
+    _DummyWindow 初始 min_width/min_height/width/height 均为 0。
+    """
+    # --- 桌面模式：设置最小尺寸 1280x720 与默认尺寸 1280x800 ---
+    _prepare_main(monkeypatch)
+    desktop_page = _DummyPage()
+    await app_main.main(desktop_page)
+
+    assert desktop_page.window.min_width == 1280
+    assert desktop_page.window.min_height == 720
+    # width=0 (falsy) → 触发默认窗口逻辑，置为 1280x800
+    assert desktop_page.window.width == 1280
+    assert desktop_page.window.height == 800
+
+    # --- Web 模式：跳过窗口尺寸设置，保持 _DummyWindow 初始值 0 ---
+    monkeypatch.setenv("FLET_FORCE_WEB_SERVER", "true")
+    web_page = _DummyPage()
+    await app_main.main(web_page)
+
+    assert web_page.window.min_width == 0
+    assert web_page.window.min_height == 0
+    assert web_page.window.width == 0
+    assert web_page.window.height == 0

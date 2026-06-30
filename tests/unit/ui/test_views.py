@@ -691,6 +691,18 @@ class TestAppLayout:
         layout = self._make_layout(mock_page)
         assert layout.body is not None
 
+    def test_app_layout_body_no_max_width(self, mock_page):
+        """回归测试：AppLayout.body 必须无 max_width 约束（v4.3 规范 2）。"""
+        layout = self._make_layout(mock_page)
+        assert not getattr(layout.body, "max_width", None), "AppLayout.body must not have max_width constraint"
+
+    def test_compact_height_threshold_constant(self):
+        """COMPACT_HEIGHT_THRESHOLD 应为 560（基于 min_height=720 估算）。"""
+        from ui.app_layout import COMPACT_HEIGHT_THRESHOLD
+
+        assert COMPACT_HEIGHT_THRESHOLD == 560
+        assert COMPACT_HEIGHT_THRESHOLD > 0
+
     @pytest.mark.parametrize("index", [0, 1, 2, 3, 4, 5])
     def test_get_view_returns_object_and_caches(self, mock_page, index):
         """_get_view 返回非 None 对象，二次调用返回同一对象（行为断言）。

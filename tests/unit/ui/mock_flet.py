@@ -165,3 +165,26 @@ class MockFletPage:
     def close(self, control):
         if control in self.overlay:
             self.overlay.remove(control)
+
+
+class MockDragUpdateEvent:
+    """DragUpdateEvent 测试桩：绕过真实 flet 需 ControlEvent + JSON 解析的构造。
+
+    真实 ``ft.DragUpdateEvent`` 构造需传入 ControlEvent 且 ``json.loads(e.data)``
+    解析 delta_x；测试中直接构造不便，故提供此轻量桩。
+    """
+
+    def __init__(self, delta_x=0, delta_y=0):
+        self.delta_x = delta_x
+        self.delta_y = delta_y
+
+
+class MockHoverEvent:
+    """HoverEvent 测试桩：data 为字符串。
+
+    真实 ``ft.HoverEvent`` 构造时 ``json.loads(e.data)`` 解析时间戳/坐标，
+    若 data 为非 JSON 字符串会因解析后类型无 get 方法崩溃；故测试用此桩。
+    """
+
+    def __init__(self, data=""):
+        self.data = data

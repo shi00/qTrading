@@ -17,6 +17,10 @@ from ui.views.task_center_view import TaskCenterView
 
 logger = logging.getLogger(__name__)
 
+# 高度维度阈值：低于此值视为紧凑高度，需调整图表最小高度/表格页大小
+# 估算依据：min_height=720 - nav_rail(56) - tabs(40) - body_padding(64) ≈ 560
+COMPACT_HEIGHT_THRESHOLD = 560
+
 
 class NavTabs(IntEnum):
     MARKET = 0

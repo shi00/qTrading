@@ -110,7 +110,7 @@ class BacktestConfigPanel(ft.Container):
             divisions=10,
             value=3,
             label="{value}",
-            width=200,
+            expand=True,
         )
         self.commission_text = ft.Text("3‱", size=12, color=AppColors.TEXT_SECONDARY)
 
@@ -125,7 +125,7 @@ class BacktestConfigPanel(ft.Container):
             divisions=4,
             value=0.5,
             label="{value}",
-            width=200,
+            expand=True,
             disabled=True,
             on_change=self._on_stamp_duty_slider_change,
         )
@@ -141,7 +141,7 @@ class BacktestConfigPanel(ft.Container):
             divisions=20,
             value=5,
             label="{value}",
-            width=200,
+            expand=True,
         )
         self.slippage_text = ft.Text("5 bps", size=12, color=AppColors.TEXT_SECONDARY)
 

@@ -1,6 +1,7 @@
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import flet as ft
 import pandas as pd
 import pytest
 
@@ -350,6 +351,38 @@ class TestTableViewerTab:
         assert tab.filter_col.value == "col1"
         assert tab.filter_col.options is not None
         assert len(tab.filter_col.options) == 2
+
+    def test_news_cell_no_hardcoded_width(self, mock_page):
+        """§6.3：新闻 cell 不应硬编码 width=400，应使用 expand=True 自适应宽度。"""
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        tab.vm.current_table = "market_news"
+        tab.vm.table_columns = ["content", "col2"]
+        tab.vm.numeric_cols = set()
+        tab.vm.current_data = pd.DataFrame({"content": ["新闻长文本内容"], "col2": ["a"]})
+        tab._rebuild_table_rows()
+
+        assert len(tab.data_table.rows) == 1
+        containers = [cell.content for cell in tab.data_table.rows[0].cells if isinstance(cell.content, ft.Container)]
+        assert all(c.width != 400 for c in containers), "存在 cell 硬编码 width=400"
+        news_containers = [c for c in containers if c.alignment == ft.alignment.top_left]
+        assert news_containers, "未找到新闻 cell（top_left 对齐的 Container）"
+        assert news_containers[0].expand is True, "新闻 cell 应使用 expand=True"
+
+    def test_toolbar_row_has_right_padding(self, mock_page):
+        """§6.3：工具栏 Row（scroll=AUTO）末端应有 8px 右侧留白防止内容贴边被裁切。
+
+        Flet 0.28.3 的 Row 不支持 padding 参数，以 Row 末端追加 width=8 的
+        Container 间隔实现等价右侧留白（同时覆盖滚动与非滚动两种布局）。
+        """
+        tab = self._make_tab()
+        set_page(tab, mock_page)
+        toolbar_row = tab.content.controls[0].controls[0].content
+        assert isinstance(toolbar_row, ft.Row)
+        assert toolbar_row.scroll == ft.ScrollMode.AUTO
+        last = toolbar_row.controls[-1]
+        assert isinstance(last, ft.Container), "工具栏 Row 末端应为留白 Container"
+        assert last.width == 8, f"工具栏末端右侧留白应为 8，实际 {last.width}"
 
 
 class TestSQLConsoleTab:

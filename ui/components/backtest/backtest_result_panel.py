@@ -32,6 +32,8 @@ class BacktestResultPanel(ft.Container):
         self._result: BacktestResult | None = None
         self._trades_page: int = 0
         self._trades_page_size: int = 50
+        self._chart_min_height: int | None = None
+        self._chart_containers: list[ft.Container] = []
         self.content = self._build_empty_content()
 
     def set_result(self, result: BacktestResult):
@@ -40,6 +42,21 @@ class BacktestResultPanel(ft.Container):
         self.content = self._build_content()
         if self.page:
             self.update()
+
+    def set_chart_min_height(self, min_height: int) -> None:
+        """设置图表区的最小高度（用于高度维度响应式调整）。
+
+        局部更新已构建的图表容器 height，并记住该值供下次 _build_content 应用。
+        若图表尚未构建（无结果），仅记值，下次构建时生效。
+        """
+        self._chart_min_height = min_height
+        for container in self._chart_containers:
+            container.height = min_height
+        if self.page:
+            try:
+                self.update()
+            except Exception as e:
+                logger.debug("[BacktestResultPanel] set_chart_min_height update skipped: %s", e)
 
     def refresh_locale(self):
         """语言切换时刷新界面（纯 UI 操作）。
@@ -86,6 +103,7 @@ class BacktestResultPanel(ft.Container):
         if not self._result:
             return self._build_empty_content()
 
+        self._chart_containers = []
         metrics = self._result.metrics
 
         return ft.Column(
@@ -267,7 +285,7 @@ class BacktestResultPanel(ft.Container):
             )
         ]
 
-        return ft.Container(
+        container = ft.Container(
             content=ft.LineChart(
                 data_series=chart_data,
                 border=ft.border.all(1, AppColors.DIVIDER),
@@ -282,6 +300,10 @@ class BacktestResultPanel(ft.Container):
             padding=16,
             expand=True,
         )
+        if self._chart_min_height is not None:
+            container.height = self._chart_min_height
+        self._chart_containers.append(container)
+        return container
 
     def _build_trades_table(self) -> ft.Container:
         if not self._result or self._result.trades.is_empty():
@@ -403,7 +425,7 @@ class BacktestResultPanel(ft.Container):
                 )
             )
 
-        return ft.Container(
+        container = ft.Container(
             content=ft.BarChart(
                 bar_groups=bars,
                 border=ft.border.all(1, AppColors.DIVIDER),
@@ -414,6 +436,10 @@ class BacktestResultPanel(ft.Container):
             padding=16,
             expand=True,
         )
+        if self._chart_min_height is not None:
+            container.height = self._chart_min_height
+        self._chart_containers.append(container)
+        return container
 
     def _build_monthly_table(self) -> ft.Container:
         if not self._result or self._result.period_stats.is_empty():

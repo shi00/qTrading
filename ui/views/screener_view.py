@@ -10,6 +10,7 @@ import pandas as pd
 
 from data.persistence.metadata_manager import MetaDataManager
 from ui.components._markdown_safe import safe_open_url
+from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
 from ui.i18n import I18n, translate_strategy_name
@@ -285,8 +286,6 @@ class ScreenerView(ft.Container):
                 spacing=0,  # pragma: no cover
                 expand=True,  # pragma: no cover
             ),  # pragma: no cover
-            width=0,  # pragma: no cover
-            visible=False,  # pragma: no cover
             bgcolor=ft.Colors.SURFACE,  # pragma: no cover
             border=ft.border.only(right=ft.border.BorderSide(1, AppColors.DIVIDER)),  # pragma: no cover
         )  # pragma: no cover
@@ -323,6 +322,12 @@ class ScreenerView(ft.Container):
         # Subscribe to I18n locale changes
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
+    def _refresh_table_viewport(self) -> None:
+        """splitter 拖动 / 模式切换时的唯一表格视口刷新入口。"""
+        table = getattr(self, "result_table", None)
+        if table and hasattr(table, "refresh_viewport"):
+            table.refresh_viewport()
+
     def handle_resize(self, width: float = 0, height: float = 0):
         """窗口 resize 通知 — 刷新虚拟表格视口。
 
@@ -330,9 +335,7 @@ class ScreenerView(ft.Container):
             width: 当前窗口宽度 (来自 WindowResizeEvent)，0 表示未知
             height: 当前窗口高度 (来自 WindowResizeEvent)，0 表示未知
         """
-        table = getattr(self, "result_table", None)
-        if table and hasattr(table, "refresh_viewport"):
-            table.refresh_viewport()
+        self._refresh_table_viewport()
 
     def will_unmount(self):  # pragma: no cover
         if self._locale_subscription_id is not None:
@@ -691,17 +694,21 @@ class ScreenerView(ft.Container):
         right_content = ft.Column([table_card, self.log_card], expand=True, spacing=10)  # pragma: no cover
 
         # ==========================================
-        # 5. Main Layout: Row(left_tree + right_content)
+        # 5. Main Layout: ResizableSplitter(left_tree + right_content)
         # ==========================================
-        main_body = ft.Row(  # pragma: no cover
-            [  # pragma: no cover
-                self.history_tree_container,  # pragma: no cover
-                right_content,  # pragma: no cover
-            ],  # pragma: no cover
-            expand=True,  # pragma: no cover
-            spacing=0,  # pragma: no cover
-            vertical_alignment=ft.CrossAxisAlignment.STRETCH,  # pragma: no cover
+        self._main_splitter = ResizableSplitter(  # pragma: no cover
+            left_content=self.history_tree_container,  # pragma: no cover
+            right_content=right_content,  # pragma: no cover
+            config_key="ui_splitter_screener_history",  # pragma: no cover
+            default_width=250,  # pragma: no cover
+            min_width=220,  # pragma: no cover
+            max_width=420,  # pragma: no cover
+            collapsible=True,  # pragma: no cover
+            on_resize=self._refresh_table_viewport,  # pragma: no cover
         )  # pragma: no cover
+        # 初始为 REALTIME 模式，折叠历史树侧栏
+        self._main_splitter.set_left_collapsed(True)  # pragma: no cover
+        main_body = self._main_splitter  # pragma: no cover
 
         # ==========================================
         # Final Assembly
@@ -742,8 +749,7 @@ class ScreenerView(ft.Container):
         """Activate history viewing mode."""
         self.vm.switch_to_history()
         # Show tree, hide realtime controls and log card
-        self.history_tree_container.visible = True
-        self.history_tree_container.width = 250
+        self._main_splitter.set_left_collapsed(False)
         self.realtime_controls.visible = False
         self.log_card.visible = False
         self.run_btn.visible = False
@@ -760,8 +766,7 @@ class ScreenerView(ft.Container):
         """Activate realtime execution mode."""
         self.vm.switch_to_realtime()
         # Hide tree, show realtime controls and log card
-        self.history_tree_container.visible = False
-        self.history_tree_container.width = 0
+        self._main_splitter.set_left_collapsed(True)
         self.realtime_controls.visible = True
         self.log_card.visible = True
         self.run_btn.visible = True
@@ -1540,11 +1545,6 @@ class ScreenerView(ft.Container):
     def _render_table_sync(self):
         """Synchronous fallback for non-async callers (e.g. update_theme)"""
         df = self.vm.get_current_page_data()
-        logger.info("=== E2E DEBUG _render_table_sync: df empty=%s ===", df.empty if df is not None else True)
-        if df is not None and not df.empty:
-            logger.info("DF columns: %s", list(df.columns))
-            logger.info("DF row 0: %s", df.iloc[0].to_dict())
-
         if df is None or df.empty:
             self.result_table.set_columns([])
             self.result_table.set_rows(

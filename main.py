@@ -278,9 +278,9 @@ async def main(page: ft.Page):
     page.on_error = on_error
 
     if not _is_web_mode():
-        page.window.min_width = 960
-        page.window.min_height = 640
-        if not page.window.width or page.window.width < 1200:
+        page.window.min_width = 1280
+        page.window.min_height = 720
+        if not page.window.width or page.window.width < 1280:
             page.window.width = 1280
             page.window.height = 800
         try:

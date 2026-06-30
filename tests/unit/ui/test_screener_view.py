@@ -320,24 +320,62 @@ class TestScreenerView:
     async def test_switch_to_history_mode(self, mock_page):
         view = self._make_view(mock_page)
         view.vm.load_history_tree = MagicMock(return_value=_asyncio_dummy())
+        view._main_splitter.set_left_collapsed = MagicMock()
         await view._switch_to_history_mode()
         assert view.history_tree_container.visible is True
-        assert view.history_tree_container.width == 250
         assert view.realtime_controls.visible is False
         assert view.log_card.visible is False
         assert view.run_btn.visible is False
         view.vm.switch_to_history.assert_called_once()
+        view._main_splitter.set_left_collapsed.assert_called_once_with(False)
 
     @pytest.mark.asyncio
     async def test_switch_to_realtime_mode(self, mock_page):
         view = self._make_view(mock_page)
+        view._main_splitter.set_left_collapsed = MagicMock()
         await view._switch_to_realtime_mode()
-        assert view.history_tree_container.visible is False
-        assert view.history_tree_container.width == 0
         assert view.realtime_controls.visible is True
         assert view.log_card.visible is True
         assert view.run_btn.visible is True
         view.vm.switch_to_realtime.assert_called_once()
+        view._main_splitter.set_left_collapsed.assert_called_once_with(True)
+
+    # --- §6.2 ResizableSplitter integration ---
+
+    def test_main_body_uses_resizable_splitter(self, mock_page):
+        """§6.2: ScreenerView 主体分栏为 ResizableSplitter 实例。"""
+        from ui.components.resizable_splitter import ResizableSplitter
+
+        view = self._make_view(mock_page)
+        assert hasattr(view, "_main_splitter")
+        assert isinstance(view._main_splitter, ResizableSplitter)
+
+    def test_main_splitter_collapsible_true(self, mock_page):
+        """§6.2: ResizableSplitter collapsible=True。"""
+        view = self._make_view(mock_page)
+        assert view._main_splitter._collapsible is True
+
+    def test_main_splitter_on_resize_is_refresh_table_viewport(self, mock_page):
+        """§6.2: on_resize 回调指向 _refresh_table_viewport。"""
+        view = self._make_view(mock_page)
+        assert view._main_splitter._on_resize == view._refresh_table_viewport
+
+    def test_refresh_table_viewport_calls_result_table_refresh(self, mock_page):
+        """§6.2: _refresh_table_viewport 触发 result_table.refresh_viewport。"""
+        view = self._make_view(mock_page)
+        view.result_table.refresh_viewport.reset_mock()
+        view._refresh_table_viewport()
+        view.result_table.refresh_viewport.assert_called_once()
+
+    def test_no_direct_width_assignment_on_history_tree_container(self):
+        """§6.2: history_tree_container.width 不再被直接设置（由 splitter 管理）。"""
+        import inspect
+
+        from ui.views import screener_view
+
+        source = inspect.getsource(screener_view.ScreenerView)
+        assert "history_tree_container.width = 250" not in source
+        assert "history_tree_container.width = 0" not in source
 
     def test_on_page_size_change(self, mock_page):
         view = self._make_view(mock_page)
@@ -1259,6 +1297,7 @@ class TestScreenerView:
     def test_handle_resize_calls_refresh_viewport(self, mock_page):
         """覆盖 333-335: handle_resize 调用 result_table.refresh_viewport。"""
         view = self._make_view(mock_page)
+        view.result_table.refresh_viewport.reset_mock()
         view.handle_resize(1200, 800)
         view.result_table.refresh_viewport.assert_called_once()
 

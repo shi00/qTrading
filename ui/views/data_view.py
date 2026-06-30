@@ -240,6 +240,8 @@ class TableViewerTab(ft.Container):
                         ),  # pragma: no cover
                     ],  # pragma: no cover
                 ),  # pragma: no cover
+                # 右侧留白：ft.Row 不支持 padding（Flet 0.28.3），用 Container 间隔器替代
+                ft.Container(width=8),  # pragma: no cover
             ],  # pragma: no cover
             alignment=ft.MainAxisAlignment.START,  # pragma: no cover
             spacing=10,  # pragma: no cover
@@ -554,7 +556,7 @@ class TableViewerTab(ft.Container):
                     cell_container = ft.Container(
                         content=cell_text,
                         alignment=ft.alignment.top_left,
-                        width=400,  # 固定宽度确保换行
+                        expand=True,  # 自适应宽度确保换行
                         padding=ft.padding.symmetric(vertical=5),
                     )
                 else:

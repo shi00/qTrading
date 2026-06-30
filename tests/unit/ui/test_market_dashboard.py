@@ -2,8 +2,10 @@
 
 from unittest.mock import MagicMock, patch
 
+import flet as ft
 
 from ui.components.market_dashboard import MarketDashboard
+from ui.theme import AppStyles
 import pytest
 
 
@@ -263,7 +265,7 @@ class TestMarketDashboardUpdateLocale:
             assert dashboard.cyb_title.value == "localized"
             assert dashboard.hsgt_title.value == "localized"
             assert dashboard.concepts_title.value == "localized"
-            assert dashboard.concepts_placeholder.value == "localized"
+            assert dashboard.concepts_placeholder.content.value == "localized"
 
 
 class TestMarketDashboardUpdateIndexCard:
@@ -408,3 +410,59 @@ class TestMarketDashboardBuildCard:
             card = dashboard._build_card(title_ctrl, control1, control2)
 
             assert card is not None
+
+
+class TestMarketDashboardResponsiveRowCol:
+    """v4.3 §6 响应式栅格：卡片墙 ResponsiveRow 子元素必须指定 col 参数。"""
+
+    def _find_responsive_rows(self, control):
+        """递归收集控件树中所有 ft.ResponsiveRow。"""
+        rows: list[ft.ResponsiveRow] = []
+        if not isinstance(control, ft.Control):
+            return rows
+        if isinstance(control, ft.ResponsiveRow):
+            rows.append(control)
+        controls = getattr(control, "controls", None)
+        if isinstance(controls, list):
+            for child in controls:
+                rows.extend(self._find_responsive_rows(child))
+        content = getattr(control, "content", None)
+        if isinstance(content, ft.Control):
+            rows.extend(self._find_responsive_rows(content))
+        return rows
+
+    def test_responsive_row_children_all_have_col(self):
+        """每个 ResponsiveRow 子元素必须有非 None 的 col 配置。"""
+        with (
+            patch("ui.components.market_dashboard.I18n.get", return_value="test"),
+            patch("ui.components.market_dashboard.AppColors"),
+        ):
+            dashboard = MarketDashboard()
+            rows = self._find_responsive_rows(dashboard)
+            assert len(rows) >= 2, "应至少存在 indices_row 与 concepts_row"
+            for row in rows:
+                assert len(row.controls) > 0, "ResponsiveRow 不应为空"
+                for child in row.controls:
+                    assert child.col is not None, f"ResponsiveRow 子元素 {type(child).__name__} 缺失 col 配置"
+
+    def test_concepts_placeholder_wrapped_with_col_full(self):
+        """concepts_placeholder 空态必须包裹 col=COL_FULL 的容器。"""
+        with (
+            patch("ui.components.market_dashboard.I18n.get", return_value="test"),
+            patch("ui.components.market_dashboard.AppColors"),
+        ):
+            dashboard = MarketDashboard()
+            assert len(dashboard.concepts_row.controls) == 1
+            wrapper = dashboard.concepts_row.controls[0]
+            assert wrapper.col == AppStyles.COL_FULL
+
+    def test_indices_cards_have_col(self):
+        """指数卡（indices_row 子元素）必须有非 None 的 col。"""
+        with (
+            patch("ui.components.market_dashboard.I18n.get", return_value="test"),
+            patch("ui.components.market_dashboard.AppColors"),
+        ):
+            dashboard = MarketDashboard()
+            assert len(dashboard.indices_row.controls) == 4
+            for card in dashboard.indices_row.controls:
+                assert card.col is not None

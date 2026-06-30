@@ -6,6 +6,7 @@ TDD RED phase: these tests define the expected ViewModel contract.
 import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import flet as ft
 import pytest
 
 from tests.unit.ui.conftest import set_page
@@ -1056,3 +1057,33 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
 
         assert wizard.schedule_enabled.value is False
         assert wizard.schedule_time.value == "09:00"
+
+
+class TestOnboardingWizardResponsiveRowCol(_OnboardingWizardBase):
+    """v4.3 §6 响应式栅格：卡片墙 ResponsiveRow 子元素必须指定 col 参数。"""
+
+    def _find_responsive_rows(self, control):
+        """递归收集控件树中所有 ft.ResponsiveRow。"""
+        rows: list[ft.ResponsiveRow] = []
+        if not isinstance(control, ft.Control):
+            return rows
+        if isinstance(control, ft.ResponsiveRow):
+            rows.append(control)
+        controls = getattr(control, "controls", None)
+        if isinstance(controls, list):
+            for child in controls:
+                rows.extend(self._find_responsive_rows(child))
+        content = getattr(control, "content", None)
+        if isinstance(content, ft.Control):
+            rows.extend(self._find_responsive_rows(content))
+        return rows
+
+    def test_overview_cards_responsive_row_children_have_col(self, mock_page):
+        """overview_cards 卡片墙 ResponsiveRow 子元素必须有非 None 的 col。"""
+        wizard = self._make_wizard(mock_page)
+        rows = self._find_responsive_rows(wizard)
+        assert len(rows) >= 1, "OnboardingWizard 应至少有一个 ResponsiveRow (overview cards)"
+        for row in rows:
+            assert len(row.controls) > 0, "ResponsiveRow 不应为空"
+            for child in row.controls:
+                assert child.col is not None, f"ResponsiveRow 子元素 {type(child).__name__} 缺失 col 配置"
