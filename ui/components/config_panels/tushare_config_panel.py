@@ -312,8 +312,12 @@ class TushareConfigPanel(ft.Container):
 
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
 
-            client = TushareClient()
-            needs_probe = client.set_token(token)
+            # TushareClient.__init__ 和 set_token 内部调用 ts.set_token (文件 IO)，必须 offload
+            def _init_client_sync() -> tuple[TushareClient, bool]:
+                client = TushareClient()
+                return client, client.set_token(token)
+
+            client, needs_probe = await ThreadPoolManager().run_async(TaskType.IO, _init_client_sync)
 
             if needs_probe:
                 try:

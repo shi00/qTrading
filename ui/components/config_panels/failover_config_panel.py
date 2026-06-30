@@ -314,7 +314,11 @@ class ProviderCredentialDialog(ft.AlertDialog):
                     AppColors.ERROR,
                 )
         except Exception as ex:
-            logger.error("[ProviderCredentialDialog] test connection failed: %s", ex, exc_info=True)
+            logger.error(
+                "[ProviderCredentialDialog] test connection failed: %s",
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             self._show_snack(
                 I18n.get("failover_test_failed") + f": {DataSanitizer.sanitize_error(ex)}",
                 AppColors.ERROR,
