@@ -1604,5 +1604,10 @@
     "tag_coding": "Coding",
     "date_picker_help": "Select date",
     "date_picker_error_format": "Invalid format",
-    "date_picker_error_invalid": "Out of range"
+    "date_picker_error_invalid": "Out of range",
+    "db_err_connection": "Database connection failed",
+    "status_repairing": "Repairing: {period} {code}",
+    "llm_test_need_model": "Please select a model first",
+    "backtest_metric_profit_factor": "Profit Factor",
+    "backtest_metric_total_trades": "Total Trades"
 }

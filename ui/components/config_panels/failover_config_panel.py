@@ -128,7 +128,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             width=440,
         )
         self._cancel_btn = ft.TextButton(
-            text=I18n.get("btn_cancel"),
+            text=I18n.get("common_cancel"),
             on_click=self._on_cancel,
         )
         self._test_btn = None
@@ -188,7 +188,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self.base_url_input.hint_text = default_url or I18n.get("failover_base_url_hint")
             self.api_key_input.label = I18n.get("llm_api_key")
 
-            self._cancel_btn.text = I18n.get("btn_cancel")
+            self._cancel_btn.text = I18n.get("common_cancel")
             if self._test_btn is not None:
                 self._test_btn.text = I18n.get("failover_test_connection")
             self._confirm_btn.text = I18n.get("common_confirm")

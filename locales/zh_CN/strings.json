@@ -1604,5 +1604,10 @@
     "tag_coding": "代码专用",
     "date_picker_help": "选择日期",
     "date_picker_error_format": "格式无效",
-    "date_picker_error_invalid": "日期超出范围"
+    "date_picker_error_invalid": "日期超出范围",
+    "db_err_connection": "数据库连接失败",
+    "status_repairing": "修复中: {period} {code}",
+    "llm_test_need_model": "请先选择模型",
+    "backtest_metric_profit_factor": "盈亏比",
+    "backtest_metric_total_trades": "总交易次数"
 }
