@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import datetime
+import logging
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -82,6 +83,11 @@ class TestFormatCellValue:
     def test_string_value_returns_str(self):
         result = _format_cell_value("name", "平安银行")
         assert result == "平安银行"
+
+    def test_int_non_volume_returns_str(self):
+        # 覆盖 96->98: int 值且非 volume 列时跳过 float 格式化，走 str(val)
+        result = _format_cell_value("ai_score", 85)
+        assert result == "85"
 
 
 class TestBuildTableData:
@@ -1247,3 +1253,309 @@ class TestScreenerView:
         view.refresh_locale()
         # 空字典场景下 refresh_locale 不产生副作用
         assert view._ai_cards == {}
+
+    # --- handle_resize / refresh_locale branch coverage ---
+
+    def test_handle_resize_calls_refresh_viewport(self, mock_page):
+        """覆盖 333-335: handle_resize 调用 result_table.refresh_viewport。"""
+        view = self._make_view(mock_page)
+        view.handle_resize(1200, 800)
+        view.result_table.refresh_viewport.assert_called_once()
+
+    def test_handle_resize_no_result_table(self, mock_page):
+        """覆盖 333-335 分支: 无 result_table 时安全跳过。"""
+        view = self._make_view(mock_page)
+        view.result_table = None
+        view.handle_resize(1200, 800)  # should not raise
+
+    def test_refresh_locale_strategy_dropdown_name_from_info_and_missing_apis(self, mock_page):
+        """覆盖 386 (strategy_obj 无 name_key 走 info['name']) 与 388 (missing_apis 标记)。"""
+        view = self._make_view(mock_page)
+        view.selected_strategy = None
+        self.mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {
+            "value": {"name": "Value", "missing_apis": ["api1"]},
+        }
+        self.mock_vm.strategy_mgr.get_strategy.return_value = None
+        view.refresh_locale()
+        opt = view.strategy_dropdown.options[0]
+        assert opt.text and "Value" in opt.text
+        assert opt.text and "⚠️" in opt.text
+
+    def test_refresh_locale_selected_strategy_with_dynamic_desc(self, mock_page):
+        """覆盖 397-400: selected_strategy 有 get_dynamic_description 路径。"""
+        view = self._make_view(mock_page)
+        view.selected_strategy = "momentum"
+        mock_strategy = MagicMock()
+        mock_strategy.get_parameters.return_value = []
+        mock_strategy.get_dynamic_description.return_value = "Dynamic desc"
+        self.mock_vm.strategy_mgr.get_strategy.return_value = mock_strategy
+        view.refresh_locale()
+        assert view.strategy_desc_text.value == "Dynamic desc"
+
+    def test_refresh_locale_selected_strategy_without_dynamic_desc(self, mock_page):
+        """覆盖 401-402: selected_strategy 但 strategy_obj 无 get_dynamic_description 走 get_strategy_desc。"""
+        view = self._make_view(mock_page)
+        view.selected_strategy = "momentum"
+        self.mock_vm.strategy_mgr.get_strategy.return_value = None
+        self.mock_vm.get_strategy_desc.return_value = "Fallback desc"
+        view.refresh_locale()
+        assert view.strategy_desc_text.value == "Fallback desc"
+
+    def test_refresh_locale_no_title_text_attr(self, mock_page):
+        """覆盖 370->374: 无 title_text 属性时跳过赋值。"""
+        view = self._make_view(mock_page)
+        del view.title_text
+        view.refresh_locale()  # should not raise
+
+    def test_refresh_locale_segments_not_ft_text(self, mock_page):
+        """覆盖 429->431, 431->435 (segments label 非 ft.Text) 与 438->442, 442->446 (无标题属性)。"""
+        view = self._make_view(mock_page)
+        view.mode_toggle.segments = [MagicMock(label=ft.Container()), MagicMock(label=ft.Container())]
+        del view.history_tree_title_text
+        del view.log_title_text
+        view.refresh_locale()  # should not raise
+
+    def test_refresh_locale_segments_fewer_than_two(self, mock_page):
+        """覆盖 428->435: segments 少于 2 时跳过 segment 标签更新。"""
+        view = self._make_view(mock_page)
+        view.mode_toggle.segments = [MagicMock(label=ft.Text("x"))]
+        view.refresh_locale()  # should not raise
+
+    def test_refresh_locale_table_rebuild_exception(self, mock_page, caplog):
+        """覆盖 454-462: 表格重建抛异常时记 DEBUG 并跳过。"""
+        view = self._make_view(mock_page)
+        view.vm.get_current_page_data.return_value = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        with caplog.at_level(logging.DEBUG, logger="ui.views.screener_view"):
+            with patch("ui.views.screener_view._build_table_data", side_effect=RuntimeError("boom")):
+                view.refresh_locale()
+        assert any("table rebuild skipped" in r.message for r in caplog.records)
+
+    def test_refresh_locale_calls_render_strategy_params(self, mock_page):
+        """覆盖 466: selected_strategy 非空时调用 _render_strategy_params。"""
+        view = self._make_view(mock_page)
+        view.selected_strategy = "momentum"
+        view._render_strategy_params = MagicMock()
+        view.refresh_locale()
+        view._render_strategy_params.assert_called_once()
+
+    def test_refresh_locale_no_page(self, mock_page):
+        """覆盖 468->exit: page 为 None 时跳过 self.update。"""
+        view = self._make_view(mock_page)
+        view._Control__page = None  # type: ignore[attr-defined]
+        view.refresh_locale()  # should not raise
+
+    def test_refresh_locale_outer_exception(self, mock_page, caplog):
+        """覆盖 470-471: refresh_locale 外层异常记 WARNING。"""
+        view = self._make_view(mock_page)
+        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
+        with caplog.at_level(logging.WARNING, logger="ui.views.screener_view"):
+            view.refresh_locale()
+        assert any("refresh_locale error" in r.message for r in caplog.records)
+
+    # --- _do_restore_default_async / _do_save_prompt_async coverage ---
+
+    @pytest.mark.asyncio
+    async def test_do_restore_default_async_success(self, mock_page):
+        """覆盖 1317-1335: 恢复默认 prompt 成功路径。"""
+        view = self._make_view(mock_page)
+        ctrl_field = ft.TextField(value="old")
+        with (
+            patch("utils.config_handler.ConfigHandler.set_strategy_prompt") as mock_set,
+            patch("strategies.strategy_prompts.get_base_prompt", return_value="new prompt"),
+            patch("ui.views.screener_view.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tpm.return_value.run_async = MagicMock(side_effect=_tpm_passthrough)
+            await view._do_restore_default_async("momentum", ctrl_field)
+        assert ctrl_field.value == "new prompt"
+        mock_set.assert_called_once_with("momentum", None)
+        mock_page.show_toast.assert_called_once()
+        assert mock_page.show_toast.call_args[0][1] == "info"
+
+    @pytest.mark.asyncio
+    async def test_do_restore_default_async_exception(self, mock_page):
+        """覆盖 1332-1335: 恢复默认 prompt 异常路径。"""
+        view = self._make_view(mock_page)
+        ctrl_field = ft.TextField(value="old")
+        with (
+            patch("utils.config_handler.ConfigHandler.set_strategy_prompt", side_effect=RuntimeError("io")),
+            patch("ui.views.screener_view.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tpm.return_value.run_async = MagicMock(side_effect=_tpm_passthrough)
+            await view._do_restore_default_async("momentum", ctrl_field)
+        mock_page.show_toast.assert_called_once()
+        assert mock_page.show_toast.call_args[0][1] == "error"
+
+    @pytest.mark.asyncio
+    async def test_do_save_prompt_async_invalid_length(self, mock_page):
+        """覆盖 1338-1353: prompt 校验失败 (prompt_err_length)。"""
+        view = self._make_view(mock_page)
+        ctrl_field = ft.TextField(value="x" * 200)
+        with (
+            patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_length")),
+            patch("utils.prompt_guard.MAX_PROMPT_LENGTH", 100),
+            patch("utils.config_handler.ConfigHandler.set_strategy_prompt") as mock_set,
+        ):
+            await view._do_save_prompt_async("momentum", ctrl_field)
+        mock_set.assert_not_called()
+        mock_page.show_toast.assert_called_once()
+        assert mock_page.show_toast.call_args[0][1] == "warning"
+
+    @pytest.mark.asyncio
+    async def test_do_save_prompt_async_invalid_other_key(self, mock_page):
+        """覆盖 1346-1347: prompt 校验失败 (其他 key)。"""
+        view = self._make_view(mock_page)
+        ctrl_field = ft.TextField(value="bad")
+        with (
+            patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_xxx")),
+            patch("utils.config_handler.ConfigHandler.set_strategy_prompt") as mock_set,
+        ):
+            await view._do_save_prompt_async("momentum", ctrl_field)
+        mock_set.assert_not_called()
+        msg = mock_page.show_toast.call_args[0][0]
+        assert "prompt_err_xxx" in msg
+
+    @pytest.mark.asyncio
+    async def test_do_save_prompt_async_success(self, mock_page):
+        """覆盖 1355-1365: 保存 prompt 成功路径。"""
+        view = self._make_view(mock_page)
+        ctrl_field = ft.TextField(value="my prompt")
+        with (
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("ui.views.screener_view.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler.set_strategy_prompt") as mock_set,
+        ):
+            mock_tpm.return_value.run_async = MagicMock(side_effect=_tpm_passthrough)
+            await view._do_save_prompt_async("momentum", ctrl_field)
+        mock_set.assert_called_once_with("momentum", "my prompt")
+        mock_page.show_toast.assert_called_once()
+        assert mock_page.show_toast.call_args[0][1] == "success"
+
+    @pytest.mark.asyncio
+    async def test_do_save_prompt_async_exception(self, mock_page):
+        """覆盖 1366-1369: 保存 prompt 异常路径。"""
+        view = self._make_view(mock_page)
+        ctrl_field = ft.TextField(value="my prompt")
+        with (
+            patch("utils.prompt_guard.validate_prompt", return_value=(True, "")),
+            patch("ui.views.screener_view.ThreadPoolManager") as mock_tpm,
+            patch("utils.config_handler.ConfigHandler.set_strategy_prompt", side_effect=RuntimeError("io")),
+        ):
+            mock_tpm.return_value.run_async = MagicMock(side_effect=_tpm_passthrough)
+            await view._do_save_prompt_async("momentum", ctrl_field)
+        mock_page.show_toast.assert_called_once()
+        assert mock_page.show_toast.call_args[0][1] == "error"
+
+    # --- _render_table_async coverage ---
+
+    @pytest.mark.asyncio
+    async def test_render_table_async_df_none(self, mock_page):
+        """覆盖 1510-1522: df 为 None 时清理表格。"""
+        view = self._make_view(mock_page)
+        view.vm.get_current_page_data.return_value = None
+        await view._render_table_async()
+        view.result_table.set_columns.assert_called_once_with([])
+        view.result_table.set_rows.assert_called_once()
+        assert view._raw_row_lookup == {}
+
+    @pytest.mark.asyncio
+    async def test_render_table_async_with_data(self, mock_page):
+        """覆盖 1523-1538: df 非空时正常构建。"""
+        view = self._make_view(mock_page)
+        df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["test"]})
+        view.vm.get_current_page_data.return_value = df
+        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
+            mock_tpm.return_value.run_async = MagicMock(side_effect=_tpm_passthrough)
+            await view._render_table_async()
+        view.result_table.set_columns.assert_called_once()
+        assert "000001.SZ" in view._raw_row_lookup
+
+    # --- _on_export_click / _on_save_file_result / _on_row_click branch coverage ---
+
+    @pytest.mark.asyncio
+    async def test_on_export_click_no_show_toast(self, mock_page):
+        """覆盖 1394->1396: df 为 None 且 page 无 show_toast 时安全跳过。"""
+        view = self._make_view(mock_page)
+        no_toast = _NoToastPage()
+        set_page(view, no_toast)
+        view.vm.get_export_data.return_value = None
+        await view._on_export_click(None)  # should not raise
+
+    @pytest.mark.asyncio
+    async def test_on_save_file_result_success_no_show_toast(self, mock_page):
+        """覆盖 1422->1438: export 成功但 page 无 show_toast 时跳过 toast 直达 finally。"""
+        view = self._make_view(mock_page)
+        no_toast = _NoToastPage()
+        set_page(view, no_toast)
+        e = MagicMock()
+        e.path = "/tmp/test.csv"
+        view.vm.export_results = MagicMock(return_value=_asyncio_result(("/tmp/test.csv", None)))
+        view._on_save_file_result(e)
+        inner_fn = no_toast.run_task.call_args[0][0]
+        filepath = no_toast.run_task.call_args[0][1]
+        await inner_fn(filepath)
+        assert view.export_btn.disabled is False
+
+    @pytest.mark.asyncio
+    async def test_on_save_file_result_fail_no_show_toast(self, mock_page):
+        """覆盖 1427->1438: export 失败但 page 无 show_toast 时跳过 toast 直达 finally。"""
+        view = self._make_view(mock_page)
+        no_toast = _NoToastPage()
+        set_page(view, no_toast)
+        e = MagicMock()
+        e.path = "/tmp/test.csv"
+        view.vm.export_results = MagicMock(return_value=_asyncio_result((None, "disk full")))
+        view._on_save_file_result(e)
+        inner_fn = no_toast.run_task.call_args[0][0]
+        filepath = no_toast.run_task.call_args[0][1]
+        await inner_fn(filepath)
+        assert view.export_btn.disabled is False
+
+    @pytest.mark.asyncio
+    async def test_on_save_file_result_exception_no_show_toast(self, mock_page):
+        """覆盖 1435->1438: export 抛异常且 page 无 show_toast 时跳过 toast 直达 finally。"""
+        view = self._make_view(mock_page)
+        no_toast = _NoToastPage()
+        set_page(view, no_toast)
+        e = MagicMock()
+        e.path = "/tmp/test.csv"
+        view.vm.export_results = MagicMock(side_effect=RuntimeError("boom"))
+        view._on_save_file_result(e)
+        inner_fn = no_toast.run_task.call_args[0][0]
+        filepath = no_toast.run_task.call_args[0][1]
+        await inner_fn(filepath)
+        assert view.export_btn.disabled is False
+
+    def test_on_row_click_empty_ts_code(self, mock_page):
+        """覆盖 1476->exit: ts_code 为空时不调 run_task。"""
+        view = self._make_view(mock_page)
+        view._raw_row_lookup = {}
+        view._on_row_click({"name": "test"})
+        mock_page.run_task.assert_not_called()
+
+    def test_collect_params_unknown_control_type_with_data(self, mock_page):
+        """覆盖 1310->1281: 控件有 data 但非 Slider/TextField/Dropdown 时跳过。"""
+        view = self._make_view(mock_page)
+        t = ft.Text("label")
+        t.data = "unknown_param"
+        view.params_container.controls.append(t)
+        params = view._collect_params()
+        assert params == {}
+
+
+# --- Helpers for branch coverage ---
+
+
+def _tpm_passthrough(task_type, func, *args, **kwargs):
+    """ThreadPoolManager.run_async passthrough: 同步调用 func，结果包装为 Future。"""
+    return _asyncio_result(func(*args, **kwargs))
+
+
+class _NoToastPage:
+    """无 show_toast 的 page 桩，用于测试 hasattr(self.page, 'show_toast') False 分支。"""
+
+    def __init__(self):
+        self.overlay = []
+        self.run_task = MagicMock(return_value=MagicMock())
+
+    def update(self, *args, **kwargs):
+        pass

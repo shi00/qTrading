@@ -165,6 +165,112 @@ class TestHealthReportDialog:
 
         assert any("refresh_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
 
+    def test_dialog_size_default_without_page(self):
+        """B1: _dialog_size 无 page_ref 时返回 (600, 600)。"""
+        from ui.components.health_report_dialog import HealthReportDialog
+
+        report = {
+            "status": "green",
+            "market": {"lag_days": 0, "latest_local": "2025-01-01"},
+            "fundamentals": {"gap_count": 0, "sanity_errors": 0, "tables": {}},
+            "reasons": [],
+        }
+        dlg = HealthReportDialog(page=None, report=report)
+        assert dlg._cached_width == 600
+        assert dlg._cached_height == 600
+
+    def test_did_mount_subscribes_i18n(self, mock_page):
+        """B2: did_mount 订阅 I18n。"""
+        dlg = self._make_dialog(mock_page)
+        dlg.did_mount()
+        self.mock_i18n.subscribe.assert_called_once_with(dlg.refresh_locale)
+        assert dlg._locale_subscription_id == "sub_id"
+
+    def test_will_unmount_unsubscribes(self, mock_page):
+        """B3: will_unmount 取消订阅并清理 id。"""
+        dlg = self._make_dialog(mock_page)
+        dlg.did_mount()
+        dlg.will_unmount()
+        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
+        assert dlg._locale_subscription_id is None
+
+    def test_build_content_with_reasons(self, mock_page):
+        """B4: _build_content 含 reasons 时构建 issues_section。"""
+        report = self._make_report()
+        report["reasons"] = ["数据延迟", "缺失财务"]
+        dlg = self._make_dialog(mock_page, report)
+
+        # issues_section 是 Column 中的第 3 个控件 (index 2)
+        issues_section = dlg.content.content.controls[2]
+        # 有 reasons 时 issues_section 有 bgcolor 和 content
+        assert issues_section.bgcolor is not None
+        issues_column = issues_section.content
+        # 第一个控件是标题 "common_reason"
+        assert issues_column.controls[0].value == "common_reason"
+        # 后续是 2 个 reason 行
+        assert len(issues_column.controls) == 3  # 1 header + 2 reasons
+
+    def test_refresh_locale_no_page_skips_update(self, mock_page):
+        """B5: refresh_locale 无 page 时不调用 update。"""
+        dlg = self._make_dialog(mock_page, self._make_report("green"))
+        set_page(dlg, mock_page)
+        # 模拟无 page 场景
+        dlg._Control__page = None
+        dlg.update = MagicMock()
+
+        dlg.refresh_locale()
+
+        dlg.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_deep_scan_fallback_no_open(self, mock_page):
+        """B6: page_ref 无 open 方法时走回退路径。"""
+        dlg = self._make_dialog(mock_page)
+        set_page(dlg, mock_page)
+        dlg.close_dialog = MagicMock()
+
+        # 替换 page_ref 为无 open 方法的 mock
+        fake_page = MagicMock(spec=["update", "dialog"])
+        dlg.page_ref = fake_page
+
+        mock_scan = MagicMock()
+        mock_scan.start_scan = AsyncMock()
+        with (
+            patch("data.data_processor.DataProcessor"),
+            patch(
+                "ui.components.health_report_dialog.HealthScanDialog",
+                return_value=mock_scan,
+            ),
+        ):
+            await dlg.run_deep_scan(None)
+
+        # 验证回退路径
+        assert fake_page.dialog is mock_scan
+        assert mock_scan.open is True
+        fake_page.update.assert_called_once()
+
+    def test_init_logs_error_when_summary_fails(self, mock_page, caplog):
+        """B7: __init__ 摘要日志异常路径。"""
+
+        class WeirdMarket:
+            def get(self, key, default=None):
+                if default == "?":
+                    raise RuntimeError("boom")
+                return default
+
+        report = {
+            "status": "green",
+            "market": WeirdMarket(),
+            "fundamentals": {"gap_count": 0, "sanity_errors": 0, "tables": {}},
+            "reasons": [],
+        }
+
+        with caplog.at_level(logging.ERROR, logger=dialog_logger.name):
+            dlg = self._make_dialog(mock_page, report)
+
+        assert any("Error logging report summary" in r.message for r in caplog.records)
+        assert dlg.content is not None
+
 
 class TestHealthScoreCard:
     # HealthScoreCard.__init__ is marked pragma: no cover, so we test
@@ -299,6 +405,20 @@ class TestCoverageDetailTable:
         progress_bar = row.content.controls[1]
         assert progress_bar.color == self.mock_ac.ERROR
 
+    def test_create_row_uses_i18n_name_when_available(self):
+        """覆盖 263->266 分支：I18n.get 返回非 key 值时不走 fallback。"""
+        from ui.components.health_report_dialog import CoverageDetailTable
+
+        # 让 I18n.get 对 tab_ 前缀的 key 返回翻译值
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}" if key.startswith("tab_") else key
+
+        table = CoverageDetailTable({})
+        row = table._create_row("daily_quotes", {"ratio": 0.95, "fresh_ratio": 0.90, "type": "stock"})
+
+        # 验证使用了 i18n 翻译名而非 fallback
+        name_text = row.content.controls[0].controls[1]
+        assert name_text.value == "translated_tab_daily_quotes"
+
 
 class TestHealthScanDialog:
     @pytest.fixture(autouse=True)
@@ -417,4 +537,50 @@ class TestHealthScanDialog:
         await dlg._update_progress(25, 100, "quarter done")
         assert dlg.progress_bar.value == 0.25
         assert dlg.status_text.value == "quarter done"
+        mock_page.update.assert_called_once()
+
+    def test_dialog_size_default_without_page(self):
+        """B8: _dialog_size 无 page_ref 时返回 (450, 300)。"""
+        from ui.components.health_report_dialog import HealthScanDialog
+
+        dlg = HealthScanDialog(page=None, data_processor=MagicMock())
+        assert dlg._cached_width == 450
+        assert dlg._cached_height == 300
+
+    def test_refresh_locale_updates_texts(self, mock_page):
+        """B9: refresh_locale 正常路径。"""
+        dlg = self._make_scan_dialog(mock_page)
+        set_page(dlg, mock_page)
+        dlg.update = MagicMock()
+
+        dlg.refresh_locale()
+
+        assert dlg._title_text.value == "scan_title"
+        assert dlg._close_btn.text == "common_close"
+        dlg.update.assert_called_once()
+
+    def test_refresh_locale_calls_show_results_when_visible(self, mock_page):
+        """B10: refresh_locale 结果区域可见时调用 show_results。"""
+        dlg = self._make_scan_dialog(mock_page)
+        set_page(dlg, mock_page)
+        dlg.result_content.visible = True
+        dlg._last_result = {"score": 90, "tier": 3}
+        dlg.show_results = MagicMock()
+        dlg.update = MagicMock()
+
+        dlg.refresh_locale()
+
+        dlg.show_results.assert_called_once_with({"score": 90, "tier": 3})
+
+    @pytest.mark.asyncio
+    async def test_start_scan_handles_error(self, mock_page):
+        """B11: start_scan 异常路径。"""
+        mock_dp = MagicMock()
+        mock_dp.run_quality_scan = AsyncMock(side_effect=RuntimeError("scan failed"))
+        dlg = self._make_scan_dialog(mock_page, mock_dp)
+        mock_page.update = MagicMock()
+
+        await dlg.start_scan()
+
+        assert dlg.status_text.value == "db_err_format"
         mock_page.update.assert_called_once()

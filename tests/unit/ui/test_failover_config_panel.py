@@ -1,6 +1,7 @@
 """FailoverConfigPanel 和 ProviderCredentialDialog 单元测试"""
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
@@ -1527,3 +1528,1004 @@ class TestProviderCredentialDialogNormalizeBaseUrl:
             ProviderCredentialDialog._normalize_base_url("https://dashscope.aliyuncs.com/compatible-mode/v1")
             == "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. TestProviderCredentialDialogBuildOptions (A1: _build_ui 无 test 回调 + _populate_edit_data 早返回)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestProviderCredentialDialogBuildOptions:
+    """覆盖 _build_ui 中 on_test_connection=None 分支与 _populate_edit_data 早返回。"""
+
+    def test_build_ui_without_test_connection_callback(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """on_test_connection=None 时 _test_btn 为 None，actions 仅含 cancel + confirm"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+            on_test_connection=None,
+        )
+        assert dialog._test_btn is None
+        assert len(dialog.actions) == 2
+
+    def test_populate_edit_data_returns_when_no_edit_item(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_edit_item 为 None 时 _populate_edit_data 直接返回（覆盖 line 153）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        assert dialog._edit_item is None
+        # 直接调用不应抛出
+        dialog._populate_edit_data()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 10. TestProviderCredentialDialogLifecycle (A2-A4: did_mount/will_unmount/refresh_locale)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestProviderCredentialDialogLifecycle:
+    """覆盖 did_mount/will_unmount/refresh_locale 正常与异常路径。"""
+
+    def test_did_mount_subscribes_i18n(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """did_mount 订阅 I18n（覆盖 line 170）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.did_mount()
+        mock_i18n.subscribe.assert_called_once_with(dialog.refresh_locale)
+
+    def test_will_unmount_unsubscribes_and_clears_id(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """will_unmount 取消订阅并清理 id（覆盖 173-175）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.did_mount()
+        dialog.will_unmount()
+        mock_i18n.unsubscribe.assert_called_once()
+        assert dialog._locale_subscription_id is None
+
+    def test_refresh_locale_updates_labels(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """refresh_locale 正常路径更新所有 i18n 文案（覆盖 179-200）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog._provider = "deepseek"
+        dialog.refresh_locale()
+        assert dialog.title.value == "failover_dialog_title"
+        assert dialog.provider_dropdown.label == "failover_select_provider"
+        assert dialog._cancel_btn.text == "btn_cancel"
+
+    def test_refresh_locale_exception_logged_as_warning(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+        caplog,
+    ):
+        """I18n.get 抛错时 refresh_locale 仅 warning 不抛（覆盖 201-202）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        mock_i18n.get.side_effect = RuntimeError("i18n boom")
+        with caplog.at_level(logging.WARNING):
+            dialog.refresh_locale()
+        assert "refresh_locale failed" in caplog.text
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 11. TestProviderCredentialDialogProviderChange (A5-A7)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestProviderCredentialDialogProviderChange:
+    """覆盖 _on_provider_change_internal update 分支、_on_model_dropdown_change 空值、_update_links_row models_url。"""
+
+    def test_on_provider_change_internal_triggers_control_updates(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """model_dropdown/base_url_input/links_row 有 page 时触发 update（覆盖 229/231/233）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        # 让控件的 page 非 None 以触发 update 分支
+        dialog.model_dropdown.page = mock_page
+        dialog.base_url_input.page = mock_page
+        dialog.links_row.page = mock_page
+        dialog._on_provider_change_internal("deepseek")
+        assert len(dialog.model_dropdown.options) > 0
+
+    def test_on_model_dropdown_change_none_value_preserves_custom_input(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """e.control.value 为 None 时不清理 custom_model_input（覆盖 236->exit）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.custom_model_input.value = "my-model"
+        e = MagicMock(spec=[])
+        e.control = MagicMock(spec=[])
+        e.control.value = None
+        dialog._on_model_dropdown_change(e)
+        assert dialog.custom_model_input.value == "my-model"
+
+    def test_update_links_row_with_models_url(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """provider 含 console_url + pricing_url + models_url 时添加 3 个按钮（覆盖 246->253, 261）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        # 临时添加 models_url
+        mock_llm_providers["deepseek"]["models_url"] = "https://platform.deepseek.com/models"
+        try:
+            dialog._update_links_row("deepseek")
+            assert len(dialog.links_row.controls) == 3
+        finally:
+            mock_llm_providers["deepseek"].pop("models_url", None)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 12. TestProviderCredentialDialogActions (A8-A13)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestProviderCredentialDialogActions:
+    """覆盖 _open_url、_on_cancel、_on_test_connection、_show_snack、_on_confirm_click 边界。"""
+
+    def test_open_url_calls_page_launch_url(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_open_url 调用 page.launch_url（覆盖 269-270）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog._open_url("https://example.com")
+        mock_page.launch_url.assert_called_once_with("https://example.com")
+
+    def test_on_cancel_without_page_does_not_raise(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_on_cancel 无 page 时不抛出（覆盖 287->exit）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.page = None
+        dialog._on_cancel(MagicMock(spec=[]))
+
+    @pytest.mark.asyncio
+    async def test_on_test_connection_no_callback_returns_early(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_on_test_connection 无 callback 时早返回（覆盖 line 300）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+            on_test_connection=None,
+        )
+        dialog._provider = "deepseek"
+        dialog.model_dropdown.value = "deepseek-chat"
+        dialog.api_key_input.value = "key"
+        await dialog._on_test_connection(MagicMock(spec=[]))
+        assert len(mock_page.overlay) == 0
+
+    @pytest.mark.asyncio
+    async def test_on_test_connection_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_on_test_connection callback 抛错时显示 SnackBar（覆盖 316-322）"""
+        mock_callback = AsyncMock(side_effect=RuntimeError("conn err"))
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+            on_test_connection=mock_callback,
+        )
+        dialog._provider = "deepseek"
+        dialog.model_dropdown.value = "deepseek-chat"
+        dialog.api_key_input.value = "key"
+        await dialog._on_test_connection(MagicMock(spec=[]))
+        assert len(mock_page.overlay) == 1
+
+    def test_show_snack_without_page_does_not_raise(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_show_snack 无 page 时跳过（覆盖 328->exit）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.page = None
+        dialog._show_snack("msg", "#fff")
+
+    def test_on_confirm_click_without_page_does_not_raise(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """_on_confirm_click 无 page 时不调 run_task（覆盖 353->exit）"""
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.page = None
+        dialog._provider = "deepseek"
+        dialog.model_dropdown.value = "deepseek-chat"
+        dialog.api_key_input.value = "key"
+        dialog._on_confirm_click(MagicMock(spec=[]))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 13. TestProviderCredentialDialogConfirmAsync (A14 + 403->406/407-414)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestProviderCredentialDialogConfirmAsync:
+    """覆盖 _do_confirm_click_async 的边界路径。"""
+
+    @pytest.mark.asyncio
+    async def test_do_confirm_click_async_existing_entry_not_duplicated(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """新增模式下 entry 已存在时不重复添加（覆盖 385->388）"""
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": ["openai/gpt-4o"],
+            "llm_provider": "deepseek",
+        }
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog._provider = "openai"
+        dialog.model_dropdown.value = "gpt-4o"
+        dialog.api_key_input.value = "key"
+        await dialog._do_confirm_click_async("openai", "gpt-4o", "", "key")
+        mock_config_handler.save_config.assert_called_once_with({"llm_failover_models": ["openai/gpt-4o"]})
+
+    @pytest.mark.asyncio
+    async def test_do_confirm_click_async_without_page_skips_close(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """page 为 None 时不调用 page.close（覆盖 403->406）"""
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": [],
+            "llm_provider": "deepseek",
+        }
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog.page = None
+        await dialog._do_confirm_click_async("openai", "gpt-4o", "", "key")
+
+    @pytest.mark.asyncio
+    async def test_do_confirm_click_async_calls_on_confirm(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """on_confirm 回调被调用（覆盖 line 407）"""
+        on_confirm = MagicMock()
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": [],
+            "llm_provider": "deepseek",
+        }
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+            on_confirm=on_confirm,
+        )
+        dialog._provider = "openai"
+        dialog.model_dropdown.value = "gpt-4o"
+        dialog.api_key_input.value = "key"
+        await dialog._do_confirm_click_async("openai", "gpt-4o", "", "key")
+        on_confirm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_do_confirm_click_async_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_page,
+    ):
+        """保存异常时显示错误 SnackBar（覆盖 408-414）"""
+        mock_config_handler.save_provider_credential.side_effect = RuntimeError("save err")
+        mock_config_handler.load_config.return_value = {
+            "llm_failover_models": [],
+            "llm_provider": "deepseek",
+        }
+        dialog = _make_dialog(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_page,
+        )
+        dialog._provider = "openai"
+        dialog.model_dropdown.value = "gpt-4o"
+        dialog.api_key_input.value = "key"
+        await dialog._do_confirm_click_async("openai", "gpt-4o", "", "key")
+        assert len(mock_page.overlay) == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 14. TestFailoverConfigPanelNoPageEdgeCases (A15/A17/A19/A21/A23/A25/A27 + 643->exit/667->exit)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestFailoverConfigPanelNoPageEdgeCases:
+    """覆盖 panel 各事件处理器在 page=None 时的早返回。"""
+
+    def test_on_add_click_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_add_click 无 page 时不调 run_task（覆盖 626->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._on_add_click(MagicMock(spec=[]))
+
+    def test_on_edit_item_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_edit_item 无 page 时不调 run_task（覆盖 650->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._on_edit_item(0)
+
+    def test_on_delete_item_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_delete_item 无 page 时不调 run_task（覆盖 674->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._on_delete_item(0)
+
+    def test_on_move_up_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_move_up 无 page 时跳过（覆盖 697->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._failover_items = [
+            FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
+            FailoverItem(provider="openai", model="gpt-4o", display_name="OpenAI", has_credential=False),
+        ]
+        panel._on_move_up(1)
+
+    def test_on_move_down_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_move_down 无 page 时跳过（覆盖 703->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._failover_items = [
+            FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
+            FailoverItem(provider="openai", model="gpt-4o", display_name="OpenAI", has_credential=False),
+        ]
+        panel._on_move_down(0)
+
+    def test_on_validate_all_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_validate_all 无 page 时不调 run_task（覆盖 733->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._on_validate_all(MagicMock(spec=[]))
+
+    def test_on_dialog_confirmed_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_on_dialog_confirmed 无 page 时不调 run_task（覆盖 760-761）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._on_dialog_confirmed()
+
+    def test_show_snack_without_page(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_show_snack 无 page 时跳过（覆盖 771->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        panel._show_snack("msg", "#fff")
+
+    @pytest.mark.asyncio
+    async def test_do_add_click_async_without_page_skips_open(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_do_add_click_async 无 page 时不调用 page.open（覆盖 643->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel.page = None
+        await panel._do_add_click_async()
+
+    @pytest.mark.asyncio
+    async def test_do_edit_item_async_without_page_skips_open(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_do_edit_item_async 无 page 时不调用 page.open（覆盖 667->exit）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel._failover_items = [
+            FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
+        ]
+        panel.page = None
+        await panel._do_edit_item_async(0)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 15. TestFailoverConfigPanelAsyncExceptions (A16/A18/A20/A22/A24/A26)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestFailoverConfigPanelAsyncExceptions:
+    """覆盖 panel 各 async 方法的异常路径。"""
+
+    @pytest.mark.asyncio
+    async def test_do_add_click_async_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_do_add_click_async 内部 load_config 抛错时显示 SnackBar（覆盖 645-647）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        # 在 __init__ 同步加载完成后，再次调用时抛错（_do_add_click_async 内部 lambda 调用 load_config）
+        mock_config_handler.load_config.side_effect = RuntimeError("db")
+        await panel._do_add_click_async()
+        assert len(mock_page.overlay) == 1
+
+    @pytest.mark.asyncio
+    async def test_do_edit_item_async_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """get_provider_credential 抛错时显示 SnackBar（覆盖 669-671）"""
+        mock_config_handler.get_provider_credential.side_effect = RuntimeError("kr")
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel._failover_items = [
+            FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
+        ]
+        await panel._do_edit_item_async(0)
+        assert len(mock_page.overlay) == 1
+
+    @pytest.mark.asyncio
+    async def test_do_delete_item_async_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_do_delete_item_async 内部 load_config 抛错时显示 SnackBar（覆盖 690-692）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel._failover_items = [
+            FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
+        ]
+        # _delete_sync 内部会再次调用 load_config，这里设置抛错
+        mock_config_handler.load_config.side_effect = RuntimeError("db")
+        await panel._do_delete_item_async(0)
+        assert len(mock_page.overlay) == 1
+
+    @pytest.mark.asyncio
+    async def test_do_move_item_async_exception_rolls_back(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """save_config 抛错时回滚顺序并显示 SnackBar（覆盖 720-725）"""
+        mock_config_handler.save_config.side_effect = RuntimeError("io")
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        panel._failover_items = [
+            FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
+            FailoverItem(provider="openai", model="gpt-4o", display_name="OpenAI", has_credential=False),
+            FailoverItem(provider="zhipu", model="glm-4", display_name="智谱", has_credential=False),
+        ]
+        original = list(panel._failover_items)
+        await panel._do_move_item_async(0, 1)
+        # 回滚后顺序应与原始一致
+        assert panel._failover_items == original
+        assert len(mock_page.overlay) == 1
+
+    @pytest.mark.asyncio
+    async def test_do_validate_all_async_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """validate_failover_credentials 抛错时显示 SnackBar（覆盖 750-752）"""
+        mock_config_handler.validate_failover_credentials.side_effect = RuntimeError("v")
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        await panel._do_validate_all_async()
+        assert len(mock_page.overlay) == 1
+
+    @pytest.mark.asyncio
+    async def test_do_dialog_confirmed_async_exception_shows_snack(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """_load_config_async 抛错时显示 SnackBar（覆盖 764-768）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        with patch.object(panel, "_load_config_async", new=AsyncMock(side_effect=RuntimeError("x"))):
+            await panel._do_dialog_confirmed_async()
+        assert len(mock_page.overlay) == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 16. TestFailoverConfigPanelSafeUpdateAndLocale (A28-A29)
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestFailoverConfigPanelSafeUpdateAndLocale:
+    """覆盖 _safe_update 与 _on_locale_change 异常路径。"""
+
+    def test_safe_update_exception_logged_as_debug(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+    ):
+        """self.update 抛错时仅 debug 日志（覆盖 783-784）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        # panel.page 已为 mock_page
+        with patch.object(panel, "update", side_effect=RuntimeError("u")):
+            panel._safe_update()  # 不应抛出
+
+    def test_on_locale_change_exception_logged_as_warning(
+        self,
+        mock_config_handler,
+        mock_i18n,
+        mock_llm_providers,
+        mock_app_colors,
+        mock_app_styles,
+        mock_section_header,
+        mock_page,
+        caplog,
+    ):
+        """_build_ui 抛错时 warning 日志（覆盖 798-799）"""
+        panel = _make_panel(
+            mock_config_handler,
+            mock_i18n,
+            mock_llm_providers,
+            mock_app_colors,
+            mock_app_styles,
+            mock_section_header,
+            mock_page,
+        )
+        with (
+            patch.object(panel, "_build_ui", side_effect=RuntimeError("b")),
+            caplog.at_level(logging.WARNING),
+        ):
+            panel._on_locale_change()
+        assert "_on_locale_change failed" in caplog.text
