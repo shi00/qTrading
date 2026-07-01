@@ -87,14 +87,14 @@ async def check_multi_period_data(field: str) -> bool:
                     if field in df.columns and not df[field].isna().all():  # type: ignore[union-attr]
                         passed += 1
             except Exception as e:
-                logger.debug(f"[PromptValidator] check_field_populous sample {ts_code} failed: {e}")
+                logger.debug("[PromptValidator] check_field_populous sample %s failed: %s", ts_code, e)
                 continue
 
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
     except Exception as e:
-        logger.debug(f"[PromptValidator] check_field_populous failed: {e}")
+        logger.debug("[PromptValidator] check_field_populous failed: %s", e)
         return False
 
 
@@ -123,14 +123,14 @@ async def check_field_exists(field: str) -> bool:
                 if df is not None and not df.empty and field in df.columns:
                     passed += 1
             except Exception as e:
-                logger.debug(f"[PromptValidator] check_field_exists sample {ts_code} failed: {e}")
+                logger.debug("[PromptValidator] check_field_exists sample %s failed: %s", ts_code, e)
                 continue
 
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
     except Exception as e:
-        logger.debug(f"[PromptValidator] check_field_exists failed: {e}")
+        logger.debug("[PromptValidator] check_field_exists failed: %s", e)
         return False
 
 

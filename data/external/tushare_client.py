@@ -264,7 +264,10 @@ class TushareClient:
                 rate=slow_rate,
             )
             logger.info(
-                f"[API] Slow API limiter for '{api_name}': {slow_rate * 60:.0f} req/min (factor={factor})",
+                "[API] Slow API limiter for '%s': %.0f req/min (factor=%s)",
+                api_name,
+                slow_rate * 60,
+                factor,
             )
 
         for api_name, factor in self._FAST_API_OVERRIDES.items():
@@ -276,7 +279,10 @@ class TushareClient:
                 rate=fast_rate,
             )
             logger.info(
-                f"[API] Fast API limiter for '{api_name}': {fast_rate * 60:.0f} req/min (factor={factor})",
+                "[API] Fast API limiter for '%s': %.0f req/min (factor=%s)",
+                api_name,
+                fast_rate * 60,
+                factor,
             )
 
         return rate_limiter, api_limiters
@@ -318,7 +324,8 @@ class TushareClient:
                 # tushare SDK has no type stubs; cast to Protocol for typed access
                 self.pro = typing.cast(TushareProApi, ts.pro_api(token=self.token, timeout=self.timeout))
                 logger.info(
-                    f"[API] Tushare Client initialized with timeout={self.timeout}s",
+                    "[API] Tushare Client initialized with timeout=%ss",
+                    self.timeout,
                 )
             else:
                 self.pro = None

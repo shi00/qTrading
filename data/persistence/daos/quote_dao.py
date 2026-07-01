@@ -180,7 +180,7 @@ class QuoteDao(BaseDao):
         safe_tables = []
         for table in tables:
             if table not in allowed_tables or not _is_safe_identifier(table):
-                logger.warning(f"[QuoteDao] Invalid table name rejected: {table}")
+                logger.warning("[QuoteDao] Invalid table name rejected: %s", table)
                 return False
             safe_tables.append(table)
 
@@ -193,7 +193,7 @@ class QuoteDao(BaseDao):
         for t in safe_tables:
             tbl = metadata.tables.get(t)
             if tbl is None or "trade_date" not in tbl.c:
-                logger.warning(f"[QuoteDao] Table '{t}' not in metadata or missing trade_date column")
+                logger.warning("[QuoteDao] Table '%s' not in metadata or missing trade_date column", t)
                 return False
             part = (
                 sa.select(
@@ -219,7 +219,7 @@ class QuoteDao(BaseDao):
         except Exception as exc:
             if raise_on_error:
                 raise
-            logger.debug(f"[QuoteDao] Table existence check failed: {exc}")
+            logger.debug("[QuoteDao] Table existence check failed: %s", exc)
             return False
 
     async def get_expected_stock_count(self, trade_date: datetime.date | str) -> int:
@@ -271,14 +271,14 @@ class QuoteDao(BaseDao):
             if df is not None and not df.empty:
                 is_trade_day = int(df["is_trade_day"].iloc[0])
                 if is_trade_day == 0:
-                    logger.debug(f"[QuoteDao] {trade_date} is not a trading day")
+                    logger.debug("[QuoteDao] %s is not a trading day", trade_date)
                     return 0
                 return int(df["cnt"].iloc[0])
             return 0
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[QuoteDao] Failed to get expected stock count for {trade_date}: {e}")
+            logger.warning("[QuoteDao] Failed to get expected stock count for %s: %s", trade_date, e)
             return 0
 
     async def get_daily_quotes(
@@ -360,19 +360,19 @@ class QuoteDao(BaseDao):
         }
 
         if table_name not in date_col_map:
-            logger.warning(f"[QuoteDao] Invalid table name rejected: {table_name}")
+            logger.warning("[QuoteDao] Invalid table name rejected: %s", table_name)
             return set()
 
         date_col = date_col_map[table_name]
 
         if not _is_safe_identifier(table_name) or not _is_safe_identifier(date_col):
-            logger.warning(f"[QuoteDao] Invalid identifier rejected: table={table_name}, col={date_col}")
+            logger.warning("[QuoteDao] Invalid identifier rejected: table=%s, col=%s", table_name, date_col)
             return set()
 
         try:
             tbl = Base.metadata.tables.get(table_name)
             if tbl is None or date_col not in tbl.c:
-                logger.warning(f"[QuoteDao] Table '{table_name}' not in metadata or missing column '{date_col}'")
+                logger.warning("[QuoteDao] Table '%s' not in metadata or missing column '%s'", table_name, date_col)
                 return set()
             stmt = sa.select(sa.distinct(tbl.c[date_col])).order_by(tbl.c[date_col])
             df = await self._read_db_select(stmt)
@@ -383,7 +383,9 @@ class QuoteDao(BaseDao):
             raise
         except Exception as e:
             logger.warning(
-                f"[QuoteDao] Failed to get cached dates for {table_name}: {e}",
+                "[QuoteDao] Failed to get cached dates for %s: %s",
+                table_name,
+                e,
             )
             return set()
 
@@ -732,13 +734,13 @@ class QuoteDao(BaseDao):
         """
         allowed_tables = set(_get_default_synced_tables())
         if table_name not in allowed_tables:
-            logger.warning(f"[QuoteDao] Invalid table name rejected: {table_name}")
+            logger.warning("[QuoteDao] Invalid table name rejected: %s", table_name)
             return {}
 
         try:
             tbl = Base.metadata.tables.get(table_name)
             if tbl is None or "trade_date" not in tbl.c:
-                logger.warning(f"[QuoteDao] Table '{table_name}' not in metadata or missing trade_date column")
+                logger.warning("[QuoteDao] Table '%s' not in metadata or missing trade_date column", table_name)
                 return {}
             stmt = (
                 sa.select(tbl.c.trade_date, sa.func.count().label("cnt"))
@@ -759,7 +761,7 @@ class QuoteDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[QuoteDao] Failed to get bulk counts for {table_name}: {e}")
+            logger.warning("[QuoteDao] Failed to get bulk counts for %s: %s", table_name, e)
             return {}
 
     async def get_bulk_expected_stock_counts(
@@ -817,7 +819,7 @@ class QuoteDao(BaseDao):
             )
 
             if df is None or df.empty:
-                logger.warning(f"[QuoteDao] No trading days found for range {start_date} to {end_date}")
+                logger.warning("[QuoteDao] No trading days found for range %s to %s", start_date, end_date)
                 return {}
 
             normalized_results = {}
@@ -828,7 +830,7 @@ class QuoteDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[QuoteDao] Failed to get bulk expected counts: {e}")
+            logger.warning("[QuoteDao] Failed to get bulk expected counts: %s", e)
             return {}
 
     async def get_bulk_sync_quality_scores(
@@ -987,7 +989,7 @@ class QuoteDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"[QuoteDao] Field completeness check skipped: {e}")
+            logger.debug("[QuoteDao] Field completeness check skipped: %s", e)
 
         if field_completeness:
             for trade_date in results:
@@ -1053,7 +1055,7 @@ class QuoteDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug(f"[QuoteDao] get_field_completeness failed for {trade_date}: {e}")
+            logger.debug("[QuoteDao] get_field_completeness failed for %s: %s", trade_date, e)
         return {}
 
     async def get_sync_quality_score(self, trade_date: datetime.date | str) -> dict:

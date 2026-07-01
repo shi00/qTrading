@@ -23,7 +23,7 @@ class OfflineCalendar:
                 # SSE includes holidays for Shanghai Stock Exchange (A-Share)
                 cls._calendar = get_calendar("SSE")
             except Exception as e:
-                logger.error(f"[OfflineCalendar] Failed to load SSE calendar: {e}")
+                logger.error("[OfflineCalendar] Failed to load SSE calendar: %s", e)
                 return None
         return cls._calendar
 
@@ -36,7 +36,8 @@ class OfflineCalendar:
             cal = OfflineCalendar.get_instance()
             if cal is None:
                 logger.error(
-                    f"[OfflineCalendar] Calendar unavailable, treating {date_obj} as non-trading day (conservative fallback)",
+                    "[OfflineCalendar] Calendar unavailable, treating %s as non-trading day (conservative fallback)",
+                    date_obj,
                 )
                 return False
 
@@ -49,7 +50,7 @@ class OfflineCalendar:
             return not schedule.empty
 
         except Exception as e:
-            logger.error(f"[OfflineCalendar] is_trading_day check failed for {date_obj}: {e}")
+            logger.error("[OfflineCalendar] is_trading_day check failed for %s: %s", date_obj, e)
             return False
 
     @staticmethod
@@ -71,5 +72,5 @@ class OfflineCalendar:
             return [d.strftime("%Y%m%d") for d in valid]
 
         except Exception as e:
-            logger.error(f"[OfflineCalendar] Range check failed: {e}")
+            logger.error("[OfflineCalendar] Range check failed: %s", e)
             return []

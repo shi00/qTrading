@@ -57,17 +57,17 @@ class I18n:
         file_path = cls._get_locales_dir() / locale_folder / "strings.json"
 
         if not file_path.exists():
-            logger.warning(f"[I18n] Locale file not found: {file_path}")
+            logger.warning("[I18n] Locale file not found: %s", file_path)
             return {}
 
         try:
             with open(file_path, encoding="utf-8") as f:
                 return json.load(f)
         except json.JSONDecodeError as e:
-            logger.error(f"[I18n] Failed to parse locale file {file_path}: {e}")
+            logger.error("[I18n] Failed to parse locale file %s: %s", file_path, e)
             return {}
         except Exception as e:
-            logger.error(f"[I18n] Failed to load locale file {file_path}: {e}")
+            logger.error("[I18n] Failed to load locale file %s: %s", file_path, e)
             return {}
 
     @classmethod
@@ -88,11 +88,11 @@ class I18n:
         if normalized_locale in SUPPORTED_LOCALES:
             cls._locale = normalized_locale
         else:
-            logger.warning(f"[I18n] Unsupported locale '{config_locale}', falling back to {DEFAULT_LOCALE}")
+            logger.warning("[I18n] Unsupported locale '%s', falling back to %s", config_locale, DEFAULT_LOCALE)
             cls._locale = DEFAULT_LOCALE
 
         cls._initialized = True
-        logger.info(f"[I18n] Initialized with locale: {cls._locale}")
+        logger.info("[I18n] Initialized with locale: %s", cls._locale)
 
     @classmethod
     def get(cls, key: str, default: str | None = None, locale: str | None = None, **kwargs) -> str:
@@ -130,11 +130,16 @@ class I18n:
             if key not in cls._missing_keys:
                 if default is not None:
                     logger.debug(
-                        f"[I18n] Using default fallback '{default}' for missing key: '{key}' (Locale: {normalized_locale})",
+                        "[I18n] Using default fallback '%s' for missing key: '%s' (Locale: %s)",
+                        default,
+                        key,
+                        normalized_locale,
                     )
                 else:
                     logger.warning(
-                        f"[I18n] Missing translation for key: '{key}' (Locale: {normalized_locale})",
+                        "[I18n] Missing translation for key: '%s' (Locale: %s)",
+                        key,
+                        normalized_locale,
                     )
                 cls._missing_keys.add(key)
             return default if default is not None else key
@@ -145,7 +150,7 @@ class I18n:
             try:
                 return template.format(**kwargs)
             except KeyError as e:
-                logger.warning(f"[I18n] Missing format arg for '{key}': {e}")
+                logger.warning("[I18n] Missing format arg for '%s': %s", key, e)
                 return template
         return template
 
@@ -157,16 +162,16 @@ class I18n:
         if normalized_locale in SUPPORTED_LOCALES:
             cls._locale = normalized_locale
             cls._initialized = True
-            logger.info(f"[I18n] Locale changed to: {cls._locale}")
+            logger.info("[I18n] Locale changed to: %s", cls._locale)
 
             if cls._listeners:
                 for listener in cls._listeners:
                     try:
                         listener()
                     except Exception as e:
-                        logger.error(f"[I18n] Listener error: {e}")
+                        logger.error("[I18n] Listener error: %s", e)
         else:
-            logger.warning(f"[I18n] Attempted to set unsupported locale: {locale}")
+            logger.warning("[I18n] Attempted to set unsupported locale: %s", locale)
 
     @classmethod
     def subscribe(cls, callback, *, sync_immediately: bool = True):
@@ -193,7 +198,7 @@ class I18n:
                 try:
                     callback()
                 except Exception as e:
-                    logger.error(f"[I18n] Immediate sync error: {e}", exc_info=True)
+                    logger.error("[I18n] Immediate sync error: %s", e, exc_info=True)
         return callback
 
     @classmethod
@@ -246,4 +251,4 @@ class I18n:
         if cls._locale in cls._strings_cache:
             del cls._strings_cache[cls._locale]
         cls._get_strings(cls._locale)
-        logger.info(f"[I18n] Reloaded locale: {cls._locale}")
+        logger.info("[I18n] Reloaded locale: %s", cls._locale)

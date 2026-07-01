@@ -51,7 +51,7 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
     import os
 
     if os.environ.get("E2E_TESTING") == "true":
-        logger.info(f"[QualityGate] E2E mode: bypassing quality check for {func_name}")
+        logger.info("[QualityGate] E2E mode: bypassing quality check for %s", func_name)
         return
 
     if processor is None:
@@ -61,7 +61,8 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
                 f"Set STRICT_QUALITY_GATE=false to bypass (not recommended in production)."
             )
         logger.warning(
-            f"[QualityGate] Bypassed for {func_name}: DataProcessor not found in context. (Could be test env or context missing)",
+            "[QualityGate] Bypassed for %s: DataProcessor not found in context. (Could be test env or context missing)",
+            func_name,
         )
         return
     current_tier = getattr(processor, "_quality_tier", None)
@@ -77,7 +78,7 @@ def _check_tier(processor: typing.Any, min_tier: typing.Any, func_name: typing.A
         )
         if msg == "quality_err_too_low":  # Fallback if I18n not initialized
             msg = f"Data Quality too low for {func_name}. Required: {min_tier.name}, Current: {QualityTier(current_tier).name}"
-        logger.warning(f"[QualityGate] {msg}")
+        logger.warning("[QualityGate] %s", msg)
         raise QualityGateError(msg)
 
 

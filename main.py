@@ -89,7 +89,7 @@ async def main(page: ft.Page):
                     page.window.prevent_close = False
                     page.window.destroy()
             except Exception as e:
-                logger.debug(f"Window destroy ignored: {e}")
+                logger.debug("Window destroy ignored: %s", e)
 
             if cleanup_ok:
                 coordinator.cancel_watchdog()
@@ -273,7 +273,7 @@ async def main(page: ft.Page):
         page.on_disconnect = _on_disconnect
 
     def on_error(e):
-        logger.error(f"[App] Unhandled UI Exception: {e}", exc_info=True)
+        logger.error("[App] Unhandled UI Exception: %s", e, exc_info=True)
 
     page.on_error = on_error
 
@@ -360,7 +360,11 @@ async def main(page: ft.Page):
     masked_token = mask_sensitive(token)
     masked_llm_key = mask_sensitive(llm_api_key)
     logger.debug(
-        f"DB_URL configured: {bool(db_url)}, Token='{masked_token}', API_Key='{masked_llm_key}', Onboarding='{onboarding_complete}'"
+        "DB_URL configured: %s, Token='%s', API_Key='%s', Onboarding='%s'",
+        bool(db_url),
+        masked_token,
+        masked_llm_key,
+        onboarding_complete,
     )
 
     await controller.start(db_url, token, llm_api_key, onboarding_complete)

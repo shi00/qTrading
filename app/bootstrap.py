@@ -28,7 +28,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     try:
         await cache_manager.init_db()
     except DatabaseMigrationNeeded as e:
-        logger.warning(f"[Bootstrap] Database needs migration: {e}")
+        logger.warning("[Bootstrap] Database needs migration: %s", e)
         return {
             "success": False,
             "error": "db_upgrade_needed",
@@ -37,7 +37,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             "head_rev": e.head_rev,
         }
     except Exception as e:
-        logger.error(f"[Bootstrap] Database initialization failed: {e}", exc_info=True)
+        logger.error("[Bootstrap] Database initialization failed: %s", e, exc_info=True)
         if show_toast_fn:
             show_toast_fn(I18n.get("error_db_init_failed"), "error")
         return {"success": False, "error": "db_init_failed", "detail": str(e), "current_rev": None, "head_rev": None}
@@ -53,7 +53,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     try:
         await TaskManager().init_db()
     except Exception as e:
-        logger.error(f"[Bootstrap] TaskManager init failed: {e}", exc_info=True)
+        logger.error("[Bootstrap] TaskManager init failed: %s", e, exc_info=True)
         if show_toast_fn:
             show_toast_fn(I18n.get("error_task_manager_init_failed"), "error")
         return {
@@ -99,11 +99,11 @@ async def _warmup_tushare_capabilities() -> None:
 
         cache = client.get_capability_cache()
         if cache:
-            logger.info(f"[Bootstrap] Loaded {len(cache)} Tushare capabilities from AppState")
+            logger.info("[Bootstrap] Loaded %s Tushare capabilities from AppState", len(cache))
         else:
             logger.debug("[Bootstrap] Tushare capability cache empty after load (first startup or token changed)")
     except Exception as e:
-        logger.warning(f"[Bootstrap] Tushare capability warmup failed (non-critical): {e}")
+        logger.warning("[Bootstrap] Tushare capability warmup failed (non-critical): %s", e)
 
 
 def _validate_failover_credentials() -> None:
@@ -122,7 +122,7 @@ def _validate_failover_credentials() -> None:
                 ", ".join(missing),
             )
     except Exception as e:
-        logger.debug(f"[Bootstrap] Failover credential validation skipped: {e}")
+        logger.debug("[Bootstrap] Failover credential validation skipped: %s", e)
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):

@@ -156,13 +156,18 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         dep_result = self.check_dependencies(context)
         if dep_result["status"] == "unready":
             logger.warning(
-                f"[Strategy] {self.name}: dependencies unready, "
-                f"missing_keys={dep_result['missing_keys']}, "
-                f"missing_tables={dep_result['missing_tables']}"
+                "[Strategy] %s: dependencies unready, missing_keys=%s, missing_tables=%s",
+                self.name,
+                dep_result["missing_keys"],
+                dep_result["missing_tables"],
             )
             return pd.DataFrame()
         elif dep_result["status"] == "degraded":
-            logger.info(f"[Strategy] {self.name}: running in degraded mode, empty_keys={dep_result['empty_keys']}")
+            logger.info(
+                "[Strategy] %s: running in degraded mode, empty_keys=%s",
+                self.name,
+                dep_result["empty_keys"],
+            )
 
         # --- Read dynamic params from UI (with fallback) ---
         params = context.get("params", {})
@@ -182,7 +187,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
         candidates["_vol_ratio_threshold"] = vol_ratio_threshold
 
         logger.info(
-            f"[OversoldStrategy] Phase 1 complete: {len(candidates)} candidates (RSI < {rsi_threshold})",
+            "[OversoldStrategy] Phase 1 complete: %s candidates (RSI < %s)",
+            len(candidates),
+            rsi_threshold,
         )
 
         # --- Phase 2: AI Analysis (via Mixin) ---
@@ -221,7 +228,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     except ValueError:
                         continue
                 else:
-                    logger.warning(f"[OversoldStrategy] Cannot parse trade_date: {context_trade_date}")
+                    logger.warning("[OversoldStrategy] Cannot parse trade_date: %s", context_trade_date)
                     return pd.DataFrame()
             elif isinstance(context_trade_date, datetime.date):
                 end_date_obj = context_trade_date
@@ -246,7 +253,9 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             context.setdefault("_metadata", {})["calendar_fallback"] = True
 
         logger.info(
-            f"[OversoldStrategy] Fetching history {start_date_obj} → {end_date_obj} for RSI calculation...",
+            "[OversoldStrategy] Fetching history %s → %s for RSI calculation...",
+            start_date_obj,
+            end_date_obj,
         )
 
         try:
@@ -344,7 +353,8 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             raise
         except Exception as e:
             logger.error(
-                f"[OversoldStrategy] Error during execution: {e}",
+                "[OversoldStrategy] Error during execution: %s",
+                e,
                 exc_info=True,
             )
             raise RuntimeError(f"Strategy internal error: {e}") from e
@@ -383,14 +393,14 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         end_date=end_date,
                     )
         except Exception as e:
-            logger.warning(f"[OversoldStrategy] Failed to prefetch indicators: {e}")
+            logger.warning("[OversoldStrategy] Failed to prefetch indicators: %s", e)
 
         try:
             screening_data = context.get("screening_data")
             if screening_data is not None and not screening_data.empty:
                 prefetched.sector_stats = self._compute_sector_stats(screening_data)
         except Exception as e:
-            logger.warning(f"[OversoldStrategy] Failed to compute sector stats: {e}")
+            logger.warning("[OversoldStrategy] Failed to compute sector stats: %s", e)
 
         try:
             if hasattr(dp.cache, "get_index_daily_range"):
@@ -446,7 +456,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                             }
                         prefetched.market_context = market_context
         except Exception as e:
-            logger.warning(f"[OversoldStrategy] Failed to prefetch market data: {e}")
+            logger.warning("[OversoldStrategy] Failed to prefetch market data: %s", e)
 
         return prefetched
 

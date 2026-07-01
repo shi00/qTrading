@@ -364,7 +364,7 @@ class ScreenerDao(BaseDao):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                logger.warning(f"[ScreenerDao] Failed to update prediction result: {e}")
+                logger.warning("[ScreenerDao] Failed to update prediction result: %s", e)
 
     async def save_screening_results(self, records: list[dict | tuple]):
         if not records:

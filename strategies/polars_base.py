@@ -55,9 +55,10 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         dep_result = self.check_dependencies(context)
         if dep_result["status"] == "unready":
             logger.warning(
-                f"[Strategy] {self.name}: dependencies unready, "
-                f"missing_keys={dep_result['missing_keys']}, "
-                f"missing_tables={dep_result['missing_tables']}"
+                "[Strategy] %s: dependencies unready, missing_keys=%s, missing_tables=%s",
+                self.name,
+                dep_result["missing_keys"],
+                dep_result["missing_tables"],
             )
             context["_dependency_status"] = dep_result
             return pd.DataFrame()
@@ -69,8 +70,8 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             df = context.get("fundamental_screening_data")
             if df is None or df.empty:
                 logger.warning(
-                    f"[Strategy] {self.name}: fundamental_screening_data unavailable, "
-                    f"cannot execute fundamental strategy without it"
+                    "[Strategy] %s: fundamental_screening_data unavailable, cannot execute fundamental strategy without it",
+                    self.name,
                 )
                 return pd.DataFrame()
         else:

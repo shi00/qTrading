@@ -417,11 +417,17 @@ class BaseDao:
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > _SLOW_WRITE_THRESHOLD_MS:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Slow Write ({elapsed:.1f}ms): {sql[:200]}...",
+                    "[%s] Slow Write (%.1fms): %s...",
+                    self.__class__.__name__,
+                    elapsed,
+                    sql[:200],
                 )
             else:
                 logger.debug(
-                    f"[{self.__class__.__name__}] Write ({elapsed:.1f}ms): {sql[:200]}...",
+                    "[%s] Write (%.1fms): %s...",
+                    self.__class__.__name__,
+                    elapsed,
+                    sql[:200],
                 )
 
             return len(params) if is_many and params else 1
@@ -443,7 +449,9 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during write (Shutdown): {e}",
+                    "[%s] DB Closed during write (Shutdown): %s",
+                    self.__class__.__name__,
+                    e,
                 )
                 raise EngineDisposedError(
                     f"[{self.__class__.__name__}] Engine disposed during write, data not persisted: {e}"
@@ -451,11 +459,18 @@ class BaseDao:
 
             if suppress_errors:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Write Error ({elapsed:.1f}ms, suppressed): {e}",
+                    "[%s] Write Error (%.1fms, suppressed): %s",
+                    self.__class__.__name__,
+                    elapsed,
+                    e,
                 )
             else:
                 logger.error(
-                    f"[{self.__class__.__name__}] Write Error ({elapsed:.1f}ms): {e}\nSQL: {sql[:200]}...",
+                    "[%s] Write Error (%.1fms): %s\nSQL: %s...",
+                    self.__class__.__name__,
+                    elapsed,
+                    e,
+                    sql[:200],
                     exc_info=True,
                 )
 
@@ -511,7 +526,9 @@ class BaseDao:
         table = Base.metadata.tables.get(table_name)
         if table is None:
             logger.error(
-                f"[{self.__class__.__name__}] Table {table_name} not found in SQLAlchemy metadata.",
+                "[%s] Table %s not found in SQLAlchemy metadata.",
+                self.__class__.__name__,
+                table_name,
             )
             return 0
 
@@ -522,11 +539,17 @@ class BaseDao:
             pk_missing = [col for col in missing_cols if col in pk_columns]
             if pk_missing:
                 logger.error(
-                    f"[{self.__class__.__name__}] Insert '{table_name}': PK columns missing in dataframe, aborting: {pk_missing}",
+                    "[%s] Insert '%s': PK columns missing in dataframe, aborting: %s",
+                    self.__class__.__name__,
+                    table_name,
+                    pk_missing,
                 )
                 return 0
             logger.warning(
-                f"[{self.__class__.__name__}] Insert '{table_name}': Missing columns in dataframe, filling with None: {missing_cols}",
+                "[%s] Insert '%s': Missing columns in dataframe, filling with None: %s",
+                self.__class__.__name__,
+                table_name,
+                missing_cols,
             )
             df = df.assign(**{col: None for col in missing_cols})
 
@@ -613,17 +636,27 @@ class BaseDao:
             elapsed = (time.perf_counter() - start_time) * 1000
             if elapsed > _SLOW_UPSERT_THRESHOLD_MS:
                 logger.warning(
-                    f"[{self.__class__.__name__}] Slow UPSERT ({elapsed:.1f}ms, {total_written} rows): {table_name}",
+                    "[%s] Slow UPSERT (%.1fms, %s rows): %s",
+                    self.__class__.__name__,
+                    elapsed,
+                    total_written,
+                    table_name,
                 )
             else:
                 logger.debug(
-                    f"[{self.__class__.__name__}] UPSERT ({elapsed:.1f}ms, {total_written} rows): {table_name}",
+                    "[%s] UPSERT (%.1fms, %s rows): %s",
+                    self.__class__.__name__,
+                    elapsed,
+                    total_written,
+                    table_name,
                 )
 
             return total_written
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] UPSERT cancelled during shutdown: {table_name}",
+                "[%s] UPSERT cancelled during shutdown: %s",
+                self.__class__.__name__,
+                table_name,
             )
             # CancelledError is a control flow signal, MUST strictly propagate it
             raise
@@ -639,7 +672,9 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during upsert (Shutdown): {e}",
+                    "[%s] DB Closed during upsert (Shutdown): %s",
+                    self.__class__.__name__,
+                    e,
                 )
                 raise EngineDisposedError(
                     f"[{self.__class__.__name__}] Engine disposed during upsert, data not persisted: {e}"
@@ -647,11 +682,19 @@ class BaseDao:
 
             if suppress_errors:
                 logger.warning(
-                    f"[{self.__class__.__name__}] UPSERT Error ({elapsed:.1f}ms, suppressed) on {table_name}: {e}",
+                    "[%s] UPSERT Error (%.1fms, suppressed) on %s: %s",
+                    self.__class__.__name__,
+                    elapsed,
+                    table_name,
+                    e,
                 )
             else:
                 logger.error(
-                    f"[{self.__class__.__name__}] UPSERT Error ({elapsed:.1f}ms) on {table_name}: {e}",
+                    "[%s] UPSERT Error (%.1fms) on %s: %s",
+                    self.__class__.__name__,
+                    elapsed,
+                    table_name,
+                    e,
                     exc_info=True,
                 )
             if not suppress_errors:
@@ -742,7 +785,8 @@ class BaseDao:
                 cols = list(result.keys())
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] Read cancelled during shutdown.",
+                "[%s] Read cancelled during shutdown.",
+                self.__class__.__name__,
             )
             raise
         except Exception as e:
@@ -759,12 +803,17 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}",
+                    "[%s] DB Closed during read (Shutdown): %s",
+                    self.__class__.__name__,
+                    e,
                 )
                 raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
 
             logger.warning(
-                f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
+                "[%s] Read Error (%.1fms): %s",
+                self.__class__.__name__,
+                elapsed,
+                e,
             )
             if not suppress_errors:
                 raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e
@@ -788,11 +837,19 @@ class BaseDao:
         elapsed = (time.perf_counter() - start_time) * 1000
         if elapsed > _SLOW_READ_THRESHOLD_MS:
             logger.warning(
-                f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
+                "[%s] Slow Read (%.1fms, %s rows): %s...",
+                self.__class__.__name__,
+                elapsed,
+                len(df),
+                sql[:200],
             )
         else:
             logger.debug(
-                f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {sql[:200]}...",
+                "[%s] Read (%.1fms, %s rows): %s...",
+                self.__class__.__name__,
+                elapsed,
+                len(df),
+                sql[:200],
             )
 
         return df
@@ -841,17 +898,26 @@ class BaseDao:
                 elapsed = (time.perf_counter() - start_time) * 1000
                 if elapsed > _SLOW_READ_THRESHOLD_MS:
                     logger.warning(
-                        f"[{self.__class__.__name__}] Slow Read ({elapsed:.1f}ms, {len(df)} rows): {str(stmt)[:200]}...",
+                        "[%s] Slow Read (%.1fms, %s rows): %s...",
+                        self.__class__.__name__,
+                        elapsed,
+                        len(df),
+                        str(stmt)[:200],
                     )
                 else:
                     logger.debug(
-                        f"[{self.__class__.__name__}] Read ({elapsed:.1f}ms, {len(df)} rows): {str(stmt)[:200]}...",
+                        "[%s] Read (%.1fms, %s rows): %s...",
+                        self.__class__.__name__,
+                        elapsed,
+                        len(df),
+                        str(stmt)[:200],
                     )
 
                 return df
         except asyncio.CancelledError:
             logger.warning(
-                f"[{self.__class__.__name__}] Read cancelled during shutdown.",
+                "[%s] Read cancelled during shutdown.",
+                self.__class__.__name__,
             )
             raise
         except Exception as e:
@@ -867,12 +933,17 @@ class BaseDao:
                 ]
             ):
                 logger.warning(
-                    f"[{self.__class__.__name__}] DB Closed during read (Shutdown): {e}",
+                    "[%s] DB Closed during read (Shutdown): %s",
+                    self.__class__.__name__,
+                    e,
                 )
                 raise EngineDisposedError(f"[{self.__class__.__name__}] Engine disposed during read: {e}") from e
 
             logger.warning(
-                f"[{self.__class__.__name__}] Read Error ({elapsed:.1f}ms): {e}",
+                "[%s] Read Error (%.1fms): %s",
+                self.__class__.__name__,
+                elapsed,
+                e,
             )
             if not suppress_errors:
                 raise DatabaseQueryError(f"[{self.__class__.__name__}] Database read failed: {e}") from e

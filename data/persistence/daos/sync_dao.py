@@ -101,7 +101,7 @@ class SyncDao(BaseDao):
         except Exception as exc:
             if raise_on_error:
                 raise
-            logger.debug(f"[SyncDao] Step4 stock query failed: {exc}")
+            logger.debug("[SyncDao] Step4 stock query failed: %s", exc)
             return set()
 
     async def mark_stock_step4_completed(self, ts_code: str | None, sync_version: int = 1, conn=None):

@@ -134,7 +134,10 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
             )
         except Exception as e:
             logger.warning(
-                f"[{self.name}] Logic error: {e}. Params: {context.get('params')}",
+                "[%s] Logic error: %s. Params: %s",
+                self.name,
+                e,
+                context.get("params"),
                 exc_info=True,
             )
             return lf.head(0)
@@ -189,7 +192,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
         target_flow = p.get("nb_flow_min", 50)
 
         if flow_df is None or flow_df.empty:
-            logger.debug(f"[{self.name}] Gating: no northbound_flow_data. Returning empty.")
+            logger.debug("[%s] Gating: no northbound_flow_data. Returning empty.", self.name)
             return pd.DataFrame()
 
         try:
@@ -200,12 +203,14 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
 
             if north_money_val is None or north_money_val <= target_flow:
                 logger.debug(
-                    f"[{self.name}] Gating: north_money={north_money_val}, "
-                    f"threshold={target_flow}. Returning empty (market sentiment insufficient)."
+                    "[%s] Gating: north_money=%s, threshold=%s. Returning empty (market sentiment insufficient).",
+                    self.name,
+                    north_money_val,
+                    target_flow,
                 )
                 return pd.DataFrame()
         except Exception as e:
-            logger.warning(f"[{self.name}] Gating check failed: {e}", exc_info=True)
+            logger.warning("[%s] Gating check failed: %s", self.name, e, exc_info=True)
             return pd.DataFrame()
 
         return await super().filter(context)
@@ -268,7 +273,10 @@ class InstitutionalStrategy(PolarsBaseStrategy):
             )
         except Exception as e:
             logger.warning(
-                f"[{self.name}] Logic error: {e}. Params: {context.get('params')}",
+                "[%s] Logic error: %s. Params: %s",
+                self.name,
+                e,
+                context.get("params"),
                 exc_info=True,
             )
             return lf.head(0)
@@ -328,7 +336,10 @@ class BlockTradeStrategy(PolarsBaseStrategy):
             )
         except Exception as e:
             logger.warning(
-                f"[{self.name}] Logic error: {e}. Params: {context.get('params')}",
+                "[%s] Logic error: %s. Params: %s",
+                self.name,
+                e,
+                context.get("params"),
                 exc_info=True,
             )
             return lf.head(0)

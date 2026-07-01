@@ -362,5 +362,7 @@ async def cleanup_singletons_session():
                     try:
                         await inst.close()
                     except Exception as e:
-                        logger.warning(f"Failed to async close singleton {cls.__name__} during session teardown: {e}")
+                        logger.warning(
+                            "Failed to async close singleton %s during session teardown: %s", cls.__name__, e
+                        )
     reset_all_singletons()

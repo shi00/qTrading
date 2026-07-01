@@ -35,7 +35,10 @@ def register_strategy(key: str):
         with _REGISTRY_LOCK:
             if key in _STRATEGY_REGISTRY:
                 logger.warning(
-                    f"[StrategyRegistry] Duplicate key '{key}' — overwriting {_STRATEGY_REGISTRY[key].__name__} with {cls.__name__}",
+                    "[StrategyRegistry] Duplicate key '%s' — overwriting %s with %s",
+                    key,
+                    _STRATEGY_REGISTRY[key].__name__,
+                    cls.__name__,
                 )
             _STRATEGY_REGISTRY[key] = cls
         return cls

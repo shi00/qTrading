@@ -165,7 +165,10 @@ class ReviewManager:
                                     index_cache[trade_date_str] = None
                         except Exception as exc:
                             logger.warning(
-                                f"[Review] Cache index lookup failed for {index_code} on {trade_date_str}: {exc}"
+                                "[Review] Cache index lookup failed for %s on %s: %s",
+                                index_code,
+                                trade_date_str,
+                                exc,
                             )
                             index_cache[trade_date_str] = None
 
@@ -173,7 +176,9 @@ class ReviewManager:
 
                     if index_pct is None:
                         logger.warning(
-                            f"[Review] {ts_code}: Index return unavailable for {trade_date_str}, skipping to avoid label pollution",
+                            "[Review] %s: Index return unavailable for %s, skipping to avoid label pollution",
+                            ts_code,
+                            trade_date_str,
                         )
                         continue
 
@@ -198,17 +203,22 @@ class ReviewManager:
                         }
                     )
                     logger.info(
-                        f"[Review] {ts_code}: Stock {t1_pct}% vs Index {index_pct}% = Alpha {alpha:.2f}% -> {label}"
-                        f", T+5={t5_pct if t5_pct is not None else 'N/A'}",
+                        "[Review] %s: Stock %s%% vs Index %s%% = Alpha %.2f%% -> %s, T+5=%s",
+                        ts_code,
+                        t1_pct,
+                        index_pct,
+                        alpha,
+                        label,
+                        t5_pct if t5_pct is not None else "N/A",
                     )
 
             except Exception as e:
-                logger.error(f"[Review] Error reviewing {ts_code}: {e}")
+                logger.error("[Review] Error reviewing %s: %s", ts_code, e)
 
         if updates:
             await self._batch_update_results(updates)
 
-        logger.info(f"[Review] Completed. Updated {len(updates)} records.")
+        logger.info("[Review] Completed. Updated %s records.", len(updates))
 
     async def _get_pending_predictions(self):
         """
@@ -239,7 +249,7 @@ class ReviewManager:
             return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore[union-attr]
 
         except Exception as e:
-            logger.error(f"[Review] Error fetching pending predictions: {e}")
+            logger.error("[Review] Error fetching pending predictions: %s", e)
             return pd.DataFrame()
 
     async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | datetime.datetime | None = None):
@@ -308,7 +318,7 @@ class ReviewManager:
                     )
 
         except Exception as e:
-            logger.warning(f"[Review] Error fetching learning context: {e}")
+            logger.warning("[Review] Error fetching learning context: %s", e)
             # Non-blocking: return empty context on error
 
         # Build XML
@@ -534,4 +544,4 @@ class ReviewManager:
             return
 
         await self.cache.screener_dao.save_screening_results(records)
-        logger.info(f"[Review] Saved {len(records)} predictions for {strategy_name}")
+        logger.info("[Review] Saved %s predictions for %s", len(records), strategy_name)

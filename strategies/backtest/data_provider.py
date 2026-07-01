@@ -85,7 +85,7 @@ class BacktestDataProvider:
             start_date_obj = to_date_obj(start_date)
             end_date_obj = to_date_obj(end_date)
         except Exception as e:
-            logger.error(f"[BacktestDataProvider] Invalid date format for preloading: {e}")
+            logger.error("[BacktestDataProvider] Invalid date format for preloading: %s", e)
             self._preloaded = None
             return
 
@@ -94,8 +94,10 @@ class BacktestDataProvider:
         days_limit = self.preload_max_days
         if (end_date_obj - start_date_obj).days > days_limit:
             logger.warning(
-                f"[BacktestDataProvider] Preload range too wide ({(end_date_obj - start_date_obj).days} days > {days_limit}). "
-                f"Skipping range preloading to prevent OOM/DB overload. Fallback to daily query."
+                "[BacktestDataProvider] Preload range too wide (%s days > %s). "
+                "Skipping range preloading to prevent OOM/DB overload. Fallback to daily query.",
+                (end_date_obj - start_date_obj).days,
+                days_limit,
             )
             self._preloaded = None
             return
@@ -103,7 +105,7 @@ class BacktestDataProvider:
         start_str = self._normalize_trade_date(start_date_obj)
         end_str = self._normalize_trade_date(end_date_obj)
 
-        logger.info(f"[BacktestDataProvider] Preloading range {start_str} to {end_str}...")
+        logger.info("[BacktestDataProvider] Preloading range %s to %s...", start_str, end_str)
 
         self._preloaded = {}
 
@@ -135,7 +137,9 @@ class BacktestDataProvider:
                     if isinstance(res, asyncio.CancelledError):
                         raise res
                     logger.warning(
-                        f"[BacktestDataProvider] Range preload failed for {key}: {res}. Fallback to daily query."
+                        "[BacktestDataProvider] Range preload failed for %s: %s. Fallback to daily query.",
+                        key,
+                        res,
                     )
                     self._preloaded[key] = None
                 elif res is not None and not res.empty:
@@ -152,13 +156,13 @@ class BacktestDataProvider:
                         self._preloaded[key] = df_copy
 
                     rows = len(res)
-                    logger.info(f"[BacktestDataProvider] Preloaded {key}: {rows} rows")
+                    logger.info("[BacktestDataProvider] Preloaded %s: %s rows", key, rows)
                 else:
                     self._preloaded[key] = {}
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"[BacktestDataProvider] Failed to preload range: {e}", exc_info=True)
+            logger.error("[BacktestDataProvider] Failed to preload range: %s", e, exc_info=True)
             self._preloaded = None
 
     async def build_context(
@@ -295,7 +299,7 @@ class BacktestDataProvider:
                     diagnostics["table_status"][key] = {"ready": False, "rows": 0}
                     all_aux_ready = False
             except Exception as e:
-                logger.warning(f"[BacktestDataProvider] Failed to fetch {key}: {e}")
+                logger.warning("[BacktestDataProvider] Failed to fetch %s: %s", key, e)
                 diagnostics["table_status"][key] = {"ready": False, "rows": 0, "error": str(e)}
                 all_aux_ready = False
 

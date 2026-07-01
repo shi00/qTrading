@@ -300,7 +300,8 @@ class CacheManager:
                 raise
             except Exception as e:
                 logger.error(
-                    f"[CacheManager] Schema | Init failed critically: {e}",
+                    "[CacheManager] Schema | Init failed critically: %s",
+                    e,
                     exc_info=True,
                 )
                 raise
@@ -316,7 +317,8 @@ class CacheManager:
             logger.info("[CacheManager] Wipe | Hard reset completed.")
         except Exception as e:
             logger.error(
-                f"[CacheManager] Wipe | ❌ Error during hard reset: {e}",
+                "[CacheManager] Wipe | ❌ Error during hard reset: %s",
+                e,
                 exc_info=True,
             )
             raise
@@ -568,10 +570,12 @@ class CacheManager:
         total_stocks = (total_stocks_result if not isinstance(total_stocks_result, BaseException) else None) or 1
         if isinstance(date_range_result, BaseException):
             logger.warning(
-                f"[CacheManager] Health | ⚠️ Date range query failed (non-fatal): {date_range_result}",
+                "[CacheManager] Health | ⚠️ Date range query failed (non-fatal): %s",
+                date_range_result,
             )
         logger.debug(
-            f"[CacheManager] Health | Active stocks baseline: {total_stocks}",
+            "[CacheManager] Health | Active stocks baseline: %s",
+            total_stocks,
         )
 
         global_trade_days = 0
@@ -585,11 +589,14 @@ class CacheManager:
                         self.stock_dao.count_expected_rows(g_min, g_max),
                     )
                     logger.debug(
-                        f"[CacheManager] Health | Baseline: trade_days={global_trade_days}, expected_rows={global_expected_rows}",
+                        "[CacheManager] Health | Baseline: trade_days=%s, expected_rows=%s",
+                        global_trade_days,
+                        global_expected_rows,
                     )
         except Exception as e:
             logger.warning(
-                f"[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): {e}",
+                "[CacheManager] Health | ⚠️ Baseline calc failed (non-fatal): %s",
+                e,
             )
 
         # Tables Check (Dynamic iteration based on registry)

@@ -17,7 +17,7 @@ async def get_app_state(engine, key: str) -> str | None:
             row = result.fetchone()
             return row[0] if row else None
     except Exception as e:
-        logger.debug(f"[AppState] Failed to read key='{key}': {e}")
+        logger.debug("[AppState] Failed to read key='%s': %s", key, e)
         return None
 
 
@@ -33,4 +33,4 @@ async def set_app_state(engine, key: str, value: str) -> None:
             )
             await conn.execute(stmt)
     except Exception as e:
-        logger.warning(f"[AppState] Failed to write key='{key}': {e}")
+        logger.warning("[AppState] Failed to write key='%s': %s", key, e)

@@ -816,8 +816,9 @@ class TestMarketDataServiceGetHsgt:
             with patch("data.domain_services.market_data_service.logger") as mock_logger:
                 result = await svc._get_hsgt("20240614")
                 mock_logger.warning.assert_any_call(
-                    "[MarketDataService] north_money unit changed: expected='million_cny', got='yuan'. "
-                    "Display conversion may be incorrect."
+                    "[MarketDataService] north_money unit changed: expected='million_cny', got='%s'. "
+                    "Display conversion may be incorrect.",
+                    "yuan",
                 )
                 assert result["color"] == "red"
 

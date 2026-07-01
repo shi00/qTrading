@@ -102,7 +102,7 @@ class MacroDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[MacroDao] Failed to get shibor latest: {e}")
+            logger.warning("[MacroDao] Failed to get shibor latest: %s", e)
             return pd.DataFrame()
 
     async def get_macro_economy_latest(self, as_of_date=None) -> pd.DataFrame:
@@ -141,5 +141,5 @@ class MacroDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[MacroDao] Failed to get macro economy latest: {e}")
+            logger.warning("[MacroDao] Failed to get macro economy latest: %s", e)
             return pd.DataFrame()

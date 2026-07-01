@@ -80,7 +80,9 @@ class StrategyManager:
             self.strategies[k] = instance
 
         logger.info(
-            f"[StrategyManager] Loaded {len(self.strategies)} strategies: {list(self.strategies.keys())}",
+            "[StrategyManager] Loaded %d strategies: %s",
+            len(self.strategies),
+            list(self.strategies.keys()),
         )
         self._validate_i18n()
 
@@ -95,11 +97,15 @@ class StrategyManager:
             desc_val = I18n.get(s.desc_key)
             if name_val == s.name_key:
                 logger.warning(
-                    f"[StrategyManager] Missing i18n key: '{s.name_key}' (strategy: {key})",
+                    "[StrategyManager] Missing i18n key: '%s' (strategy: %s)",
+                    s.name_key,
+                    key,
                 )
             if desc_val == s.desc_key:
                 logger.warning(
-                    f"[StrategyManager] Missing i18n key: '{s.desc_key}' (strategy: {key})",
+                    "[StrategyManager] Missing i18n key: '%s' (strategy: %s)",
+                    s.desc_key,
+                    key,
                 )
 
     def get_strategy(self, key: typing.Any):

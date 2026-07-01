@@ -690,14 +690,14 @@ def validate_schema_definitions(strict: bool = False):
         missing_defs = db_tables - defined_tables - IGNORED_TABLES
         if missing_defs:
             msg = f"The following tables are in ORM models but missing from TABLE_DEFINITIONS: {missing_defs}"
-            logger.warning(f"[DataDict] {msg}")
+            logger.warning("[DataDict] %s", msg)
             logger.warning("[DataDict] Please update data_dictionary.py to ensure health checks and UI work correctly.")
             errors.append(msg)
 
         extra_defs = defined_tables - db_tables - IGNORED_TABLES
         if extra_defs:
             msg = f"The following tables are in TABLE_DEFINITIONS but not in ORM: {extra_defs}"
-            logger.warning(f"[DataDict] {msg}")
+            logger.warning("[DataDict] %s", msg)
             errors.append(msg)
 
         for table_name in defined_tables - IGNORED_TABLES:
@@ -714,17 +714,18 @@ def validate_schema_definitions(strict: bool = False):
             missing_cols = orm_cols - dd_cols_with_common - {"updated_at", "created_at"}
             if missing_cols:
                 msg = f"Table '{table_name}': ORM columns missing from data dictionary: {missing_cols}"
-                logger.warning(f"[DataDict] {msg}")
+                logger.warning("[DataDict] %s", msg)
                 errors.append(msg)
 
             phantom_cols = dd_table_cols - orm_cols
             if phantom_cols:
                 msg = f"Table '{table_name}': Data dictionary has phantom columns not in ORM: {phantom_cols}"
-                logger.warning(f"[DataDict] {msg}")
+                logger.warning("[DataDict] %s", msg)
                 errors.append(msg)
 
         logger.info(
-            f"[DataDict] Schema validation completed. {len(db_tables)} tables verified.",
+            "[DataDict] Schema validation completed. %s tables verified.",
+            len(db_tables),
         )
 
         is_strict = strict or os.environ.get("STRICT_SCHEMA_GATE") == "1"
@@ -732,9 +733,9 @@ def validate_schema_definitions(strict: bool = False):
             raise ValueError("Schema inconsistencies found:\n" + "\n".join(errors))
 
     except ValueError as e:
-        logger.error(f"[DataDict] Schema validation failed in strict mode: {e}")
+        logger.error("[DataDict] Schema validation failed in strict mode: %s", e)
         raise
     except Exception as e:
-        logger.error(f"[DataDict] ORM validation failed: {e}")
+        logger.error("[DataDict] ORM validation failed: %s", e)
         if strict:
             raise

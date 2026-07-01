@@ -150,7 +150,10 @@ class AIStrategyMixin:
             col, ascending = sort_cols[0]
             df = df.sort_values(by=col, ascending=ascending, na_position="last")
             logger.debug(
-                f"[{self.__class__.__name__}] Sorted {len(df)} candidates by {col} (descending) for AI analysis"
+                "[%s] Sorted %d candidates by %s (descending) for AI analysis",
+                self.__class__.__name__,
+                len(df),
+                col,
             )
         else:
             logger.debug("[%s] Using default order for AI analysis (%d candidates)", self.__class__.__name__, len(df))
@@ -314,7 +317,9 @@ class AIStrategyMixin:
         cap = max_stocks or ConfigHandler.get_ai_max_candidates()
         if len(candidates_df) > cap:
             logger.info(
-                f"[AIStrategyMixin] Capping candidates from {len(candidates_df)} to {cap}",
+                "[AIStrategyMixin] Capping candidates from %d to %d",
+                len(candidates_df),
+                cap,
             )
             candidates_df = candidates_df.head(cap)
 
@@ -345,7 +350,8 @@ class AIStrategyMixin:
                 history_context = await rm.get_learning_context(as_of=as_of)
             except Exception as e:
                 logger.warning(
-                    f"[AIStrategyMixin] Failed to pre-fetch learning context: {e}",
+                    "[AIStrategyMixin] Failed to pre-fetch learning context: %s",
+                    e,
                 )
 
         global_context = ""
@@ -436,7 +442,10 @@ class AIStrategyMixin:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))
 
         logger.info(
-            f"[AIStrategyMixin] Pre-fetched capital data: moneyflow={len(moneyflow_df)}, top_list={len(top_list_df)}, northbound={len(northbound_df)}",
+            "[AIStrategyMixin] Pre-fetched capital data: moneyflow=%d, top_list=%d, northbound=%d",
+            len(moneyflow_df),
+            len(top_list_df),
+            len(northbound_df),
         )
 
         # --- Pre-fetch Auxiliary Data (Audit, Dividend, Pledge, Holders) ---
@@ -914,7 +923,8 @@ class AIStrategyMixin:
 
         except Exception as e:
             logger.warning(
-                f"[AIStrategyMixin] Technical structure computation failed: {e}",
+                "[AIStrategyMixin] Technical structure computation failed: %s",
+                e,
             )
             result["ma_alignment"] = I18n.get("ai_calc_error")
             result["volume_trend"] = I18n.get("ai_calc_error")

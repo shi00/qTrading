@@ -108,7 +108,7 @@ class DataExplorerQueryClient:
             insp = sa.inspect(self._engine)
             return sorted(insp.get_table_names())
         except Exception as e:
-            logger.error(f"Error fetching tables: {e}")
+            logger.error("Error fetching tables: %s", e)
             return []
 
     def get_table_schema(self, table_name: str):
@@ -129,7 +129,7 @@ class DataExplorerQueryClient:
                 )
             return columns
         except Exception as e:
-            logger.error(f"Error fetching schema for {table_name}: {e}")
+            logger.error("Error fetching schema for %s: %s", table_name, e)
             return []
 
     def get_table_count(self, table_name: str, filters: list | None = None):
@@ -155,7 +155,7 @@ class DataExplorerQueryClient:
                 result = conn.execute(stmt)
                 return result.scalar() or 0
         except Exception as e:
-            logger.error(f"Error counting rows for {table_name}: {e}")
+            logger.error("Error counting rows for %s: %s", table_name, e)
             return 0
 
     def _validate_table_name(self, table_name: str):
@@ -174,7 +174,8 @@ class DataExplorerQueryClient:
             # Whitelist validation: reject columns not in schema (mirrors sort_col check)
             if schema_cols and col_name not in schema_cols:
                 logger.warning(
-                    f"[DataExplorerQueryClient] Filter column '{col_name}' not in schema, skipped.",
+                    "[DataExplorerQueryClient] Filter column '%s' not in schema, skipped.",
+                    col_name,
                 )
                 continue
             op_func = _OP_MAP.get(op)
@@ -244,7 +245,7 @@ class DataExplorerQueryClient:
                 return pd.DataFrame(rows, columns=cols)
 
         except Exception as e:
-            logger.error(f"Error querying table {table_name}: {e}")
+            logger.error("Error querying table %s: %s", table_name, e)
             return pd.DataFrame()
 
     def execute_sql(self, sql_query: typing.Any):

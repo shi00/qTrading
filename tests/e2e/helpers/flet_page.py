@@ -165,7 +165,9 @@ class FletPage:
                 #      尝试直接去点击那个 label 的纯文本节点，然后用键盘模拟全选删除和输入。
                 # 针对 Flet multiline=True 的黑盒行为：它把 label 文本合并到了父容器（如 tabpanel）的 aria-label 中
                 logger.warning(
-                    f"fill_textbox standard method failed for label '{label}', trying fallback (aria-label click + keyboard): {e}",
+                    "fill_textbox standard method failed for label '%s', trying fallback (aria-label click + keyboard): %s",
+                    label,
+                    e,
                     exc_info=True,
                 )
 
@@ -183,7 +185,7 @@ class FletPage:
                 await self.page.keyboard.type(value, delay=50)
                 return
             except Exception as fallback_exc:  # noqa: BLE001
-                logger.error(f"fill_textbox fallback failed for label '{label}': {fallback_exc}", exc_info=True)
+                logger.error("fill_textbox fallback failed for label '%s': %s", label, fallback_exc, exc_info=True)
                 raise
 
     async def select_dropdown(

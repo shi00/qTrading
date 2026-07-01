@@ -118,15 +118,17 @@ class DatabaseMigrator:
         head_rev = await cls._get_head_revision()
 
         if current_rev == head_rev:
-            logger.info(f"[DatabaseMigrator] Database schema is up to date (rev={current_rev}).")
+            logger.info("[DatabaseMigrator] Database schema is up to date (rev=%s).", current_rev)
             return
 
-        logger.info(f"[DatabaseMigrator] Schema state: current={current_rev}, head={head_rev}")
+        logger.info("[DatabaseMigrator] Schema state: current=%s, head=%s", current_rev, head_rev)
 
         if not auto_migrate:
             logger.warning(
-                f"[DatabaseMigrator] Database needs migration from {current_rev} to {head_rev}, "
-                f"but AUTO_MIGRATE is disabled. Set AUTO_MIGRATE=1 to enable automatic upgrades."
+                "[DatabaseMigrator] Database needs migration from %s to %s, "
+                "but AUTO_MIGRATE is disabled. Set AUTO_MIGRATE=1 to enable automatic upgrades.",
+                current_rev,
+                head_rev,
             )
             raise DatabaseMigrationNeeded(current_rev, head_rev)
 
@@ -240,12 +242,16 @@ class DatabaseMigrator:
             severity = classify_severity(e, context="db")
             if severity == "system":
                 logger.critical(
-                    f"[DatabaseMigrator] SYSTEM-LEVEL migration failure ({error_info['code']}): {e}",
+                    "[DatabaseMigrator] SYSTEM-LEVEL migration failure (%s): %s",
+                    error_info["code"],
+                    e,
                     exc_info=True,
                 )
             else:
                 logger.error(
-                    f"[DatabaseMigrator] Migration failed ({error_info['code']}): {e}",
+                    "[DatabaseMigrator] Migration failed (%s): %s",
+                    error_info["code"],
+                    e,
                     exc_info=True,
                 )
             raise
@@ -261,7 +267,7 @@ class DatabaseMigrator:
                 f"Partial migration may have occurred."
             )
         if new_rev:
-            logger.info(f"[DatabaseMigrator] Database schema updated. Current revision: {new_rev}")
+            logger.info("[DatabaseMigrator] Database schema updated. Current revision: %s", new_rev)
         else:
             logger.warning("[DatabaseMigrator] Schema version is None after migration, this is unexpected.")
 
@@ -298,22 +304,22 @@ class DatabaseMigrator:
                 return await conn.run_sync(_sync_get_rev)
         except _CONNECTION_EXCEPTIONS as exc:
             # 连接级错误必须上抛，不能吞没为"全新数据库"
-            logger.error(f"[DBMigrator] Connection error getting revision: {exc}")
+            logger.error("[DBMigrator] Connection error getting revision: %s", exc)
             raise
         except ProgrammingError as exc:
             # ProgrammingError 需要区分：仅 "relation does not exist" 类错误
             # 表示全新数据库，返回 None；其他（语法错误、权限等）必须上抛。
             msg = str(exc).lower()
             if any(kw in msg for kw in _RELATION_NOT_FOUND_KEYWORDS):
-                logger.debug(f"[DBMigrator] ProgrammingError (likely fresh DB): {exc}")
+                logger.debug("[DBMigrator] ProgrammingError (likely fresh DB): %s", exc)
                 return None
-            logger.error(f"[DBMigrator] ProgrammingError (not relation-not-found): {exc}")
+            logger.error("[DBMigrator] ProgrammingError (not relation-not-found): %s", exc)
             raise
         except OperationalError as exc:
             # OperationalError 可能是权限/结构损坏等严重问题，上抛
-            logger.error(f"[DBMigrator] OperationalError getting revision: {exc}")
+            logger.error("[DBMigrator] OperationalError getting revision: %s", exc)
             raise
         except Exception as exc:
             # 其他未知异常：记录 warning 并上抛，避免误判为全新数据库
-            logger.warning(f"[DBMigrator] Unexpected error getting revision, re-raising: {exc}")
+            logger.warning("[DBMigrator] Unexpected error getting revision, re-raising: %s", exc)
             raise

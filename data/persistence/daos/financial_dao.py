@@ -508,7 +508,7 @@ class FinancialDao(BaseDao):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.debug(f"[FinancialDao] fina_audit count query failed: {exc}")
+                logger.debug("[FinancialDao] fina_audit count query failed: %s", exc)
                 result["tables"]["fina_audit"] = 0
 
         except asyncio.CancelledError:

@@ -105,13 +105,13 @@ class MarketDataService:
     def add_listener(self, callback: typing.Callable | None):
         """Add a listener for market data updates"""
         self._listeners.add(callback)
-        logger.info(f"[MarketDataService] Added listener: {callback}")
+        logger.info("[MarketDataService] Added listener: %s", callback)
 
     def remove_listener(self, callback: typing.Callable | None):
         """Remove a listener"""
         try:
             self._listeners.remove(callback)
-            logger.info(f"[MarketDataService] Removed listener: {callback}")
+            logger.info("[MarketDataService] Removed listener: %s", callback)
         except KeyError:
             pass
 
@@ -404,8 +404,9 @@ class MarketDataService:
             unit = get_column_unit(df, "north_money", default="million_cny")
             if unit != "million_cny":
                 logger.warning(
-                    f"[MarketDataService] north_money unit changed: expected='million_cny', got='{unit}'. "
-                    "Display conversion may be incorrect."
+                    "[MarketDataService] north_money unit changed: expected='million_cny', got='%s'. "
+                    "Display conversion may be incorrect.",
+                    unit,
                 )
             # north_money unit: 百万元 (1 Million CNY). >100 (=1亿) -> 亿 display.
             return {

@@ -166,7 +166,9 @@ class NewsFetcher:
                                 return news_list
                 except Exception as e:
                     logger.warning(
-                        f"[News] CNINFO disclosure failed for {ts_code}: {e}",
+                        "[News] CNINFO disclosure failed for %s: %s",
+                        ts_code,
+                        e,
                         exc_info=True,
                     )
 
@@ -197,7 +199,7 @@ class NewsFetcher:
 
                         return news_list
                 except Exception as e:
-                    logger.warning(f"[News] EM search failed for {ts_code}: {e}")
+                    logger.warning("[News] EM search failed for %s: %s", ts_code, e)
 
                 return []
 

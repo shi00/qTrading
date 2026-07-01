@@ -121,12 +121,12 @@ class TradeCalendarService:
 
         try:
             await self._cache.save_trade_cal(df)
-            logger.debug(f"[TradeCalendarService] Persisted {len(df)} calendar records to DB")
+            logger.debug("[TradeCalendarService] Persisted %s calendar records to DB", len(df))
             return True
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[TradeCalendarService] Failed to persist calendar data: {e}")
+            logger.warning("[TradeCalendarService] Failed to persist calendar data: %s", e)
             return False
 
     async def _fetch_from_api_and_persist(self, start_date, end_date) -> pd.DataFrame | None:
@@ -143,7 +143,11 @@ class TradeCalendarService:
         import os
 
         if os.environ.get("E2E_TESTING") == "true":
-            logger.debug(f"[TradeCalendarService] E2E mode: skipping Tushare API fetch for {start_date} - {end_date}")
+            logger.debug(
+                "[TradeCalendarService] E2E mode: skipping Tushare API fetch for %s - %s",
+                start_date,
+                end_date,
+            )
             return None
 
         try:
@@ -152,7 +156,12 @@ class TradeCalendarService:
                 await self._ensure_data_persisted(df)
             return df
         except Exception as e:
-            logger.warning(f"[TradeCalendarService] API fetch failed for {start_date} - {end_date}: {e}")
+            logger.warning(
+                "[TradeCalendarService] API fetch failed for %s - %s: %s",
+                start_date,
+                end_date,
+                e,
+            )
             return None
 
     async def ensure_calendar_range(self, start_date, end_date) -> bool:
@@ -189,8 +198,11 @@ class TradeCalendarService:
                         # 简单的范围检查：如果边界覆盖了就认为完整
                         # 更精确的方式是 count 日期数，但作为初始化快速路径这已足够
                         logger.debug(
-                            f"[TradeCalendarService] Calendar range already covers "
-                            f"{start_obj} to {end_obj} (DB: {db_min} to {db_max})"
+                            "[TradeCalendarService] Calendar range already covers %s to %s (DB: %s to %s)",
+                            start_obj,
+                            end_obj,
+                            db_min,
+                            db_max,
                         )
                         return True
 
@@ -198,15 +210,25 @@ class TradeCalendarService:
             df = await self._api.get_trade_cal(start_date=start_obj, end_date=end_obj)  # type: ignore[arg-type]
             if df is not None and not df.empty:
                 await self._ensure_data_persisted(df)
-                logger.info(f"[TradeCalendarService] Bulk synced {len(df)} calendar records ({start_obj} to {end_obj})")
+                logger.info(
+                    "[TradeCalendarService] Bulk synced %s calendar records (%s to %s)",
+                    len(df),
+                    start_obj,
+                    end_obj,
+                )
                 return True
 
-            logger.warning(f"[TradeCalendarService] API returned empty for {start_obj} to {end_obj}")
+            logger.warning(
+                "[TradeCalendarService] API returned empty for %s to %s",
+                start_obj,
+                end_obj,
+            )
             return False
 
         except Exception as e:
             logger.error(
-                f"[TradeCalendarService] ensure_calendar_range failed: {e}",
+                "[TradeCalendarService] ensure_calendar_range failed: %s",
+                e,
                 exc_info=True,
             )
             return False
@@ -250,7 +272,10 @@ class TradeCalendarService:
             return self._offline.is_trading_day(date_obj)
 
         except Exception as e:
-            logger.warning(f"[TradeCalendarService] is_trading_day check failed, using offline: {e}")
+            logger.warning(
+                "[TradeCalendarService] is_trading_day check failed, using offline: %s",
+                e,
+            )
             return self._offline.is_trading_day(date_obj)
 
     @log_async_operation(
@@ -298,9 +323,12 @@ class TradeCalendarService:
                 if not is_e2e and span_days > 30 and len(df) < expected_min * 0.5:
                     # 数据明显不完整，回退到 API 补充
                     logger.warning(
-                        f"[TradeCalendarService] DB data incomplete: {len(df)} records "
-                        f"for {span_days} day span (expected >= {expected_min}), "
-                        f"falling back to API"
+                        "[TradeCalendarService] DB data incomplete: %s records "
+                        "for %s day span (expected >= %s), "
+                        "falling back to API",
+                        len(df),
+                        span_days,
+                        expected_min,
                     )
                 else:
                     dates = pd.to_datetime(df["cal_date"]).dt.date.tolist()
@@ -323,7 +351,8 @@ class TradeCalendarService:
             raise
         except Exception as e:
             logger.error(
-                f"[TradeCalendarService] get_trade_dates failed: {e}",
+                "[TradeCalendarService] get_trade_dates failed: %s",
+                e,
                 exc_info=True,
             )
             offline_dates = self._offline.get_trade_dates(start_obj, end_obj)  # type: ignore[arg-type]
@@ -357,7 +386,7 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[TradeCalendarService] count_trade_days failed, using list: {e}")
+            logger.warning("[TradeCalendarService] count_trade_days failed, using list: %s", e)
             dates = await self.get_trade_dates(start_obj, end_obj)
             return len(dates)
 
@@ -396,7 +425,7 @@ class TradeCalendarService:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.warning(f"[TradeCalendarService] get_start_date_by_trade_days failed: {e}")
+            logger.warning("[TradeCalendarService] get_start_date_by_trade_days failed: %s", e)
             rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
             return rough_start
 
@@ -543,7 +572,7 @@ class TradeCalendarService:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.warning(f"[TradeCalendarService] get_latest_trade_date failed: {e}")
+                logger.warning("[TradeCalendarService] get_latest_trade_date failed: %s", e)
 
             logger.error(
                 "[TradeCalendarService] get_latest_trade_date: no trade calendar data available.%s",
@@ -650,7 +679,8 @@ class TradeCalendarService:
             raise
         except Exception as e:
             logger.error(
-                f"[TradeCalendarService] get_trade_cal_df failed: {e}",
+                "[TradeCalendarService] get_trade_cal_df failed: %s",
+                e,
                 exc_info=True,
             )
             return pd.DataFrame()

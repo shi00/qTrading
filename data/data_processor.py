@@ -151,10 +151,12 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         for name, strategy in self.strategies.items():
             try:
                 strategy.cancel()
-                logger.debug(f"[DataProcessor] Stop | Cancelled strategy: {name}")
+                logger.debug("[DataProcessor] Stop | Cancelled strategy: %s", name)
             except Exception as e:
                 logger.error(
-                    f"[DataProcessor] Stop | ❌ Failed to cancel {name}: {e}",
+                    "[DataProcessor] Stop | ❌ Failed to cancel %s: %s",
+                    name,
+                    e,
                     exc_info=True,
                 )
 
@@ -176,16 +178,19 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             for name, strategy in self.strategies.items():
                 try:
                     strategy.cancel()
-                    logger.debug(f"[DataProcessor] Stop | Cancelled strategy: {name}")
+                    logger.debug("[DataProcessor] Stop | Cancelled strategy: %s", name)
                 except Exception as e:
                     logger.error(
-                        f"[DataProcessor] Stop | ❌ Failed to cancel {name}: {e}",
+                        "[DataProcessor] Stop | ❌ Failed to cancel %s: %s",
+                        name,
+                        e,
                         exc_info=True,
                     )
 
         except Exception as e:
             logger.error(
-                f"[DataProcessor] Stop | ❌ Error during stop propagation: {e}",
+                "[DataProcessor] Stop | ❌ Error during stop propagation: %s",
+                e,
                 exc_info=True,
             )
 
@@ -212,7 +217,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 await self.cache.close()
         except Exception as e:
             logger.error(
-                f"[DataProcessor] State | ❌ Error during engine close: {e}",
+                "[DataProcessor] State | ❌ Error during engine close: %s",
+                e,
                 exc_info=True,
             )
 
@@ -517,7 +523,10 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 self._quality_tier = None
                 self._health_cache = {"time": 0, "data": None}
                 logger.info(
-                    f"[DataProcessor] Sync Basic | ✅ {active_count} active + {delisted_count} delisted = {total_count} total stocks",
+                    "[DataProcessor] Sync Basic | ✅ %s active + %s delisted = %s total stocks",
+                    active_count,
+                    delisted_count,
+                    total_count,
                 )
                 return total_count
 
@@ -527,7 +536,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
         except Exception as e:
-            logger.error(f"[DataProcessor] Sync Basic | ❌ Failed: {e}", exc_info=True)
+            logger.error("[DataProcessor] Sync Basic | ❌ Failed: %s", e, exc_info=True)
             return 0
         finally:
             with self._sync_lock:
@@ -594,7 +603,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     elif isinstance(r, Exception):
                         # Log but don't stop everything for one failed concept
                         logger.warning(
-                            f"[DataProcessor] Sync Concepts | ⚠️ Subtask failed: {r}",
+                            "[DataProcessor] Sync Concepts | ⚠️ Subtask failed: %s",
+                            r,
                         )
 
             except asyncio.CancelledError:
@@ -624,13 +634,15 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             self._quality_tier = None
             self._health_cache = {"time": 0, "data": None}
             logger.info(
-                f"[DataProcessor] Sync Concepts | ✅ Saved {count} structured mappings",
+                "[DataProcessor] Sync Concepts | ✅ Saved %s structured mappings",
+                count,
             )
             return count
 
         except Exception as e:
             logger.error(
-                f"[DataProcessor] Sync Concepts | ❌ Failed: {e}",
+                "[DataProcessor] Sync Concepts | ❌ Failed: %s",
+                e,
                 exc_info=True,
             )
             return 0
@@ -747,7 +759,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         except Exception as e:
             logger.error(
-                f"[DataProcessor] Config | ❌ Unexpected error fetching market summary: {e}",
+                "[DataProcessor] Config | ❌ Unexpected error fetching market summary: %s",
+                e,
                 exc_info=True,
             )
             return None
@@ -865,7 +878,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 )
                 if history_result and history_result.status == "failed":
                     logger.error(
-                        f"[DataProcessor] Init | ❌ Historical daily sync encountered errors: {history_result.errors}",
+                        "[DataProcessor] Init | ❌ Historical daily sync encountered errors: %s",
+                        history_result.errors,
                     )
                     return None
                 if self.is_cancelled():
@@ -882,7 +896,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 )
                 if financial_result and financial_result.status == "failed":
                     logger.error(
-                        f"[DataProcessor] Init | ❌ Financial sync encountered errors: {financial_result.errors}",
+                        "[DataProcessor] Init | ❌ Financial sync encountered errors: %s",
+                        financial_result.errors,
                     )
                     return None
                 if self.is_cancelled():
@@ -894,7 +909,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             macro_res = await self.strategies["macro"].run()
             if macro_res.status == "failed":
                 logger.warning(
-                    f"[DataProcessor] Init | ⚠️ Macro sync failed: {macro_res.errors}",
+                    "[DataProcessor] Init | ⚠️ Macro sync failed: %s",
+                    macro_res.errors,
                 )
 
             report_step(5, 1, 3, I18n.get("init_sync_holders"))
@@ -902,7 +918,8 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             holder_res = await self.strategies["holder"].run()
             if holder_res.status == "failed":
                 logger.warning(
-                    f"[DataProcessor] Init | ⚠️ Holder sync failed: {holder_res.errors}",
+                    "[DataProcessor] Init | ⚠️ Holder sync failed: %s",
+                    holder_res.errors,
                 )
 
             report_step(5, 2, 3, I18n.get("init_step_5_done"))
@@ -923,7 +940,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         except Exception as e:
             step_label = I18n.get(f"init_step_{current_step}") if current_step > 0 else "Initialization"
             logger.error(
-                f"[DataProcessor] Init | ❌ System init unexpectedly failed at {step_label}: {e}",
+                "[DataProcessor] Init | ❌ System init unexpectedly failed at %s: %s",
+                step_label,
+                e,
                 exc_info=True,
             )
             raise  # Re-raise so UI can catch and display
@@ -951,7 +970,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 else:
                     end = parse_date(str(end_date))
         except Exception as e:
-            logger.warning(f"[DataProcessor] get_stock_history fallback to natural date: {e}")
+            logger.warning("[DataProcessor] get_stock_history fallback to natural date: %s", e)
             end = get_now().date()
 
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
@@ -1020,8 +1039,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 await self.check_data_health()
             except Exception as e:
                 logger.warning(
-                    f"[DataProcessor] Deep health check during screening prep failed, "
-                    f"keeping fast-path tier={quality_tier}: {e}",
+                    "[DataProcessor] Deep health check during screening prep failed, keeping fast-path tier=%s: %s",
+                    quality_tier,
+                    e,
                 )
 
         context = {}

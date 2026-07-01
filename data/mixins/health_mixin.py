@@ -171,7 +171,8 @@ class HealthCheckMixin:
                         latest_quote_date = str(db_max_date)
             except Exception as e:
                 logger.error(
-                    f"[DataProcessor] FastCheck | ❌ Deep DB fallback totally failed: {e}",
+                    "[DataProcessor] FastCheck | ❌ Deep DB fallback totally failed: %s",
+                    e,
                     exc_info=True,
                 )
 
@@ -187,13 +188,15 @@ class HealthCheckMixin:
                 if not normalized:
                     self._quality_tier = 1
                     logger.warning(
-                        f"[DataProcessor] FastCheck | ⚠️ Invalid quote date '{latest_quote_date}'. Degrading to BRONZE.",
+                        "[DataProcessor] FastCheck | ⚠️ Invalid quote date '%s'. Degrading to BRONZE.",
+                        latest_quote_date,
                     )
                     return
                 latest_dt = parse_date(normalized, "%Y%m%d")
                 days_lag = (get_now() - latest_dt).days
                 logger.debug(
-                    f"[DataProcessor] FastCheck | Quote Lag measured as {days_lag}d",
+                    "[DataProcessor] FastCheck | Quote Lag measured as %sd",
+                    days_lag,
                 )
 
                 # Double check actual table if sync_status claims it's stale (sync_status could be out of sync with DB)
@@ -207,17 +210,20 @@ class HealthCheckMixin:
                             latest_dt = parse_date(str(db_max_date), "%Y%m%d")
                             days_lag = (get_now() - latest_dt).days
                             logger.debug(
-                                f"[DataProcessor] FastCheck | DB MAX swept. Lag settled as {days_lag}d",
+                                "[DataProcessor] FastCheck | DB MAX swept. Lag settled as %sd",
+                                days_lag,
                             )
                     except Exception as e:
                         logger.warning(
-                            f"[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: {e}",
+                            "[DataProcessor] FastCheck | ⚠️ Fallback DB query aborted: %s",
+                            e,
                         )
 
             except (ValueError, TypeError):
                 self._quality_tier = 1
                 logger.warning(
-                    f"[DataProcessor] FastCheck | ⚠️ Malformed date '{latest_quote_date}'. Degrading to BRONZE.",
+                    "[DataProcessor] FastCheck | ⚠️ Malformed date '%s'. Degrading to BRONZE.",
+                    latest_quote_date,
                 )
                 return
 
@@ -257,8 +263,9 @@ class HealthCheckMixin:
                 if empty_critical:
                     self._quality_tier = 0
                     logger.warning(
-                        f"[DataProcessor] FastCheck | ⚠️ Critical tables with EMPTY data: {empty_critical}. "
-                        f"Tier forced to CRITICAL (0)",
+                        "[DataProcessor] FastCheck | ⚠️ Critical tables with EMPTY data: %s. "
+                        "Tier forced to CRITICAL (0)",
+                        empty_critical,
                     )
                     return
 
@@ -288,11 +295,13 @@ class HealthCheckMixin:
                 )
 
             logger.debug(
-                f"[DataProcessor] FastCheck | Derived fast Tier parameter = {self._quality_tier}",
+                "[DataProcessor] FastCheck | Derived fast Tier parameter = %s",
+                self._quality_tier,
             )
         except Exception as e:
             logger.error(
-                f"[DataProcessor] FastCheck | ❌ Critical crash during evaluate: {e}",
+                "[DataProcessor] FastCheck | ❌ Critical crash during evaluate: %s",
+                e,
                 exc_info=True,
             )
             # If we can't even read metadata, be conservative but don't block everything
@@ -353,11 +362,13 @@ class HealthCheckMixin:
                         api_latest_official = api_latest
                         if api_latest > str(official_dates[-1]):
                             logger.warning(
-                                f"[DataProcessor] Health | Local trade_cal latest={official_dates[-1]}, "
-                                f"API latest={api_latest}. Local calendar may be stale. Using API as gold standard."
+                                "[DataProcessor] Health | Local trade_cal latest=%s, "
+                                "API latest=%s. Local calendar may be stale. Using API as gold standard.",
+                                official_dates[-1],
+                                api_latest,
                             )
             except Exception as e:
-                logger.debug(f"[DataProcessor] Health | API trade_cal cross-check skipped: {e}")
+                logger.debug("[DataProcessor] Health | API trade_cal cross-check skipped: %s", e)
 
             local_dates = await self.cache.get_cached_trade_dates()
 
@@ -377,7 +388,9 @@ class HealthCheckMixin:
                     if local_latest_str and api_latest_official > local_latest_str:
                         gold_standard_dates = official_dates + [api_latest_official]
                         logger.info(
-                            f"[DataProcessor] Health | P1-7: API extends official dates from {local_latest_str} to {api_latest_official}"
+                            "[DataProcessor] Health | P1-7: API extends official dates from %s to %s",
+                            local_latest_str,
+                            api_latest_official,
                         )
                 except (ValueError, TypeError):
                     pass
@@ -394,7 +407,8 @@ class HealthCheckMixin:
                 concept_count = await self.cache.get_concept_count()
             except Exception as e:
                 logger.error(
-                    f"[DataProcessor] QualityScan | ❌ Concept sweep crash: {e}",
+                    "[DataProcessor] QualityScan | ❌ Concept sweep crash: %s",
+                    e,
                     exc_info=True,
                 )
                 concept_count = 0
@@ -481,8 +495,13 @@ class HealthCheckMixin:
 
             # Log Metrics
             logger.debug(
-                f"[DataProcessor] Health | Metrics snapshot: Lag={lag_days}d, FinCoverage={fin_fresh_ratio:.1%}, Missing={len(all_missing)}, "
-                f"MissDepth={len(missing_depth)}, MissBreadth={len(missing_breadth)}",
+                "[DataProcessor] Health | Metrics snapshot: Lag=%sd, FinCoverage=%.1f%%, Missing=%s, "
+                "MissDepth=%s, MissBreadth=%s",
+                lag_days,
+                fin_fresh_ratio * 100,
+                len(all_missing),
+                len(missing_depth),
+                len(missing_breadth),
             )
 
             # Final Status Aggregation
@@ -493,7 +512,9 @@ class HealthCheckMixin:
 
             if status != "green":
                 logger.warning(
-                    f"[DataProcessor] QualityScan | ⚠️ Evaluation abnormal. Status={status}, Reasons={reasons}",
+                    "[DataProcessor] QualityScan | ⚠️ Evaluation abnormal. Status=%s, Reasons=%s",
+                    status,
+                    reasons,
                 )
 
             # Tier uses the shared computation path even when status is yellow/red,
@@ -508,7 +529,7 @@ class HealthCheckMixin:
                         valid_values = [v for v in fc.values() if v is not None]
                         avg_fund = sum(valid_values) / len(valid_values) if valid_values else None
             except Exception as e:
-                logger.debug(f"[DataProcessor] HealthCheck | Field completeness check skipped: {e}")
+                logger.debug("[DataProcessor] HealthCheck | Field completeness check skipped: %s", e)
             try:
                 sync_records = await self.cache.get_sync_status()
                 if isinstance(sync_records, pd.DataFrame) and not sync_records.empty:
@@ -518,7 +539,7 @@ class HealthCheckMixin:
                         if fin_date_str:
                             fin_lag_days = (get_now() - parse_date(str(fin_date_str), "%Y%m%d")).days
             except (ValueError, TypeError, KeyError) as exc:
-                logger.debug(f"[HealthMixin] Financial freshness calc skipped: {exc}")
+                logger.debug("[HealthMixin] Financial freshness calc skipped: %s", exc)
                 pass
 
             self._quality_tier = _compute_tier(
@@ -573,7 +594,8 @@ class HealthCheckMixin:
             return result_dict
         except Exception as e:
             logger.error(
-                f"[DataProcessor] QualityScan | ❌ Deep engine health sweep crashed: {e}",
+                "[DataProcessor] QualityScan | ❌ Deep engine health sweep crashed: %s",
+                e,
                 exc_info=True,
             )
             return {"status": "red", "msg": f"Check failed: {e!s}"}
@@ -609,7 +631,8 @@ class HealthCheckMixin:
             sample = random.sample(active_stocks, min(sample_size, len(active_stocks)))
 
             logger.debug(
-                f"[DataProcessor] QualityScan | Commencing deep sweep on {len(sample)} random targets.",
+                "[DataProcessor] QualityScan | Commencing deep sweep on %s random targets.",
+                len(sample),
             )
 
             deep_health = {}
@@ -624,7 +647,7 @@ class HealthCheckMixin:
                 ]
                 missing_critical = any(tables.get(t, {}).get("ratio", 0.0) < 0.1 for t in critical_tables)
             except Exception as e:
-                logger.debug(f"[DataProcessor] QualityScan | Coverage snapshot skipped: {e}")
+                logger.debug("[DataProcessor] QualityScan | Coverage snapshot skipped: %s", e)
 
             # 2. Prepare Context
             scan_results = {"continuity": [], "recency": [], "nulls": []}
@@ -642,7 +665,7 @@ class HealthCheckMixin:
                 else:
                     end_date_obj = get_now().date()
             except Exception as e:
-                logger.debug(f"[DataProcessor] QualityScan | Latest trade date fallback: {e}")
+                logger.debug("[DataProcessor] QualityScan | Latest trade date fallback: %s", e)
                 end_date_obj = get_now().date()
 
             # --- Architecture Optimization: One-Pass Batch Fetch ---
@@ -726,7 +749,7 @@ class HealthCheckMixin:
                 if latest_td:
                     fundamental_completeness = await self.cache.get_field_completeness(latest_td)
             except Exception as e:
-                logger.debug(f"[DataProcessor] QualityScan | Fundamental completeness check skipped: {e}")
+                logger.debug("[DataProcessor] QualityScan | Fundamental completeness check skipped: %s", e)
 
             avg_fundamental = (
                 sum(v for v in fundamental_completeness.values() if v is not None)
@@ -753,7 +776,7 @@ class HealthCheckMixin:
                             fin_lag_days = (end_as_date - fin_dt_date).days
                             fin_recency_ok = fin_lag_days < TIER_FINANCIAL_FRESHNESS_DAYS
             except (ValueError, TypeError, KeyError) as exc:
-                logger.debug(f"[HealthMixin] Composite tier calc skipped: {exc}")
+                logger.debug("[HealthMixin] Composite tier calc skipped: %s", exc)
                 pass
 
             # 7. Composite Score & Tier
@@ -778,9 +801,14 @@ class HealthCheckMixin:
             self._quality_tier = tier
             fin_score_str = f"{fundamental_score:.0f}" if fundamental_score is not None else "N/A"
             logger.info(
-                f"[DataProcessor] QualityScan | ✅ Thorough evaluation complete. "
-                f"Composite={composite_score:.0f} (Quote={quote_score:.0f}, Fin={fin_score_str}, "
-                f"FinRecency={'OK' if fin_recency_ok else 'STALE'}). Tier={tier}",
+                "[DataProcessor] QualityScan | ✅ Thorough evaluation complete. "
+                "Composite=%.0f (Quote=%.0f, Fin=%s, "
+                "FinRecency=%s). Tier=%s",
+                composite_score,
+                quote_score,
+                fin_score_str,
+                "OK" if fin_recency_ok else "STALE",
+                tier,
             )
 
             result = {
@@ -800,7 +828,8 @@ class HealthCheckMixin:
 
         except Exception as e:
             logger.error(
-                f"[DataProcessor] QualityScan | ❌ Batch sampling crashed: {e}",
+                "[DataProcessor] QualityScan | ❌ Batch sampling crashed: %s",
+                e,
                 exc_info=True,
             )
             return {"score": 0, "tier": 0, "error": str(e)}
