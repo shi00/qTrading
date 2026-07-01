@@ -454,6 +454,50 @@ class TestQuoteDaoCheckDataExists:
 
             assert isinstance(stmt, sa.Select)
 
+    @pytest.mark.asyncio
+    async def test_three_tables_all_present(self):
+        """3+ 表场景：验证 sa.union_all 正确构造，不触发 AttributeError。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes", "daily_indicators", "moneyflow_daily"],
+        ):
+            dao._read_db_select = AsyncMock(
+                return_value=pd.DataFrame(
+                    {
+                        "tbl": ["daily_quotes", "daily_indicators", "moneyflow_daily"],
+                        "val": [1, 1, 1],
+                    }
+                )
+            )
+            result = await dao.check_data_exists(
+                "20240615",
+                tables=["daily_quotes", "daily_indicators", "moneyflow_daily"],
+            )
+            assert result is True
+
+    @pytest.mark.asyncio
+    async def test_three_tables_partial_missing(self):
+        """3+ 表部分缺失：验证 UNION ALL 查询正确返回缺失标记。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch(
+            "data.persistence.daos.quote_dao._get_default_synced_tables",
+            return_value=["daily_quotes", "daily_indicators", "moneyflow_daily"],
+        ):
+            dao._read_db_select = AsyncMock(
+                return_value=pd.DataFrame(
+                    {
+                        "tbl": ["daily_quotes", "daily_indicators"],
+                        "val": [1, 1],
+                    }
+                )
+            )
+            result = await dao.check_data_exists(
+                "20240615",
+                tables=["daily_quotes", "daily_indicators", "moneyflow_daily"],
+            )
+            assert result is False
+
 
 class TestQuoteDaoGetExpectedStockCount:
     @pytest.mark.asyncio

@@ -529,7 +529,9 @@ class HistoricalSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except TushareAPIPermissionError as e:
-                logger.warning("[HistoricalSync] DaySync | ⚠️ PERMISSION_DENIED for %s: %s", name, e, exc_info=True)
+                # cached unavailable 由 _handle_api_call 的 DEBUG + mark_api_unavailable 的 WARNING 充分记录；
+                # 首次真实权限错误由 _handle_api_call 的 ERROR 记录。此处仅标记本日跳过，避免按日循环刷屏。
+                logger.debug("[HistoricalSync] DaySync | PERMISSION_DENIED for %s (skipped): %s", name, e)
                 return (key, None, "permission_denied")
             except Exception as e:
                 logger.warning(

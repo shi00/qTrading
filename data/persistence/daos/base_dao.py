@@ -856,7 +856,7 @@ class BaseDao:
 
     async def _read_db_select(
         self,
-        stmt: sa.Select,
+        stmt: sa.Select | sa.CompoundSelect,
         *,
         suppress_errors: bool = True,
     ):

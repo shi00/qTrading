@@ -346,7 +346,10 @@ class TaskCenterView(ft.Container):
         )
 
         # --- Description / Error ---
-        desc_text = t.error if t.status == TaskStatus.FAILED else t.description
+        if t.status == TaskStatus.FAILED and t.error:
+            desc_text = I18n.get(t.error)
+        else:
+            desc_text = t.description
         desc_row = ft.Text(
             desc_text or "",
             size=12,

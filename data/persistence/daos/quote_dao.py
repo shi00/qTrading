@@ -205,9 +205,10 @@ class QuoteDao(BaseDao):
                 .limit(1)
             )
             union_parts.append(part)
-        stmt = union_parts[0]
-        for part in union_parts[1:]:
-            stmt = stmt.union_all(part)
+        if len(union_parts) == 1:
+            stmt = union_parts[0]
+        else:
+            stmt = sa.union_all(*union_parts)
         try:
             df = await self._read_db_select(stmt, suppress_errors=not raise_on_error)
             if df is None or df.empty:
