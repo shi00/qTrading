@@ -14,7 +14,7 @@ from datetime import date, timedelta
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
@@ -182,15 +182,15 @@ class BacktestConfigPanel(ft.Container):
             self.end_date_picker.error_invalid_text = I18n.get("date_picker_error_invalid")
             self.initial_capital_input.label = I18n.get("backtest_initial_capital")
             self.rebalance_dropdown.label = I18n.get("backtest_rebalance_freq")
-            saved_rebalance = self.rebalance_dropdown.value
-            self.rebalance_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.rebalance_dropdown.options = [
-                ft.dropdown.Option("signal", I18n.get("backtest_rebalance_signal")),
-                ft.dropdown.Option("daily", I18n.get("backtest_rebalance_daily")),
-                ft.dropdown.Option("weekly", I18n.get("backtest_rebalance_weekly")),
-                ft.dropdown.Option("monthly", I18n.get("backtest_rebalance_monthly")),
-            ]
-            self.rebalance_dropdown.value = saved_rebalance
+            refresh_dropdown_options(
+                self.rebalance_dropdown,
+                [
+                    ft.dropdown.Option("signal", I18n.get("backtest_rebalance_signal")),
+                    ft.dropdown.Option("daily", I18n.get("backtest_rebalance_daily")),
+                    ft.dropdown.Option("weekly", I18n.get("backtest_rebalance_weekly")),
+                    ft.dropdown.Option("monthly", I18n.get("backtest_rebalance_monthly")),
+                ],
+            )
             self.max_position_input.label = I18n.get("backtest_max_positions")
             self.stamp_duty_auto_checkbox.label = I18n.get("backtest_stamp_duty_auto")
             self.run_btn.text = I18n.get("backtest_run")

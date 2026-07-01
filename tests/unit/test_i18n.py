@@ -659,3 +659,106 @@ class TestI18nDebugModeStrictInit:
         result = I18n.get("app_title")
 
         assert result == "A股智能选股助手"
+
+
+class TestRefreshDropdownOptions:
+    """refresh_dropdown_options 工具函数测试"""
+
+    def test_updates_options_and_preserves_value(self):
+        """正常场景：更新 options 并保留 value，调用两次 control.update()"""
+        from unittest.mock import patch
+
+        import flet as ft
+
+        from ui.i18n import refresh_dropdown_options
+
+        dropdown = ft.Dropdown(value="dark")
+        with patch.object(dropdown, "update") as mock_update:
+            refresh_dropdown_options(
+                dropdown,
+                [
+                    ft.dropdown.Option("dark", "Dark"),
+                    ft.dropdown.Option("light", "Light"),
+                ],
+            )
+
+        assert dropdown.value == "dark"
+        assert len(dropdown.options) == 2
+        assert dropdown.options[0].key == "dark"
+        assert dropdown.options[0].text == "Dark"
+        assert mock_update.call_count == 2
+
+    def test_value_none_preserved(self):
+        """saved_value 为 None 时正常处理"""
+        from unittest.mock import patch
+
+        import flet as ft
+
+        from ui.i18n import refresh_dropdown_options
+
+        dropdown = ft.Dropdown(value=None)
+        with patch.object(dropdown, "update"):
+            refresh_dropdown_options(
+                dropdown,
+                [ft.dropdown.Option("a", "Option A")],
+            )
+
+        assert dropdown.value is None
+        assert len(dropdown.options) == 1
+
+    def test_update_raises_assertion_swallows_error(self):
+        """control.update() 抛 AssertionError（未挂载）时静默处理"""
+        from unittest.mock import patch
+
+        import flet as ft
+
+        from ui.i18n import refresh_dropdown_options
+
+        dropdown = ft.Dropdown(value="dark")
+        with patch.object(dropdown, "update", side_effect=AssertionError("not added to page")):
+            # 不应抛出异常
+            refresh_dropdown_options(
+                dropdown,
+                [ft.dropdown.Option("dark", "Dark")],
+            )
+
+        # value 仍然恢复
+        assert dropdown.value == "dark"
+
+    def test_update_raises_generic_exception_swallows_error(self):
+        """control.update() 抛其他异常时静默处理"""
+        from unittest.mock import patch
+
+        import flet as ft
+
+        from ui.i18n import refresh_dropdown_options
+
+        dropdown = ft.Dropdown(value="info")
+        with patch.object(dropdown, "update", side_effect=RuntimeError("connection lost")):
+            refresh_dropdown_options(
+                dropdown,
+                [ft.dropdown.Option("info", "Info")],
+            )
+
+        assert dropdown.value == "info"
+
+    def test_options_replaced_not_appended(self):
+        """options 被替换而非追加"""
+        from unittest.mock import patch
+
+        import flet as ft
+
+        from ui.i18n import refresh_dropdown_options
+
+        dropdown = ft.Dropdown(
+            value="a",
+            options=[ft.dropdown.Option("a", "Old A"), ft.dropdown.Option("b", "Old B")],
+        )
+        with patch.object(dropdown, "update"):
+            refresh_dropdown_options(
+                dropdown,
+                [ft.dropdown.Option("c", "New C")],
+            )
+
+        assert len(dropdown.options) == 1
+        assert dropdown.options[0].key == "c"

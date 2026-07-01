@@ -4,7 +4,7 @@ import weakref
 import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SettingRow
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -291,10 +291,7 @@ class AutomationTab(ft.Container):
             # 更新静态文本
             self.schedule_enabled.label = I18n.get("settings_auto_update")
             self.schedule_time.label = I18n.get("settings_update_time")
-            saved_schedule_time = self.schedule_time.value
-            self.schedule_time.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.schedule_time.options = self._build_time_options()
-            self.schedule_time.value = saved_schedule_time
+            refresh_dropdown_options(self.schedule_time, self._build_time_options())
             self.schedule_status.value = self._get_schedule_status_text(
                 self.schedule_enabled.value,
             )
@@ -303,19 +300,13 @@ class AutomationTab(ft.Container):
                 "settings_ai_concept_update",
             )
             self.ai_concept_time.label = I18n.get("settings_update_time")
-            saved_ai_concept_time = self.ai_concept_time.value
-            self.ai_concept_time.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.ai_concept_time.options = self._build_time_options()
-            self.ai_concept_time.value = saved_ai_concept_time
+            refresh_dropdown_options(self.ai_concept_time, self._build_time_options())
             self.ai_concept_status.value = self._get_schedule_status_text(
                 self.ai_concept_enabled.value,
             )
 
             self.ai_concept_search_engine.label = I18n.get("settings_ai_concept_search_engine")
-            saved_ai_concept_search_engine = self.ai_concept_search_engine.value
-            self.ai_concept_search_engine.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.ai_concept_search_engine.options = self._build_search_engine_options()
-            self.ai_concept_search_engine.value = saved_ai_concept_search_engine
+            refresh_dropdown_options(self.ai_concept_search_engine, self._build_search_engine_options())
 
             for row in [
                 self.row_schedule,
@@ -592,10 +583,7 @@ class NotificationsTab(ft.Container):
         try:
             self.news_alerts_enabled.label = I18n.get("settings_news_alerts")
             self.news_interval.label = I18n.get("settings_news_interval")
-            saved_news_interval = self.news_interval.value
-            self.news_interval.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.news_interval.options = self._build_interval_options()
-            self.news_interval.value = saved_news_interval
+            refresh_dropdown_options(self.news_interval, self._build_interval_options())
             for row in [self.row_alerts, self.row_interval]:
                 row.update_locale()
             self._build_content()

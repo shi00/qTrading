@@ -8,7 +8,7 @@ import flet as ft
 import pandas as pd
 
 from data.persistence.metadata_manager import MetaDataManager
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
 from utils.correlation import ensure_correlation_id
@@ -324,29 +324,27 @@ class TableViewerTab(ft.Container):
             # 令 MetaDataManager 缓存失效，确保后续 get_table_alias/get_column_alias 用新 locale
             MetaDataManager.invalidate_cache()
             self.table_selector.label = I18n.get("data_select_table")
-            saved_table = self.table_selector.value
-            self.table_selector.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.table_selector.options = [
-                ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.tables_list
-            ]
-            self.table_selector.value = saved_table
+            refresh_dropdown_options(
+                self.table_selector,
+                [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.tables_list],
+            )
 
             self.filter_col.label = I18n.get("data_filter_col")
             self._populate_filter_columns()
 
             self.filter_op.label = I18n.get("data_filter_op")
-            saved_op = self.filter_op.value
-            self.filter_op.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.filter_op.options = [
-                ft.dropdown.Option("="),
-                ft.dropdown.Option("LIKE"),
-                ft.dropdown.Option(">"),
-                ft.dropdown.Option("<"),
-                ft.dropdown.Option(">="),
-                ft.dropdown.Option("<="),
-                ft.dropdown.Option("!="),
-            ]
-            self.filter_op.value = saved_op
+            refresh_dropdown_options(
+                self.filter_op,
+                [
+                    ft.dropdown.Option("="),
+                    ft.dropdown.Option("LIKE"),
+                    ft.dropdown.Option(">"),
+                    ft.dropdown.Option("<"),
+                    ft.dropdown.Option(">="),
+                    ft.dropdown.Option("<="),
+                    ft.dropdown.Option("!="),
+                ],
+            )
 
             self.filter_val.label = I18n.get("data_filter_val")
             self.btn_query.tooltip = I18n.get("common_query")

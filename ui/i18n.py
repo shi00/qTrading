@@ -12,9 +12,15 @@ UI modules can continue to import from ui.i18n:
     from ui.i18n import I18n
 """
 
+import logging
+
+import flet as ft
+
 from core.i18n import I18n, LOCALE_MAP, LOCALE_NAMES, SUPPORTED_LOCALES, DEFAULT_LOCALE  # noqa: F401
 
 from utils.error_classifier import classify_error, get_error_message  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
 _STRATEGY_NAME_MAP = {
@@ -53,3 +59,34 @@ def translate_strategy_name(name: str | None) -> str | None:
         return I18n.get(_STRATEGY_NAME_MAP[name])
 
     return name
+
+
+def refresh_dropdown_options(
+    dropdown: ft.Dropdown,
+    new_options: list[ft.dropdown.Option],
+) -> None:
+    """重建 Dropdown options 并确保显示文本正确刷新。
+
+    Flet 0.28.3 的 ``_set_attr_internal`` 在批量 ``page.update()`` 中只发送
+    属性最终值。``value`` 从 X→None→X 的最终值等于原值，前端 DropdownButton
+    不触发 rebuild，闭合态选中项显示文本不刷新。
+
+    通过分两步 ``control.update()`` 解决：
+    步骤1: 提交 options + value=None，前端清除选中项显示
+    步骤2: 提交 value=saved，前端用新 options 的 text 更新显示
+
+    参考: CONTRIBUTING.md §5.8 规范 4
+    """
+    saved_value = dropdown.value
+    dropdown.value = None
+    dropdown.options = new_options
+    try:
+        dropdown.update()
+    except Exception:
+        # 控件未挂载时跳过，后续 page.update() 兜底
+        pass
+    dropdown.value = saved_value
+    try:
+        dropdown.update()
+    except Exception:
+        pass

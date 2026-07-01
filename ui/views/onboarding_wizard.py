@@ -26,7 +26,7 @@ from ui.components.config_panels.database_config_panel import DatabaseConfigPane
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from utils.config_handler import ConfigHandler
@@ -1032,12 +1032,10 @@ class OnboardingWizard(ft.Container):
             if hasattr(self, "wizard_language_dropdown"):
                 self.wizard_language_dropdown.label = I18n.get_language_label()
                 self.wizard_language_dropdown.tooltip = I18n.get_language_label()
-                saved_wizard_language = self.wizard_language_dropdown.value
-                self.wizard_language_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-                self.wizard_language_dropdown.options = [
-                    ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()
-                ]
-                self.wizard_language_dropdown.value = saved_wizard_language
+                refresh_dropdown_options(
+                    self.wizard_language_dropdown,
+                    [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
+                )
 
             # 重建步骤内容（含子面板），保证外部触发的语言切换也能完整刷新
             self._rebuild_steps_after_locale_change()

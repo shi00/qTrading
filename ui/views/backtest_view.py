@@ -15,7 +15,7 @@ import flet as ft
 
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.components.resizable_splitter import ResizableSplitter
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
 from utils.log_decorators import UILogger
@@ -98,11 +98,11 @@ class BacktestView(ft.Container):
         try:
             self.title_text.value = I18n.get("backtest_view_title")
             self.strategy_dropdown.label = I18n.get("backtest_select_strategy")
-            saved_strategy = self.strategy_dropdown.value
-            self.strategy_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             strategies = self.vm.get_available_strategies()
-            self.strategy_dropdown.options = [ft.dropdown.Option(key, name) for key, name in strategies.items()]
-            self.strategy_dropdown.value = saved_strategy
+            refresh_dropdown_options(
+                self.strategy_dropdown,
+                [ft.dropdown.Option(key, name) for key, name in strategies.items()],
+            )
             self.cancel_button.text = I18n.get("common_cancel")
             if hasattr(self.config_panel, "refresh_locale"):
                 self.config_panel.refresh_locale()

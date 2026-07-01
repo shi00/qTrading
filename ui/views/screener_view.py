@@ -13,7 +13,7 @@ from ui.components._markdown_safe import safe_open_url
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
-from ui.i18n import I18n, translate_strategy_name
+from ui.i18n import I18n, refresh_dropdown_options, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 from utils.log_decorators import UILogger
@@ -375,8 +375,6 @@ class ScreenerView(ft.Container):
 
             # 策略下拉框：label + options（重建策略名翻译，保留 missing_apis 标记与当前选择）
             self.strategy_dropdown.label = I18n.get("select_strategy")
-            saved_strategy = self.strategy_dropdown.value
-            self.strategy_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             try:
                 # 复用依赖缓存，避免语言切换触发 IO（§5.8 规范：refresh_locale 纯 UI）
                 strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
@@ -390,10 +388,9 @@ class ScreenerView(ft.Container):
                     if info.get("missing_apis"):
                         name = f"{name} ⚠️"
                     options.append(ft.dropdown.Option(key, name))
-                self.strategy_dropdown.options = options
+                refresh_dropdown_options(self.strategy_dropdown, options)
             except Exception as ex:
                 logger.debug("[ScreenerView] strategy dropdown rebuild skipped: %s", ex, exc_info=True)
-            self.strategy_dropdown.value = saved_strategy  # 无论 options 重建是否成功都恢复 value
 
             # 策略描述
             if self.selected_strategy:
@@ -418,13 +415,11 @@ class ScreenerView(ft.Container):
 
             # 每页大小下拉框：重建 options 以严格符合 §5.8 规范 4
             self.page_size_dropdown.label = I18n.get("screener_page_size")
-            saved_page_size = self.page_size_dropdown.value
-            self.page_size_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
             per_page = I18n.get("screener_per_page")
-            self.page_size_dropdown.options = [
-                ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50", "100")
-            ]
-            self.page_size_dropdown.value = saved_page_size
+            refresh_dropdown_options(
+                self.page_size_dropdown,
+                [ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50", "100")],
+            )
 
             # 模式切换 Segments
             segments = self.mode_toggle.segments

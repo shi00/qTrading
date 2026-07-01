@@ -718,23 +718,28 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 4. **下拉框 options 同步**：所有 `ft.Dropdown` 的 `options` 中如果包含 `I18n.get()` 翻译文案，`refresh_locale` 必须重建 `options` 列表（**保留当前 `value`**），不能只刷新 `label`。枚举型 options（如主题、日志级别、积分档位）必须重建；语言选择器 options 也需重建以保持一致性。
 
-   **⚠️ 必须强制刷新 value（Flet 已知坑）**：`Control._set_attr_internal` 对相等值短路（源码 `flet/core/control.py:189` 的 `orig_val[0] != value` 判断），不标记 dirty。因此以下两种"看似正确"的写法**均无效**，前端收不到 value 变更，闭合状态下选中项显示文本不会刷新：
+   **⚠️ 必须使用 `refresh_dropdown_options()` 工具函数（Flet 已知坑）**：`Control._set_attr_internal` 对相等值短路（源码 `flet/core/control.py:189` 的 `orig_val[0] != value` 判断），不标记 dirty。在批量 `page.update()` 中，`value` 从 X→None→X 的最终值等于原值，前端只收到最终值，`DropdownButton` 不触发 rebuild，闭合态选中项显示文本不刷新。
 
-   - `dropdown.value = dropdown.value`（自赋值）
-   - `saved = dropdown.value; ...; dropdown.value = saved`（saved_value 模式）
-
-   必须先置 `None` 再恢复，强制触发两次 dirty：
+   必须使用 `ui.i18n.refresh_dropdown_options(dropdown, new_options)` 工具函数，它通过分两步 `control.update()` 解决：
 
    ```python
-   saved = dropdown.value
-   dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，必须先置空）
-   dropdown.options = [...]  # 重建 options（含新 locale 文案）
-   dropdown.value = saved   # 再次触发 dirty，前端 rebuild 选中项文本
+   from ui.i18n import refresh_dropdown_options
+
+   # 正确写法：使用工具函数
+   refresh_dropdown_options(self.theme_dropdown, [
+       ft.dropdown.Option(ThemeName.DARK, I18n.get("theme_dark")),
+       ft.dropdown.Option(ThemeName.LIGHT, I18n.get("theme_light")),
+   ])
    ```
 
-   原理：`value=None` 时原值非空，被改写为 `""` 并触发 dirty；`value=saved` 时原值为 `""`，再次触发 dirty。前端收到两次 value 变更事件，`DropdownButton` 必然 rebuild 并重新查找选中项显示文本。
+   原理：工具函数内部先提交 `value=None` + 新 `options`，通过 `control.update()` 立即发送到前端（清除选中项显示）；再提交 `value=saved`，再次 `control.update()` 使前端用新 options 的 text 更新显示。`control.update()` 未挂载时抛 `AssertionError`，被工具函数 catch 后属性仍标记 dirty，后续 `page.update()` 兜底。
 
-   **边界情况**：当 `saved_value` 为 `None`（用户未选中）时，闭合态本就无文本需刷新，无需此修复，但套用本模式也无副作用；当 `saved_value` 为空字符串 `""` 时本方案失效（两次赋值均被短路），实际项目 option key 应非空，若出现需单独处理。
+   **边界情况**：当 `saved_value` 为 `None`（用户未选中）时，闭合态本就无文本需刷新，但套用本工具函数也无副作用；当 `saved_value` 为空字符串 `""` 时本方案失效（两次赋值均被短路），实际项目 option key 应非空，若出现需单独处理。
+
+   **禁止的手动写法**（以下写法在批量 `page.update()` 中无效）：
+
+   - `dropdown.value = dropdown.value`（自赋值）
+   - `saved = dropdown.value; dropdown.value = None; ...; dropdown.value = saved`（saved_value 模式，不调用 `control.update()` 时无效）
 
 5. **实例属性提取**：内联在 `ft.Row`/`ft.Column` 中且 `tooltip`/`text` 来自 `I18n.get()` 的控件（如 `ft.IconButton`、`ft.Text`），必须提取为实例属性（`self.xxx_btn`/`self.xxx_text`），否则 `refresh_locale` 无法引用。`MetricCard`/`ActionChip`/`StatusBadge` 等复合组件通过 `set_label`/`set_text` 方法刷新。
 
@@ -752,7 +757,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - ❌ 只刷新 `Dropdown.label` 而不重建 `options`
 - ❌ 重建 `options` 时不保留当前 `value`
 - ❌ `dropdown.value = dropdown.value` 自赋值刷新（被 Flet `_set_attr_internal` 短路，无效）
-- ❌ 仅 `value = saved_value` 不先置 `None`（同样被短路，闭合态选中项文本不刷新）
+- ❌ 手动 `value = None; options = [...]; value = saved` 不调用 `control.update()`（批量 `page.update()` 只发送最终值，闭合态选中项文本不刷新）
+- ❌ 不使用 `refresh_dropdown_options()` 工具函数重建含 i18n 文案的 Dropdown options
 - ❌ 重建子 panel 前不调用旧 panel 的 `will_unmount`
 - ❌ 重建子 panel 后不恢复用户输入状态（如表单值、选中项）
 - ❌ 内联 `ft.Text(I18n.get(...))` 不提取为实例属性，导致无法刷新
@@ -770,7 +776,7 @@ import logging
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 
 logger = logging.getLogger(__name__)
 
@@ -845,19 +851,15 @@ class MyView(ft.Container):
             self.action_btn.tooltip = I18n.get("my_view_refresh")
 
             self.size_dropdown.label = I18n.get("my_view_page_size")
-            # 规范 4：重建 options 并强制刷新 value（Flet 对相等值短路，必须先置 None）
-            # value 恢复放在 try 外，确保 options 重建失败也能恢复（§5.8 规范 9 异常降级）
-            saved_value = self.size_dropdown.value
-            self.size_dropdown.value = None  # 强制触发 dirty
+            # 规范 4：使用 refresh_dropdown_options 重建 options（分步 control.update() 强制刷新）
             try:
                 per_page = I18n.get("unit_per_page")
-                self.size_dropdown.options = [
-                    ft.dropdown.Option(k, text=f"{k} {per_page}")
-                    for k in ("10", "20", "50")
-                ]
+                refresh_dropdown_options(
+                    self.size_dropdown,
+                    [ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50")],
+                )
             except Exception as rebuild_err:
                 logger.debug(f"[MyView] size_dropdown options rebuild skipped: {rebuild_err}")
-            self.size_dropdown.value = saved_value  # 无论 options 重建是否成功都恢复 value
 
             # 规范 6：级联子组件（若有）
             # child_refresh = getattr(self.child_panel, "refresh_locale", None)

@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 import flet as ft
 
 from ui.components.settings_widgets import SectionHeader
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import (
@@ -1184,15 +1184,9 @@ class LLMConfigPanel(ft.Container):
             self.refresh_models_button.tooltip = I18n.get("llm_refresh_models")
             self.save_button.text = I18n.get("settings_save_config")
 
-            saved_provider = self.provider_dropdown.value
-            self.provider_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.provider_dropdown.options = self._build_provider_options()
-            self.provider_dropdown.value = saved_provider
+            refresh_dropdown_options(self.provider_dropdown, self._build_provider_options())
 
-            saved_model = self.model_dropdown.value
-            self.model_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.model_dropdown.options = self._build_model_options(self._current_provider)
-            self.model_dropdown.value = saved_model
+            refresh_dropdown_options(self.model_dropdown, self._build_model_options(self._current_provider))
 
             self._update_links_row()
 

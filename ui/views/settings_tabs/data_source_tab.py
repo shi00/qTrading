@@ -13,7 +13,7 @@ from ui.components.settings_widgets import (
     SectionHeader,
     SettingRow,
 )
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
 from utils.config_handler import ConfigHandler
@@ -371,16 +371,16 @@ class DataSourceTab(ft.Container):
             self.row_init.subtitle_view.value = I18n.get("settings_hint_first_run")
             self.row_token.update_locale()
             self.history_years_dropdown.label = I18n.get("settings_history_range")
-            saved_history_years = self.history_years_dropdown.value
-            self.history_years_dropdown.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.history_years_dropdown.options = [
-                ft.dropdown.Option("1", f"1 {I18n.get('unit_year')}".strip()),
-                ft.dropdown.Option("2", f"2 {I18n.get('unit_years')}".strip()),
-                ft.dropdown.Option("3", f"3 {I18n.get('unit_years')}".strip()),
-                ft.dropdown.Option("4", f"4 {I18n.get('unit_years')}".strip()),
-                ft.dropdown.Option("5", f"5 {I18n.get('unit_years')}".strip()),
-            ]
-            self.history_years_dropdown.value = saved_history_years
+            refresh_dropdown_options(
+                self.history_years_dropdown,
+                [
+                    ft.dropdown.Option("1", f"1 {I18n.get('unit_year')}".strip()),
+                    ft.dropdown.Option("2", f"2 {I18n.get('unit_years')}".strip()),
+                    ft.dropdown.Option("3", f"3 {I18n.get('unit_years')}".strip()),
+                    ft.dropdown.Option("4", f"4 {I18n.get('unit_years')}".strip()),
+                    ft.dropdown.Option("5", f"5 {I18n.get('unit_years')}".strip()),
+                ],
+            )
 
             self.header_health.update_locale()
             self.header_console.update_locale()
