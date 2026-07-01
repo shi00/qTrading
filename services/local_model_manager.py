@@ -247,11 +247,14 @@ class LocalModelManager:
             else:
                 # Force path: worker 可能正忙于推理，sentinel 不会被及时处理。
                 # 直接 terminate 释放资源（关机路径，推理结果将丢弃）。
+                # terminate() 在 Windows 上是 TerminateProcess（同步立即返回），
+                # 在 Linux 上是 SIGTERM；join 在进程退出后立即返回。
+                # 超时预算 1.5+0.5=2.0s 适配 Step 5 的 2.0s 步超时。
                 self._worker_proc.terminate()
-                self._worker_proc.join(timeout=3)
+                self._worker_proc.join(timeout=1.5)
                 if self._worker_proc.is_alive():
                     self._worker_proc.kill()
-                    self._worker_proc.join(timeout=1)
+                    self._worker_proc.join(timeout=0.5)
             logger.info("[LocalModel] Persistent worker shut down.")
 
         if self._request_queue is not None:
