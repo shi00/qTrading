@@ -181,7 +181,6 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("free", I18n.get("sys_tier_free")),  # pragma: no cover
                 ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),  # pragma: no cover
                 ft.dropdown.Option("pro", I18n.get("sys_tier_pro")),  # pragma: no cover
-                ft.dropdown.Option("flagship", I18n.get("sys_tier_flagship")),  # pragma: no cover
                 ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),  # pragma: no cover
             ],  # pragma: no cover
             on_change=self.save_point_tier,  # pragma: no cover
@@ -503,7 +502,6 @@ class SystemTab(ft.Container):
                     ft.dropdown.Option("free", I18n.get("sys_tier_free")),
                     ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),
                     ft.dropdown.Option("pro", I18n.get("sys_tier_pro")),
-                    ft.dropdown.Option("flagship", I18n.get("sys_tier_flagship")),
                     ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),
                 ],
             )

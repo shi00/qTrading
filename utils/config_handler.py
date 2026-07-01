@@ -1398,7 +1398,7 @@ class ConfigHandler:
 
     @staticmethod
     def set_tushare_point_tier(tier):
-        valid_tiers = {"free", "standard", "pro", "flagship", "custom"}
+        valid_tiers = {"free", "standard", "pro", "custom"}
         if tier not in valid_tiers:
             return False
         return ConfigHandler.set_typed("tushare_point_tier", str(tier))
