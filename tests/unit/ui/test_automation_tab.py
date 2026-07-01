@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
@@ -804,3 +805,327 @@ class TestNotificationsTab:
 
                 assert tab._page_ref is not None
                 assert tab._page_ref() is page
+
+
+# ============================================================================
+# 测试工厂：patch 依赖并 yield (tab, mock_ch, mock_i18n)
+# 测试逻辑必须在 with 块内执行，以保证 mock 生效（模块级 ConfigHandler/I18n 引用）。
+# ============================================================================
+
+
+@contextmanager
+def _automation_tab_cxt(**config):
+    """AutomationTab 测试工厂：默认 show_snack=MagicMock()，测试中可覆盖 tab.show_snack。"""
+    with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+        mock_ch.is_auto_update_enabled.return_value = config.get("auto_update_enabled", False)
+        mock_ch.get_auto_update_time.return_value = config.get("auto_update_time", "16:00")
+        mock_ch.is_ai_concept_schedule_enabled.return_value = config.get("ai_concept_enabled", False)
+        mock_ch.get_ai_concept_schedule_time.return_value = config.get("ai_concept_time", "16:00")
+        mock_ch.get_ai_concept_search_engine.return_value = config.get("search_engine", "search_std")
+        mock_ch.save_config = MagicMock()
+        mock_ch.set_ai_concept_schedule_enabled = MagicMock()
+        mock_ch.set_ai_concept_schedule_time = MagicMock()
+        mock_ch.set_ai_concept_search_engine = MagicMock()
+
+        with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "test"
+            mock_i18n.subscribe.return_value = "sub_id"
+            mock_i18n.unsubscribe = MagicMock()
+
+            tab = AutomationTab(MagicMock())
+            yield tab, mock_ch, mock_i18n
+
+
+@contextmanager
+def _notifications_tab_cxt(page=None, **config):
+    """NotificationsTab 测试工厂。
+
+    Args:
+        page: 传入 _FakePage() 以让 on_xxx 调度 run_task；None 时 _page_ref=None 跳过调度。
+    """
+    enable_news = config.get("enable_news_alerts", True)
+    news_interval = config.get("news_poll_interval", 60)
+
+    with patch("ui.views.settings_tabs.automation_tab.ConfigHandler") as mock_ch:
+        mock_ch.get_config.side_effect = lambda key, default=None: (
+            enable_news if key == "enable_news_alerts" else news_interval if key == "news_poll_interval" else default
+        )
+        mock_ch.save_config = MagicMock()
+
+        with patch("ui.views.settings_tabs.automation_tab.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "test"
+            mock_i18n.subscribe.return_value = "sub_id"
+            mock_i18n.unsubscribe = MagicMock()
+
+            tab = NotificationsTab(MagicMock(), page)
+            yield tab, mock_ch, mock_i18n
+
+
+# ============================================================================
+# AutomationTab 异常路径覆盖
+# 直接 await _do_xxx_async() 以确保 coverage.py 追踪分支
+# （sync 通过 page.run_task + asyncio.run 会导致分支追踪缺失）
+# ============================================================================
+
+
+class TestAutomationTabErrorPaths:
+    """AutomationTab async handler except 块 + UI rollback 路径。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "switch_attr,handler_name,mock_attr_to_fail",
+        [
+            ("schedule_enabled", "_do_schedule_toggle_async", "save_config"),
+            ("ai_concept_enabled", "_do_ai_concept_toggle_async", "set_ai_concept_schedule_enabled"),
+        ],
+        ids=["schedule_toggle", "ai_concept_toggle"],
+    )
+    async def test_toggle_async_rollback_on_error(self, switch_attr, handler_name, mock_attr_to_fail):
+        """开关切换 save 失败 → 回滚开关 value + 错误 snackbar 反馈。"""
+        with _automation_tab_cxt() as (tab, mock_ch, _):
+            getattr(mock_ch, mock_attr_to_fail).side_effect = RuntimeError("save failed")
+            show_snack = MagicMock()
+            tab.show_snack = show_snack
+
+            switch = getattr(tab, switch_attr)
+            switch.value = True
+            await getattr(tab, handler_name)()
+
+            # rollback：开关被回滚为 False
+            assert switch.value is False
+            show_snack.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "handler_name,dropdown_attr,value,mock_attr_to_fail",
+        [
+            ("_do_schedule_time_change_async", "schedule_time", "17:00", "save_config"),
+            ("_do_ai_concept_time_change_async", "ai_concept_time", "18:00", "set_ai_concept_schedule_time"),
+            (
+                "_do_ai_concept_search_engine_change_async",
+                "ai_concept_search_engine",
+                "search_pro",
+                "set_ai_concept_search_engine",
+            ),
+        ],
+        ids=["schedule_time", "ai_concept_time", "ai_concept_search_engine"],
+    )
+    async def test_async_change_handles_error(self, handler_name, dropdown_attr, value, mock_attr_to_fail):
+        """time/engine 变更 save 失败 → 错误 snackbar（无 rollback）。"""
+        with _automation_tab_cxt() as (tab, mock_ch, _):
+            getattr(mock_ch, mock_attr_to_fail).side_effect = RuntimeError("fail")
+            show_snack = MagicMock()
+            tab.show_snack = show_snack
+
+            getattr(tab, dropdown_attr).value = value
+            await getattr(tab, handler_name)()
+
+            show_snack.assert_called_once()
+
+    @pytest.mark.parametrize("scenario", ["no_page", "update_raises"], ids=["no_page", "update_raises"])
+    def test_safe_update_does_not_raise(self, scenario):
+        """_safe_update 在 page=None 或 update() 抛异常时降级，不传播。"""
+        with _automation_tab_cxt() as (tab, _, _):
+            if scenario == "no_page":
+                tab._safe_update()
+            else:
+                tab.page = _FakePage()
+                tab.update = MagicMock(side_effect=RuntimeError("update failed"))
+                tab._safe_update()
+
+    def test_on_locale_change_swallows_exception(self):
+        """_build_content 抛异常时 _on_locale_change 降级为 warning 日志，不传播。"""
+        with _automation_tab_cxt() as (tab, _, _):
+            tab.page = _FakePage()
+            with patch.object(tab, "_build_content", side_effect=RuntimeError("build failed")):
+                tab._on_locale_change("en")
+
+    def test_will_unmount_skips_when_no_subscription(self):
+        """_locale_subscription_id=None 时跳过 unsubscribe。"""
+        with _automation_tab_cxt() as (tab, _, mock_i18n):
+            tab._locale_subscription_id = None
+            tab.will_unmount()
+            mock_i18n.unsubscribe.assert_not_called()
+
+    def test_update_theme_skips_when_no_page(self):
+        """page=None 时 update_theme 不调用 update()。"""
+        with _automation_tab_cxt() as (tab, _, _):
+            update_mock = MagicMock()
+            tab.update = update_mock
+            tab.update_theme()
+            update_mock.assert_not_called()
+
+
+class TestAutomationTabNoPage:
+    """page=None 时事件入口应跳过 run_task 调度。"""
+
+    @pytest.mark.parametrize(
+        "event_method",
+        [
+            "on_schedule_toggle",
+            "on_schedule_time_change",
+            "on_ai_concept_toggle",
+            "on_ai_concept_time_change",
+            "on_ai_concept_search_engine_change",
+        ],
+    )
+    def test_event_handler_skips_when_no_page(self, event_method):
+        with _automation_tab_cxt() as (tab, _, _):
+            getattr(tab, event_method)(MagicMock())
+
+
+class TestAutomationTabNoSnackCallback:
+    """show_snack=None 时 async handler 不应报错（覆盖 if self.show_snack False 分支）。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "handler_name,setup_trigger",
+        [
+            ("_do_schedule_toggle_async", lambda tab: setattr(tab.schedule_enabled, "value", True)),
+            ("_do_schedule_time_change_async", lambda tab: setattr(tab.schedule_time, "value", "17:00")),
+            ("_do_ai_concept_toggle_async", lambda tab: setattr(tab.ai_concept_enabled, "value", True)),
+            ("_do_ai_concept_time_change_async", lambda tab: setattr(tab.ai_concept_time, "value", "18:00")),
+            (
+                "_do_ai_concept_search_engine_change_async",
+                lambda tab: setattr(tab.ai_concept_search_engine, "value", "search_pro"),
+            ),
+        ],
+        ids=["schedule_toggle", "schedule_time", "ai_concept_toggle", "ai_concept_time", "ai_concept_search_engine"],
+    )
+    async def test_async_handler_no_snack_callback(self, handler_name, setup_trigger):
+        with _automation_tab_cxt() as (tab, _, _):
+            tab.show_snack = None
+            setup_trigger(tab)
+            await getattr(tab, handler_name)()
+
+
+# ============================================================================
+# NotificationsTab 异常路径覆盖
+# ============================================================================
+
+
+class TestNotificationsTabErrorPaths:
+    """NotificationsTab async handler except 块 + UI rollback 路径。"""
+
+    @pytest.mark.asyncio
+    async def test_do_news_toggle_async_rollback_on_error(self):
+        """save_config 失败时开关回滚 + 错误反馈。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, mock_ch, _):
+            mock_ch.save_config.side_effect = RuntimeError("fail")
+            show_snack = MagicMock()
+            tab.show_snack = show_snack
+
+            tab.news_alerts_enabled.value = True
+            await tab._do_news_toggle_async()
+
+            assert tab.news_alerts_enabled.value is False
+            assert tab.news_interval.disabled is True
+            show_snack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_do_interval_change_async_handles_error(self):
+        """save_config 抛 Exception 时错误反馈。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, mock_ch, _):
+            mock_ch.save_config.side_effect = RuntimeError("fail")
+            show_snack = MagicMock()
+            tab.show_snack = show_snack
+
+            tab.news_interval.value = "60"
+            await tab._do_interval_change_async()
+
+            show_snack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_do_interval_change_async_value_error_no_snack(self):
+        """news_interval 非数字 + show_snack=None 时 ValueError 路径不报错（覆盖 L657 分支）。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, _, _):
+            tab.show_snack = None
+            tab.news_interval.value = "invalid"
+            await tab._do_interval_change_async()
+
+    @pytest.mark.parametrize("scenario", ["no_page", "update_raises"], ids=["no_page", "update_raises"])
+    def test_safe_update_does_not_raise(self, scenario):
+        """_safe_update 在 page=None 或 update() 抛异常时降级，不传播。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, _, _):
+            if scenario == "no_page":
+                tab._safe_update()
+            else:
+                tab.page = _FakePage()
+                tab.update = MagicMock(side_effect=RuntimeError("update failed"))
+                tab._safe_update()
+
+    def test_on_locale_change_swallows_exception(self):
+        """_build_content 抛异常时 _on_locale_change 降级为 warning 日志。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, _, _):
+            tab.page = _FakePage()
+            with patch.object(tab, "_build_content", side_effect=RuntimeError("build failed")):
+                tab._on_locale_change("en")
+
+    def test_will_unmount_skips_when_no_subscription(self):
+        """_locale_subscription_id=None 时跳过 unsubscribe。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, _, mock_i18n):
+            tab._locale_subscription_id = None
+            tab.will_unmount()
+            mock_i18n.unsubscribe.assert_not_called()
+
+    def test_update_theme_skips_when_no_page(self):
+        """page=None 时 update_theme 不调用 update()。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, _, _):
+            update_mock = MagicMock()
+            tab.update = update_mock
+            tab.update_theme()
+            update_mock.assert_not_called()
+
+
+class TestNotificationsTabNoPageRef:
+    """page_ref=None 时事件入口应跳过 run_task 调度。"""
+
+    def test_on_news_toggle_skips_when_no_page_ref(self):
+        with _notifications_tab_cxt(page=None) as (tab, _, _):
+            tab._page_ref = None
+            tab.news_alerts_enabled.value = True
+            tab.on_news_toggle(MagicMock())
+
+    def test_on_interval_change_skips_when_no_page_ref(self):
+        with _notifications_tab_cxt(page=None) as (tab, _, _):
+            tab._page_ref = None
+            tab.news_interval.value = "60"
+            tab.on_interval_change(MagicMock())
+
+
+class TestNotificationsTabNoSnackCallback:
+    """show_snack=None 时 async handler 不应报错（覆盖 if self.show_snack False 分支）。"""
+
+    @pytest.mark.asyncio
+    async def test_do_news_toggle_async_no_snack_enable(self):
+        """enabled=True + show_snack=None 不报错（覆盖 L629 分支）。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(enable_news_alerts=False, page=page) as (tab, _, _):
+            tab.show_snack = None
+            tab.news_alerts_enabled.value = True
+            await tab._do_news_toggle_async()
+
+    @pytest.mark.asyncio
+    async def test_do_news_toggle_async_no_snack_disable(self):
+        """enabled=False + show_snack=None 不报错（覆盖 L631 elif 分支）。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(enable_news_alerts=True, page=page) as (tab, _, _):
+            tab.show_snack = None
+            tab.news_alerts_enabled.value = False
+            await tab._do_news_toggle_async()
+
+    @pytest.mark.asyncio
+    async def test_do_interval_change_async_no_snack(self):
+        """show_snack=None 时 interval 变更不报错（覆盖 L651 分支）。"""
+        page = _FakePage()
+        with _notifications_tab_cxt(page=page) as (tab, _, _):
+            tab.show_snack = None
+            tab.news_interval.value = "60"
+            await tab._do_interval_change_async()
