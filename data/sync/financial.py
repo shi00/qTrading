@@ -585,7 +585,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             tasks = [sync_one_target(item) for item in target_list]
 
             day_saved = 0
-            _BATCH_SIZE = 100
+            _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
             for batch_start in range(0, len(tasks), _BATCH_SIZE):
                 batch = tasks[batch_start : batch_start + _BATCH_SIZE]
                 batch_results = await gather_return_exceptions_propagating_cancel(*batch)

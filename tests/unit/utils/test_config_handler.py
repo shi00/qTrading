@@ -1501,6 +1501,21 @@ class TestSimpleGetterSetters:
         cfg_mod.ConfigHandler.set_sync_concurrency(5)
         mock_save.assert_called_once_with({"sync_max_concurrent_heavy": 5})
 
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_batch_size(self, mock_save):
+        cfg_mod.ConfigHandler.set_sync_batch_size(100)
+        mock_save.assert_called_once_with({"sync_batch_size": 100})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_batch_size_clamps_low(self, mock_save):
+        cfg_mod.ConfigHandler.set_sync_batch_size(1)
+        mock_save.assert_called_once_with({"sync_batch_size": 5})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_batch_size_clamps_high(self, mock_save):
+        cfg_mod.ConfigHandler.set_sync_batch_size(999)
+        mock_save.assert_called_once_with({"sync_batch_size": 200})
+
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
     def test_set_max_batch_rows(self, mock_set):
         cfg_mod.ConfigHandler.set_max_batch_rows(50000)
