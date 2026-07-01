@@ -389,6 +389,7 @@ class TestShutdownCoordinatorCleanupSteps:
             mock_instance.unload_model = MagicMock()
             mock_lmm._instance = mock_instance
             await coord._step5_unload_ai_model()
+            mock_instance.unload_model.assert_called_once_with(force=True)
 
     @pytest.mark.asyncio
     async def test_step6_shutdown_pools_no_instance(self):

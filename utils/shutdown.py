@@ -25,7 +25,7 @@ _CLEANUP_STEPS = [
     ("Step 2", "_step2_flush_db_writes", True, 2.0),
     ("Step 3", "_step3_close_processor", True, 3.0),
     ("Step 4", "_step4_clear_toast", False, 1.0),
-    ("Step 5", "_step5_unload_ai_model", True, 2.0),
+    ("Step 5", "_step5_unload_ai_model", True, 5.0),
     ("Step 6", "_step6_shutdown_thread_pools", True, 2.0),
     ("Step 7", "_step7_close_database_managers", True, 1.0),
 ]
@@ -366,7 +366,7 @@ class ShutdownCoordinator:
         if LocalModelManager._instance is not None and (
             LocalModelManager._instance._worker_ready or LocalModelManager._instance._model_path
         ):
-            LocalModelManager._instance.unload_model()
+            LocalModelManager._instance.unload_model(force=True)
             logger.info("[Shutdown]   - Llama.cpp model evicted (subprocess terminated).")
         else:
             logger.info("[Shutdown]   - AI model not loaded, skipping.")

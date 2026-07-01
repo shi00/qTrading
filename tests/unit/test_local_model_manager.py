@@ -281,6 +281,48 @@ class TestPersistentWorkerShutdownWorker:
             mgr.unload_model()
             mock_sw.assert_called_once()
 
+    def test_unload_model_force_propagates(self):
+        mgr = LocalModelManager()
+        with patch.object(mgr, "_shutdown_worker") as mock_sw:
+            mgr.unload_model(force=True)
+            mock_sw.assert_called_once_with(force=True)
+
+    def test_shutdown_worker_force_skips_sentinel(self):
+        """force=True 时不发送 sentinel，直接 terminate。"""
+        mgr = LocalModelManager()
+        mock_req_queue = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
+        mock_proc.is_alive.side_effect = [True, False]
+        mock_proc.join.return_value = None
+        mgr._request_queue = mock_req_queue
+        mgr._worker_proc = mock_proc
+        mgr._result_queue = MagicMock()
+        mgr._worker_ready = True
+
+        mgr._shutdown_worker(force=True)
+
+        mock_req_queue.put.assert_not_called()
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_not_called()
+
+    def test_shutdown_worker_force_kills_if_terminate_fails(self):
+        """force=True 且 terminate 后仍存活时，升级到 kill。"""
+        mgr = LocalModelManager()
+        mock_req_queue = MagicMock()
+        mock_proc = MagicMock(spec=_RealProcess)
+        mock_proc.is_alive.side_effect = [True, True, False]
+        mock_proc.join.return_value = None
+        mgr._request_queue = mock_req_queue
+        mgr._worker_proc = mock_proc
+        mgr._result_queue = MagicMock()
+        mgr._worker_ready = True
+
+        mgr._shutdown_worker(force=True)
+
+        mock_req_queue.put.assert_not_called()
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_called_once()
+
 
 class TestPersistentWorkerModelReuse:
     @pytest.mark.asyncio

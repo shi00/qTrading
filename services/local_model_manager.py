@@ -215,25 +215,43 @@ class LocalModelManager:
         self._clock = clock or time.monotonic
         self._initialized = True
 
-    def _shutdown_worker(self):
-        """Gracefully shut down the persistent worker subprocess (thread-safe)."""
-        with self._worker_lock:
-            self._shutdown_worker_locked()
+    def _shutdown_worker(self, *, force: bool = False):
+        """Shut down the persistent worker subprocess (thread-safe).
 
-    def _shutdown_worker_locked(self):
-        """Internal: shut down worker. Caller MUST hold _worker_lock."""
+        Args:
+            force: True 时跳过 sentinel 直接 terminate。用于关机路径——
+                   worker 可能正忙于推理，sentinel 要等推理完成才会被处理。
+        """
+        with self._worker_lock:
+            self._shutdown_worker_locked(force=force)
+
+    def _shutdown_worker_locked(self, *, force: bool = False):
+        """Internal: shut down worker. Caller MUST hold _worker_lock.
+
+        Args:
+            force: True 时跳过 sentinel 直接 terminate（关机路径使用）。
+        """
         if self._request_queue is not None and self._worker_proc is not None and self._worker_proc.is_alive():
-            try:
-                self._request_queue.put(_SENTINEL, timeout=2.0)
-            except Exception as e:
-                logger.debug("[LocalModel] Failed to send sentinel to worker: %s", e, exc_info=True)
-            self._worker_proc.join(timeout=5)
-            if self._worker_proc.is_alive():
+            if not force:
+                try:
+                    self._request_queue.put(_SENTINEL, timeout=2.0)
+                except Exception as e:
+                    logger.debug("[LocalModel] Failed to send sentinel to worker: %s", e, exc_info=True)
+                self._worker_proc.join(timeout=5)
+                if self._worker_proc.is_alive():
+                    self._worker_proc.terminate()
+                    self._worker_proc.join(timeout=3)
+                    if self._worker_proc.is_alive():
+                        self._worker_proc.kill()
+                        self._worker_proc.join(timeout=2)
+            else:
+                # Force path: worker 可能正忙于推理，sentinel 不会被及时处理。
+                # 直接 terminate 释放资源（关机路径，推理结果将丢弃）。
                 self._worker_proc.terminate()
                 self._worker_proc.join(timeout=3)
                 if self._worker_proc.is_alive():
                     self._worker_proc.kill()
-                    self._worker_proc.join(timeout=2)
+                    self._worker_proc.join(timeout=1)
             logger.info("[LocalModel] Persistent worker shut down.")
 
         if self._request_queue is not None:
@@ -687,10 +705,14 @@ class LocalModelManager:
         )
         return payload
 
-    def unload_model(self):
-        """Free memory by terminating the worker subprocess and resetting state."""
+    def unload_model(self, *, force: bool = False):
+        """Free memory by terminating the worker subprocess and resetting state.
+
+        Args:
+            force: True 时强制 terminate 而非等待优雅关闭（关机路径使用）。
+        """
         self._cancel_event.set()
-        self._shutdown_worker()
+        self._shutdown_worker(force=force)
         self._model_path = ""
         self._model_sha256 = ""
         self._model_stat = (0, 0)
