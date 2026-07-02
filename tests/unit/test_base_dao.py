@@ -784,6 +784,59 @@ class TestNullProtectedFromMetadata:
                 assert col.info.get("null_protected", False) is True
 
 
+class TestComputedColsFromMetadata:
+    """Test that get_model_columns auto-excludes columns marked info={"computed": True}.
+
+    Derived columns (e.g. holder_num_change) are calculated by SQL post-upsert,
+    not provided by Tushare API. They must be excluded from upsert column lists
+    to avoid: (1) misleading 'missing columns' warnings in BaseDao._save_upsert,
+    (2) accidental overwriting of computed values with None on UPSERT conflict.
+
+    Pattern mirrors null_protected metadata (see TestNullProtectedFromMetadata).
+    """
+
+    def test_stk_holdernumber_computed_cols_marked(self):
+        from data.persistence.models import StkHoldernumber
+
+        computed = {c.name for c in StkHoldernumber.__table__.columns if c.info.get("computed", False)}
+        assert computed == {"holder_num_change", "holder_num_ratio"}
+
+    def test_get_model_columns_excludes_computed(self):
+        from data.persistence.models import StkHoldernumber, get_model_columns
+
+        cols = set(get_model_columns(StkHoldernumber))
+        assert "holder_num_change" not in cols, "computed col should be excluded from get_model_columns"
+        assert "holder_num_ratio" not in cols, "computed col should be excluded from get_model_columns"
+        assert "holder_num" in cols, "non-computed col should remain"
+        assert "ts_code" in cols, "PK col should remain"
+
+    def test_screening_history_computed_cols_marked(self):
+        from data.persistence.models import ScreeningHistory
+
+        computed = {c.name for c in ScreeningHistory.__table__.columns if c.info.get("computed", False)}
+        assert computed == {
+            "t1_price",
+            "t1_pct",
+            "t5_price",
+            "t5_pct",
+            "index_pct",
+            "alpha",
+            "prediction_result",
+        }
+
+    def test_screening_history_get_model_columns_excludes_computed(self):
+        from data.persistence.models import ScreeningHistory, get_model_columns
+
+        cols = set(get_model_columns(ScreeningHistory))
+        computed_cols = {"t1_price", "t1_pct", "t5_price", "t5_pct", "index_pct", "alpha", "prediction_result"}
+        for c in computed_cols:
+            assert c not in cols, f"computed col '{c}' should be excluded from get_model_columns"
+        # review_status is NOT computed (explicitly set to PENDING at save time)
+        assert "review_status" in cols, "review_status should remain (set at save time, not post-upsert)"
+        assert "ai_score" in cols, "non-computed col should remain"
+        assert "ts_code" in cols, "PK col should remain"
+
+
 class TestAiScoreColumnType:
     def test_ai_score_is_numeric(self):
         import sqlalchemy as sa

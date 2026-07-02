@@ -264,11 +264,12 @@ class TestOrmDaoAlignment:
         assert not missing, f"save_concepts missing: {missing}"
 
     def test_stk_holdernumber_alignment(self):
-        model_cols = get_model_columns(StkHoldernumber)
+        from data.persistence.models import get_model_columns as gmc_filtered
+
+        model_cols = set(gmc_filtered(StkHoldernumber))
         dao_cols = extract_cols_from_method(HolderDao.save_holder_number)
         assert dao_cols is not None
-        computed = {"holder_num_change", "holder_num_ratio"}
-        expected = model_cols - {"updated_at", "created_at"} - computed
+        expected = model_cols - {"updated_at", "created_at"}
         missing = expected - dao_cols
         assert not missing, f"save_holder_number missing: {missing}"
 
@@ -282,30 +283,22 @@ class TestOrmDaoAlignment:
         assert not missing, f"save_macro_economy missing: {missing}"
 
     def test_screening_history_alignment(self):
-        model_cols = get_model_columns(ScreeningHistory)
+        from data.persistence.models import get_model_columns as gmc_filtered
+
+        model_cols = set(gmc_filtered(ScreeningHistory))
         dao_cols = extract_cols_from_method(ScreenerDao.save_screening_results)
         assert dao_cols is not None
-        excluded = {
-            "id",
-            "updated_at",
-            "created_at",
-            "t1_price",
-            "t1_pct",
-            "t5_price",
-            "t5_pct",
-            "index_pct",
-            "alpha",
-            "prediction_result",
-            "review_status",
-        }
+        # computed 列由 get_model_columns 自动排除；review_status 在 save 时显式设置为 PENDING
+        excluded = {"id", "updated_at", "created_at"}
         expected = model_cols - excluded
         missing = expected - dao_cols
         assert not missing, f"save_screening_results missing: {missing}"
 
     def test_screening_history_review_fields_updated_by_review_path(self):
-        from data.persistence.models import get_model_columns, ScreeningHistory
+        from data.persistence.models import ScreeningHistory
 
-        model_cols = set(get_model_columns(ScreeningHistory))
+        # 直接检查 __table__.columns，因为 computed 列会被 get_model_columns 自动排除
+        model_cols = {c.name for c in ScreeningHistory.__table__.columns}
         required_fields = {
             "t1_pct",
             "prediction_result",
