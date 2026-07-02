@@ -215,15 +215,19 @@ class ScreeningHistory(Base):
     debt_to_assets = Column(Numeric(12, 4))
     or_yoy = Column(Numeric(12, 4))
     netprofit_yoy = Column(Numeric(12, 4))
-    t1_price = Column(Numeric(12, 4))
-    t1_pct = Column(Numeric(8, 4))
-    t5_price = Column(Numeric(12, 4))
-    t5_pct = Column(Numeric(8, 4))
-    index_pct = Column(Numeric(8, 4))
-    alpha = Column(Numeric(12, 4))
+    # info={"computed": True} 标记派生列：由 update_prediction_result 异步 UPDATE 回填
+    # （T+1/T+5 行情、alpha 计算、预测分类），不由 save_screening_results 写入。
+    # get_model_columns 自动排除，避免 _save_upsert 触发 "Missing columns" 误报警告，
+    # 并防止 UPSERT 冲突时用 None 覆盖已回填的值。
+    t1_price = Column(Numeric(12, 4), info={"computed": True})
+    t1_pct = Column(Numeric(8, 4), info={"computed": True})
+    t5_price = Column(Numeric(12, 4), info={"computed": True})
+    t5_pct = Column(Numeric(8, 4), info={"computed": True})
+    index_pct = Column(Numeric(8, 4), info={"computed": True})
+    alpha = Column(Numeric(12, 4), info={"computed": True})
     ai_score = Column(Numeric(12, 4))
     ai_reason = Column(String)
-    prediction_result = Column(String)
+    prediction_result = Column(String, info={"computed": True})
     review_status = Column(String, server_default="PENDING")
     params_snapshot = Column(JSONB)
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
@@ -556,8 +560,11 @@ class StkHoldernumber(Base):
     end_date = Column(Date, primary_key=True, index=True)
     ann_date = Column(Date)
     holder_num = Column(BigInteger)
-    holder_num_change = Column(BigInteger)
-    holder_num_ratio = Column(Numeric(12, 4))
+    # info={"computed": True} 标记派生列：由 _calculate_holder_changes 的 SQL LAG() 计算，
+    # 不由 Tushare API 提供。get_model_columns 自动排除，避免 _save_upsert 触发
+    # "Missing columns" 误报警告，并防止 UPSERT 冲突时用 None 覆盖已计算的值。
+    holder_num_change = Column(BigInteger, info={"computed": True})
+    holder_num_ratio = Column(Numeric(12, 4), info={"computed": True})
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -699,7 +706,9 @@ class AIConceptFailure(Base):
 
 def get_model_columns(model_class: type, exclude: set[str] | None = None) -> list[str]:
     exclude = exclude or {"updated_at", "created_at"}
-    return [c.name for c in model_class.__table__.columns if c.name not in exclude]
+    return [
+        c.name for c in model_class.__table__.columns if c.name not in exclude and not c.info.get("computed", False)
+    ]
 
 
 def get_model_pk_columns(model_class: type) -> list[str]:

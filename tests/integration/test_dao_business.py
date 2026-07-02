@@ -762,21 +762,10 @@ class TestScreenerDao:
         """验证动态列推导与 tuple 顺序一致，防止列错位"""
         from data.persistence.models import ScreeningHistory, get_model_columns
 
+        # computed 列由 get_model_columns 自动排除；review_status 在 save 时显式设置为 PENDING
         all_cols = get_model_columns(
             ScreeningHistory,
-            exclude={
-                "id",
-                "updated_at",
-                "created_at",
-                "t1_price",
-                "t1_pct",
-                "t5_price",
-                "t5_pct",
-                "index_pct",
-                "alpha",
-                "prediction_result",
-                "review_status",
-            },
+            exclude={"id", "updated_at", "created_at"},
         )
         expected_order = [
             "run_id",
@@ -803,6 +792,7 @@ class TestScreenerDao:
             "netprofit_yoy",
             "ai_score",
             "ai_reason",
+            "review_status",
             "params_snapshot",
         ]
         assert all_cols == expected_order, f"Column order mismatch: {all_cols}"
@@ -833,6 +823,7 @@ class TestScreenerDao:
                 8.0,
                 85,
                 "AI推荐理由",
+                None,
                 None,
             ),
         ]
@@ -1374,15 +1365,17 @@ class TestScreenerDaoDynamicCols:
     def test_sh_base_cols_matches_model(self):
         """Verify SH_BASE_COLS count matches ScreeningHistory columns minus excluded fields"""
         from data.persistence.daos.screener_dao import ScreenerDao
-        from data.persistence.models import ScreeningHistory, get_model_columns
+        from data.persistence.models import ScreeningHistory
 
         dao = ScreenerDao.__new__(ScreenerDao)
         col_list = [c.strip() for c in dao.SH_BASE_COLS.split(",")]
 
-        expected_cols = get_model_columns(
-            ScreeningHistory,
-            exclude={"updated_at", "created_at", "params_snapshot"},
-        )
+        # SH_BASE_COLS 直接从 __table__.columns 获取，包含 computed 列（用于 SELECT 查询）
+        expected_cols = [
+            c.name
+            for c in ScreeningHistory.__table__.columns
+            if c.name not in {"updated_at", "created_at", "params_snapshot"}
+        ]
         assert len(col_list) == len(expected_cols)
 
     def test_sh_base_cols_cached(self):
