@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 class ScreenerDao(BaseDao):
     @functools.cached_property
     def SH_BASE_COLS(self):
-        cols = get_model_columns(ScreeningHistory, exclude={"updated_at", "created_at", "params_snapshot"})
+        # SH_BASE_COLS 用于 SELECT 查询，需包含 computed 列（t1_pct, alpha 等），
+        # 直接从 __table__.columns 获取以绕过 get_model_columns 的 computed 过滤。
+        cols = [
+            c.name
+            for c in ScreeningHistory.__table__.columns
+            if c.name not in {"updated_at", "created_at", "params_snapshot"}
+        ]
         return ", ".join(f"sh.{c}" for c in cols)
 
     @functools.cached_property
@@ -370,24 +376,12 @@ class ScreenerDao(BaseDao):
         if not records:
             return
 
+        # computed 列（t1_price, alpha, prediction_result 等）由 get_model_columns 自动排除；
+        # review_status 不在 exclude 中，下方显式设置为 PENDING。
         all_cols = get_model_columns(
             ScreeningHistory,
-            exclude={
-                "id",
-                "updated_at",
-                "created_at",
-                "t1_price",
-                "t1_pct",
-                "t5_price",
-                "t5_pct",
-                "index_pct",
-                "alpha",
-                "prediction_result",
-                "review_status",
-            },
+            exclude={"id", "updated_at", "created_at"},
         )
-
-        all_cols_with_review = all_cols + ["review_status"]
 
         enriched_records = []
         thinking_records = []
@@ -398,18 +392,18 @@ class ScreenerDao(BaseDao):
                 row = dict(zip(all_cols, r, strict=False))
             thinking_text = row.pop("thinking", "")
             row["review_status"] = REVIEW_STATUS_PENDING
-            enriched_records.append(tuple(row.get(c) for c in all_cols_with_review))
+            enriched_records.append(tuple(row.get(c) for c in all_cols))
             if thinking_text:
                 thinking_records.append(
                     {"run_id": row.get("run_id"), "ts_code": row.get("ts_code"), "thinking": str(thinking_text)}
                 )
 
-        df = pd.DataFrame(enriched_records, columns=all_cols_with_review)
+        df = pd.DataFrame(enriched_records, columns=all_cols)
 
         await self._save_upsert(
             df=df,
             table_name="screening_history",
-            columns=all_cols_with_review,
+            columns=all_cols,
             pk_columns=["run_id", "ts_code"],
         )
 
