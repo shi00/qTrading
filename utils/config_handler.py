@@ -1322,12 +1322,12 @@ class ConfigHandler:
 
     @staticmethod
     def get_sync_max_concurrent_heavy():
-        val = ConfigHandler.get_typed("sync_max_concurrent_heavy", int, 3)
-        return max(1, min(val, 10))
+        val = ConfigHandler.get_typed("sync_max_concurrent_heavy", int, 5)
+        return max(1, min(val, 20))
 
     @staticmethod
     def set_sync_max_concurrent_heavy(val):
-        safe_val = max(1, min(int(val), 10))
+        safe_val = max(1, min(int(val), 20))
         return ConfigHandler.save_config({"sync_max_concurrent_heavy": safe_val})
 
     @staticmethod
@@ -1366,6 +1366,16 @@ class ConfigHandler:
     def set_sync_concurrency_light(val):
         return ConfigHandler.set_typed("sync_concurrency_light", int(val))
 
+    @staticmethod
+    def get_sync_batch_size():
+        val = ConfigHandler.get_typed("sync_batch_size", int, 50)
+        return max(5, min(val, 200))
+
+    @staticmethod
+    def set_sync_batch_size(val):
+        safe_val = max(5, min(int(val), 200))
+        return ConfigHandler.save_config({"sync_batch_size": safe_val})
+
     # === API Robustness Parameters ===
 
     @staticmethod
@@ -1398,7 +1408,7 @@ class ConfigHandler:
 
     @staticmethod
     def set_tushare_point_tier(tier):
-        valid_tiers = {"free", "standard", "pro", "flagship", "custom"}
+        valid_tiers = {"free", "standard", "pro", "custom"}
         if tier not in valid_tiers:
             return False
         return ConfigHandler.set_typed("tushare_point_tier", str(tier))

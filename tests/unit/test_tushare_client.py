@@ -530,10 +530,11 @@ class TestTushareClientBuildRateLimiters:
 
     def test_build_rate_limiters_honors_tier(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "flagship"
+        mock_ch.get_tushare_point_tier.return_value = "pro"
         mock_ch.get_tushare_api_limit.return_value = 0
         client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is not None
+        assert pytest.approx(client._rate_limiter.rate * 60, abs=1) == 500
 
     def test_reload_rate_limiters_updates_instance(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks

@@ -403,9 +403,13 @@ class TestTusharePointTier:
         assert cfg.tushare_point_tier == "custom"
 
     def test_point_tier_accepts_known_tiers(self):
-        for tier in ["free", "standard", "pro", "flagship", "custom"]:
+        for tier in ["free", "standard", "pro", "custom"]:
             cfg = AppConfig(tushare_point_tier=tier)
             assert cfg.tushare_point_tier == tier
+
+    def test_point_tier_rejects_flagship(self):
+        with pytest.raises(ValidationError):
+            AppConfig(tushare_point_tier="flagship")
 
     def test_point_tier_rejects_unknown(self):
         with pytest.raises(ValidationError):

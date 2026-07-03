@@ -153,17 +153,18 @@ class TushareClient:
         "index_weight": 2.5,
     }
 
-    # 积分档位 → 推荐全局 req/min 预设。来源见 docs/tushare.md 校准表。
+    # 积分档位 → 推荐全局 req/min 预设。官方档位对照见 docs/积分挡位.PNG
+    # 官方实际频次只有三档：120分=50/min，2000/3000分=200/min，5000分及以上=500/min
+    # 5000+ 积分频次均为 500/min，差异在于数据权限（更多特色接口）
     # 因子表（_SLOW/_FAST_API_OVERRIDES）按 standard=200/min 推导：
     #   财报核心(income/balancesheet/cashflow/fina_indicator) 0.3 -> 60/min (2000分文档约60-80/min)
     #   公告/预告(disclosure_date/forecast/fina_audit/fina_mainbz) 0.5 -> 100/min
-    #   行情类(daily/daily_basic/adj_factor/index_*) 2.5 -> 500/min
-    #   元数据(trade_cal/stock_basic) 5.0 -> 1000/min
+    #   行情类(daily/daily_basic/adj_factor/index_*) 2.5 -> 500/min (pro档顶满官方上限)
+    #   元数据(trade_cal/stock_basic) 5.0 -> 1000/min (standard档；pro档受全局500上限约束)
     _POINT_TIER_PRESETS: typing.ClassVar[dict[str, int]] = {
         "free": 50,
         "standard": 200,
         "pro": 500,
-        "flagship": 800,
     }
 
     TABLE_TO_API_MAP: dict[str, str] = {
@@ -212,7 +213,7 @@ class TushareClient:
         Resolve effective rate limit based on point tier preset or manual config.
 
         Priority:
-        1. If tier is in _POINT_TIER_PRESETS (free/standard/pro/flagship), use preset value.
+        1. If tier is in _POINT_TIER_PRESETS (free/standard/pro), use preset value.
         2. Otherwise (custom tier), fall back to manual limit from config.
 
         Returns:
