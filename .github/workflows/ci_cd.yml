@@ -145,20 +145,20 @@ jobs:
         run: pip install pre-commit
 
       - name: Cache pre-commit
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Cache pytest
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .pytest_cache
           key: pytest-${{ runner.os }}-${{ hashFiles('tests/**/*.py') }}
           restore-keys: pytest-${{ runner.os }}-
 
       - name: Cache ruff
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .ruff_cache
           key: ruff-${{ runner.os }}-${{ hashFiles('**/*.py') }}
@@ -301,7 +301,7 @@ jobs:
 
       - name: Cache Playwright Browsers
         id: cache-playwright
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cache/ms-playwright
@@ -454,20 +454,20 @@ jobs:
         run: pip install pre-commit
 
       - name: Cache pre-commit
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Cache pytest
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .pytest_cache
           key: pytest-${{ runner.os }}-${{ hashFiles('tests/**/*.py') }}
           restore-keys: pytest-${{ runner.os }}-
 
       - name: Cache ruff
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8  # v6.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .ruff_cache
           key: ruff-${{ runner.os }}-${{ hashFiles('**/*.py') }}
@@ -713,7 +713,7 @@ jobs:
           output-file: sbom-${{ matrix.variant }}.cdx.json
 
       - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
           subject-path: Output/AStockScreener-Setup-${{ matrix.variant }}.exe
 
