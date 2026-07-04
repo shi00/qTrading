@@ -75,8 +75,9 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_northbound",
             # _build_history_text 子项
             "ai_label_kline",
-            # _mixin_analyze_single 块级标签
-            "ai_label_macro",
+            # _mixin_analyze_single 块级标签（Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full）
+            "ai_label_shibor",
+            "ai_label_macro_full",
         }
         assert builder_labels.issubset(AVAILABLE_DATA_LABELS), (
             f"Builder labels not in registry: {builder_labels - AVAILABLE_DATA_LABELS}"
@@ -133,7 +134,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_top_list",
             "ai_label_northbound",
             "ai_label_kline",
-            "ai_label_macro",
+            "ai_label_shibor",
+            "ai_label_macro_full",
         }
         uncovered = ast_labels - builder_labels
         assert not uncovered, (
@@ -611,7 +613,7 @@ class TestInvariant3BuilderLabelEquivalence:
 
     @pytest.mark.asyncio
     async def test_macro_context_exception_returns_empty(self):
-        """_build_macro_context 异常路径：catch 后返回空串，不触发 ai_label_macro 注册。"""
+        """_build_macro_context 异常路径：catch 后返回空串，不触发 ai_label_shibor / ai_label_macro_full 注册。"""
         mixin = AIStrategyMixin()
         mixin.cache = type("FakeCache", (), {})()
         mixin.cache.get_macro_economy = _async_raise(RuntimeError("DB error"))
@@ -693,7 +695,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         financial_labels = call_kwargs.get("financial_labels", [])
         assert "ai_label_valuation" in financial_labels
         assert "ai_label_roe_trend" not in financial_labels
-        assert "ai_label_macro" in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" in financial_labels
+        assert "ai_label_macro_full" in financial_labels
 
     @pytest.mark.asyncio
     async def test_auxiliary_sentinel_excludes_labels(self):
@@ -748,7 +752,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         assert "ai_label_valuation" in financial_labels
         assert "ai_label_roe_trend" in financial_labels
         assert "ai_label_audit" not in financial_labels
-        assert "ai_label_macro" not in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" not in financial_labels
+        assert "ai_label_macro_full" not in financial_labels
 
     @pytest.mark.asyncio
     async def test_all_valid_includes_all_labels(self):
@@ -839,7 +845,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         assert "ai_label_valuation" in financial_labels
         assert "ai_label_roe_trend" in financial_labels
         assert "ai_label_audit" in financial_labels
-        assert "ai_label_macro" in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" in financial_labels
+        assert "ai_label_macro_full" in financial_labels
 
     @pytest.mark.asyncio
     async def test_capital_flow_sentinel_excludes_labels(self):
@@ -929,7 +937,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
 
     @pytest.mark.asyncio
     async def test_macro_empty_excludes_label(self):
-        """macro_context 为空时，ai_label_macro 不应注册。"""
+        """macro_context 为空时，ai_label_shibor / ai_label_macro_full 不应注册。"""
         mixin = AIStrategyMixin()
         mixin.cache = _make_fake_cache()
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
@@ -962,7 +970,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         )
         call_kwargs = mock_client.analyze_stock.call_args.kwargs
         financial_labels = call_kwargs.get("financial_labels", [])
-        assert "ai_label_macro" not in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" not in financial_labels
+        assert "ai_label_macro_full" not in financial_labels
 
 
 class TestInvariant6AnalyzeStockLabelAssembly:

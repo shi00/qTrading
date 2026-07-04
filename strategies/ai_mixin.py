@@ -45,6 +45,44 @@ from utils.time_utils import get_now, to_yyyymmdd_str
 logger = logging.getLogger(__name__)
 
 
+def _build_stale_section(
+    api_name: str,
+    df: pd.DataFrame,
+    formatter: typing.Callable[[pd.DataFrame], str],
+    date_column: str = "ann_date",
+) -> str:
+    """统一 stale 标注格式。
+
+    Phase 2A.1 §4.4.5 v1.6.0 P1-7：模块级辅助函数，作为 ``AIStrategyMixin``
+    的基类静态方法供子类复用，避免在多 ``_build_*_text`` 方法中重复实现
+    stale 检查逻辑。
+
+    Args:
+        api_name: 该子段落对应的 API 名（如 "share_float" / "cn_m"）
+        df: 该子段落的数据 DataFrame
+        formatter: 格式化函数，接收 df 返回该子段落的文本
+        date_column: df 中代表"最后更新日期"的列名，默认 "ann_date"。
+            v1.8.0 P2-D 修订：由各 _build_*_text 调用时传入实际列名
+            （如 trade_date/date/month）。
+
+    Returns:
+        - df 为空 → 返回空字符串（不注入）
+        - api_name 不在当前档位覆盖内 → 返回 stale 前缀 + formatter(df)
+        - api_name 在档位覆盖内 → 返回 formatter(df)（无 stale 标注）
+    """
+    if df.empty:
+        return ""
+    from data.external.tushare_client import TushareClient
+
+    client = TushareClient()
+    if not client.is_api_covered_by_tier(api_name):
+        last_update = (
+            pd.to_datetime(df[date_column].max()).strftime("%Y-%m-%d") if date_column in df.columns else "未知"
+        )
+        return f"【数据停止更新，最后更新：{last_update}】\n" + formatter(df)
+    return formatter(df)
+
+
 @dataclass
 class PreFetchedContext:
     """
@@ -775,7 +813,12 @@ class AIStrategyMixin:
                 financial_labels.extend(auxiliary_labels)
             if prefetched.macro_context:
                 financials_parts.append(f"\n{prefetched.macro_context}")
-                financial_labels.append("ai_label_macro")
+                # Phase 2A.1 §4.1 v1.6.0 P0-1：拆分 ai_label_macro 为
+                # ai_label_shibor（points_120，shibor 段落）+ ai_label_macro_full
+                # （points_2000，cn_m/cn_cpi/cn_ppi 段落）。filter_available_labels
+                # 按档位动态过滤（points_120 时 ai_label_macro_full 被移除）
+                financial_labels.append("ai_label_shibor")
+                financial_labels.append("ai_label_macro_full")
 
             financials_text = "\n".join(financials_parts)
 
@@ -1514,6 +1557,12 @@ class AIStrategyMixin:
         L3 修复：新增 Shibor 利率注入，对价值投资和固收相关策略有重要参考价值。
         B-P1-1 修复：新增 as_of_date 参数，在历史回放场景下按日期截断宏观数据，防止前视偏差。
 
+        Phase 2A.1 §4.4.5 v1.6.0 P0-1：按子段落分别 stale 标注
+        - shibor 段落（对应 ai_label_shibor，points_120）：shibor API 在 points_120
+          覆盖内，正常注入（无 stale 标注）
+        - m2/cpi/ppi 段落（对应 ai_label_macro_full，points_2000）：cn_m/cn_cpi/cn_ppi
+          在 points_2000 覆盖内；points_120 降级时按子段落 stale 标注注入历史数据
+
         Args:
             cache: 数据缓存实例
             as_of_date: 截止日期（含），None 表示不限制
@@ -1529,39 +1578,65 @@ class AIStrategyMixin:
             if macro is not None and not macro.empty:
                 latest = macro.iloc[0]
 
+                # Phase 2A.1 §4.4.5：m2/cpi/ppi 段落对应 ai_label_macro_full（points_2000），
+                # cn_m/cn_cpi/cn_ppi 在 points_2000 覆盖内；points_120 降级时按子段落 stale 标注。
+                # cn_m 作为整个 macro 段落的代理（三者档位一致）
+                macro_lines: list[str] = []
                 m2_yoy = latest.get("m2_yoy")
                 if m2_yoy is not None:
-                    lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
-                    has_data = True
+                    macro_lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
 
                 cpi = latest.get("cpi")
                 if cpi is not None:
-                    lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
-                    has_data = True
+                    macro_lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
 
                 ppi = latest.get("ppi")
                 if ppi is not None:
-                    lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
-                    has_data = True
+                    macro_lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
+
+                if macro_lines:
+                    macro_text = "\n".join(macro_lines)
+                    # 用 _build_stale_section 统一标注（cn_m 作为代理 API，date_column="period"）
+                    macro_section = _build_stale_section(
+                        "cn_m",
+                        macro,
+                        lambda _df: macro_text,
+                        date_column="period",
+                    )
+                    if macro_section:
+                        lines.append(macro_section)
+                        has_data = True
 
             shibor = await cache.get_shibor_latest(as_of_date=as_of_date)
             if shibor is not None and not shibor.empty:
                 shibor_latest = shibor.iloc[0]
 
+                shibor_lines: list[str] = []
                 on_rate = shibor_latest.get("on")
                 if on_rate is not None:
-                    lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
-                    has_data = True
+                    shibor_lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
 
                 w1_rate = shibor_latest.get("1w")
                 if w1_rate is not None:
-                    lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
-                    has_data = True
+                    shibor_lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
 
                 m3_rate = shibor_latest.get("3m")
                 if m3_rate is not None:
-                    lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
-                    has_data = True
+                    shibor_lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
+
+                if shibor_lines:
+                    shibor_text = "\n".join(shibor_lines)
+                    # shibor 段落对应 ai_label_shibor（points_120），shibor API 在 points_120 覆盖内
+                    # points_120 降级时 shibor 仍可正常注入（无 stale 标注）
+                    shibor_section = _build_stale_section(
+                        "shibor",
+                        shibor,
+                        lambda _df: shibor_text,
+                        date_column="date",
+                    )
+                    if shibor_section:
+                        lines.append(shibor_section)
+                        has_data = True
 
         except Exception as e:
             logger.warning("[AIMixin] Failed to build macro context: %s", DataSanitizer.sanitize_error(e))

@@ -62,6 +62,19 @@ class ShutdownCoordinator:
         self._service_stop_delay = service_stop_delay
         self._watchdog_timeout_s = watchdog_timeout_s
         self._force_exit = force_exit_callback or self._default_force_exit
+        # Phase 2A.1 Task 2A.1.9：注册的 fire-and-forget 任务（如启动期 auto probe），
+        # 关机时先于 TaskManager 任务取消，避免资源泄漏
+        self._registered_tasks: set[asyncio.Task] = set()
+
+    def register_task(self, task: asyncio.Task) -> None:
+        """Phase 2A.1 Task 2A.1.9：注册 fire-and-forget asyncio.Task 以便关机时取消。
+
+        采用项目既有 ``_background_tasks: set + add_done_callback`` 模式（见
+        market_data_service / task_manager / news_subscription_service）。
+        已完成的任务通过 ``discard`` 自动从集合中移除，避免内存泄漏。
+        """
+        self._registered_tasks.add(task)
+        task.add_done_callback(self._registered_tasks.discard)
 
     @staticmethod
     def _default_force_exit(code: int) -> None:
@@ -290,6 +303,25 @@ class ShutdownCoordinator:
 
     async def _step0_cancel_tasks(self):
         logger.info("[Shutdown] Step 0: Cancelling managed tasks...")
+
+        # Phase 2A.1 Task 2A.1.9：先取消 ShutdownCoordinator 注册的 fire-and-forget
+        # 任务（如启动期 auto probe），再取消 TaskManager 的任务。注册任务通常为
+        # 网络 IO，先取消可释放连接池资源给后续 DB flush 步骤使用。
+        if self._registered_tasks:
+            pending = [t for t in self._registered_tasks if not t.done()]
+            if pending:
+                logger.info(
+                    "[Shutdown]   - Cancelling %s registered task(s) (auto probe etc.)",
+                    len(pending),
+                )
+                for task in pending:
+                    task.cancel()
+                # 用 asyncio.wait（而非 gather(return_exceptions=True)）等待 drain：
+                # wait 不会重新抛出任务异常，符合"不传播 CancelledError 到 _step0"
+                # 的需求，且不违反 R2（未用 except 吞没 CancelledError）。
+                await asyncio.wait(pending, timeout=2.0)
+            self._registered_tasks.clear()
+
         from services.task_manager import TaskManager
 
         if TaskManager._instance is not None:

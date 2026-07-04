@@ -2137,3 +2137,81 @@ class TestStructuredResultSentinel:
             assert zh_valid is False
         finally:
             I18n.set_locale(original_locale)
+
+
+class TestBuildStaleSection:
+    """Phase 2A.1 Task 2A.1.13：stale 标注测试（_build_stale_section + _build_macro_context）。"""
+
+    def test_build_text_stale_annotation(self):
+        """_build_stale_section 在 API 不在档位覆盖时返回 stale 前缀 + formatter(df)。"""
+        from strategies.ai_mixin import _build_stale_section
+
+        df = pd.DataFrame({"ann_date": ["2024-01-15"], "value": [100.0]})
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.is_api_covered_by_tier.return_value = False  # API 不在档位覆盖内
+            result = _build_stale_section("cyq_perf", df, lambda _df: "raw text")
+        assert "【数据停止更新，最后更新：2024-01-15】" in result
+        assert result.endswith("raw text")
+
+    def test_build_text_no_stale_when_tier_covers(self):
+        """_build_stale_section 在 API 在档位覆盖内时仅返回 formatter(df)（无 stale 标注）。"""
+        from strategies.ai_mixin import _build_stale_section
+
+        df = pd.DataFrame({"ann_date": ["2024-01-15"], "value": [100.0]})
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.is_api_covered_by_tier.return_value = True  # API 在档位覆盖内
+            result = _build_stale_section("fina_indicator", df, lambda _df: "raw text")
+        assert result == "raw text"
+        assert "数据停止更新" not in result
+
+    def test_build_text_stale_empty_db_returns_empty(self):
+        """_build_stale_section 在 df 为空时返回空字符串（不注入）。"""
+        from strategies.ai_mixin import _build_stale_section
+
+        df = pd.DataFrame()
+        with patch("data.external.tushare_client.TushareClient"):
+            result = _build_stale_section("cyq_perf", df, lambda _df: "raw text")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_stale_per_subsection(self):
+        """_build_macro_context 按子段落分别 stale 标注：
+
+        - points_120 档位下 macro 段落（cn_m，min_tier=points_2000）有 stale 标注
+        - shibor 段落（min_tier=points_120）无 stale 标注
+        """
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        # macro 数据（m2/cpi/ppi 段落）
+        macro_df = pd.DataFrame(
+            {
+                "period": ["2024-06"],
+                "m2_yoy": [10.5],
+                "cpi": [0.3],
+                "ppi": [-1.2],
+            }
+        )
+        cache.get_macro_economy = AsyncMock(return_value=macro_df)
+        # shibor 数据
+        shibor_df = pd.DataFrame(
+            {
+                "date": ["2024-01-15"],
+                "on": [1.85],
+                "1w": [1.95],
+                "3m": [2.10],
+            }
+        )
+        cache.get_shibor_latest = AsyncMock(return_value=shibor_df)
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            # cn_m 不在 points_120 覆盖内 → stale 标注；shibor 在 points_120 覆盖内 → 无标注
+            client.is_api_covered_by_tier.side_effect = lambda api, tier=None: api == "shibor"
+            result = await s._build_macro_context(cache)
+        # macro 段落应有 stale 标注（period "2024-06" 被 pd.to_datetime 解析为 2024-06-01）
+        assert "【数据停止更新，最后更新：2024-06-01】" in result
+        # shibor 段落内容存在（on rate=1.85）
+        assert "1.85" in result
+        # stale 标注只出现一次（仅 macro 段落，shibor 段落无 stale 标注）
+        assert result.count("【数据停止更新") == 1

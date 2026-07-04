@@ -92,9 +92,10 @@ class TestSystemTabInit:
         tab = self._make_tab()
         assert tab.cpu_workers_input is not None
 
-    def test_init_creates_point_tier_dropdown(self, mock_page):
+    def test_init_creates_tier_api_panel(self, mock_page):
+        # Phase 2A.1 §3.2.10：point_tier_dropdown 已迁移到 TierApiPanel
         tab = self._make_tab()
-        assert tab.point_tier_dropdown is not None
+        assert tab.tier_api_panel is not None
 
     def test_init_creates_no_proxy_input(self, mock_page):
         tab = self._make_tab()
@@ -149,7 +150,8 @@ class TestSystemTabInit:
         assert tab.row_concurrency is not None
         assert tab.row_thread_pool is not None
         assert tab.row_db_pool is not None
-        assert tab.row_limit is not None
+        # Phase 2A.1 §3.2.10：row_limit 已被 TierApiPanel 取代
+        assert tab.tier_api_panel is not None
         assert tab.row_proxy is not None
         assert tab.row_diagnostics is not None
 
@@ -643,83 +645,6 @@ class TestSystemTabThreadPoolSettings:
         assert snack.call_args.kwargs.get("color") == self.mock_ac.SUCCESS
 
 
-class TestSystemTabPointTier:
-    """Tushare 积分等级设置测试"""
-
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors, mock_app_styles, mock_config_handler):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.mock_as = mock_app_styles
-        self.mock_ch = mock_config_handler
-        self.patches = [
-            patch("ui.views.settings_tabs.system_tab.I18n", self.mock_i18n),
-            patch("ui.views.settings_tabs.system_tab.AppColors", self.mock_ac),
-            patch("ui.views.settings_tabs.system_tab.AppStyles", self.mock_as),
-            patch("ui.views.settings_tabs.system_tab.ConfigHandler", self.mock_ch),
-            patch("ui.views.settings_tabs.system_tab.ThemeName"),
-            patch("ui.views.settings_tabs.system_tab.DashboardCard", MagicMock()),
-            patch("ui.views.settings_tabs.system_tab.SectionHeader", MagicMock()),
-            patch("ui.views.settings_tabs.system_tab.SettingRow", MagicMock()),
-            patch("ui.views.settings_tabs.system_tab.UILogger"),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_tab(self):
-        from ui.views.settings_tabs.system_tab import SystemTab
-
-        return SystemTab(show_snack_callback=MagicMock())
-
-    async def test_save_point_tier_saves_config(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.point_tier_dropdown.value = "points_5000"
-        with (
-            patch("data.external.tushare_client.TushareClient"),
-            _patch_thread_pool(),
-        ):
-            await tab._do_save_point_tier_async("points_5000")
-        self.mock_ch.set_tushare_point_tier.assert_called_with("points_5000")
-
-    def test_save_point_tier_empty_value_skips(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.point_tier_dropdown.value = None
-        tab.save_point_tier(None)
-        self.mock_ch.set_tushare_point_tier.assert_not_called()
-
-    async def test_save_point_tier_calls_snack(self, mock_page):
-        snack = MagicMock()
-        tab = self._make_tab()
-        tab.show_snack = snack
-        set_page(tab, mock_page)
-        tab.point_tier_dropdown.value = "points_2000"
-        with (
-            patch("data.external.tushare_client.TushareClient"),
-            _patch_thread_pool(),
-        ):
-            await tab._do_save_point_tier_async("points_2000")
-        snack.assert_called_once()
-
-    async def test_save_point_tier_reloads_rate_limiters(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.point_tier_dropdown.value = "points_5000"
-        with (
-            patch("data.external.tushare_client.TushareClient") as mock_tc,
-            _patch_thread_pool(),
-        ):
-            mock_tc_instance = MagicMock()
-            mock_tc.return_value = mock_tc_instance
-            await tab._do_save_point_tier_async("points_5000")
-            mock_tc_instance.reload_rate_limiters.assert_called_once()
-
-
 class TestSystemTabNoProxyDomains:
     """无代理域名设置测试"""
 
@@ -927,13 +852,13 @@ class TestSystemTabLocaleChange:
             tab.row_concurrency,
             tab.row_thread_pool,
             tab.row_db_pool,
-            tab.row_limit,
             tab.row_proxy,
             tab.row_diagnostics,
         ]
-        # All rows share the same SettingRow mock, so update_locale is called 9 times total
+        # Phase 2A.1 §3.2.10：row_limit 已移除（TierApiPanel 自身订阅 I18n）
+        # All rows share the same SettingRow mock, so update_locale is called 8 times total
         for row in rows:
-            row.update_locale.assert_called()  # 多次调用预期 (9次, 所有row共享mock)
+            row.update_locale.assert_called()  # 多次调用预期 (8次, 所有row共享mock)
 
     def test_on_locale_change_calls_section_header_update_locale(self, mock_page):
         tab = self._make_tab()

@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from datetime import timedelta
 from typing import TypedDict
 
 from data.domain_services.market_data_service import MarketDataService
@@ -12,12 +14,19 @@ from core.i18n import I18n
 logger = logging.getLogger(__name__)
 
 
+# Phase 2A.1 §3.2.10：距上次 probe 超过此阈值时启动期自动触发 probe
+_AUTO_PROBE_INTERVAL = timedelta(days=7)
+
+
 class InitResult(TypedDict):
     success: bool
     error: str | None
     detail: str | None
     current_rev: str | None
     head_rev: str | None
+    # Phase 2A.1 §3.2.9：启动期自动 probe 任务（fire-and-forget），
+    # 由 main.py 注册到 ShutdownCoordinator 以便关机时取消
+    auto_probe_task: asyncio.Task | None
 
 
 async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
@@ -35,12 +44,20 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             "detail": str(e),
             "current_rev": e.current_rev,
             "head_rev": e.head_rev,
+            "auto_probe_task": None,
         }
     except Exception as e:
         logger.error("[Bootstrap] Database initialization failed: %s", e, exc_info=True)
         if show_toast_fn:
             show_toast_fn(I18n.get("error_db_init_failed"), "error")
-        return {"success": False, "error": "db_init_failed", "detail": str(e), "current_rev": None, "head_rev": None}
+        return {
+            "success": False,
+            "error": "db_init_failed",
+            "detail": str(e),
+            "current_rev": None,
+            "head_rev": None,
+            "auto_probe_task": None,
+        }
 
     MetaDataManager.preload_aliases()
 
@@ -48,7 +65,14 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
         logger.error("[Bootstrap] Database engine not created after init_db().")
         if show_toast_fn:
             show_toast_fn(I18n.get("error_db_engine_missing"), "error")
-        return {"success": False, "error": "db_engine_missing", "detail": None, "current_rev": None, "head_rev": None}
+        return {
+            "success": False,
+            "error": "db_engine_missing",
+            "detail": None,
+            "current_rev": None,
+            "head_rev": None,
+            "auto_probe_task": None,
+        }
 
     try:
         await TaskManager().init_db()
@@ -62,6 +86,7 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             "detail": str(e),
             "current_rev": None,
             "head_rev": None,
+            "auto_probe_task": None,
         }
 
     import os
@@ -77,7 +102,20 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
 
     _validate_failover_credentials()
 
-    return {"success": True, "error": None, "detail": None, "current_rev": None, "head_rev": None}
+    # Phase 2A.1 Task 2A.1.10：启动期校验策略档位覆盖（warning 不 raise）
+    _validate_strategy_tier_coverage()
+
+    # Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget）
+    auto_probe_task = asyncio.create_task(_maybe_auto_probe_on_startup())
+
+    return {
+        "success": True,
+        "error": None,
+        "detail": None,
+        "current_rev": None,
+        "head_rev": None,
+        "auto_probe_task": auto_probe_task,
+    }
 
 
 async def _warmup_tushare_capabilities() -> None:
@@ -123,6 +161,66 @@ def _validate_failover_credentials() -> None:
             )
     except Exception as e:
         logger.debug("[Bootstrap] Failover credential validation skipped: %s", e)
+
+
+async def _maybe_auto_probe_on_startup() -> None:
+    """Phase 2A.1 Task 2A.1.8：启动期自动 probe（fire-and-forget，不阻塞 UI）。
+
+    决策逻辑：
+    1. Token 未配置时短路跳过（不读 AppState，避免无谓 IO）
+    2. 距上次 probe > 7 天（``_AUTO_PROBE_INTERVAL``）时触发 ``probe_api_capabilities``
+    3. 失败降级 ``warning`` 日志（不 raise，不影响主流程）
+    4. CancelledError 必须 raise（R2 红线，配合优雅停机）
+
+    本函数返回的 Task 由 ``initialize_services`` 保存到 ``InitResult.auto_probe_task``，
+    再由 main.py 注册到 ``ShutdownCoordinator`` 以便关机时取消。
+    """
+    from data.external.tushare_client import TushareClient
+    from utils.time_utils import get_now
+
+    try:
+        client = TushareClient()
+        if not client.token:
+            logger.debug("[Bootstrap] No Tushare token configured, skipping auto probe")
+            return
+
+        last_probe = client._last_probe_time  # noqa: SLF001 — 同包内访问，避免新增公共 getter
+        if last_probe is not None and (get_now() - last_probe) < _AUTO_PROBE_INTERVAL:
+            logger.debug(
+                "[Bootstrap] Last probe %s within %s days, skipping auto probe",
+                last_probe.isoformat(),
+                _AUTO_PROBE_INTERVAL.days,
+            )
+            return
+
+        logger.info(
+            "[Bootstrap] Auto probe triggered (last_probe=%s)",
+            last_probe.isoformat() if last_probe else "never",
+        )
+        await client.probe_api_capabilities()
+    except asyncio.CancelledError:
+        # R2 红线：CancelledError 必须 raise 以配合优雅停机
+        raise
+    except Exception as e:
+        # 非取消异常降级 warning，不影响主流程
+        from utils.sanitizers import DataSanitizer
+
+        logger.warning("[Bootstrap] Auto probe failed (non-critical): %s", DataSanitizer.sanitize_error(e))
+
+
+def _validate_strategy_tier_coverage() -> None:
+    """Phase 2A.1 Task 2A.1.10：启动期校验已注册策略是否都在 _STRATEGY_MIN_TIER 中登记。
+
+    委托给 ``services/ai_service.validate_strategy_tier_coverage`` 实现（R1 红线：
+    app/ 可引用 services/，但 strategies/ 不可引用 services/，因此校验逻辑必须经
+    app/ 中转）。warning 不 raise，避免阻断启动。
+    """
+    try:
+        from services.ai_service import validate_strategy_tier_coverage
+
+        validate_strategy_tier_coverage()
+    except Exception as e:
+        logger.warning("[Bootstrap] validate_strategy_tier_coverage skipped: %s", e)
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):

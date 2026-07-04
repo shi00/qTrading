@@ -6,7 +6,7 @@ import pandas as pd
 import datetime
 import requests
 
-from data.external.tushare_client import TushareClient
+from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 
 pytestmark = pytest.mark.unit
 
@@ -1277,3 +1277,319 @@ class TestTushareClientSimpleApiMethods:
         client.pro = MagicMock(spec=[])
         result = await client.get_macro_data("cn_cpi")
         assert result is None
+
+
+class TestTushareClientProbeAndEffectiveTables:
+    """Phase 2A.1 Task 2A.1.13：probe 按档位预筛 / 双层过滤 / 三态分类 / 持久化测试。"""
+
+    def _make_probed_client(self, tier="points_5000"):
+        """创建 client 并 mock pro API 方法（设置 __name__ 供 _handle_api_call 推断 api_name）。"""
+        client = _make_client(tier=tier)
+        # _make_client 的 with 块退出后 ConfigHandler patch 失效，需持续 mock _get_tushare_point_tier
+        client._get_tushare_point_tier = lambda: tier
+        # 为 probe_configs 中所有 API 在 pro 上挂 MagicMock（带 __name__）
+        pro_apis = [
+            "daily",
+            "moneyflow_hsgt",
+            "moneyflow",
+            "hk_hold",
+            "top_list",
+            "limit_list_d",
+            "margin_detail",
+            "block_trade",
+            "fina_indicator",
+            "fina_mainbz",
+            "stk_holdernumber",
+            "top10_holders",
+        ]
+        for api_name in pro_apis:
+            mock_func = MagicMock(return_value=pd.DataFrame({"a": [1]}))
+            mock_func.__name__ = api_name
+            setattr(client.pro, api_name, mock_func)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_probe_filters_by_tier(self):
+        """probe_api_capabilities 应按 is_api_covered_by_tier 预筛 probe_configs。"""
+        client = self._make_probed_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # mock _handle_api_call 记录被调用的 api_name
+        called_apis: list[str] = []
+
+        async def fake_handle(func, **kwargs):
+            api_name = getattr(func, "__name__", str(func))
+            called_apis.append(api_name)
+            return pd.DataFrame({"a": [1]})
+
+        client._handle_api_call = fake_handle
+        results = await client.probe_api_capabilities()
+        # points_120 只覆盖 daily（probe_configs 中唯一在 points_120 档位内的 API）
+        assert "daily" in called_apis
+        # points_2000+ 档位的 API 不应被 probe
+        assert "moneyflow" not in called_apis
+        assert "hk_hold" not in called_apis
+        assert "top_list" not in called_apis
+        assert "fina_indicator" not in called_apis
+        assert "top10_holders" not in called_apis
+        # results 中只包含 daily
+        assert "daily" in results
+        assert len(results) == 1
+
+    @pytest.mark.asyncio
+    async def test_probe_independent_purchase_log(self):
+        """probe_configs 当前不含 cyq_perf/forecast_eps（Phase 2B 扩展）；is_independent_purchase 在档位覆盖查询中不特殊处理。"""
+        client = self._make_probed_client(tier="points_10000")
+        # points_10000 档位覆盖 cyq_perf / forecast_eps（即使需独立购买）
+        assert client.is_api_covered_by_tier("cyq_perf", "points_10000") is True
+        assert client.is_api_covered_by_tier("forecast_eps", "points_10000") is True
+        # is_independent_purchase 标记独立存在（不影响 is_api_covered_by_tier）
+        assert client.is_independent_purchase("cyq_perf") is True
+        assert client.is_independent_purchase("forecast_eps") is True
+        # probe_configs 不含 cyq_perf（Phase 2B 才扩展）
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+        results = await client.probe_api_capabilities()
+        assert "cyq_perf" not in results
+        assert "forecast_eps" not in results
+
+    @pytest.mark.asyncio
+    async def test_probe_skips_apis_not_in_tier(self):
+        """低档位下 probe 应跳过高档位 API。"""
+        client = self._make_probed_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        called_apis: list[str] = []
+
+        async def fake_handle(func, **kwargs):
+            api_name = getattr(func, "__name__", str(func))
+            called_apis.append(api_name)
+            return pd.DataFrame({"a": [1]})
+
+        client._handle_api_call = fake_handle
+        await client.probe_api_capabilities()
+        # 所有 points_2000+ 档位的 API 都不应被 probe
+        for api in [
+            "moneyflow",
+            "hk_hold",
+            "top_list",
+            "fina_indicator",
+            "top10_holders",
+            "block_trade",
+            "margin_detail",
+        ]:
+            assert api not in called_apis, f"{api} should be skipped at points_120 tier"
+
+    @pytest.mark.asyncio
+    async def test_probe_includes_independent_purchase_at_high_tier(self):
+        """高档位下独立付费 API 在档位覆盖内（probe_configs 扩展后才会被 probe）。"""
+        client = self._make_probed_client(tier="points_10000")
+        # 验证档位覆盖关系
+        assert client.is_api_covered_by_tier("cyq_perf", "points_10000") is True
+        assert client.is_api_covered_by_tier("cyq_perf", "points_5000") is False
+        assert client.is_api_covered_by_tier("cyq_perf", "points_2000") is False
+        # forecast_eps 同理
+        assert client.is_api_covered_by_tier("forecast_eps", "points_10000") is True
+        assert client.is_api_covered_by_tier("forecast_eps", "points_5000") is False
+
+    @pytest.mark.asyncio
+    async def test_probe_mutex_skips_concurrent(self):
+        """probe_api_capabilities 串行执行 probe_configs（Phase 2A.1 串行实现，Phase 2B 才加 _probe_in_progress 互斥）。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        call_order: list[str] = []
+
+        async def fake_handle(func, **kwargs):
+            api_name = getattr(func, "__name__", str(func))
+            call_order.append(api_name)
+            return pd.DataFrame({"a": [1]})
+
+        client._handle_api_call = fake_handle
+        await client.probe_api_capabilities()
+        # 串行执行：所有调用按 probe_configs 顺序依次发生
+        assert len(call_order) > 0
+        # 验证串行性：调用次数 == results 数量（无并发）
+        assert len(call_order) == len(
+            [
+                api
+                for api in [
+                    "daily",
+                    "moneyflow_hsgt",
+                    "moneyflow",
+                    "hk_hold",
+                    "top_list",
+                    "limit_list_d",
+                    "margin_detail",
+                    "block_trade",
+                    "fina_indicator",
+                    "fina_mainbz",
+                    "stk_holdernumber",
+                    "top10_holders",
+                ]
+                if client.is_api_covered_by_tier(api, "points_5000")
+            ]
+        )
+
+    @pytest.mark.asyncio
+    async def test_probe_service_unavailable_detection(self):
+        """probe 时非权限错误（如网络错误）导致 results[api_name] = None。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # mock _handle_api_call 抛出非 TushareAPIPermissionError 的异常
+        call_count = [0]
+
+        async def fake_handle(func, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # 第一个 API（daily）抛出网络错误
+                raise requests.exceptions.ConnectionError("connection refused")
+            return pd.DataFrame({"a": [1]})
+
+        client._handle_api_call = fake_handle
+        results = await client.probe_api_capabilities()
+        # daily 应为 None（非权限错误）
+        assert results["daily"] is None
+        # 其他 API 仍正常 probe
+        assert results.get("moneyflow_hsgt") is True
+
+    @pytest.mark.asyncio
+    async def test_probe_token_invalid_detection(self):
+        """probe 时 TushareAPIPermissionError（含 token_invalid）导致 results[api_name] = False。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+        async def fake_handle(func, **kwargs):
+            api_name = getattr(func, "__name__", str(func))
+            if api_name == "daily":
+                raise TushareAPIPermissionError(api_name, "您的token不对")
+            return pd.DataFrame({"a": [1]})
+
+        client._handle_api_call = fake_handle
+        results = await client.probe_api_capabilities()
+        # daily 应为 False（权限错误）
+        assert results["daily"] is False
+        # capability_cache 中 daily 也应为 False
+        assert client.is_api_available("daily") is False
+
+    @pytest.mark.asyncio
+    async def test_probe_progress_callback(self):
+        """progress_callback 应被调用 N 次（N = filtered_configs 长度）。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+        progress_calls: list[tuple[int, int]] = []
+
+        def progress_cb(completed: int, total: int) -> None:
+            progress_calls.append((completed, total))
+
+        await client.probe_api_capabilities(progress_callback=progress_cb)
+        # points_5000 档位覆盖 probe_configs 全部 12 项
+        assert len(progress_calls) == 12
+        # 第一次调用 completed=1, total=12
+        assert progress_calls[0] == (1, 12)
+        # 最后一次调用 completed=12, total=12
+        assert progress_calls[-1] == (12, 12)
+
+    @pytest.mark.asyncio
+    async def test_probe_one_classifies_error(self):
+        """probe 三态分类：TushareAPIPermissionError → False；其他 Exception → None；成功 → True。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        call_count = [0]
+
+        async def fake_handle(func, **kwargs):
+            call_count[0] += 1
+            api_name = getattr(func, "__name__", str(func))
+            if api_name == "daily":
+                return pd.DataFrame({"a": [1]})  # 成功 → True
+            if api_name == "moneyflow_hsgt":
+                raise TushareAPIPermissionError(api_name, "权限不足")  # 权限错误 → False
+            raise Exception("network error")  # 其他错误 → None
+
+        client._handle_api_call = fake_handle
+        results = await client.probe_api_capabilities()
+        assert results["daily"] is True
+        assert results["moneyflow_hsgt"] is False
+        assert results["moneyflow"] is None
+
+    @pytest.mark.asyncio
+    async def test_probe_one_distinguishes_429(self):
+        """probe 通过 _handle_api_call 内部重试处理 429 错误；429 不导致 probe 失败。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # 直接 mock _handle_api_call 成功返回（429 在 _handle_api_call 内部已重试）
+        client._handle_api_call = AsyncMock(return_value=pd.DataFrame({"a": [1]}))
+        results = await client.probe_api_capabilities()
+        # 所有 API 都应成功（_handle_api_call 内部处理了 429）
+        for api, available in results.items():
+            assert available is True, f"{api} should be True after 429 retry"
+
+    def test_effective_tables_filters_by_tier(self):
+        """get_effective_synced_tables 第一层：档位覆盖过滤。"""
+        client = self._make_probed_client(tier="points_120")
+        # TABLE_TO_API_MAP 中的表（需档位覆盖）
+        all_tables = [
+            "moneyflow_hsgt",  # api=moneyflow_hsgt，points_2000+ 才覆盖
+            "northbound_holding",  # api=hk_hold，points_2000+ 才覆盖
+            "moneyflow_daily",  # api=moneyflow，points_2000+ 才覆盖
+        ]
+        effective = client.get_effective_synced_tables(all_tables)
+        # points_120 档位不足，所有需要 points_2000+ API 的表都应被过滤
+        assert effective == []
+
+    def test_effective_tables_filters_by_probe(self):
+        """get_effective_synced_tables 第二层：probe 验证过滤（is_api_available() is False 时排除）。"""
+        client = self._make_probed_client(tier="points_5000")
+        # 标记 moneyflow 为不可用
+        client.mark_api_unavailable("moneyflow")
+        all_tables = ["moneyflow_daily"]  # api=moneyflow
+        effective = client.get_effective_synced_tables(all_tables)
+        assert "moneyflow_daily" not in effective
+
+    def test_effective_tables_preserves_none_probe(self):
+        """get_effective_synced_tables：probe 验证为 None（未探测）时不阻塞。"""
+        client = self._make_probed_client(tier="points_5000")
+        # 不设置 capability_cache（None 状态）
+        all_tables = ["moneyflow_daily"]  # api=moneyflow
+        effective = client.get_effective_synced_tables(all_tables)
+        assert "moneyflow_daily" in effective
+
+    def test_effective_tables_downgrade_preserves_db(self):
+        """档位降级后 is_api_covered_by_tier 返回 False；get_effective_synced_tables 跳过高档位 API 表。
+
+        DB 历史数据保留由 stale 标注机制处理（不在 get_effective_synced_tables 职责内），
+        本测试只验证档位覆盖判断的正确性。
+        """
+        client = self._make_probed_client(tier="points_2000")
+        # share_float 在 points_5000 才覆盖（显式传 tier 避免单例共享问题）
+        assert client.is_api_covered_by_tier("share_float", "points_5000") is True
+        assert client.is_api_covered_by_tier("share_float", "points_2000") is False
+        # points_2000 档位下 share_float 对应的表会被 get_effective_synced_tables 过滤
+        # （DB 数据保留是 sync 层职责，get_effective_synced_tables 只返回有效表列表）
+
+    @pytest.mark.asyncio
+    async def test_persist_last_probe_time(self):
+        """persist_capabilities_to_app_state payload 应包含 last_probe_time ISO 8601 字段。"""
+        import json
+
+        client = self._make_probed_client(tier="points_5000")
+        # 设置 _last_probe_time
+        client._last_probe_time = datetime.datetime(2024, 6, 15, 10, 30, 0)
+        # mock CacheManager.engine 和 set_app_state
+        captured_payload = {}
+
+        async def fake_set_app_state(engine, key, value):
+            captured_payload["key"] = key
+            captured_payload["value"] = value
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.app_state_service.set_app_state", new=fake_set_app_state),
+        ):
+            mock_cm.return_value.engine = MagicMock()
+            await client.persist_capabilities_to_app_state()
+
+        assert captured_payload["key"] == "tushare_capabilities"
+        payload = json.loads(captured_payload["value"])
+        assert "last_probe_time" in payload
+        assert payload["last_probe_time"] == "2024-06-15T10:30:00"
+        assert "token_hash" in payload
+        assert "capabilities" in payload

@@ -6,6 +6,8 @@ import flet as ft
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles, ThemeName
+from ui.viewmodels.system_viewmodel import SystemViewModel
+from ui.views.settings_tabs.tier_api_panel import TierApiPanel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -153,24 +155,11 @@ class SystemTab(ft.Container):
             label=I18n.get("sys_pool_cpu"),  # pragma: no cover
         )  # pragma: no cover
 
-        # Point Tier Dropdown
-        current_tier = ConfigHandler.get_tushare_point_tier()  # pragma: no cover
-        self.point_tier_dropdown = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("sys_label_point_tier"),  # pragma: no cover
-            value=current_tier,  # pragma: no cover
-            width=AppStyles.CONTROL_WIDTH_SM,  # pragma: no cover
-            text_size=14,  # pragma: no cover
-            border_radius=8,  # pragma: no cover
-            content_padding=10,  # pragma: no cover
-            options=[  # pragma: no cover
-                ft.dropdown.Option("points_120", I18n.get("sys_tier_points_120_label")),  # pragma: no cover
-                ft.dropdown.Option("points_2000", I18n.get("sys_tier_points_2000_label")),  # pragma: no cover
-                ft.dropdown.Option("points_5000", I18n.get("sys_tier_points_5000_label")),  # pragma: no cover
-                ft.dropdown.Option("points_10000", I18n.get("sys_tier_points_10000_label")),  # pragma: no cover
-                ft.dropdown.Option("points_15000", I18n.get("sys_tier_points_15000_label")),  # pragma: no cover
-            ],  # pragma: no cover
-            on_change=self.save_point_tier,  # pragma: no cover
-        )  # pragma: no cover
+        # Phase 2A.1 §3.2.10: SystemViewModel 单一实例 + TierApiPanel 注入（v1.6.0 P1-10）
+        # 半迁移：档位/probe 走 VM（含异步 probe 长任务 + UI 状态管理），其他配置仍直调 ConfigHandler
+        # 档位下拉框由 TierApiPanel 自身承担（避免 UI 重复），system_tab 不再独立维护 point_tier_dropdown
+        self.system_vm = SystemViewModel()  # pragma: no cover
+        self.tier_api_panel = TierApiPanel(viewmodel=self.system_vm)  # pragma: no cover
 
         # No-Proxy Domains
         domains_list = ConfigHandler.get_no_proxy_domains()  # pragma: no cover
@@ -307,22 +296,9 @@ class SystemTab(ft.Container):
             subtitle_key="settings_pool_desc",  # pragma: no cover
         )  # pragma: no cover
 
-        # 6. API Rate Limit Item  # pragma: no cover
-        self.row_limit = SettingRow(  # pragma: no cover
-            icon=ft.Icons.SPEED,  # pragma: no cover
-            icon_color=ft.Colors.CYAN,  # pragma: no cover
-            title=I18n.get("sys_tushare_limit"),  # pragma: no cover
-            subtitle=I18n.get("sys_tushare_limit_desc"),  # pragma: no cover
-            control=ft.Row(  # pragma: no cover
-                [  # pragma: no cover
-                    self.point_tier_dropdown,  # pragma: no cover
-                ],  # pragma: no cover
-                spacing=5,  # pragma: no cover
-                wrap=True,  # pragma: no cover
-            ),  # pragma: no cover
-            title_key="sys_tushare_limit",  # pragma: no cover
-            subtitle_key="sys_tushare_limit_desc",  # pragma: no cover
-        )  # pragma: no cover
+        # 6. API Rate Limit Item — 由 TierApiPanel 承担（含档位下拉框 + probe 状态 + 触发按钮）
+        # Phase 2A.1 §3.2.10：取代旧 row_limit（独立 point_tier_dropdown 已移除，避免 UI 重复）
+        # TierApiPanel 自身订阅 I18n 变更，SystemTab._on_locale_change 不级联刷新它
 
         # 7. No-Proxy Domains  # pragma: no cover
         self.save_no_proxy_btn = ft.IconButton(  # pragma: no cover
@@ -387,7 +363,7 @@ class SystemTab(ft.Container):
                                 height=20,  # pragma: no cover
                                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),  # pragma: no cover
                             ),  # pragma: no cover
-                            self.row_limit,  # pragma: no cover
+                            self.tier_api_panel,  # pragma: no cover
                             ft.Divider(  # pragma: no cover
                                 height=20,  # pragma: no cover
                                 color=ft.Colors.with_opacity(0.5, AppColors.BORDER),  # pragma: no cover
@@ -473,18 +449,6 @@ class SystemTab(ft.Container):
                 ],
             )
 
-            self.point_tier_dropdown.label = I18n.get("sys_label_point_tier")
-            refresh_dropdown_options(
-                self.point_tier_dropdown,
-                [
-                    ft.dropdown.Option("points_120", I18n.get("sys_tier_points_120_label")),
-                    ft.dropdown.Option("points_2000", I18n.get("sys_tier_points_2000_label")),
-                    ft.dropdown.Option("points_5000", I18n.get("sys_tier_points_5000_label")),
-                    ft.dropdown.Option("points_10000", I18n.get("sys_tier_points_10000_label")),
-                    ft.dropdown.Option("points_15000", I18n.get("sys_tier_points_15000_label")),
-                ],
-            )
-
             self.concurrency_input.label = I18n.get("settings_concurrency")
             self.concurrency_input.suffix_text = I18n.get("sys_suffix_threads")
             self.pool_size_input.label = I18n.get("settings_db_pool")
@@ -514,7 +478,6 @@ class SystemTab(ft.Container):
                 self.row_concurrency,
                 self.row_thread_pool,
                 self.row_db_pool,
-                self.row_limit,
                 self.row_proxy,
                 self.row_diagnostics,
             ]:
@@ -667,7 +630,6 @@ class SystemTab(ft.Container):
             self.db_timeout_input,  # pragma: no cover
             self.io_workers_input,  # pragma: no cover
             self.cpu_workers_input,  # pragma: no cover
-            self.point_tier_dropdown,  # pragma: no cover
             self.no_proxy_input,  # pragma: no cover
         ]  # pragma: no cover
         for ctrl in inputs:  # pragma: no cover
@@ -730,31 +692,17 @@ class SystemTab(ft.Container):
                 exc_info=True,
             )
 
-    def save_point_tier(self, e):
-        """Save Tushare point tier setting."""
-        tier = self.point_tier_dropdown.value
-        if not tier:
-            return
-        if self.page:
-            self.page.run_task(self._do_save_point_tier_async, tier)
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:  # pragma: no cover - UI 事件
+        """窗口 resize 通知 — 级联调用 TierApiPanel.handle_resize 触发响应式布局。
 
-    async def _do_save_point_tier_async(self, tier):
+        Phase 2A.1 §3.2.10：TierApiPanel 自身实现 3/2/1 列响应式断点，
+        SystemTab 在此方法中级联调用，确保子组件布局同步刷新。
+        """
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_point_tier, tier)
-            self._reload_rate_limiters_safe()
-            self.show_snack(I18n.get("sys_snack_tier_set").format(tier=tier))
-            logger.info("[SystemTab] Tushare point tier set to %s", tier)
-        except Exception as ex:
-            logger.error("[SystemTab] PointTier | ❌ Save failed: %s", ex, exc_info=True)
-            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
-
-    def _reload_rate_limiters_safe(self):
-        try:
-            from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
-
-            TushareClient().reload_rate_limiters()
+            if hasattr(self.tier_api_panel, "handle_resize"):
+                self.tier_api_panel.handle_resize(width, height)
         except Exception as exc:
-            logger.warning("[SystemTab] Rate limiter reload skipped: %s", exc, exc_info=True)
+            logger.debug("[SystemTab] tier_api_panel handle_resize skipped: %s", exc, exc_info=True)
 
     def save_no_proxy_domains(self, e):
         """Save no-proxy domain list."""

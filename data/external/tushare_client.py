@@ -368,12 +368,14 @@ class TushareClient:
             self._loaded_years: set[str] = set()
             self._calendar_lock = threading.Lock()
 
-            self._capability_cache: dict[str, bool] = {}
+            self._capability_cache: dict[str, bool | None] = {}
             self._capability_cache_lock = threading.Lock()
             self._bg_tasks: set[asyncio.Task] = set()
             # 全局 token 熔断标志：token 失效时置 True，阻止后续 API 调用避免无效重试刷屏。
             # 由 set_token() 重置，_reset_singleton() 销毁实例时随实例回收。
             self._token_invalid: bool = False
+            # Phase 2A.1 §3.2.10：上次 probe 时间，由 persist/load_capabilities_to_app_state 维护
+            self._last_probe_time: datetime.datetime | None = None
 
             self.token = token or self._get_token()
             self.timeout = self._get_tushare_timeout()
@@ -501,7 +503,7 @@ class TushareClient:
             self._capability_cache.clear()
             logger.info("[API] Capability cache cleared")
 
-    def get_capability_cache(self) -> dict[str, bool]:
+    def get_capability_cache(self) -> dict[str, bool | None]:
         """Get a copy of the capability cache."""
         with self._capability_cache_lock:
             return dict(self._capability_cache)
@@ -546,10 +548,12 @@ class TushareClient:
         """
         Return list of tables that are available for the current token.
 
-        Rules:
-        - Tables not in TABLE_TO_API_MAP are always included (base data)
-        - Tables in TABLE_TO_API_MAP are included only if API is available or unknown
-        - Tables with API explicitly marked as unavailable are excluded
+        Phase 2A.1 §3.2.7 双层过滤：
+        - 第一层（档位覆盖）：API 必须在当前档位覆盖内（``is_api_covered_by_tier``）
+        - 第二层（probe 验证）：API 在档位覆盖内但 probe 验证为 False 时排除；
+          None（未探测）不阻塞（保留以允许首次启动尚未 probe 时同步基础数据）
+        - 不在 TABLE_TO_API_MAP 的表（基础数据）始终包含
+        - 独立付费 API（cyq_perf/forecast_eps）即使在档位覆盖内，仍受 probe 验证约束
 
         Args:
             all_tables: List of table names to filter
@@ -560,8 +564,18 @@ class TushareClient:
         effective = []
         for table in all_tables:
             api_name = self.TABLE_TO_API_MAP.get(table)
-            if api_name is None or self.is_api_available(api_name) is not False:
+            if api_name is None:
+                # 基础数据表（无 API 依赖）：始终包含
                 effective.append(table)
+                continue
+            # 第一层：档位覆盖
+            if not self.is_api_covered_by_tier(api_name):
+                # 档位不足：跳过同步（DB 历史数据保留，由 stale 标注机制处理）
+                continue
+            # 第二层：probe 验证（None 不阻塞）
+            if self.is_api_available(api_name) is False:
+                continue
+            effective.append(table)
         return effective
 
     @log_async_operation(
@@ -594,9 +608,12 @@ class TushareClient:
         with self._capability_cache_lock:
             capabilities = dict(self._capability_cache)
 
+        # Phase 2A.1 §3.2.10：追加 last_probe_time ISO 8601 字符串，用于启动时自动 probe 判断
+        last_probe_iso = self._last_probe_time.isoformat() if self._last_probe_time else None
         payload = {
             "token_hash": token_hash,
             "capabilities": capabilities,
+            "last_probe_time": last_probe_iso,
         }
         await set_app_state(engine, "tushare_capabilities", json.dumps(payload))
         logger.info("[TushareClient] Persisted %s capabilities to AppState", len(capabilities))
@@ -633,6 +650,16 @@ class TushareClient:
             if payload.get("token_hash") == token_hash:
                 with self._capability_cache_lock:
                     self._capability_cache.update(payload.get("capabilities", {}))
+                # Phase 2A.1 §3.2.10：同步读取 last_probe_time（ISO 8601）
+                last_probe_str = payload.get("last_probe_time")
+                if last_probe_str:
+                    try:
+                        self._last_probe_time = datetime.datetime.fromisoformat(last_probe_str)
+                    except (ValueError, TypeError):
+                        logger.warning("[TushareClient] Invalid last_probe_time format: %s", last_probe_str)
+                        self._last_probe_time = None
+                else:
+                    self._last_probe_time = None
                 logger.info("[TushareClient] Loaded %s capabilities from AppState", len(self._capability_cache))
             else:
                 logger.debug("[TushareClient] Token hash mismatch, skipping capability load")
@@ -643,12 +670,24 @@ class TushareClient:
         operation_name="TushareClient.probe_api_capabilities",
         threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
-    async def probe_api_capabilities(self) -> dict[str, bool | None]:
+    async def probe_api_capabilities(
+        self,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, bool | None]:
         """
         Probe key APIs to determine their availability for current token.
 
-        Tests each API with minimal parameters to detect permission errors.
-        Results are cached and persisted to AppState.
+        Phase 2A.1 §3.2.5 档位预筛：
+        - 入口按 ``is_api_covered_by_tier(api, current_tier)`` 预筛 ``probe_configs``，
+          仅对当前档位覆盖内的 API 发起 probe，避免低档位用户对高档位 API 浪费配额。
+        - probe 并行化与三态分类细化是 Phase 2B 任务，本 Phase 仅实现档位预筛 + 串行 probe。
+
+        progress_callback 推送进度给 UI（TierApiPanel._on_probe_progress），
+        签名为 (completed, total)，total 由档位预筛后的 probe_configs 长度动态确定
+        （v1.10.0 P2-4：不硬编码 29，points_120 实际只 probe 约 8 项）。
+
+        Args:
+            progress_callback: 可选进度回调，签名为 (completed_count, total_count)
 
         Returns:
             dict mapping API names to availability:
@@ -676,9 +715,16 @@ class TushareClient:
             ("top10_holders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
         ]
 
-        results: dict[str, bool | None] = {}
+        # Phase 2A.1 §3.2.5 档位预筛：仅 probe 当前档位覆盖内的 API
+        current_tier = self._get_tushare_point_tier()
+        filtered_configs = [
+            (api, params) for api, params in probe_configs if self.is_api_covered_by_tier(api, current_tier)
+        ]
 
-        for api_name, params in probe_configs:
+        results: dict[str, bool | None] = {}
+        total = len(filtered_configs)
+
+        for completed, (api_name, params) in enumerate(filtered_configs, start=1):
             try:
                 func = getattr(self.pro, api_name)
                 await self._handle_api_call(func, **params)
@@ -694,7 +740,14 @@ class TushareClient:
                     api_name,
                     DataSanitizer.sanitize_error(e),
                 )
+            if progress_callback is not None:
+                try:
+                    progress_callback(completed, total)
+                except Exception as cb_exc:  # pragma: no cover - UI 回调异常不应阻塞 probe
+                    logger.debug("[TushareClient] progress_callback failed: %s", cb_exc)
 
+        # Phase 2A.1 §3.2.10：更新 last_probe_time 并持久化
+        self._last_probe_time = get_now()
         await self.persist_capabilities_to_app_state()
         return results
 

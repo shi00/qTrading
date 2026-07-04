@@ -1124,23 +1124,24 @@ class TestSystemTab:
         tab._on_locale_change("en_US")
 
     def test_on_locale_change_preserves_dropdown_values(self, mock_page):
-        """§5.8 规范 4：_on_locale_change 重建 options 后 4 个 dropdown 的 value 必须保留。"""
+        """§5.8 规范 4：_on_locale_change 重建 options 后 3 个 dropdown 的 value 必须保留。
+
+        Phase 2A.1 §3.2.10：point_tier_dropdown 已迁移到 TierApiPanel（自身订阅 I18n，
+        SystemTab._on_locale_change 不级联刷新），故此处只校验 SystemTab 自身维护的 3 个 dropdown。
+        """
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.language_dropdown.value = "en_US"
         tab.theme_dropdown.value = "dark"
         tab.log_level_dropdown.value = "INFO"
-        tab.point_tier_dropdown.value = "points_120"
         tab._on_locale_change("en_US")
         assert tab.language_dropdown.value == "en_US"
         assert tab.theme_dropdown.value == "dark"
         assert tab.log_level_dropdown.value == "INFO"
-        assert tab.point_tier_dropdown.value == "points_120"
         for dropdown in (
             tab.language_dropdown,
             tab.theme_dropdown,
             tab.log_level_dropdown,
-            tab.point_tier_dropdown,
         ):
             assert dropdown.options is not None
             assert len(dropdown.options) > 0

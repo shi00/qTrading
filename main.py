@@ -369,6 +369,12 @@ async def main(page: ft.Page):
 
     await controller.start(db_url, token, llm_api_key, onboarding_complete)
 
+    # Phase 2A.1 Task 2A.1.9：注册启动期 auto probe 任务到 ShutdownCoordinator
+    # （仅在 initialize_services 成功执行后非 None；onboarding 路径不创建 task）
+    auto_probe_task = controller.auto_probe_task
+    if auto_probe_task is not None and not auto_probe_task.done():
+        coordinator.register_task(auto_probe_task)
+
 
 if __name__ == "__main__":  # pragma: no cover
     import multiprocessing
