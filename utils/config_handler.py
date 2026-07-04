@@ -1378,6 +1378,16 @@ class ConfigHandler:
         safe_val = max(5, min(int(val), 200))
         return ConfigHandler.save_config({"sync_batch_size": safe_val})
 
+    @staticmethod
+    def get_sync_full_batch_size():
+        val = ConfigHandler.get_typed("sync_full_batch_size", int, 200)
+        return max(10, min(val, 500))
+
+    @staticmethod
+    def set_sync_full_batch_size(val):
+        safe_val = max(10, min(int(val), 500))
+        return ConfigHandler.save_config({"sync_full_batch_size": safe_val})
+
     # === API Robustness Parameters ===
 
     @staticmethod

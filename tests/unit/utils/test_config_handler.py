@@ -1917,6 +1917,28 @@ class TestSyncMaxConcurrentHeavyDynamicClamp:
         assert cfg_mod.ConfigHandler.get_sync_max_concurrent_heavy() == 8
 
 
+class TestSyncFullBatchSize:
+    """测试 get/set_sync_full_batch_size 的 clamp 行为（Phase 2C）"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_full_batch_size(self, mock_save):
+        """正常值原样保存。"""
+        cfg_mod.ConfigHandler.set_sync_full_batch_size(150)
+        mock_save.assert_called_once_with({"sync_full_batch_size": 150})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_full_batch_size_clamps_low(self, mock_save):
+        """低于下限 10 应 clamp 到 10。"""
+        cfg_mod.ConfigHandler.set_sync_full_batch_size(1)
+        mock_save.assert_called_once_with({"sync_full_batch_size": 10})
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_full_batch_size_clamps_high(self, mock_save):
+        """高于上限 500 应 clamp 到 500。"""
+        cfg_mod.ConfigHandler.set_sync_full_batch_size(9999)
+        mock_save.assert_called_once_with({"sync_full_batch_size": 500})
+
+
 class TestSaveProviderCredentialClearSemantics:
     """测试 save_provider_credential 的清空语义 (Fix 7)
 

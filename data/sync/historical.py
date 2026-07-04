@@ -22,7 +22,7 @@ from data.constants import (
     SYNC_RESULT_SAVE_FAILED,
     SYNC_RESULT_SKIPPED_PERMISSION,
 )
-from data.sync.base import ISyncStrategy, SyncResult, SyncStatus
+from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import I18n
@@ -329,7 +329,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.warning("[HistoricalSync] Resume | ⚠️ Cache check failed: %s", e, exc_info=True)
 
         total_days = len(trade_dates)
-        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
+        concurrency_factor, _ = _get_seasonal_adjustments()
+        concurrency = max(1, ConfigHandler.get_sync_max_concurrent_heavy() // concurrency_factor)
         semaphore = asyncio.Semaphore(max(1, concurrency))
 
         failed_dates = []

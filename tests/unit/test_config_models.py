@@ -420,3 +420,15 @@ class TestTusharePointTier:
     def test_sync_max_concurrent_heavy_rejects_above_8(self):
         with pytest.raises(ValidationError):
             AppConfig(sync_max_concurrent_heavy=9)
+
+    def test_sync_full_batch_size_default(self):
+        """Phase 2C：sync_full_batch_size 默认 200。"""
+        cfg = AppConfig()
+        assert cfg.sync_full_batch_size == 200
+
+    def test_sync_full_batch_size_rejects_out_of_range(self):
+        """Phase 2C：sync_full_batch_size 超出 [10, 500] 应校验失败。"""
+        with pytest.raises(ValidationError):
+            AppConfig(sync_full_batch_size=9)
+        with pytest.raises(ValidationError):
+            AppConfig(sync_full_batch_size=501)

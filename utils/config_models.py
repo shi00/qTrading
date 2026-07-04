@@ -155,6 +155,7 @@ class AppConfig(BaseModel):
 
     sync_max_concurrent_heavy: int = Field(default=5, ge=1, le=8)
     sync_batch_size: int = Field(default=50, ge=5, le=200)
+    sync_full_batch_size: int = Field(default=200, ge=10, le=500)
     max_batch_rows: int = Field(default=20000, ge=1000)
     sync_request_delay_heavy: float = Field(default=0.0, ge=0)
     sync_request_delay_light: float = Field(default=0.0, ge=0)
