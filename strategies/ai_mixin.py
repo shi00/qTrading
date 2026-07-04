@@ -1398,6 +1398,50 @@ class AIStrategyMixin:
                 labels_out.clear()
             return ("", False)
 
+    @staticmethod
+    def _format_forecast_section(df: pd.DataFrame) -> str:
+        """格式化业绩预告段落（Phase 3A）。
+
+        入参 df 由 ``get_fina_forecast_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
+        仅返回每只股票最新一期预告，故直接取 ``iloc[0]``。
+
+        格式示例：``- 业绩预告: 2024Q3 预增 50.0%-70.0%（公告日 2024-10-15）``
+        """
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        end_date = row.get("end_date")
+        ann_date = row.get("ann_date")
+        forecast_type = row.get("type") or I18n.get("ai_unknown")
+        p_min = row.get("p_change_min")
+        p_max = row.get("p_change_max")
+
+        # end_date 为 Date 类型（季度末日期），转换为 "YYYYQN" 格式
+        quarter_str = str(end_date) if end_date is not None else I18n.get("ai_unknown")
+        try:
+            d = pd.to_datetime(str(end_date))
+            q = (d.month - 1) // 3 + 1
+            quarter_str = f"{d.year}Q{q}"
+        except Exception:
+            pass
+
+        # 拼接预告幅度区间
+        range_str = ""
+        if p_min is not None and not pd.isna(p_min) and p_max is not None and not pd.isna(p_max):
+            range_str = f" {float(p_min):.1f}%-{float(p_max):.1f}%"
+
+        # 公告日格式化为 YYYY-MM-DD
+        ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
+        try:
+            ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        return (
+            f"- {I18n.get('ai_forecast')}: {quarter_str} {forecast_type}{range_str}"
+            f"（{I18n.get('ai_forecast_ann_date')}: {ann_str}）"
+        )
+
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1537,6 +1581,25 @@ class AIStrategyMixin:
                     has_data = True
                     if labels_out is not None:
                         labels_out.append("ai_label_holder_count")
+
+            # Phase 3A：业绩预告（fina_forecast）— 表已建 + DAO 读取已激活，注入 AI
+            if prefetched and ts_code in prefetched and "forecast" in prefetched[ts_code]:
+                forecast_df = prefetched[ts_code]["forecast"]
+            else:
+                forecast_df = await cache.get_fina_forecast(ts_code, as_of_date=as_of_date)
+
+            if forecast_df is not None and not forecast_df.empty:
+                forecast_line = _build_stale_section(
+                    "forecast",
+                    forecast_df,
+                    self._format_forecast_section,
+                    date_column="ann_date",
+                )
+                if forecast_line:
+                    lines.append(forecast_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_forecast")
 
         except Exception as e:
             logger.warning(

@@ -88,6 +88,8 @@ _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_main_flow",
     "ai_label_top_list",
     "ai_label_northbound",
+    # Phase 3A：业绩预告（fina_forecast，forecast API，points_2000）
+    "ai_label_forecast",
 }
 
 AVAILABLE_DATA_LABELS: frozenset[str] = frozenset(_AVAILABLE_DATA_LABEL_KEYS)
@@ -192,6 +194,8 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     # 不耦合进此处，否则 top_inst 不可用会误删 top_list 段落
     "ai_label_top_list": ("points_2000", frozenset({"top_list"})),
     "ai_label_northbound": ("points_2000", frozenset({"hk_hold"})),
+    # Phase 3A：业绩预告（forecast API，points_2000）
+    "ai_label_forecast": ("points_2000", frozenset({"forecast"})),
     # 新增标签（Phase 3 追加时同步加入此 map）：
     # "ai_label_top_inst": ("points_2000", frozenset({"top_inst"})),  # Phase 3C
     # "ai_label_share_float": ("points_5000", frozenset({"share_float"})),  # Phase 3D

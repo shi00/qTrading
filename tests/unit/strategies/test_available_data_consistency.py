@@ -69,6 +69,7 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_pledge",
             "ai_label_top_holder",
             "ai_label_holder_count",
+            "ai_label_forecast",
             # _build_capital_flow_text 子项
             "ai_label_main_flow",
             "ai_label_top_list",
@@ -130,6 +131,7 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_pledge",
             "ai_label_top_holder",
             "ai_label_holder_count",
+            "ai_label_forecast",
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
@@ -327,6 +329,7 @@ class TestInvariant3BuilderLabelEquivalence:
                 }
             )
         )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -375,6 +378,7 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame())
         mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -425,6 +429,7 @@ class TestInvariant3BuilderLabelEquivalence:
                 }
             )
         )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -813,6 +818,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
                 }
             )
         )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
             capital={},
@@ -1363,6 +1369,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [0.0]}))
         mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1383,6 +1390,7 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [None]}))
         mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1414,6 +1422,7 @@ def _make_fake_cache():
     cache.get_pledge_stat = _async_return(pd.DataFrame())
     cache.get_top10_holders = _async_return(pd.DataFrame())
     cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+    cache.get_fina_forecast = _async_return(pd.DataFrame())
     cache.get_concepts = _async_return({})
     return cache
 

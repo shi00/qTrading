@@ -1045,6 +1045,10 @@ class CacheManager:
         """获取股权质押统计"""
         return await self.financial_dao.get_pledge_stat_batch([ts_code], as_of_date=as_of_date)
 
+    async def get_fina_forecast(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """获取业绩预告"""
+        return await self.financial_dao.get_fina_forecast_batch([ts_code], as_of_date=as_of_date)
+
     # --- 股东数据方法 ---
     async def get_top10_holders(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取前十大股东"""
@@ -1134,6 +1138,7 @@ class CacheManager:
             self.financial_dao.get_fina_mainbz_batch(ts_codes, as_of_date=as_of_date),
             self.financial_dao.get_financial_reports_history_batch(ts_codes, as_of_date=as_of_date),
             self.holder_dao.get_stk_holdernumber_batch(ts_codes, as_of_date=as_of_date),
+            self.financial_dao.get_fina_forecast_batch(ts_codes, as_of_date=as_of_date),
         )
 
         batch_keys = [
@@ -1144,6 +1149,7 @@ class CacheManager:
             "mainbz",
             "financial_history",
             "holdernumber",
+            "forecast",
         ]
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):

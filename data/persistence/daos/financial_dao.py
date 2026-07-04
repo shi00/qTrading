@@ -376,6 +376,49 @@ class FinancialDao(BaseDao):
             logger.warning("[FinancialDao] Failed to get pledge batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
 
+    async def get_fina_forecast_batch(self, ts_codes: list[str], as_of_date=None) -> pd.DataFrame:
+        if not ts_codes:
+            return pd.DataFrame()
+
+        try:
+            if as_of_date is not None:
+                return await self.chunked_in_query(
+                    self._read_db,
+                    lambda placeholders, chunk_len, start_idx: (
+                        f"""
+                        SELECT DISTINCT ON (ts_code)
+                            ts_code, end_date, ann_date, type,
+                            p_change_min, p_change_max,
+                            net_profit_min, net_profit_max
+                        FROM fina_forecast
+                        WHERE ts_code IN ({placeholders})
+                          AND ann_date <= ${start_idx + chunk_len}
+                        ORDER BY ts_code, end_date DESC, ann_date DESC
+                    """
+                    ),
+                    ts_codes,
+                    params_fn=lambda chunk: [as_of_date],
+                )
+            else:
+                return await self.chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT DISTINCT ON (ts_code)
+                        ts_code, end_date, ann_date, type,
+                        p_change_min, p_change_max,
+                        net_profit_min, net_profit_max
+                    FROM fina_forecast
+                    WHERE ts_code IN ({placeholders})
+                    ORDER BY ts_code, end_date DESC, ann_date DESC
+                    """,
+                    ts_codes,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[FinancialDao] Failed to get forecast batch: %s", DataSanitizer.sanitize_error(e))
+            return pd.DataFrame()
+
     async def get_fina_mainbz(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         try:
             if as_of_date is not None:
