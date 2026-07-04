@@ -114,6 +114,12 @@ class TushareClient:
 
     _ASYNC_TIMEOUT_MULTIPLIER = 1.5
 
+    # Phase 2B §3.2.5：probe 专用桶配额（50/min 独立配额，避免被同步任务挤压）
+    _PROBE_RATE_LIMIT_RPM = 50
+
+    # Phase 2B §3.2.5：probe 互斥标志（单线程 asyncio 同步段内原子，避免档位切换/手动按钮/启动自动并发）
+    _probe_in_progress: bool = False
+
     _COLUMN_RENAMES = {
         "cn_cpi": {"month": "period", "nt_val": "cpi"},
         "cn_ppi": {"month": "period", "ppi_yoy": "ppi"},
@@ -306,18 +312,22 @@ class TushareClient:
     def reload_rate_limiters(self):
         """Rebuild rate limiters from current config. Call after tier/limit change in settings."""
         with self._lock:
-            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
         logger.info("[API] Rate limiters reloaded from config")
 
-    def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket]]:
+    def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket], TokenBucket]:
         """
         Build rate limiters based on config.
-        Supports three tiers: default, slow APIs, and fast APIs.
+
+        Phase 2B §3.2.5: 返回三元组（全局 + per-API + probe 专用 50/min）。
+        probe 专用桶与全局桶同步创建（避免 R11 跨循环复用同步原语）。
         """
         limit_per_min = self._resolve_rate_limit()
         if not limit_per_min or limit_per_min <= 0:
             logger.info("[API] Rate Limiter disabled (No limit set)")
-            return None, {}
+            # probe 专用桶仍创建（probe 不依赖档位，独立 50/min 配额）
+            probe_limiter = self._build_probe_rate_limiter()
+            return None, {}, probe_limiter
 
         rate_per_sec = limit_per_min / 60.0
         capacity = max(10, rate_per_sec * 2)
@@ -349,7 +359,18 @@ class TushareClient:
                 factor,
             )
 
-        return rate_limiter, api_limiters
+        probe_limiter = self._build_probe_rate_limiter()
+        return rate_limiter, api_limiters, probe_limiter
+
+    def _build_probe_rate_limiter(self) -> TokenBucket:
+        """Phase 2B §3.2.5: probe 专用桶（50/min 独立配额，与全局桶同步创建）。"""
+        probe_rate_per_sec = self._PROBE_RATE_LIMIT_RPM / 60.0
+        probe_capacity = max(5, probe_rate_per_sec * 2)
+        return TokenBucket(
+            start_tokens=probe_capacity,
+            capacity=probe_capacity,
+            rate=probe_rate_per_sec,
+        )
 
     def __init__(self, token: str | None = None, *, config=None, clock=None):
         if self._initialized:
@@ -381,7 +402,7 @@ class TushareClient:
             self.timeout = self._get_tushare_timeout()
             self.max_retries = self._get_request_max_retries()
 
-            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 
             if self.token:
                 ts.set_token(self.token)
@@ -459,7 +480,7 @@ class TushareClient:
             # 显式传 token，避免依赖 tushare SDK 全局状态
             self.pro = ts.pro_api(token=token, timeout=self.timeout) if token else None
 
-            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 
             cache_size = len(self._capability_cache)
             self._capability_cache.clear()
@@ -677,14 +698,16 @@ class TushareClient:
         """
         Probe key APIs to determine their availability for current token.
 
-        Phase 2A.1 §3.2.5 档位预筛：
-        - 入口按 ``is_api_covered_by_tier(api, current_tier)`` 预筛 ``probe_configs``，
-          仅对当前档位覆盖内的 API 发起 probe，避免低档位用户对高档位 API 浪费配额。
-        - probe 并行化与三态分类细化是 Phase 2B 任务，本 Phase 仅实现档位预筛 + 串行 probe。
-
-        progress_callback 推送进度给 UI（TierApiPanel._on_probe_progress），
-        签名为 (completed, total)，total 由档位预筛后的 probe_configs 长度动态确定
-        （v1.10.0 P2-4：不硬编码 29，points_120 实际只 probe 约 8 项）。
+        Phase 2B §3.2.5 实测基础设施：
+        - 入口互斥（``_probe_in_progress`` bool 标志，单线程 asyncio 同步段内原子）
+        - 入口快照（取消/异常时回滚 ``_capability_cache``，避免部分污染）
+        - 档位预筛（``is_api_covered_by_tier`` 过滤候选池）
+        - 并行探测（semaphore=4 + ``gather_return_exceptions_propagating_cancel`` 传播 CancelledError）
+        - 三态分类（True/False/None，None 不写入 ``_capability_cache``）
+        - 服务不可用检测（None 比例 >80% 保留旧缓存）
+        - Token 无效检测（False 比例 >90% 记 error 日志）
+        - 进度回调（``progress_callback(completed, total)``）
+        - 取消回滚 + finally 置 ``_probe_in_progress=False``
 
         Args:
             progress_callback: 可选进度回调，签名为 (completed_count, total_count)
@@ -695,61 +718,277 @@ class TushareClient:
             - False: API is not available (permission denied)
             - None: Unable to determine (other error)
         """
+        from utils.async_utils import gather_return_exceptions_propagating_cancel
         from utils.time_utils import get_now
 
-        recent_date = get_now().strftime("%Y%m%d")
-        PROBE_STOCK_CODE = "000001.SZ"
-        PROBE_RECENT_PERIOD = "20241231"
-        probe_configs: list[tuple[str, dict]] = [
-            ("daily", {"trade_date": recent_date}),
-            ("moneyflow_hsgt", {"trade_date": recent_date}),
-            ("moneyflow", {"trade_date": recent_date}),
-            ("hk_hold", {"trade_date": recent_date}),
-            ("top_list", {"trade_date": recent_date}),
-            ("limit_list_d", {"trade_date": recent_date}),
-            ("margin_detail", {"trade_date": recent_date}),
-            ("block_trade", {"trade_date": recent_date}),
-            ("fina_indicator", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-            ("fina_mainbz", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-            ("stk_holdernumber", {"ts_code": PROBE_STOCK_CODE, "enddate": PROBE_RECENT_PERIOD}),
-            ("top10_holders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-        ]
+        # probe 互斥：单线程 asyncio 同步段内 ``if _probe_in_progress`` 与
+        # ``self._probe_in_progress = True`` 之间无 await，理论原子。
+        if self._probe_in_progress:
+            logger.warning("[TushareClient] Probe already in progress, skipping")
+            # 浅拷贝（bool 不可变足够）；调用方检测 _probe_in_progress 决定 UI 反馈
+            return dict(self._capability_cache)
+        self._probe_in_progress = True
 
-        # Phase 2A.1 §3.2.5 档位预筛：仅 probe 当前档位覆盖内的 API
-        current_tier = self._get_tushare_point_tier()
-        filtered_configs = [
-            (api, params) for api, params in probe_configs if self.is_api_covered_by_tier(api, current_tier)
-        ]
+        # 入口快照：取消/异常时回滚到入口状态（v1.9.0 P0-3/M-3）
+        cache_snapshot = dict(self._capability_cache)
 
-        results: dict[str, bool | None] = {}
-        total = len(filtered_configs)
+        try:
+            recent_date = get_now().strftime("%Y%m%d")
+            PROBE_STOCK_CODE = "000001.SZ"
+            PROBE_RECENT_PERIOD = f"{get_now().year - 1}1231"
 
-        for completed, (api_name, params) in enumerate(filtered_configs, start=1):
-            try:
-                func = getattr(self.pro, api_name)
-                await self._handle_api_call(func, **params)
-                results[api_name] = True
-                self.mark_api_available(api_name)
-            except TushareAPIPermissionError:
-                results[api_name] = False
-                self.mark_api_unavailable(api_name)
-            except Exception as e:
-                results[api_name] = None
-                logger.warning(
-                    "[TushareClient] Probe %s failed with non-permission error: %s",
-                    api_name,
-                    DataSanitizer.sanitize_error(e),
+            # 完整候选池（29 项 = 现有 12 + 追加 17 含 cyq_perf/forecast_eps 独立付费）
+            probe_configs: list[tuple[str, dict]] = [
+                # 现有 12 项
+                ("daily", {"trade_date": recent_date}),
+                ("moneyflow_hsgt", {"trade_date": recent_date}),
+                ("moneyflow", {"trade_date": recent_date}),
+                ("hk_hold", {"trade_date": recent_date}),
+                ("top_list", {"trade_date": recent_date}),
+                ("limit_list_d", {"trade_date": recent_date}),
+                ("margin_detail", {"trade_date": recent_date}),
+                ("block_trade", {"trade_date": recent_date}),
+                ("fina_indicator", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("fina_mainbz", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("stk_holdernumber", {"ts_code": PROBE_STOCK_CODE, "enddate": PROBE_RECENT_PERIOD}),
+                ("top10_holders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                # P0 必接入（5 个，官方确认 ≤5000）
+                ("share_float", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
+                ("stk_holdertrade", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
+                ("index_classify", {"level": "L1", "src": "SW2021"}),
+                ("index_member_all", {"index_code": "801010.SI"}),
+                ("top_inst", {"trade_date": recent_date}),
+                # P0 待实测（2 个）
+                ("stk_factor_pro", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
+                ("top10_floatholders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                # P1 推荐接入（4 个）
+                ("stk_limit", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
+                ("express", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("pledge_detail", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("shibor_lpr", {"date": recent_date}),
+                # P1 待实测（3 个）
+                ("stock_company", {"ts_code": PROBE_STOCK_CODE}),
+                ("stk_managers", {"ts_code": PROBE_STOCK_CODE}),
+                ("stk_surv", {"ts_code": PROBE_STOCK_CODE, "start_date": recent_date, "end_date": recent_date}),
+                # cn_gdp 激活（1 个，v1.10.0 P0-1：quarter 参数）
+                ("cn_gdp", {"quarter": f"{get_now().year - 1}Q4"}),
+                # 独立付费特色数据（2 个，仅 points_10000+ 档位会探测）
+                ("cyq_perf", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
+                ("forecast_eps", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+            ]
+
+            # 档位预筛：仅 probe 当前档位覆盖内的 API
+            current_tier = self._get_tushare_point_tier()
+            filtered_configs = [
+                (api, params) for api, params in probe_configs if self.is_api_covered_by_tier(api, current_tier)
+            ]
+            skipped = len(probe_configs) - len(filtered_configs)
+            if skipped > 0:
+                logger.info(
+                    "[TushareClient] Probe pre-filtered by tier=%s: %d candidates → %d to probe (skipped %d not covered)",
+                    current_tier,
+                    len(probe_configs),
+                    len(filtered_configs),
+                    skipped,
                 )
-            if progress_callback is not None:
-                try:
-                    progress_callback(completed, total)
-                except Exception as cb_exc:  # pragma: no cover - UI 回调异常不应阻塞 probe
-                    logger.debug("[TushareClient] progress_callback failed: %s", cb_exc)
 
-        # Phase 2A.1 §3.2.10：更新 last_probe_time 并持久化
-        self._last_probe_time = get_now()
-        await self.persist_capabilities_to_app_state()
-        return results
+            total = len(filtered_configs)
+            if total == 0:
+                self._last_probe_time = get_now()
+                await self.persist_capabilities_to_app_state()
+                return {}
+
+            # 并行探测过滤后的候选（semaphore=4 + gather 传播 CancelledError）
+            semaphore = asyncio.Semaphore(4)
+            completed_counter = [0]  # list 包装以便闭包内修改
+
+            async def _probe_with_progress(name: str, params: dict) -> tuple[str, bool | None]:
+                result = await self._probe_one(semaphore, name, params)
+                completed_counter[0] += 1
+                if progress_callback is not None:
+                    try:
+                        progress_callback(completed_counter[0], total)
+                    except Exception as cb_exc:  # pragma: no cover - UI 回调异常不应阻塞 probe
+                        logger.warning("[TushareClient] Probe progress_callback failed: %s", cb_exc)
+                return result
+
+            results_list = await gather_return_exceptions_propagating_cancel(
+                *[_probe_with_progress(name, params) for name, params in filtered_configs]
+            )
+            results: dict[str, bool | None] = {}
+            for item in results_list:
+                if isinstance(item, Exception):
+                    # _probe_one 已捕获内部异常，此处 Exception 不应发生；
+                    # 防御性处理：跳过该 item
+                    logger.warning("[TushareClient] Probe returned unexpected exception: %s", item)
+                    continue
+                if isinstance(item, tuple):
+                    api_name, available = item
+                    results[api_name] = available
+
+            # 服务不可用检测（None 比例 >80% 保留旧缓存，不清空）
+            none_count = sum(1 for v in results.values() if v is None)
+            if total > 0 and none_count / total > 0.8:
+                logger.warning(
+                    "[TushareClient] Probe %d/%d APIs returned None (network error?), Tushare service may be unavailable; "
+                    "preserving existing _capability_cache for degraded run",
+                    none_count,
+                    total,
+                )
+                # 保留旧缓存，仅更新 last_probe_time 标记本次 probe 尝试过
+                self._last_probe_time = get_now()
+                await self.persist_capabilities_to_app_state()
+                return self.get_capability_cache()
+
+            # Token 无效检测（False 比例 >90% 记 error 日志）
+            false_count = sum(1 for v in results.values() if v is False)
+            if total > 0 and false_count / total > 0.9:
+                logger.error(
+                    "[TushareClient] Probe %d/%d APIs returned False (permission denied), Token may be invalid or积分严重不足",
+                    false_count,
+                    total,
+                )
+
+            # gather 全部成功后统一写入 _capability_cache（None 不写入，避免污染）
+            for api_name, available in results.items():
+                if available is True:
+                    self.mark_api_available(api_name)
+                elif available is False:
+                    self.mark_api_unavailable(api_name)
+                # None 不写入 _capability_cache（保持原值或不存在）
+
+            self._last_probe_time = get_now()
+            await self.persist_capabilities_to_app_state()
+            return results
+        except asyncio.CancelledError:
+            # 取消时回滚 _capability_cache 到入口快照（R2 红线：raise 传播）
+            logger.info("[TushareClient] Probe cancelled, rolling back _capability_cache to entry snapshot")
+            self._capability_cache = cache_snapshot
+            raise
+        except Exception as exc:
+            # 其他异常（网络抖动等非取消）也回退到入口快照，避免部分污染
+            logger.warning(
+                "[TushareClient] Probe failed, rolling back _capability_cache to entry snapshot: %s",
+                exc,
+            )
+            self._capability_cache = cache_snapshot
+            return self.get_capability_cache()
+        finally:
+            self._probe_in_progress = False
+
+    async def _handle_probe_call(self, api_name: str, func: typing.Callable, **params: typing.Any) -> None:
+        """Phase 2B §3.2.5: probe 专用调用 wrapper。
+
+        与 ``_handle_api_call`` 的差异：
+        - 两段消费：全局桶 + probe 专用桶（50/min 独立配额）
+        - 复用 io_pool / timeout / DataSanitizer / 权限判定
+        - 跳过 reduce_rate / on_success（probe 是一次性探测，不永久降速）
+        - 权限拒绝抛 TushareAPIPermissionError（由 ``_probe_one`` 分类为 False）
+
+        R2 红线：内部 await 必须响应 CancelledError，不吞没。
+        """
+        import contextvars
+        import functools
+
+        from utils.thread_pool import ThreadPoolManager
+
+        if not self.pro:
+            raise Exception("Tushare Token not set. Please set your token in settings.")
+
+        # 两段消费：全局桶 + probe 专用桶
+        if self._rate_limiter is not None:
+            await self._rate_limiter.consume_async(1)
+        await self._probe_rate_limiter.consume_async(1)
+
+        # 格式化日期参数（与 _handle_api_call 一致）
+        formatted_kwargs = {}
+        for k, v in params.items():
+            if isinstance(v, (datetime.date, datetime.datetime)):
+                formatted_kwargs[k] = v.strftime("%Y%m%d")
+            else:
+                formatted_kwargs[k] = v
+
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    ThreadPoolManager().io_pool,
+                    lambda ctx=ctx: ctx.run(functools.partial(func, **formatted_kwargs)),
+                ),
+                timeout=self.timeout * self._ASYNC_TIMEOUT_MULTIPLIER,
+            )
+        except Exception as e:
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+            # 权限判定（复用 PERMISSION_DENIED_KEYWORDS + TOKEN_INVALID_KEYWORDS）
+            is_token_invalid = any(k in error_msg_lower for k in TOKEN_INVALID_KEYWORDS)
+            is_permission_error = is_token_invalid or any(k in error_msg_lower for k in PERMISSION_DENIED_KEYWORDS)
+            if is_permission_error:
+                # 权限拒绝抛 TushareAPIPermissionError，由 _probe_one 分类为 False
+                raise TushareAPIPermissionError(api_name, error_msg) from e
+            # 其他异常（429 / 网络错误等）原样抛出，由 _probe_one 分类为 None
+            # 不调用 reduce_rate（probe 一次性探测，不永久降速）
+            raise
+
+    async def _probe_one(
+        self,
+        semaphore: asyncio.Semaphore,
+        api_name: str,
+        params: dict,
+    ) -> tuple[str, bool | None]:
+        """Phase 2B §3.2.5: 单个 API 探测，返回三态结果。
+
+        三态分类：
+        - True: API 可用（_handle_probe_call 成功）
+        - False: 权限拒绝（TushareAPIPermissionError）
+        - None: 未知（其他异常，如网络错误 / 429）
+
+        v1.9.0 P0-3 修订：本方法**不**直接调用 ``mark_api_available`` / ``mark_api_unavailable``，
+        只返回 ``(api_name, True/False/None)``。统一由 ``probe_api_capabilities`` 主体在 gather
+        全部成功后写入 ``_capability_cache``，避免并行期间中间污染 + 取消时回滚失效。
+        """
+        from utils.error_classifier import classify_error, classify_severity
+
+        async with semaphore:
+            func = getattr(self.pro, api_name, None)
+            if func is None:
+                logger.warning("[TushareClient] Probe %s: API not found in SDK", api_name)
+                return (api_name, None)
+            try:
+                await self._handle_probe_call(api_name, func, **params)
+                return (api_name, True)
+            except TushareAPIPermissionError:
+                # 区分"积分不足"vs"需独立购买"
+                if self.is_independent_purchase(api_name):
+                    logger.info(
+                        "[TushareClient] Probe %s: permission denied (requires independent purchase, points sufficient but not purchased)",
+                        api_name,
+                    )
+                else:
+                    logger.info("[TushareClient] Probe %s: permission denied (insufficient points)", api_name)
+                return (api_name, False)
+            except Exception as e:
+                # 区分 429 限流 vs 网络错误（429 不 reduce_rate，仅记日志，下次 probe 重试）
+                error_msg = str(e).lower()
+                if "429" in error_msg or "rate" in error_msg:
+                    logger.warning(
+                        "[TushareClient] Probe %s: 429 rate limited (will retry next probe cycle)",
+                        api_name,
+                    )
+                else:
+                    # 使用 classify_error + classify_severity 分类（CLAUDE.md §5.7 错误处理标准模式）
+                    error_type = classify_error(e, context="probe")
+                    severity = classify_severity(e, context="probe")
+                    log_level = logging.WARNING if severity != "system" else logging.ERROR
+                    logger.log(
+                        log_level,
+                        "[TushareClient] Probe %s error (type=%s): %s",
+                        api_name,
+                        error_type.get("code", "unknown"),
+                        DataSanitizer.sanitize_error(e),
+                    )
+                return (api_name, None)
 
     @log_async_operation(
         operation_name="tushare_api_call",
