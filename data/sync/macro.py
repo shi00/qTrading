@@ -85,13 +85,76 @@ def _compute_publish_date(period_date: datetime.date) -> datetime.date:
     return datetime.date(period_date.year, period_date.month + 1, 16)
 
 
+def _quarter_to_period_end(quarter: str) -> datetime.date | None:
+    """将 Tushare cn_gdp 的 quarter 字符串（如 "2024Q4"）转为季度末日期。
+
+    - Q1 → 03-31
+    - Q2 → 06-30
+    - Q3 → 09-30
+    - Q4 → 12-31
+
+    Returns:
+        datetime.date 或 None（解析失败时）
+    """
+    if not isinstance(quarter, str) or len(quarter) != 6 or quarter[4] not in ("Q", "q"):
+        return None
+    try:
+        year = int(quarter[:4])
+        q = int(quarter[5])
+    except ValueError:
+        return None
+    last_day = {1: 31, 2: 30, 3: 30, 4: 31}
+    month = {1: 3, 2: 6, 3: 9, 4: 12}
+    if q not in month:
+        return None
+    return datetime.date(year, month[q], last_day[q])
+
+
+def _compute_gdp_publish_date(period_date: datetime.date) -> datetime.date:
+    """保守估算 GDP 发布日期：季度结束后次月 20 日。
+
+    中国 GDP 数据发布窗口（国家统计局）：
+    - 一季度 GDP：4 月 16-20 日发布
+    - 二季度 GDP：7 月 15-20 日发布
+    - 三季度 GDP：10 月 18-20 日发布
+    - 四季度 GDP：次年 1 月 18-20 日发布
+    统一使用季度结束后次月 20 日作为保守估算，避免回测前视偏差。
+    """
+    if period_date.month == 12:
+        return datetime.date(period_date.year + 1, 1, 20)
+    next_month = period_date.month + 1
+    # 季度末月份：3, 6, 9, 12 → 次月 4, 7, 10, 1
+    return datetime.date(period_date.year, next_month, 20)
+
+
+def _latest_quarter_before(period: datetime.date) -> str:
+    """根据 period（最新 macro_economy period）推断应同步的最近 quarter。
+
+    若 period 是 2024-06-30（Q2 末），返回 "2024Q2"；若 period 是 2024-07-15
+    （Q3 中），返回 "2024Q2"（Q3 未结束，不能拉取）。
+
+    Returns:
+        "YYYYQN" 字符串
+    """
+    month = period.month
+    if month <= 3:
+        return f"{period.year - 1}Q4"
+    if month <= 6:
+        return f"{period.year}Q1"
+    if month <= 9:
+        return f"{period.year}Q2"
+    return f"{period.year}Q3"
+
+
 class MacroSyncStrategy(ISyncStrategy):
     """
-    Strategy for syncing Macroeconomic data (M2, CPI, PPI, Shibor).
+    Strategy for syncing Macroeconomic data (M2, CPI, PPI, GDP, Shibor).
     Runs efficiently by checking the latest available data date.
     """
 
     _M2_COLUMNS = ["period", "m2", "m2_yoy", "m1", "m1_yoy", "m0", "m0_yoy"]
+    # Phase 2D §3.2.6：cn_gdp 返回字段（quarter 已被 _COLUMN_RENAMES 重命名为 period）
+    _GDP_COLUMNS = ["period", "gdp", "gdp_yoy", "pi", "pi_yoy", "si", "si_yoy", "ti", "ti_yoy"]
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
@@ -170,7 +233,7 @@ class MacroSyncStrategy(ISyncStrategy):
 
     async def _sync_macro_monthly(self, result: typing.Any):
         """
-        Fetch M2, CPI, PPI and merge into a single DataFrame before save.
+        Fetch M2, CPI, PPI, GDP and merge into a single DataFrame before save.
         Merging in-memory avoids INSERT OR REPLACE wiping other columns.
         """
         try:
@@ -181,7 +244,28 @@ class MacroSyncStrategy(ISyncStrategy):
             df_cpi = await self.context.api.get_macro_data("cn_cpi", start_m=start_m)
             df_ppi = await self.context.api.get_macro_data("cn_ppi", start_m=start_m)
 
-            merged = self._merge_macro_data(df_m2, df_cpi, df_ppi)
+            # Phase 2D §3.2.6：cn_gdp 同步分支
+            # v1.10.0 P0-1：cn_gdp API 期望 quarter 参数（如 "2024Q4"），与 cn_m/cn_cpi/cn_ppi
+            # 的 start_m（YYYYMM）不兼容，因此使用专用 get_cn_gdp(quarter) wrapper。
+            # quarter 推断：根据 latest period 取最近已结束的季度，避免拉取未公布数据。
+            df_gdp = None
+            try:
+                if latest is not None:
+                    latest_period = parse_date(str(latest)).date() if isinstance(latest, str) else latest
+                    quarter = _latest_quarter_before(latest_period)
+                    df_gdp = await self.context.api.get_cn_gdp(quarter=quarter)
+                else:
+                    # 首次同步：拉取去年 Q4（确保已发布）
+                    current_year = get_now().year
+                    df_gdp = await self.context.api.get_cn_gdp(quarter=f"{current_year - 1}Q4")
+            except TushareAPIPermissionError:
+                logger.warning("[MacroSync] Monthly | ⛔ Permission denied for cn_gdp, skipping GDP")
+                # GDP 权限不足不阻断 m2/cpi/ppi 同步，df_gdp 保持 None
+            except Exception as e:
+                logger.warning("[MacroSync] Monthly | ⚠️ cn_gdp fetch failed, skipping GDP: %s", e, exc_info=True)
+                # GDP 失败不阻断 m2/cpi/ppi 同步，df_gdp 保持 None
+
+            merged = self._merge_macro_data(df_m2, df_cpi, df_ppi, df_gdp)
 
             if merged is not None and not merged.empty:
                 count = await self.dao.save_macro_economy(merged)
@@ -224,14 +308,24 @@ class MacroSyncStrategy(ISyncStrategy):
             result.errors.append(f"Macro Monthly: {e}")
 
     @classmethod
-    def _merge_macro_data(cls, df_m2: typing.Any, df_cpi: typing.Any, df_ppi: typing.Any):
+    def _merge_macro_data(
+        cls,
+        df_m2: typing.Any,
+        df_cpi: typing.Any,
+        df_ppi: typing.Any,
+        df_gdp: typing.Any = None,
+    ):
         """
-        Merge M2/CPI/PPI DataFrames on period column.
+        Merge M2/CPI/PPI/GDP DataFrames on period column.
+
+        - M2/CPI/PPI: monthly period (YYYYMM), merged on period (月初)
+        - GDP: quarterly period ("YYYYQN" → quarter-end date), independent rows
 
         Note: Column renaming is handled by TushareClient._COLUMN_RENAMES:
         - cn_m: month -> period
         - cn_cpi: month -> period, nt_val -> cpi
         - cn_ppi: month -> period, ppi_yoy -> ppi
+        - cn_gdp: quarter -> period
         """
         merged = None
 
@@ -242,6 +336,23 @@ class MacroSyncStrategy(ISyncStrategy):
         merged = cls._merge_indicator(merged, df_cpi, "cpi")
         merged = cls._merge_indicator(merged, df_ppi, "ppi")
 
+        # Phase 2D §3.2.6：追加 GDP 数据（季度粒度，period 为季度末日）
+        # GDP 行与月度行 period 不同（2024-12-31 vs 2024-12-01），作为独立行 concat
+        if df_gdp is not None and not df_gdp.empty:
+            gdp_available = [c for c in cls._GDP_COLUMNS if c in df_gdp.columns]
+            gdp_df = df_gdp[gdp_available].copy()
+            if "period" in gdp_df.columns:
+                # quarter 字符串（如 "2024Q4"）转季度末日期（如 2024-12-31）
+                gdp_df["period"] = gdp_df["period"].apply(_quarter_to_period_end)
+                gdp_df = gdp_df.dropna(subset=["period"])
+                if not gdp_df.empty:
+                    # 保守 publish_date：季度结束后次月 20 日
+                    gdp_df["publish_date"] = gdp_df["period"].apply(_compute_gdp_publish_date)
+                    if merged is not None and not merged.empty:
+                        merged = pd.concat([merged, gdp_df], ignore_index=True)
+                    else:
+                        merged = gdp_df
+
         if merged is not None and not merged.empty:
             if "period" not in merged.columns:
                 logger.warning("[MacroSync] _merge_macro_data | 'period' column missing after merge, returning None")
@@ -250,14 +361,25 @@ class MacroSyncStrategy(ISyncStrategy):
             # Tushare macro APIs (cn_m, cn_cpi, cn_ppi) return period as 'YYYYMM' string.
             # base_dao.py's pd.to_datetime(format='mixed') parses 'YYYYMM' as NaT.
             # Here we ensure it's either cleanly parsed or dropped if completely invalid.
+            # GDP rows already have period as datetime.date, _parse_period passes through.
             merged["period"] = merged["period"].apply(_parse_period)
             merged["period"] = pd.to_datetime(merged["period"], format="mixed", errors="coerce").dt.date
             merged = merged.dropna(subset=["period"])
 
-            # Compute publish_date from period for point-in-time queries
-            merged["publish_date"] = merged["period"].apply(
-                lambda p: _compute_publish_date(p) if isinstance(p, datetime.date) else None
-            )
+            # Compute publish_date
+            # - GDP rows already have publish_date set (from _compute_gdp_publish_date)
+            # - Monthly rows need publish_date computed (from _compute_publish_date)
+            if "publish_date" not in merged.columns:
+                merged["publish_date"] = merged["period"].apply(
+                    lambda p: _compute_publish_date(p) if isinstance(p, datetime.date) else None
+                )
+            else:
+                # Fill missing publish_date (monthly rows where GDP concat left NaN)
+                mask = merged["publish_date"].isna()
+                if mask.any():
+                    merged.loc[mask, "publish_date"] = merged.loc[mask, "period"].apply(
+                        lambda p: _compute_publish_date(p) if isinstance(p, datetime.date) else None
+                    )
 
         return merged
 

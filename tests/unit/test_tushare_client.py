@@ -488,6 +488,44 @@ class TestTushareClientApiMethods:
         result = await client.get_macro_data("cn_cpi")
         assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_get_cn_gdp_wrapper_returns_none_when_pro_is_none(self, tushare_client_mocks):
+        """Phase 2D §3.2.6：pro 为 None 时 get_cn_gdp 返回 None。"""
+        client, _, _ = tushare_client_mocks
+        client.pro = None
+        result = await client.get_cn_gdp(quarter="2024Q4")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_cn_gdp_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 2D §3.2.6：get_cn_gdp 委托 _handle_api_call，传递 quarter 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "quarter": ["2024Q4"],
+                "gdp": [35000000.0],
+                "gdp_yoy": [5.2],
+                "pi": [2500000.0],
+                "pi_yoy": [3.1],
+                "si": [14000000.0],
+                "si_yoy": [5.0],
+                "ti": [18500000.0],
+                "ti_yoy": [5.8],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_cn_gdp(quarter="2024Q4")
+
+        assert result is not None
+        # 验证 _handle_api_call 被调用，传入 pro.cn_gdp + quarter + 显式 fields
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.cn_gdp callable
+        assert callable(call_args.args[0])
+        # kwargs 含 quarter 和 fields
+        assert call_args.kwargs["quarter"] == "2024Q4"
+        assert "gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy" in call_args.kwargs["fields"]
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):

@@ -58,6 +58,22 @@ class TestMacroDaoIntegrity:
         assert df["ppi"].iloc[0] == Decimal("-1.2")
 
     @pytest.mark.asyncio
+    async def test_get_macro_economy_latest_includes_gdp(self, macro_dao):
+        """Phase 2D §3.2.6：验证 get_macro_economy_latest 返回 8 个 GDP 字段。"""
+        df = await macro_dao.get_macro_economy_latest()
+
+        assert df is not None
+        assert not df.empty
+        # Phase 2D: 8 个 GDP 字段必须在 SELECT 列表中
+        for col in ("gdp", "gdp_yoy", "pi", "pi_yoy", "si", "si_yoy", "ti", "ti_yoy"):
+            assert col in df.columns, f"GDP 字段 {col} 未在查询结果中"
+        # 验证 MVD 注入的具体值
+        assert df["gdp_yoy"].iloc[0] == Decimal("5.2")
+        assert df["pi_yoy"].iloc[0] == Decimal("3.1")
+        assert df["si_yoy"].iloc[0] == Decimal("5.0")
+        assert df["ti_yoy"].iloc[0] == Decimal("5.8")
+
+    @pytest.mark.asyncio
     async def test_get_macro_latest_date(self, macro_dao):
         """Level 2: 验证宏观经济数据最新日期"""
         result = await macro_dao.get_macro_latest_date()

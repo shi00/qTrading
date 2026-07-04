@@ -166,7 +166,8 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     # v1.6.0 拆分：shibor 段落独立标签（points_120，仅依赖 shibor API）
     "ai_label_shibor": ("points_120", frozenset({"shibor"})),
     # v1.6.0 拆分：宏观完整段落（cn_m/cn_cpi/cn_ppi，points_2000）
-    "ai_label_macro_full": ("points_2000", frozenset({"cn_m", "cn_cpi", "cn_ppi"})),
+    # Phase 2D §3.2.6：cn_gdp 全链路补全，required_apis 追加 cn_gdp
+    "ai_label_macro_full": ("points_2000", frozenset({"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"})),
     "ai_label_global": ("points_120", frozenset()),  # 无 API 依赖（新闻/外部）
     "ai_label_news": ("points_120", frozenset()),  # 无 API 依赖
     "ai_label_learning": ("points_120", frozenset()),  # 无 API 依赖

@@ -509,6 +509,15 @@ TABLE_DEFINITIONS = {
             "m0_yoy": "col_m0_yoy",
             "cpi": "col_cpi",
             "ppi": "col_ppi",
+            # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
+            "gdp": "col_gdp",
+            "gdp_yoy": "col_gdp_yoy",
+            "pi": "col_pi",
+            "pi_yoy": "col_pi_yoy",
+            "si": "col_si",
+            "si_yoy": "col_si_yoy",
+            "ti": "col_ti",
+            "ti_yoy": "col_ti_yoy",
         },
     },
     "shibor_daily": {

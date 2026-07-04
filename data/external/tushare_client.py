@@ -60,6 +60,7 @@ class TushareProApi(typing.Protocol):
     top10_holders: Callable[..., pd.DataFrame]
     index_weight: Callable[..., pd.DataFrame]
     stk_holdernumber: Callable[..., pd.DataFrame]
+    cn_gdp: Callable[..., pd.DataFrame]
 
 
 class TushareAPIPermissionError(Exception):
@@ -124,6 +125,8 @@ class TushareClient:
         "cn_cpi": {"month": "period", "nt_val": "cpi"},
         "cn_ppi": {"month": "period", "ppi_yoy": "ppi"},
         "cn_m": {"month": "period"},
+        # Phase 2D §3.2.6：cn_gdp API 返回 quarter 列，重命名为 period 统一处理
+        "cn_gdp": {"quarter": "period"},
     }
 
     _SLOW_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
@@ -1889,3 +1892,25 @@ class TushareClient:
         if isinstance(end_m, (datetime.date, datetime.datetime)):
             end_m = f"{end_m.year}{end_m.month:02d}"
         return await self._handle_api_call(func, start_m=start_m, end_m=end_m)
+
+    async def get_cn_gdp(self, quarter: str):
+        """Get China GDP data by quarter.
+
+        Phase 2D §3.2.6 v1.10.0 P0-1：cn_gdp API 期望 ``quarter`` 参数（如 "2024Q4"），
+        与 ``get_macro_data(api_name, start_m, end_m)`` 的 YYYYMM 参数 schema 不兼容，
+        故新增专用 wrapper。
+
+        Args:
+            quarter: 季度字符串，格式 "YYYYQN"（如 "2024Q4"）。
+
+        Returns:
+            DataFrame with columns: quarter (renamed to period by _COLUMN_RENAMES),
+            gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy。
+        """
+        if self.pro is None:
+            return None
+        return await self._handle_api_call(
+            self.pro.cn_gdp,
+            quarter=quarter,
+            fields="quarter,gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy",
+        )

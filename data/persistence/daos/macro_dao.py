@@ -115,7 +115,13 @@ class MacroDao(BaseDao):
                         None 表示不限制（取最新一期）。
 
         Returns:
-            DataFrame with latest macro economy data (period, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi)
+            DataFrame with latest macro economy data
+            (period, publish_date, m2, m2_yoy, m1, m1_yoy, m0, m0_yoy, cpi, ppi,
+             gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy)
+
+        Note:
+            Phase 2D §3.2.6：GDP 行与月度行 period 不同（季度末日 vs 月初），
+            LIMIT 1 可能取到 GDP 行或月度行；调用方需处理字段缺失（NaN）情况。
         """
         try:
             t = MacroEconomy.__table__
@@ -130,6 +136,15 @@ class MacroDao(BaseDao):
                 t.c.m0_yoy,
                 t.c.cpi,
                 t.c.ppi,
+                # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
+                t.c.gdp,
+                t.c.gdp_yoy,
+                t.c.pi,
+                t.c.pi_yoy,
+                t.c.si,
+                t.c.si_yoy,
+                t.c.ti,
+                t.c.ti_yoy,
             ]
             stmt = sa.select(*cols)
             if as_of_date is not None:

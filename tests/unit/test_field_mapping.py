@@ -39,7 +39,8 @@ class TestNoUnnecessaryFieldMappings:
         )
 
     def test_macro_mappings_are_intentional(self):
-        allowed_macro_mappings = {"cn_cpi", "cn_ppi", "cn_m"}
+        # Phase 2D §3.2.6：cn_gdp 加入 macro mappings（quarter → period）
+        allowed_macro_mappings = {"cn_cpi", "cn_ppi", "cn_m", "cn_gdp"}
         actual_mappings = set(TushareClient._COLUMN_RENAMES.keys())
         macro_mappings = actual_mappings - {
             "top_list",

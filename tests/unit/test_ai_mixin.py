@@ -1328,6 +1328,60 @@ class TestBuildMacroContext:
         assert "宏观经济环境" in result
         assert "Shibor" in result
 
+    @pytest.mark.asyncio
+    async def test_build_macro_context_includes_gdp(self):
+        """Phase 2D §3.2.6：_build_macro_context 应注入 GDP 段落（含 quarter 字符串和三大产业）。"""
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        # GDP 行：period 为季度末日 2024-12-31，含 GDP 字段
+        cache.get_macro_economy = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "period": [datetime.date(2024, 12, 31)],
+                    "gdp_yoy": [5.2],
+                    "pi_yoy": [3.1],
+                    "si_yoy": [5.0],
+                    "ti_yoy": [5.8],
+                }
+            )
+        )
+        cache.get_shibor_latest = AsyncMock(return_value=None)
+        result = await s._build_macro_context(cache)
+
+        # GDP 段落应被注入
+        assert "GDP" in result
+        # quarter 字符串应从 period 推断：2024-12-31 → "2024Q4"
+        assert "2024Q4" in result
+        # 三大产业同比应被注入
+        assert "5.20" in result  # gdp_yoy
+        assert "3.10" in result  # pi_yoy
+        assert "5.00" in result  # si_yoy
+        assert "5.80" in result  # ti_yoy
+
+    @pytest.mark.asyncio
+    async def test_build_macro_context_gdp_skipped_when_no_gdp_fields(self):
+        """Phase 2D：当 macro 行无 GDP 字段（仅 m2 月度行）时，不注入 GDP 段落。"""
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        # 仅 m2 月度行，无 GDP 字段
+        cache.get_macro_economy = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "period": [datetime.date(2024, 12, 1)],
+                    "m2_yoy": [8.5],
+                    "cpi": [0.2],
+                    "ppi": [-1.5],
+                }
+            )
+        )
+        cache.get_shibor_latest = AsyncMock(return_value=None)
+        result = await s._build_macro_context(cache)
+
+        # m2 段落应被注入
+        assert "M2" in result or "m2" in result.lower() or "8.50" in result
+        # GDP 段落不应被注入（无 gdp_yoy 字段）
+        assert "GDP" not in result
+
 
 class TestPrefetchStrategySpecific:
     @pytest.mark.asyncio

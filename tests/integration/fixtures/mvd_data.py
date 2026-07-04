@@ -597,6 +597,15 @@ MVD_MACRO_ECONOMY = {
     "m0_yoy": Decimal("10.5"),
     "cpi": Decimal("1.8"),
     "ppi": Decimal("-1.2"),
+    # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
+    "gdp": Decimal("35000000.00"),
+    "gdp_yoy": Decimal("5.2"),
+    "pi": Decimal("2500000.00"),
+    "pi_yoy": Decimal("3.1"),
+    "si": Decimal("14000000.00"),
+    "si_yoy": Decimal("5.0"),
+    "ti": Decimal("18500000.00"),
+    "ti_yoy": Decimal("5.8"),
 }
 
 # 注意：ORM 中 Python 属性名与数据库列名不同（通过 name= 映射）。

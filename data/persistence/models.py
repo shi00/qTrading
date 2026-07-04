@@ -535,6 +535,15 @@ class MacroEconomy(Base):
     m0_yoy = Column(Numeric(12, 4))
     cpi = Column(Numeric(12, 4))
     ppi = Column(Numeric(12, 4))
+    # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
+    gdp = Column(Numeric(20, 4))
+    gdp_yoy = Column(Numeric(12, 4))
+    pi = Column(Numeric(20, 4))
+    pi_yoy = Column(Numeric(12, 4))
+    si = Column(Numeric(20, 4))
+    si_yoy = Column(Numeric(12, 4))
+    ti = Column(Numeric(20, 4))
+    ti_yoy = Column(Numeric(12, 4))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
 

@@ -1607,6 +1607,44 @@ class AIStrategyMixin:
                         lines.append(macro_section)
                         has_data = True
 
+                # Phase 2D §3.2.6：cn_gdp 段落（季度数据，period 为季度末日）
+                # GDP 行与 m2 行 period 不同，latest 可能只有 GDP 或只有 m2；分别 stale 标注
+                gdp_lines: list[str] = []
+                gdp_yoy = latest.get("gdp_yoy")
+                if gdp_yoy is not None:
+                    # 从 period（季度末日）推断 quarter 字符串，如 2024-12-31 → "2024Q4"
+                    period = latest.get("period")
+                    quarter_str = ""
+                    if hasattr(period, "year") and hasattr(period, "month"):
+                        q = (period.month - 1) // 3 + 1
+                        quarter_str = f"（{period.year}Q{q}）"
+                    gdp_lines.append(f"- {I18n.get('macro_gdp_yoy')}{quarter_str}: {gdp_yoy:.2f}%")
+
+                    pi_yoy = latest.get("pi_yoy")
+                    if pi_yoy is not None:
+                        gdp_lines.append(f"- {I18n.get('macro_pi_yoy')}: {pi_yoy:.2f}%")
+
+                    si_yoy = latest.get("si_yoy")
+                    if si_yoy is not None:
+                        gdp_lines.append(f"- {I18n.get('macro_si_yoy')}: {si_yoy:.2f}%")
+
+                    ti_yoy = latest.get("ti_yoy")
+                    if ti_yoy is not None:
+                        gdp_lines.append(f"- {I18n.get('macro_ti_yoy')}: {ti_yoy:.2f}%")
+
+                if gdp_lines:
+                    gdp_text = "\n".join(gdp_lines)
+                    # cn_gdp 作为 GDP 段落代理 API，date_column="period"
+                    gdp_section = _build_stale_section(
+                        "cn_gdp",
+                        macro,
+                        lambda _df: gdp_text,
+                        date_column="period",
+                    )
+                    if gdp_section:
+                        lines.append(gdp_section)
+                        has_data = True
+
             shibor = await cache.get_shibor_latest(as_of_date=as_of_date)
             if shibor is not None and not shibor.empty:
                 shibor_latest = shibor.iloc[0]
