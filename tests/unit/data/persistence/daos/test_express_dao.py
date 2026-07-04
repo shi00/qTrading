@@ -1,5 +1,6 @@
 """Phase 3G §4.3.4：ExpressDao 单元测试。"""
 
+import asyncio
 import datetime
 
 import pytest
@@ -143,4 +144,13 @@ class TestGetExpressBatch:
         dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
 
         with pytest.raises(EngineDisposedError):
+            await dao.get_express_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError 必须传播（R2），不返回空 DataFrame。"""
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
             await dao.get_express_batch(["000001.SZ"])

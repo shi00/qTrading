@@ -308,6 +308,9 @@ class TushareClient:
                 # 显式重置熔断标志，符合 _bg_tasks 显式清理风格（虽实例销毁后冗余，但防御性写法）
                 if hasattr(cls._instance, "_token_invalid"):
                     cls._instance._token_invalid = False
+                # 显式重置 probe 互斥标志，避免上一测试用例残留 True 导致下一测试 probe 被跳过
+                if hasattr(cls._instance, "_probe_in_progress"):
+                    cls._instance._probe_in_progress = False
             cls._instance = None
             cls._initialized = False
 
@@ -547,6 +550,10 @@ class TushareClient:
         """Get a copy of the capability cache."""
         with self._capability_cache_lock:
             return dict(self._capability_cache)
+
+    def get_last_probe_time(self) -> datetime.datetime | None:
+        """返回上次 probe 完成时间（公共 getter，避免外部访问私有 _last_probe_time）。"""
+        return self._last_probe_time
 
     def get_tier_order(self, tier: str) -> int:
         """返回档位的顺序值（公共方法，避免外部访问私有 _TIER_ORDER）。"""
@@ -895,6 +902,10 @@ class TushareClient:
         finally:
             self._probe_in_progress = False
 
+    @log_async_operation(
+        operation_name="TushareClient._handle_probe_call",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
     async def _handle_probe_call(self, api_name: str, func: typing.Callable, **params: typing.Any) -> None:
         """Phase 2B §3.2.5: probe 专用调用 wrapper。
 
@@ -1059,9 +1070,9 @@ class TushareClient:
             )
 
         # 全局 token 熔断：token 已失效时快速失败，避免每个 API 独立重试刷屏。
-        # 注意：_token_invalid 的读写未持锁（async 路径不能持 threading.Lock），
-        # 与 set_token 的有锁写入存在极窄竞态窗口；最坏情况是 set_token 后被旧协程
-        # 覆盖为 True 导致持续误熔断，需用户再次 set_token 自愈。
+        # NOTE(lazy): _token_invalid 读写未持锁（async 路径不能持 threading.Lock）.
+        #   ceiling: set_token 后被旧协程覆盖为 True 导致持续误熔断（极窄竞态窗口，需用户再次 set_token 自愈）.
+        #   upgrade: 改用 asyncio.Lock 或 atomic 标志位（如 asyncio.Event）替换 bool 字段.
         if self._token_invalid:
             raise TushareAPIPermissionError(
                 api_name,
@@ -1202,7 +1213,7 @@ class TushareClient:
                         api_name,
                         DataSanitizer.sanitize_error(e),
                     )
-                    raise e
+                    raise
 
                 await asyncio.sleep(1)
         raise RuntimeError(f"[tushare_api] All {self.max_retries} retries exhausted for {api_name}")

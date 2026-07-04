@@ -1390,6 +1390,10 @@ class AIService:
             tier = ConfigHandler.get_tushare_point_tier()
             unavailable_apis = {api for api in client.get_tier_apis(tier) if client.is_api_available(api) is False}
             labels = filter_available_labels(labels, tier, unavailable_apis)
+        except ValueError:
+            # R14 红线扩展：filter_available_labels fail-fast 表示开发期 bug（标签未注册），
+            # 必须暴露而非静默降级，避免生产环境静默漏标
+            raise
         except Exception as exc:
             # 过滤失败不应阻塞 AI 分析（labels 已含全部 key，AI 按 prompt 契约兜底）
             logger.warning("[AIService] filter_available_labels failed, using unfiltered labels: %s", exc)

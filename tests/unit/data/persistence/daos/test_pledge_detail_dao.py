@@ -1,5 +1,7 @@
 """Phase 3B：PledgeDetailDao 单元测试。"""
 
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from contextlib import asynccontextmanager
@@ -116,3 +118,12 @@ class TestGetPledgeDetailBatch:
         result = await dao.get_pledge_detail_batch(["000001.SZ"])
 
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_get_pledge_detail_batch_cancelled_error_propagates(self):
+        """asyncio.CancelledError 必须传播（R2），不返回空 DataFrame。"""
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_pledge_detail_batch(["000001.SZ"])

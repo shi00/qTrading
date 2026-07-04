@@ -1909,6 +1909,16 @@ class TestSyncMaxConcurrentHeavyDynamicClamp:
     @patch.object(
         cfg_mod.ConfigHandler,
         "get_tushare_point_tier",
+        return_value="points_10000",
+    )
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=5)
+    def test_get_sync_max_concurrent_heavy_dynamic_clamp_by_tier_10000(self, mock_get_typed, mock_tier):
+        """points_10000 档位上限 8（与 points_5000 同），传入 5 应保持 5。"""
+        assert cfg_mod.ConfigHandler.get_sync_max_concurrent_heavy() == 5
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_tushare_point_tier",
         return_value="points_15000",
     )
     @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=32)

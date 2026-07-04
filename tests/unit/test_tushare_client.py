@@ -738,8 +738,9 @@ class TestTushareClientBuildRateLimiters:
         loop = asyncio.get_running_loop()
         with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
             await client._handle_api_call(func)
-        client._rate_limiter.consume_async.assert_awaited()
-        client._api_limiters["top10_holders"].consume_async.assert_awaited()
+        # 两段消费契约：全局桶与 per-API 桶各消费 1 个 token
+        client._rate_limiter.consume_async.assert_awaited_once_with(1)
+        client._api_limiters["top10_holders"].consume_async.assert_awaited_once_with(1)
 
     def test_fast_api_overrides_removed(self, tushare_client_mocks):
         """_FAST_API_OVERRIDES ClassVar 应已删除（Phase 2A 移除 fast API 循环）。"""

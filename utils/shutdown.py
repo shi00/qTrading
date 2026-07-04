@@ -240,7 +240,7 @@ class ShutdownCoordinator:
                     step_timeout_s=effective_timeout,
                     critical=critical,
                 )
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as orig_cancel:
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 result = StepResult(
                     name=name,
@@ -251,6 +251,8 @@ class ShutdownCoordinator:
                     error="cancelled",
                 )
                 cancelled = True
+                # 保存原始 CancelledError 以保留取消发起者堆栈，便于关机调试
+                pending_cancel = orig_cancel
             results.append(result)
             if critical and not result.ok:
                 logger.error(
@@ -258,7 +260,8 @@ class ShutdownCoordinator:
                     name,
                 )
         if cancelled:
-            raise asyncio.CancelledError()
+            # 优先 re-raise 原始 CancelledError 保留上下文；fallback 新建（理论不触发）
+            raise pending_cancel  # type: ignore[misc]  # pending_cancel 在 except 块赋值，静态分析无法推断
         return results
 
     async def _run_async_step(self, name: str, step, step_timeout_s: float, critical: bool) -> StepResult:

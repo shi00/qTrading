@@ -184,7 +184,7 @@ async def _maybe_auto_probe_on_startup() -> None:
             logger.debug("[Bootstrap] No Tushare token configured, skipping auto probe")
             return
 
-        last_probe = client._last_probe_time  # noqa: SLF001 — 同包内访问，避免新增公共 getter
+        last_probe = client.get_last_probe_time()
         if last_probe is not None and (get_now() - last_probe) < _AUTO_PROBE_INTERVAL:
             logger.debug(
                 "[Bootstrap] Last probe %s within %s days, skipping auto probe",

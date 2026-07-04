@@ -389,7 +389,7 @@ class TierApiPanel(ft.Column):
             if cache:
                 self._refresh_api_list(cache)
             # 同步 last_probe_time（自动 probe 可能已更新）
-            self._last_probe_time = client._last_probe_time  # noqa: SLF001  # 访问私有属性以同步自动 probe 时间
+            self._last_probe_time = client.get_last_probe_time()
             self.last_probe_text.value = self._format_last_probe_text()
             if self.page:
                 self.update()
@@ -523,7 +523,7 @@ class TierApiPanel(ft.Column):
         from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
 
         self._probe_status = TushareClient().get_capability_cache()
-        self._last_probe_time = TushareClient()._last_probe_time  # noqa: SLF001  # 同步最新 probe 时间
+        self._last_probe_time = TushareClient().get_last_probe_time()
         self.last_probe_text.value = self._format_last_probe_text()
         self.api_list_view.controls = self._build_api_list_controls()
         if self.page:
@@ -543,7 +543,7 @@ class TierApiPanel(ft.Column):
         from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
 
         self._probe_status = TushareClient().get_capability_cache()
-        self._last_probe_time = TushareClient()._last_probe_time  # noqa: SLF001
+        self._last_probe_time = TushareClient().get_last_probe_time()
         self.last_probe_text.value = self._format_last_probe_text()
         self.api_list_view.controls = self._build_api_list_controls()
         if self.page:
@@ -563,7 +563,7 @@ class TierApiPanel(ft.Column):
         from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
 
         self._probe_status = TushareClient().get_capability_cache()
-        self._last_probe_time = TushareClient()._last_probe_time  # noqa: SLF001
+        self._last_probe_time = TushareClient().get_last_probe_time()
         self.last_probe_text.value = self._format_last_probe_text()
         self.api_list_view.controls = self._build_api_list_controls()
         if self.page:

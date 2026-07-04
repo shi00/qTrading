@@ -187,7 +187,7 @@ class TestMaybeAutoProbeOnStartup:
     def _make_client(self, *, token: str = "test_token", last_probe: datetime.datetime | None = None):
         client = MagicMock()
         client.token = token
-        client._last_probe_time = last_probe  # noqa: SLF001 — 测试需访问私有属性以模拟 probe 时间
+        client.get_last_probe_time = MagicMock(return_value=last_probe)
         client.probe_api_capabilities = AsyncMock()
         return client
 
