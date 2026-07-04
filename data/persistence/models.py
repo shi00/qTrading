@@ -195,6 +195,21 @@ class TopInst(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class StkLimit(Base):
+    """每日涨跌停价格（Phase 2G stk_limit 涨跌停价格，仅数据层，不注入 AI）。"""
+
+    __tablename__ = "stk_limit"
+    ts_code = Column(String, primary_key=True)
+    trade_date = Column(Date, primary_key=True, index=True)
+    pre_close = Column(Numeric(12, 4))
+    up_limit = Column(Numeric(12, 4))
+    down_limit = Column(Numeric(12, 4))
+    # R17: limit 是 SQL 保留字，数据库列名映射为 limit_type
+    limit = Column(String, name="limit_type")
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class SyncStatus(Base):
     __tablename__ = "sync_status"
     table_name = Column(String, primary_key=True)

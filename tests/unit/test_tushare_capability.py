@@ -44,6 +44,7 @@ class TestTableToApiMap:
             "limit_list",
             "margin_daily",
             "block_trade",
+            "stk_limit",
         ]
         for table in expected_tables:
             assert table in client.TABLE_TO_API_MAP, f"Missing mapping for {table}"
@@ -52,6 +53,11 @@ class TestTableToApiMap:
         """Phase 2E：top_inst 表名映射到同名 Tushare API。"""
         client, _, _ = tushare_client_mocks
         assert client.TABLE_TO_API_MAP["top_inst"] == "top_inst"
+
+    def test_stk_limit_maps_to_stk_limit_api(self, tushare_client_mocks):
+        """Phase 2G：stk_limit 表名映射到同名 Tushare API。"""
+        client, _, _ = tushare_client_mocks
+        assert client.TABLE_TO_API_MAP["stk_limit"] == "stk_limit"
 
     def test_limit_list_maps_to_limit_list_d_api(self, tushare_client_mocks):
         """本地表名 limit_list 应映射到 Tushare API 名 limit_list_d（带 _d 后缀）。

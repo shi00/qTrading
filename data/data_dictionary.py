@@ -337,6 +337,19 @@ TABLE_DEFINITIONS = {
             "sell_value": "col_sell_value",
         },
     },
+    "stk_limit": {
+        "alias": "tab_stk_limit",
+        "desc": "每日涨跌停价格（Phase 2G stk_limit 涨跌停价格，仅数据层，不注入 AI）",
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
+        "columns": {
+            "ts_code": "col_ts_code",
+            "trade_date": "col_trade_date",
+            "pre_close": "col_pre_close",
+            "up_limit": "col_up_limit",
+            "down_limit": "col_down_limit",
+            "limit_type": "col_limit_type",
+        },
+    },
     "block_trade": {
         "alias": "tab_block_trade",
         "quality_config": {"tier": 1, "monitor": True, "sparse": True},

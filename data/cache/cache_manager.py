@@ -26,6 +26,7 @@ from data.persistence.daos.market_dao import MarketDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
+from data.persistence.daos.stk_limit_dao import StkLimitDao
 from data.persistence.daos.sync_dao import SyncDao
 from data.persistence.daos.top_inst_dao import TopInstDao
 from utils.config_handler import ConfigHandler
@@ -100,6 +101,7 @@ class CacheManager:
             self.holder_dao = HolderDao(self.engine)
             self.backtest_dao = BacktestDAO(self.engine)
             self.top_inst_dao = TopInstDao(self.engine)
+            self.stk_limit_dao = StkLimitDao(self.engine)
 
             self._schema_initialized = False
 
@@ -152,6 +154,7 @@ class CacheManager:
         self.holder_dao.engine = self.engine
         self.backtest_dao.engine = self.engine
         self.top_inst_dao.engine = self.engine
+        self.stk_limit_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -192,6 +195,7 @@ class CacheManager:
             self.holder_dao.engine = None
             self.backtest_dao.engine = None
             self.top_inst_dao.engine = None
+            self.stk_limit_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -908,6 +912,10 @@ class CacheManager:
     async def get_top_inst_batch(self, ts_codes: list[str], as_of_date=None):
         """Phase 2E：批量查询 top_inst 数据。"""
         return await self.top_inst_dao.get_top_inst_batch(ts_codes, as_of_date)
+
+    async def save_stk_limit(self, df: pd.DataFrame):
+        """Phase 2G：stk_limit 每日涨跌停价格入库（仅数据层，不注入 AI）。"""
+        return await self.stk_limit_dao.save_stk_limit(df)
 
     async def save_block_trade(self, df: pd.DataFrame):
         return await self.quote_dao.save_block_trade(df)

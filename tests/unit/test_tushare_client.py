@@ -557,6 +557,32 @@ class TestTushareClientApiMethods:
         assert call_args.kwargs["trade_date"] == "20240614"
         assert "ts_code,trade_date,name,close,pct_change,amount" in call_args.kwargs["fields"]
 
+    @pytest.mark.asyncio
+    async def test_get_stk_limit_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 2G §3.2：get_stk_limit 委托 _handle_api_call，传递 trade_date 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "pre_close": [9.5],
+                "up_limit": [10.45],
+                "down_limit": [8.55],
+                "limit": ["U"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_stk_limit(trade_date="20240614")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.stk_limit callable
+        assert callable(call_args.args[0])
+        # kwargs 含 trade_date 和 fields
+        assert call_args.kwargs["trade_date"] == "20240614"
+        assert "ts_code,trade_date,pre_close,up_limit,down_limit,limit" in call_args.kwargs["fields"]
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):

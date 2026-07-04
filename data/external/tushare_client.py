@@ -61,6 +61,7 @@ class TushareProApi(typing.Protocol):
     index_weight: Callable[..., pd.DataFrame]
     stk_holdernumber: Callable[..., pd.DataFrame]
     cn_gdp: Callable[..., pd.DataFrame]
+    stk_limit: Callable[..., pd.DataFrame]
 
 
 class TushareAPIPermissionError(Exception):
@@ -149,6 +150,7 @@ class TushareClient:
         "fina_indicator": 0.3,
         "disclosure_date": 0.5,
         "forecast": 0.5,
+        "stk_limit": 0.5,
     }
 
     # 积分档位 → 全局 req/min 预设。官方档位对照见 docs/积分挡位.PNG
@@ -271,6 +273,7 @@ class TushareClient:
         "limit_list": "limit_list_d",
         "margin_daily": "margin_detail",
         "block_trade": "block_trade",
+        "stk_limit": "stk_limit",
     }
 
     def __new__(cls, *args, **kwargs):
@@ -1541,6 +1544,22 @@ class TushareClient:
             self.pro.top_inst,
             trade_date=trade_date,
             fields="ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,buy_value,sell_amount,sell_value",
+        )
+
+    async def get_stk_limit(self, trade_date: str | None):
+        """Daily Limit Up/Down Price.
+
+        Phase 2G §3.2：stk_limit 涨跌停价格（仅数据层，不注入 AI），
+        挂 @log_async_operation（由 _handle_api_call 提供）+ 显式 fields。
+
+        Note: Tushare API 返回字段名为 "limit"（SQL 保留字），DAO 层 save_stk_limit
+        在写入数据库时重命名为 "limit_type"（R17）。
+        """
+
+        return await self._handle_api_call(
+            self.pro.stk_limit,
+            trade_date=trade_date,
+            fields="ts_code,trade_date,pre_close,up_limit,down_limit,limit",
         )
 
     async def get_hk_hold(self, trade_date: str | None):

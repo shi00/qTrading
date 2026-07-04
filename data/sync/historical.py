@@ -58,6 +58,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         "block_trade",
         "index_daily",
         "index_dailybasic",
+        "stk_limit",
     ]
 
     CORE_RESUME_TABLES = SYNCED_TABLES
@@ -524,6 +525,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             ("lhb_inst", self.context.api.get_top_inst, "Dragon Tiger Institutional"),
             ("block", self.context.api.get_block_trade, "Block Trade"),
             ("index_basic", self.context.api.get_index_dailybasic, "Index Indicators"),
+            ("stk_limit", self.context.api.get_stk_limit, "Daily Limit Price"),
         ]
 
         async def fetch_wrapper(key: typing.Any, func: typing.Callable, name: typing.Any):
@@ -710,6 +712,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         margin_result = await save_if_ok("margin", cache.save_margin_daily)
         lhb_result = await save_if_ok("lhb", cache.save_top_list)
         lhb_inst_result = await save_if_ok("lhb_inst", cache.save_top_inst)
+        stk_limit_result = await save_if_ok("stk_limit", cache.save_stk_limit)
         await asyncio.sleep(0)
         block_result = await save_if_ok("block", cache.save_block_trade)
         mf_result = await save_if_ok("mf", cache.save_moneyflow)
@@ -860,6 +863,8 @@ class HistoricalSyncStrategy(ISyncStrategy):
         verify_data_integrity("lhb", lhb_result)
         await safe_update_status("top_inst", lhb_inst_result, trade_date)
         verify_data_integrity("lhb_inst", lhb_inst_result)
+        await safe_update_status("stk_limit", stk_limit_result, trade_date)
+        verify_data_integrity("stk_limit", stk_limit_result)
         await safe_update_status("block_trade", block_result, trade_date)
         verify_data_integrity("block", block_result)
         await safe_update_status("index_daily", index_result, trade_date)
@@ -871,7 +876,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             "[HistoricalSync] Sync status update for %s: "
             "quotes=%s, basic=%s, mf=%s, "
             "limit=%s, lhb=%s, lhb_inst=%s, block=%s, "
-            "index=%s, index_basic=%s",
+            "index=%s, index_basic=%s, stk_limit=%s",
             trade_date,
             quotes_rows,
             basic_rows,
@@ -882,6 +887,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             block_result,
             index_result,
             index_basic_result,
+            stk_limit_result,
         )
         return True
 

@@ -34,6 +34,7 @@ def make_ctx():
     ctx.cache.save_moneyflow_hsgt = AsyncMock(return_value=2)
     ctx.cache.save_top_list = AsyncMock(return_value=1)
     ctx.cache.save_top_inst = AsyncMock(return_value=0)
+    ctx.cache.save_stk_limit = AsyncMock(return_value=0)
     ctx.cache.save_block_trade = AsyncMock(return_value=1)
     ctx.cache.save_index_daily = AsyncMock(return_value=3)
     ctx.cache.save_index_dailybasic = AsyncMock(return_value=3)
@@ -67,6 +68,7 @@ def make_ctx():
     ctx.api.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_top_list = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_top_inst = AsyncMock(return_value=pd.DataFrame())
+    ctx.api.get_stk_limit = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_block_trade = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_index_dailybasic = AsyncMock(return_value=pd.DataFrame())
     ctx.api.get_index_daily = AsyncMock(return_value=pd.DataFrame())
@@ -852,6 +854,10 @@ class TestHistoricalSyncConstants:
         """Phase 2E：top_inst 加入 SYNCED_TABLES。"""
         assert "top_inst" in HistoricalSyncStrategy.SYNCED_TABLES
 
+    def test_synced_tables_includes_stk_limit(self):
+        """Phase 2G：stk_limit 加入 SYNCED_TABLES。"""
+        assert "stk_limit" in HistoricalSyncStrategy.SYNCED_TABLES
+
 
 class TestHistoricalSyncTopInst:
     """Phase 2E：top_inst 同步分支测试。"""
@@ -903,6 +909,53 @@ class TestHistoricalSyncTopInst:
 
         assert result is True
         ctx.cache.save_top_inst.assert_not_awaited()
+
+
+class TestHistoricalSyncStkLimit:
+    """Phase 2G：stk_limit 同步分支测试（仅数据层，不注入 AI）。"""
+
+    @pytest.mark.asyncio
+    async def test_sync_daily_market_snapshot_includes_stk_limit(self):
+        """sync_daily_market_snapshot 应调用 get_stk_limit + save_stk_limit，并更新 sync_status。"""
+        ctx = make_ctx()
+        ctx.api.get_stk_limit = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240614"],
+                    "pre_close": [9.5],
+                    "up_limit": [10.45],
+                    "down_limit": [8.55],
+                    "limit": ["U"],
+                }
+            )
+        )
+        ctx.cache.save_stk_limit = AsyncMock(return_value=1)
+        strategy = HistoricalSyncStrategy(ctx)
+
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+
+        assert result is True
+        ctx.api.get_stk_limit.assert_awaited_once_with(trade_date=datetime.date(2024, 6, 14))
+        ctx.cache.save_stk_limit.assert_awaited_once()
+        # sync_status 表名应为 "stk_limit"
+        update_calls = ctx.cache.update_sync_status.await_args_list
+        table_names = [call.args[0] for call in update_calls]
+        assert "stk_limit" in table_names
+
+    @pytest.mark.asyncio
+    async def test_sync_daily_market_snapshot_stk_limit_permission_denied(self):
+        """stk_limit 权限不足时应标记 skipped_permission，不阻断同步。"""
+        from data.external.tushare_client import TushareAPIPermissionError
+
+        ctx = make_ctx()
+        ctx.api.get_stk_limit = AsyncMock(side_effect=TushareAPIPermissionError("stk_limit", "no permission"))
+        strategy = HistoricalSyncStrategy(ctx)
+
+        result = await strategy.sync_daily_market_snapshot(datetime.date(2024, 6, 14), force=True)
+
+        assert result is True
+        ctx.cache.save_stk_limit.assert_not_awaited()
 
 
 class TestHistoricalSyncRunDeepBranches:
