@@ -1594,11 +1594,6 @@ class TestSimpleGetterSetters:
         cfg_mod.ConfigHandler.set_tushare_timeout(60)
         mock_set.assert_called_once_with("tushare_timeout", 60)
 
-    @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
-    def test_set_tushare_api_limit(self, mock_set):
-        cfg_mod.ConfigHandler.set_tushare_api_limit(500)
-        mock_set.assert_called_once_with("tushare_api_rate_limit", 500)
-
 
 class TestGetFailoverConfig:
     """测试 get_failover_config 获取 failover 配置"""
@@ -1823,39 +1818,103 @@ class TestGetMaxConcurrentTasks:
 class TestTusharePointTier:
     """测试 get_tushare_point_tier / set_tushare_point_tier"""
 
-    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"tushare_point_tier": "pro"})
-    def test_get_tushare_point_tier_custom(self, mock_load):
+    @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={"tushare_point_tier": "points_5000"})
+    def test_get_tushare_point_tier_points_5000(self, mock_load):
         result = cfg_mod.ConfigHandler.get_tushare_point_tier()
-        assert result == "pro"
+        assert result == "points_5000"
 
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_get_tushare_point_tier_default(self, mock_load):
         result = cfg_mod.ConfigHandler.get_tushare_point_tier()
-        assert result == "custom"
+        assert result == "points_5000"
 
     @patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True)
     def test_set_tushare_point_tier(self, mock_set):
-        result = cfg_mod.ConfigHandler.set_tushare_point_tier("pro")
+        result = cfg_mod.ConfigHandler.set_tushare_point_tier("points_5000")
         assert result is True
-        mock_set.assert_called_once_with("tushare_point_tier", "pro")
+        mock_set.assert_called_once_with("tushare_point_tier", "points_5000")
 
     def test_point_tier_roundtrip(self):
         with patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True):
-            cfg_mod.ConfigHandler._config_cache = {"tushare_point_tier": "pro"}
+            cfg_mod.ConfigHandler._config_cache = {"tushare_point_tier": "points_5000"}
             result = cfg_mod.ConfigHandler.get_tushare_point_tier()
-            assert result == "pro"
+            assert result == "points_5000"
             cfg_mod.ConfigHandler._config_cache = None
 
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_point_tier_default_when_unset(self, mock_load):
         result = cfg_mod.ConfigHandler.get_tushare_point_tier()
-        assert result == "custom"
+        assert result == "points_5000"
 
     def test_set_tushare_point_tier_rejects_invalid(self):
         with patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True) as mock_set:
             result = cfg_mod.ConfigHandler.set_tushare_point_tier("platinum")
             assert result is False
             mock_set.assert_not_called()
+
+    def test_set_tushare_point_tier_accepts_all_5_points_tiers(self):
+        """验证 5 档 points_* 值均被白名单接受。"""
+        for tier in [
+            "points_120",
+            "points_2000",
+            "points_5000",
+            "points_10000",
+            "points_15000",
+        ]:
+            with patch.object(cfg_mod.ConfigHandler, "set_typed", return_value=True) as mock_set:
+                result = cfg_mod.ConfigHandler.set_tushare_point_tier(tier)
+                assert result is True
+                mock_set.assert_called_once_with("tushare_point_tier", tier)
+
+
+class TestSyncMaxConcurrentHeavyDynamicClamp:
+    """测试 get/set_sync_max_concurrent_heavy 的动态 clamp 行为（按 tushare_point_tier）"""
+
+    @patch.object(cfg_mod.ConfigHandler, "save_config", return_value=True)
+    def test_set_sync_max_concurrent_heavy_clamps_high(self, mock_save):
+        """传入 32 应 clamp 到 8（heavy 上限）。"""
+        cfg_mod.ConfigHandler.set_sync_max_concurrent_heavy(32)
+        mock_save.assert_called_once_with({"sync_max_concurrent_heavy": 8})
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_tushare_point_tier",
+        return_value="points_120",
+    )
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=5)
+    def test_get_sync_max_concurrent_heavy_dynamic_clamp_by_tier_120(self, mock_get_typed, mock_tier):
+        """points_120 档位上限 1，传入 5 应 clamp 到 1。"""
+        assert cfg_mod.ConfigHandler.get_sync_max_concurrent_heavy() == 1
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_tushare_point_tier",
+        return_value="points_2000",
+    )
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=5)
+    def test_get_sync_max_concurrent_heavy_dynamic_clamp_by_tier_2000(self, mock_get_typed, mock_tier):
+        """points_2000 档位上限 3，传入 5 应 clamp 到 3。"""
+        assert cfg_mod.ConfigHandler.get_sync_max_concurrent_heavy() == 3
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_tushare_point_tier",
+        return_value="points_5000",
+    )
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=5)
+    def test_get_sync_max_concurrent_heavy_dynamic_clamp_by_tier_5000(self, mock_get_typed, mock_tier):
+        """points_5000+ 档位上限 8，传入 5 应保持 5。"""
+        assert cfg_mod.ConfigHandler.get_sync_max_concurrent_heavy() == 5
+
+    @patch.object(
+        cfg_mod.ConfigHandler,
+        "get_tushare_point_tier",
+        return_value="points_15000",
+    )
+    @patch.object(cfg_mod.ConfigHandler, "get_typed", return_value=32)
+    def test_get_sync_max_concurrent_heavy_dynamic_clamp_high_tier_caps_at_8(self, mock_get_typed, mock_tier):
+        """points_15000 档位上限 8，传入 32 应 clamp 到 8。"""
+        assert cfg_mod.ConfigHandler.get_sync_max_concurrent_heavy() == 8
 
 
 class TestSaveProviderCredentialClearSemantics:

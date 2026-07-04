@@ -398,23 +398,25 @@ class TestPromptDefaultsSingleSource:
 
 
 class TestTusharePointTier:
-    def test_point_tier_default_is_custom(self):
+    def test_point_tier_default_is_points_5000(self):
         cfg = AppConfig()
-        assert cfg.tushare_point_tier == "custom"
+        assert cfg.tushare_point_tier == "points_5000"
 
-    def test_point_tier_accepts_known_tiers(self):
-        for tier in ["free", "standard", "pro", "custom"]:
+    def test_point_tier_accepts_points_tiers(self):
+        for tier in [
+            "points_120",
+            "points_2000",
+            "points_5000",
+            "points_10000",
+            "points_15000",
+        ]:
             cfg = AppConfig(tushare_point_tier=tier)
             assert cfg.tushare_point_tier == tier
-
-    def test_point_tier_rejects_flagship(self):
-        with pytest.raises(ValidationError):
-            AppConfig(tushare_point_tier="flagship")
 
     def test_point_tier_rejects_unknown(self):
         with pytest.raises(ValidationError):
             AppConfig(tushare_point_tier="platinum")
 
-    def test_rate_limit_allows_high_tier_values(self):
-        cfg = AppConfig(tushare_api_rate_limit=8000)
-        assert cfg.tushare_api_rate_limit == 8000
+    def test_sync_max_concurrent_heavy_rejects_above_8(self):
+        with pytest.raises(ValidationError):
+            AppConfig(sync_max_concurrent_heavy=9)

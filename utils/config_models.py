@@ -153,8 +153,7 @@ class AppConfig(BaseModel):
     local_flash_attn: bool = True
     local_n_gpu_layers: int = Field(default=0, ge=-1)
 
-    sync_max_concurrent_heavy: int = Field(default=5, ge=1, le=20)
-    sync_concurrency_light: int = Field(default=20, ge=1)
+    sync_max_concurrent_heavy: int = Field(default=5, ge=1, le=8)
     sync_batch_size: int = Field(default=50, ge=5, le=200)
     max_batch_rows: int = Field(default=20000, ge=1000)
     sync_request_delay_heavy: float = Field(default=0.0, ge=0)
@@ -171,8 +170,9 @@ class AppConfig(BaseModel):
 
     request_max_retries: int = Field(default=3, ge=0, le=10)
     tushare_timeout: int = Field(default=30, ge=5, le=300)
-    tushare_api_rate_limit: int = Field(default=200, ge=1, le=10000)
-    tushare_point_tier: str = Field(default="custom", pattern="^(free|standard|pro|custom)$")
+    tushare_point_tier: str = Field(
+        default="points_5000", pattern=r"^(points_120|points_2000|points_5000|points_10000|points_15000)$"
+    )
 
     theme_name: str = Field(default="dark", pattern="^(light|dark)$")
     locale: str = Field(default="zh", pattern="^(zh|zh_CN|en|en_US)$")

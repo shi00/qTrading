@@ -11,7 +11,7 @@ from data.external.tushare_client import TushareClient
 pytestmark = pytest.mark.unit
 
 
-def _make_client(token="test_token", limit=120):
+def _make_client(token="test_token", tier="points_5000"):
     """Helper for tests that need independent client creation (e.g. reinit scenarios)."""
     with (
         patch("data.external.tushare_client.ts") as mock_ts,
@@ -21,8 +21,7 @@ def _make_client(token="test_token", limit=120):
         mock_ch.get_token.return_value = token
         mock_ch.get_tushare_timeout.return_value = 30
         mock_ch.get_request_max_retries.return_value = 3
-        mock_ch.get_tushare_api_limit.return_value = limit
-        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_point_tier.return_value = tier
         client = TushareClient(token=token)
     return client
 
@@ -37,8 +36,7 @@ def tushare_client_mocks():
         mock_ch.get_token.return_value = "test_token"
         mock_ch.get_tushare_timeout.return_value = 30
         mock_ch.get_request_max_retries.return_value = 3
-        mock_ch.get_tushare_api_limit.return_value = 120
-        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client = TushareClient(token="test_token")
         yield client, mock_ts, mock_ch
 
@@ -57,8 +55,7 @@ class TestTushareClientInit:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             assert client.pro is None
 
@@ -72,8 +69,7 @@ class TestTushareClientInit:
             mock_ch.get_token.return_value = "test_token"
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 120
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             TushareClient(token="test_token")
             mock_ts.pro_api.assert_not_called()
 
@@ -88,8 +84,7 @@ class TestTushareClientInit:
                 mock_ch.get_token.return_value = "old_token"
                 mock_ch.get_tushare_timeout.return_value = 30
                 mock_ch.get_request_max_retries.return_value = 3
-                mock_ch.get_tushare_api_limit.return_value = 120
-                mock_ch.get_tushare_point_tier.return_value = "custom"
+                mock_ch.get_tushare_point_tier.return_value = "points_5000"
                 TushareClient(token="new_token")
                 mock_set.assert_called_once_with("new_token")
 
@@ -103,8 +98,7 @@ class TestTushareClientInit:
             mock_ch.get_token.return_value = "test_token"
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 120
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             TushareClient(token=None)
             mock_ts.pro_api.assert_not_called()
 
@@ -112,7 +106,6 @@ class TestTushareClientInit:
 class TestTushareClientSetToken:
     def test_set_token(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_api_limit.return_value = 120
         client.set_token("new_token")
         assert client.token == "new_token"
         mock_ts.set_token.assert_called_with("new_token")
@@ -155,8 +148,7 @@ class TestTushareClientHandleApiCall:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 1
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             with pytest.raises(Exception, match="Token not set"):
                 await client._handle_api_call(lambda: None)
@@ -315,8 +307,7 @@ class TestTushareClientGetTradeDates:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             with pytest.raises(Exception, match="Tushare Token not set"):
                 client.get_trade_dates("20240101", "20240630")
@@ -501,61 +492,152 @@ class TestTushareClientApiMethods:
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 120
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is not None
         assert "top10_holders" in client._api_limiters
 
     def test_without_limit(self, tushare_client_mocks):
+        """未知档位应禁用限速器（_POINT_TIER_PRESETS.get 返回 0）。"""
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 0
+        mock_ch.get_tushare_point_tier.return_value = "unknown_tier"
         client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is None
 
     def test_resolve_rate_limit_uses_tier_preset(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "pro"
-        mock_ch.get_tushare_api_limit.return_value = 999
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         limit = client._resolve_rate_limit()
         assert limit == 500
 
-    def test_resolve_rate_limit_custom_falls_back_to_manual(self, tushare_client_mocks):
-        client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 333
-        limit = client._resolve_rate_limit()
-        assert limit == 333
-
     def test_build_rate_limiters_honors_tier(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "pro"
-        mock_ch.get_tushare_api_limit.return_value = 0
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client._rate_limiter, client._api_limiters = client._build_rate_limiters()
         assert client._rate_limiter is not None
         assert pytest.approx(client._rate_limiter.rate * 60, abs=1) == 500
 
     def test_reload_rate_limiters_updates_instance(self, tushare_client_mocks):
+        """reload_rate_limiters 应根据当前档位重建限速器，rate 随档位变化。"""
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 120
+        # 先 reload 到 points_120，记录 old_rate（fixture 初始化为 points_5000，需显式 reload 切换）
+        mock_ch.get_tushare_point_tier.return_value = "points_120"
+        client.reload_rate_limiters()
         assert client._rate_limiter is not None
         old_rate = client._rate_limiter.rate
-        mock_ch.get_tushare_api_limit.return_value = 600
+        # 切换到 points_5000 并 reload，验证 rate 变化
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client.reload_rate_limiters()
         assert client._rate_limiter is not None
         assert client._rate_limiter.rate != old_rate
 
     def test_reload_rate_limiters_with_tier_change(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 120
+        mock_ch.get_tushare_point_tier.return_value = "points_120"
         client.reload_rate_limiters()
-        assert client._rate_limiter.rate * 60 == pytest.approx(120, abs=1)
-        mock_ch.get_tushare_point_tier.return_value = "pro"
+        assert client._rate_limiter.rate * 60 == pytest.approx(50, abs=1)
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client.reload_rate_limiters()
         assert client._rate_limiter.rate * 60 == pytest.approx(500, abs=1)
+
+    @pytest.mark.asyncio
+    async def test_global_limiter_always_consumed(self, tushare_client_mocks):
+        """两段消费：全局 _rate_limiter 始终先消费，per-API limiter 额外收紧。
+
+        _handle_api_call 通过 func.__name__ 推断 api_name，故需显式设置 __name__
+        使其命中 _api_limiters["top10_holders"]。
+        """
+        client, _, _ = tushare_client_mocks
+        client._rate_limiter = MagicMock()
+        client._rate_limiter.consume_async = AsyncMock()
+        client._api_limiters = {"top10_holders": MagicMock()}
+        client._api_limiters["top10_holders"].consume_async = AsyncMock()
+        func = MagicMock()
+        func.__name__ = "top10_holders"  # _handle_api_call 通过 __name__ 推断 api_name
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
+            await client._handle_api_call(func)
+        client._rate_limiter.consume_async.assert_awaited()
+        client._api_limiters["top10_holders"].consume_async.assert_awaited()
+
+    def test_fast_api_overrides_removed(self, tushare_client_mocks):
+        """_FAST_API_OVERRIDES ClassVar 应已删除（Phase 2A 移除 fast API 循环）。"""
+        assert not hasattr(TushareClient, "_FAST_API_OVERRIDES")
+
+    def test_slow_api_limiter_stacks_on_global(self, tushare_client_mocks):
+        """slow API limiter 在全局桶基础上额外收紧（factor < 1.0）。"""
+        client, _, _ = tushare_client_mocks
+        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
+        # slow API limiter 应存在且 rate 低于全局
+        assert "top10_holders" in client._api_limiters
+        global_rate = client._rate_limiter.rate
+        slow_rate = client._api_limiters["top10_holders"].rate
+        assert slow_rate < global_rate
+
+
+class TestTushareClientTierApiCoverage:
+    """档位 API 覆盖映射 + 独立付费 API 标记测试。"""
+
+    def test_tier_api_coverage_points_120_has_basic_apis(self):
+        """points_120 档位应覆盖基础元数据 + 日线 + shibor。"""
+        apis = TushareClient().get_tier_apis("points_120")
+        assert "trade_cal" in apis
+        assert "stock_basic" in apis
+        assert "daily" in apis
+        assert "shibor" in apis
+
+    def test_tier_api_coverage_points_2000_adds_financial_apis(self):
+        """points_2000 应在 points_120 基础上新增财务/股东/龙虎榜等。"""
+        apis_120 = TushareClient().get_tier_apis("points_120")
+        apis_2000 = TushareClient().get_tier_apis("points_2000")
+        # points_2000 包含 points_120 的所有 API
+        assert apis_120.issubset(apis_2000)
+        # 新增项
+        assert "income" in apis_2000
+        assert "top10_holders" in apis_2000
+        assert "top_list" in apis_2000
+
+    def test_tier_api_coverage_points_5000_adds_share_float(self):
+        """points_5000 应在 points_2000 基础上新增 share_float。"""
+        apis_2000 = TushareClient().get_tier_apis("points_2000")
+        apis_5000 = TushareClient().get_tier_apis("points_5000")
+        assert apis_2000.issubset(apis_5000)
+        assert "share_float" in apis_5000
+        assert "share_float" not in apis_2000
+
+    def test_tier_api_coverage_points_10000_adds_independent_purchase(self):
+        """points_10000 应在 points_5000 基础上新增 cyq_perf / forecast_eps。"""
+        apis_5000 = TushareClient().get_tier_apis("points_5000")
+        apis_10000 = TushareClient().get_tier_apis("points_10000")
+        assert apis_5000.issubset(apis_10000)
+        assert "cyq_perf" in apis_10000
+        assert "forecast_eps" in apis_10000
+
+    def test_tier_api_coverage_points_15000_no_new_apis(self):
+        """points_15000 与 points_10000 API 集合相同（频次相同，仅积分门槛不同）。"""
+        apis_10000 = TushareClient().get_tier_apis("points_10000")
+        apis_15000 = TushareClient().get_tier_apis("points_15000")
+        assert apis_10000 == apis_15000
+
+    def test_is_api_covered_by_tier_returns_bool(self):
+        """is_api_covered_by_tier 返回 bool 类型。"""
+        client = TushareClient()
+        assert client.is_api_covered_by_tier("daily", "points_120") is True
+        assert client.is_api_covered_by_tier("income", "points_120") is False
+
+    def test_independent_purchase_apis(self):
+        """独立付费 API 集合应包含 cyq_perf / forecast_eps / rating。"""
+        assert TushareClient().is_independent_purchase("cyq_perf") is True
+        assert TushareClient().is_independent_purchase("forecast_eps") is True
+        assert TushareClient().is_independent_purchase("rating") is True
+        assert TushareClient().is_independent_purchase("daily") is False
+
+    def test_get_tier_apis_uses_current_tier_when_none_passed(self, tushare_client_mocks):
+        """get_tier_apis(None) 应使用当前档位（从 ConfigHandler 读取）。"""
+        client, _, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
+        apis = client.get_tier_apis()
+        assert "share_float" in apis
 
 
 class TestTushareClientConstants:
@@ -571,12 +653,6 @@ class TestTushareClientConstants:
     def test_slow_api_overrides(self):
         assert "top10_holders" in TushareClient._SLOW_API_OVERRIDES
         assert "concept_detail" in TushareClient._SLOW_API_OVERRIDES
-
-    def test_fast_api_overrides(self):
-        assert "daily" in TushareClient._FAST_API_OVERRIDES
-        assert "daily_basic" in TushareClient._FAST_API_OVERRIDES
-        assert "trade_cal" in TushareClient._FAST_API_OVERRIDES
-        assert "index_dailybasic" in TushareClient._FAST_API_OVERRIDES
 
 
 class TestTushareClientReset:
@@ -892,8 +968,7 @@ class TestTushareClientGetTradeCal:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             with pytest.raises(Exception, match="Tushare Token not set"):
                 await client.get_trade_cal("20240601", "20240630")

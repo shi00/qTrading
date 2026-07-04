@@ -142,30 +142,116 @@ class TushareClient:
         "forecast": 0.5,
     }
 
-    _FAST_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
-        "daily": 2.5,
-        "daily_basic": 2.5,
-        "adj_factor": 2.5,
-        "trade_cal": 5.0,
-        "stock_basic": 5.0,
-        "index_daily": 2.5,
-        "index_dailybasic": 2.5,
-        "index_weight": 2.5,
-    }
-
-    # 积分档位 → 推荐全局 req/min 预设。官方档位对照见 docs/积分挡位.PNG
+    # 积分档位 → 全局 req/min 预设。官方档位对照见 docs/积分挡位.PNG
     # 官方实际频次只有三档：120分=50/min，2000/3000分=200/min，5000分及以上=500/min
     # 5000+ 积分频次均为 500/min，差异在于数据权限（更多特色接口）
-    # 因子表（_SLOW/_FAST_API_OVERRIDES）按 standard=200/min 推导：
-    #   财报核心(income/balancesheet/cashflow/fina_indicator) 0.3 -> 60/min (2000分文档约60-80/min)
-    #   公告/预告(disclosure_date/forecast/fina_audit/fina_mainbz) 0.5 -> 100/min
-    #   行情类(daily/daily_basic/adj_factor/index_*) 2.5 -> 500/min (pro档顶满官方上限)
-    #   元数据(trade_cal/stock_basic) 5.0 -> 1000/min (standard档；pro档受全局500上限约束)
     _POINT_TIER_PRESETS: typing.ClassVar[dict[str, int]] = {
-        "free": 50,
-        "standard": 200,
-        "pro": 500,
+        "points_120": 50,
+        "points_2000": 200,
+        "points_5000": 500,
+        "points_10000": 500,
+        "points_15000": 500,
     }
+
+    # 档位顺序值（用于 get_tier_apis 合并低档位 API 集合）
+    _TIER_ORDER: typing.ClassVar[dict[str, int]] = {
+        "points_120": 0,
+        "points_2000": 1,
+        "points_5000": 2,
+        "points_10000": 3,
+        "points_15000": 4,
+    }
+
+    # 档位 API 覆盖映射（层层包含，每档只列新增项，get_tier_apis 合并低档位）
+    # 按设计文档 v1.10.0 §3.2.1 完整定义
+    _TIER_API_COVERAGE: typing.ClassVar[dict[str, frozenset[str]]] = {
+        "points_120": frozenset(
+            {
+                # 50/min 档位：基础元数据 + 日线 + shibor + shibor_lpr
+                "trade_cal",
+                "stock_basic",
+                "daily",
+                "daily_basic",
+                "adj_factor",
+                "index_daily",
+                "index_dailybasic",
+                "index_weight",
+                "shibor",
+                "shibor_lpr",
+            }
+        ),
+        "points_2000": frozenset(
+            {
+                # 200/min 档位：+ 财务报表 + 股东 + 龙虎榜 + 概念 + 宏观 + 资金流 + 市场异动
+                "income",
+                "balancesheet",
+                "cashflow",
+                "fina_indicator",
+                "fina_mainbz",
+                "fina_audit",
+                "forecast",
+                "dividend",
+                "repurchase",
+                "stk_holdernumber",
+                "top10_holders",
+                "pledge_stat",
+                "pledge_detail",
+                "top_list",
+                "top_inst",
+                "concept",
+                "concept_detail",
+                "moneyflow",
+                "moneyflow_hsgt",
+                "hk_hold",
+                "block_trade",
+                "limit_list_d",
+                "suspend_d",
+                "margin_detail",
+                "stk_holdertrade",
+                "stk_limit",
+                "express",
+                "index_classify",
+                "index_member_all",
+                "cn_m",
+                "cn_cpi",
+                "cn_ppi",
+                "cn_gdp",
+                "stock_company",
+                "stk_managers",
+                "stk_surv",
+                "stk_factor_pro",
+                "top10_floatholders",  # 假设 points_2000 可访问（待 probe 验证）
+                "disclosure_date",
+            }
+        ),
+        "points_5000": frozenset(
+            {
+                # 500/min 档位：+ share_float（3000 积分）+ 无日上限
+                "share_float",
+            }
+        ),
+        "points_10000": frozenset(
+            {
+                # 常规 500/min + 特色 300/min（特色数据需独立购买）
+                "cyq_perf",
+                "forecast_eps",  # 需独立购买
+            }
+        ),
+        "points_15000": frozenset(
+            {
+                # 常规 500/min，特色无上限（特色数据仍需独立购买才能访问）
+            }
+        ),
+    }
+
+    # 需独立购买的特色数据 API（即使积分足够也需单独付费）
+    _INDEPENDENT_PURCHASE_APIS: typing.ClassVar[frozenset[str]] = frozenset(
+        {
+            "cyq_perf",  # 筹码分布
+            "forecast_eps",  # 盈利预测
+            "rating",  # 券商评级（"券商研报库"独立权限）
+        }
+    )
 
     TABLE_TO_API_MAP: dict[str, str] = {
         "moneyflow_hsgt": "moneyflow_hsgt",
@@ -209,21 +295,13 @@ class TushareClient:
             cls._instance._bg_tasks.clear()
 
     def _resolve_rate_limit(self) -> int:
-        """
-        Resolve effective rate limit based on point tier preset or manual config.
-
-        Priority:
-        1. If tier is in _POINT_TIER_PRESETS (free/standard/pro), use preset value.
-        2. Otherwise (custom tier), fall back to manual limit from config.
+        """Resolve effective rate limit based on point tier preset.
 
         Returns:
-            Effective rate limit (requests per minute), or 0 if not configured.
+            Effective rate limit (requests per minute), or 0 if tier unknown.
         """
         tier = self._get_tushare_point_tier()
-        preset = self._POINT_TIER_PRESETS.get(tier)
-        if preset is not None:
-            return preset
-        return self._get_tushare_api_limit()
+        return self._POINT_TIER_PRESETS.get(tier, 0)
 
     def reload_rate_limiters(self):
         """Rebuild rate limiters from current config. Call after tier/limit change in settings."""
@@ -268,21 +346,6 @@ class TushareClient:
                 "[API] Slow API limiter for '%s': %.0f req/min (factor=%s)",
                 api_name,
                 slow_rate * 60,
-                factor,
-            )
-
-        for api_name, factor in self._FAST_API_OVERRIDES.items():
-            fast_rate = rate_per_sec * factor
-            fast_capacity = max(10, fast_rate * 2)
-            api_limiters[api_name] = TokenBucket(
-                start_tokens=fast_capacity,
-                capacity=fast_capacity,
-                rate=fast_rate,
-            )
-            logger.info(
-                "[API] Fast API limiter for '%s': %.0f req/min (factor=%s)",
-                api_name,
-                fast_rate * 60,
                 factor,
             )
 
@@ -352,11 +415,6 @@ class TushareClient:
         if self._config is not None:
             return self._config.get_tushare_point_tier()
         return ConfigHandler.get_tushare_point_tier()
-
-    def _get_tushare_api_limit(self):
-        if self._config is not None:
-            return self._config.get_tushare_api_limit()
-        return ConfigHandler.get_tushare_api_limit()
 
     @property
     def is_token_invalid(self) -> bool:
@@ -447,6 +505,29 @@ class TushareClient:
         """Get a copy of the capability cache."""
         with self._capability_cache_lock:
             return dict(self._capability_cache)
+
+    def get_tier_order(self, tier: str) -> int:
+        """返回档位的顺序值（公共方法，避免外部访问私有 _TIER_ORDER）。"""
+        return self._TIER_ORDER.get(tier, 0)
+
+    def get_tier_apis(self, tier: str | None = None) -> frozenset[str]:
+        """获取档位覆盖的 API 集合（内部合并所有 ≤当前档位的集合）。
+
+        _TIER_API_COVERAGE 每个档位只列新增项，本方法合并低档位。
+        """
+        tier = tier or self._get_tushare_point_tier()
+        order = self._TIER_ORDER.get(tier, 0)
+        return frozenset().union(
+            *(apis for t, apis in self._TIER_API_COVERAGE.items() if self._TIER_ORDER.get(t, 0) <= order)
+        )
+
+    def is_api_covered_by_tier(self, api_name: str, tier: str | None = None) -> bool:
+        """检查 API 是否被档位覆盖（不含独立付费判断）。"""
+        return api_name in self.get_tier_apis(tier)
+
+    def is_independent_purchase(self, api_name: str) -> bool:
+        """检查 API 是否需要独立购买。"""
+        return api_name in self._INDEPENDENT_PURCHASE_APIS
 
     async def _persist_capability_safely(self) -> None:
         """Fire-and-forget persistence of capability cache to AppState.
@@ -677,10 +758,11 @@ class TushareClient:
             )
 
         for i in range(self.max_retries):
+            # 两段消费：全局 _rate_limiter 始终先消费，per-API limiter 额外收紧
+            if self._rate_limiter:
+                await self._rate_limiter.consume_async(1)
             if api_limiter:
                 await api_limiter.consume_async(1)
-            elif self._rate_limiter:
-                await self._rate_limiter.consume_async(1)
 
             try:
                 if not self.pro:
@@ -705,10 +787,11 @@ class TushareClient:
 
                 self.mark_api_available(api_name)
 
+                # 两段消费配套：两个桶分别 on_success
+                if self._rate_limiter:
+                    self._rate_limiter.on_success()
                 if api_limiter:
                     api_limiter.on_success()
-                elif self._rate_limiter:
-                    self._rate_limiter.on_success()
 
                 return result
             except Exception as e:
@@ -770,12 +853,14 @@ class TushareClient:
                     raise
 
                 if is_rate_limit:
-                    active_limiter = api_limiter or self._rate_limiter
-                    if active_limiter:
-                        active_limiter.reduce_rate(factor=0.5)
+                    # 两段消费配套：两个桶分别 reduce_rate
+                    if self._rate_limiter:
+                        self._rate_limiter.reduce_rate(factor=0.5)
+                    if api_limiter:
+                        api_limiter.reduce_rate(factor=0.5)
 
                     sleep_time = 5 + random.uniform(0, 5) + i * 5
-                    current_rpm = active_limiter.current_rate_per_min if active_limiter else 0
+                    current_rpm = self._rate_limiter.current_rate_per_min if self._rate_limiter else 0
                     logger.warning(
                         "[tushare_api] RATE_LIMITED (%s): adaptive slowdown -> %.0f/min, backoff=%.1fs (attempt %d/%d)",
                         api_name,

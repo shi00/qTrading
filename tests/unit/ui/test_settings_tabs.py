@@ -854,48 +854,6 @@ class TestSystemTab:
         snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
 
     @pytest.mark.asyncio
-    async def test_save_rate_limit_valid(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.rate_limit_input.value = "200"
-        await tab._do_save_rate_limit_async()
-        self.mock_ch.set_tushare_api_limit.assert_called_with(200)
-
-    @pytest.mark.asyncio
-    async def test_save_rate_limit_empty_disables(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.rate_limit_input.value = ""
-        await tab._do_save_rate_limit_async()
-        self.mock_ch.set_tushare_api_limit.assert_called_with(0)
-
-    @pytest.mark.asyncio
-    async def test_save_rate_limit_zero_disables(self, mock_page):
-        tab = self._make_tab()
-        set_page(tab, mock_page)
-        tab.rate_limit_input.value = "0"
-        await tab._do_save_rate_limit_async()
-        self.mock_ch.set_tushare_api_limit.assert_called_with(0)
-
-    @pytest.mark.asyncio
-    async def test_save_rate_limit_too_low(self, mock_page):
-        snack = MagicMock()
-        tab = self._make_tab()
-        tab.show_snack = snack
-        tab.rate_limit_input.value = "5"
-        await tab._do_save_rate_limit_async()
-        snack.assert_called_once_with("sys_snack_limit_min")
-
-    @pytest.mark.asyncio
-    async def test_save_rate_limit_invalid_format(self, mock_page):
-        snack = MagicMock()
-        tab = self._make_tab()
-        tab.show_snack = snack
-        tab.rate_limit_input.value = "abc"
-        await tab._do_save_rate_limit_async()
-        snack.assert_called_once_with("sys_snack_num_fmt", color=self.mock_ac.ERROR)
-
-    @pytest.mark.asyncio
     async def test_save_no_proxy_domains(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
@@ -1172,12 +1130,12 @@ class TestSystemTab:
         tab.language_dropdown.value = "en_US"
         tab.theme_dropdown.value = "dark"
         tab.log_level_dropdown.value = "INFO"
-        tab.point_tier_dropdown.value = "free"
+        tab.point_tier_dropdown.value = "points_120"
         tab._on_locale_change("en_US")
         assert tab.language_dropdown.value == "en_US"
         assert tab.theme_dropdown.value == "dark"
         assert tab.log_level_dropdown.value == "INFO"
-        assert tab.point_tier_dropdown.value == "free"
+        assert tab.point_tier_dropdown.value == "points_120"
         for dropdown in (
             tab.language_dropdown,
             tab.theme_dropdown,

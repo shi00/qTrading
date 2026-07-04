@@ -153,23 +153,8 @@ class SystemTab(ft.Container):
             label=I18n.get("sys_pool_cpu"),  # pragma: no cover
         )  # pragma: no cover
 
-        # Rate Limit Control
-        val = ConfigHandler.get_tushare_api_limit()  # pragma: no cover
-        current_tier = ConfigHandler.get_tushare_point_tier()  # pragma: no cover
-        self.rate_limit_input = ft.TextField(  # pragma: no cover
-            label=I18n.get("settings_rate_limit"),  # pragma: no cover
-            value=str(val) if val and val > 0 else "",  # pragma: no cover
-            width=AppStyles.CONTROL_WIDTH_SM,  # pragma: no cover
-            text_size=14,  # pragma: no cover
-            content_padding=10,  # pragma: no cover
-            keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
-            input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_times_min"),  # pragma: no cover
-            border_radius=8,  # pragma: no cover
-            disabled=current_tier != "custom",  # pragma: no cover
-        )  # pragma: no cover
-
         # Point Tier Dropdown
+        current_tier = ConfigHandler.get_tushare_point_tier()  # pragma: no cover
         self.point_tier_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get("sys_label_point_tier"),  # pragma: no cover
             value=current_tier,  # pragma: no cover
@@ -178,10 +163,11 @@ class SystemTab(ft.Container):
             border_radius=8,  # pragma: no cover
             content_padding=10,  # pragma: no cover
             options=[  # pragma: no cover
-                ft.dropdown.Option("free", I18n.get("sys_tier_free")),  # pragma: no cover
-                ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),  # pragma: no cover
-                ft.dropdown.Option("pro", I18n.get("sys_tier_pro")),  # pragma: no cover
-                ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),  # pragma: no cover
+                ft.dropdown.Option("points_120", I18n.get("sys_tier_points_120_label")),  # pragma: no cover
+                ft.dropdown.Option("points_2000", I18n.get("sys_tier_points_2000_label")),  # pragma: no cover
+                ft.dropdown.Option("points_5000", I18n.get("sys_tier_points_5000_label")),  # pragma: no cover
+                ft.dropdown.Option("points_10000", I18n.get("sys_tier_points_10000_label")),  # pragma: no cover
+                ft.dropdown.Option("points_15000", I18n.get("sys_tier_points_15000_label")),  # pragma: no cover
             ],  # pragma: no cover
             on_change=self.save_point_tier,  # pragma: no cover
         )  # pragma: no cover
@@ -322,12 +308,6 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # 6. API Rate Limit Item  # pragma: no cover
-        self.save_rate_limit_btn = ft.IconButton(  # pragma: no cover
-            icon=ft.Icons.SAVE_ROUNDED,  # pragma: no cover
-            icon_color=AppColors.PRIMARY,  # pragma: no cover
-            tooltip=I18n.get("settings_save_config"),  # pragma: no cover
-            on_click=self.save_rate_limit,  # pragma: no cover
-        )  # pragma: no cover
         self.row_limit = SettingRow(  # pragma: no cover
             icon=ft.Icons.SPEED,  # pragma: no cover
             icon_color=ft.Colors.CYAN,  # pragma: no cover
@@ -336,8 +316,6 @@ class SystemTab(ft.Container):
             control=ft.Row(  # pragma: no cover
                 [  # pragma: no cover
                     self.point_tier_dropdown,  # pragma: no cover
-                    self.rate_limit_input,  # pragma: no cover
-                    self.save_rate_limit_btn,  # pragma: no cover
                 ],  # pragma: no cover
                 spacing=5,  # pragma: no cover
                 wrap=True,  # pragma: no cover
@@ -499,10 +477,11 @@ class SystemTab(ft.Container):
             refresh_dropdown_options(
                 self.point_tier_dropdown,
                 [
-                    ft.dropdown.Option("free", I18n.get("sys_tier_free")),
-                    ft.dropdown.Option("standard", I18n.get("sys_tier_standard")),
-                    ft.dropdown.Option("pro", I18n.get("sys_tier_pro")),
-                    ft.dropdown.Option("custom", I18n.get("sys_tier_custom")),
+                    ft.dropdown.Option("points_120", I18n.get("sys_tier_points_120_label")),
+                    ft.dropdown.Option("points_2000", I18n.get("sys_tier_points_2000_label")),
+                    ft.dropdown.Option("points_5000", I18n.get("sys_tier_points_5000_label")),
+                    ft.dropdown.Option("points_10000", I18n.get("sys_tier_points_10000_label")),
+                    ft.dropdown.Option("points_15000", I18n.get("sys_tier_points_15000_label")),
                 ],
             )
 
@@ -518,8 +497,6 @@ class SystemTab(ft.Container):
             self.io_workers_input.suffix_text = I18n.get("sys_suffix_threads")
             self.cpu_workers_input.label = I18n.get("sys_pool_cpu")
             self.cpu_workers_input.suffix_text = I18n.get("sys_suffix_threads")
-            self.rate_limit_input.label = I18n.get("settings_rate_limit")
-            self.rate_limit_input.suffix_text = I18n.get("common_times_min")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
             self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
 
@@ -528,7 +505,6 @@ class SystemTab(ft.Container):
             self.save_concurrency_btn.tooltip = save_config_tip
             self.save_thread_pool_btn.tooltip = save_config_tip
             self.save_db_pool_btn.tooltip = save_config_tip
-            self.save_rate_limit_btn.tooltip = save_config_tip
             self.save_no_proxy_btn.tooltip = I18n.get("common_save")
 
             for row in [
@@ -692,7 +668,6 @@ class SystemTab(ft.Container):
             self.io_workers_input,  # pragma: no cover
             self.cpu_workers_input,  # pragma: no cover
             self.point_tier_dropdown,  # pragma: no cover
-            self.rate_limit_input,  # pragma: no cover
             self.no_proxy_input,  # pragma: no cover
         ]  # pragma: no cover
         for ctrl in inputs:  # pragma: no cover
@@ -766,8 +741,6 @@ class SystemTab(ft.Container):
     async def _do_save_point_tier_async(self, tier):
         try:
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_point_tier, tier)
-            self.rate_limit_input.disabled = tier != "custom"
-            self.rate_limit_input.update()
             self._reload_rate_limiters_safe()
             self.show_snack(I18n.get("sys_snack_tier_set").format(tier=tier))
             logger.info("[SystemTab] Tushare point tier set to %s", tier)
@@ -775,50 +748,9 @@ class SystemTab(ft.Container):
             logger.error("[SystemTab] PointTier | ❌ Save failed: %s", ex, exc_info=True)
             self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def save_rate_limit(self, e):
-        """Save API rate limit setting."""
-        if self.page:
-            self.page.run_task(self._do_save_rate_limit_async)
-
-    async def _do_save_rate_limit_async(self):
-        try:
-            tier = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_point_tier)
-            if tier != "custom":
-                self.show_snack(I18n.get("sys_snack_tier_override_hint"))
-                return
-
-            limit_str = self.rate_limit_input.value.strip()  # type: ignore[untyped]
-            if not limit_str:
-                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_api_limit, 0)
-                self._reload_rate_limiters_safe()
-                self.show_snack(I18n.get("sys_snack_limit_off"))
-                logger.info("Tushare API rate limit disabled (Unlimited)")
-                return
-
-            limit = int(limit_str)
-            if limit <= 0:
-                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_api_limit, 0)
-                self._reload_rate_limiters_safe()
-                self.show_snack(I18n.get("sys_snack_limit_off"))
-                return
-
-            if limit < 10:
-                self.show_snack(I18n.get("sys_snack_limit_min"))
-                return
-
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_api_limit, limit)
-            self._reload_rate_limiters_safe()
-            self.show_snack(I18n.get("sys_snack_limit_set").format(limit=limit))
-            logger.info("Tushare API rate limit updated to %s", limit)
-        except ValueError:
-            self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
-        except Exception as ex:
-            logger.error("[SystemTab] RateLimit | ❌ Save failed: %s", ex, exc_info=True)
-            self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
-
     def _reload_rate_limiters_safe(self):
         try:
-            from data.external.tushare_client import TushareClient
+            from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
 
             TushareClient().reload_rate_limiters()
         except Exception as exc:
