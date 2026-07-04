@@ -583,6 +583,81 @@ class TestTushareClientApiMethods:
         assert call_args.kwargs["trade_date"] == "20240614"
         assert "ts_code,trade_date,pre_close,up_limit,down_limit,limit" in call_args.kwargs["fields"]
 
+    @pytest.mark.asyncio
+    async def test_get_index_classify_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 3F-1 §4.3.2：get_index_classify 委托 _handle_api_call，传递 level/src 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "index_code": ["801010.SI"],
+                "index_name": ["农林牧渔"],
+                "level": ["L1"],
+                "industry_code": ["110000"],
+                "industry_name": ["农林牧渔"],
+                "parent_code": [""],
+                "is_sw": ["1"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_index_classify(level="L1", src="SW2021")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.index_classify callable
+        assert callable(call_args.args[0])
+        # kwargs 含 level/src 和 fields
+        assert call_args.kwargs["level"] == "L1"
+        assert call_args.kwargs["src"] == "SW2021"
+        assert "index_code,index_name,level,industry_code,industry_name,parent_code,is_sw" in call_args.kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_index_member_all_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 3F-1 §4.3.2：get_index_member_all 委托 _handle_api_call，传递 index_code 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "index_code": ["801010.SI"],
+                "index_name": ["农林牧渔"],
+                "sw_l1_code": ["110000"],
+                "sw_l1_name": ["农林牧渔"],
+                "sw_l2_code": ["110100"],
+                "sw_l2_name": ["种植业"],
+                "sw_l3_code": ["110101"],
+                "sw_l3_name": ["玉米"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_index_member_all(index_code="801010.SI")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.index_member_all callable
+        assert callable(call_args.args[0])
+        # kwargs 含 index_code 和 fields（含 L1/L2/L3 全字段）
+        assert call_args.kwargs["index_code"] == "801010.SI"
+        fields_str = call_args.kwargs["fields"]
+        assert "ts_code" in fields_str
+        assert "sw_l1_code" in fields_str
+        assert "sw_l2_code" in fields_str
+        assert "sw_l3_code" in fields_str
+
+    @pytest.mark.asyncio
+    async def test_get_index_member_all_wrapper_allows_none_index_code(self, tushare_client_mocks):
+        """Phase 3F-1 §4.3.2：get_index_member_all 接受 index_code=None（拉取全市场）。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "index_code": ["801010.SI"]})
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+
+        result = await client.get_index_member_all(index_code=None)
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        assert call_args.kwargs["index_code"] is None
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):

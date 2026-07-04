@@ -18,6 +18,7 @@ from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
+from data.sync.sw_industry import SwIndustrySyncStrategy
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
@@ -115,6 +116,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 "historical": HistoricalSyncStrategy(self.context),
                 "macro": MacroSyncStrategy(self.context),
                 "holder": HolderSyncStrategy(self.context),
+                "sw_industry": SwIndustrySyncStrategy(self.context),
             }
 
             # Memory Cache for high-frequency small data

@@ -65,6 +65,9 @@ class TushareProApi(typing.Protocol):
     stk_limit: Callable[..., pd.DataFrame]
     share_float: Callable[..., pd.DataFrame]
     stk_holdertrade: Callable[..., pd.DataFrame]
+    # Phase 3F-1 §4.3.2：申万行业分类（全局快照，不加入 TABLE_TO_API_MAP）
+    index_classify: Callable[..., pd.DataFrame]
+    index_member_all: Callable[..., pd.DataFrame]
 
 
 class TushareAPIPermissionError(Exception):
@@ -1854,6 +1857,44 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,change_ratio,after_share,after_ratio",
+        )
+
+    async def get_index_classify(self, level: str = "L1", src: str = "SW2021"):
+        """Get 申万行业分类（index_classify）。
+
+        Phase 3F-1 §4.3.2：申万行业分类（全局快照），挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。申万行业不加入 TABLE_TO_API_MAP（不参与交易日快照权限裁剪）。
+
+        Args:
+            level: 行业级别（L1/L2/L3），默认 L1。
+            src: 来源（SW2021 表示 2021 版申万行业分类）。
+
+        Returns:
+            DataFrame，包含 index_code/index_name/level/industry_code/industry_name/parent_code/is_sw。
+        """
+        return await self._handle_api_call(
+            self.pro.index_classify,
+            level=level,
+            src=src,
+            fields="index_code,index_name,level,industry_code,industry_name,parent_code,is_sw",
+        )
+
+    async def get_index_member_all(self, index_code: str | None = None):
+        """Get 申万行业成分股（index_member_all）。
+
+        Phase 3F-1 §4.3.2：申万行业成分股映射（全局快照），挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。申万行业不加入 TABLE_TO_API_MAP（不参与交易日快照权限裁剪）。
+
+        Args:
+            index_code: 指数代码（如 "801010.SI"）。None 时返回全市场成分股。
+
+        Returns:
+            DataFrame，包含 ts_code/index_code/index_name/sw_l1_code..sw_l3_name。
+        """
+        return await self._handle_api_call(
+            self.pro.index_member_all,
+            index_code=index_code,
+            fields="ts_code,index_code,index_name,sw_l1_code,sw_l1_name,sw_l2_code,sw_l2_name,sw_l3_code,sw_l3_name",
         )
 
     async def get_repurchase(

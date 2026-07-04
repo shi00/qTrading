@@ -550,6 +550,41 @@ class StkHoldertrade(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class SwIndustryClassify(Base):
+    """申万行业分类（Phase 3F-1，全局快照，月度更新，对应 Tushare index_classify 接口）。"""
+
+    __tablename__ = "sw_industry_classify"
+    index_code = Column(String, primary_key=True)
+    level = Column(String(2), primary_key=True, index=True)
+    index_name = Column(String)
+    industry_code = Column(String, index=True)
+    industry_name = Column(String)
+    parent_code = Column(String)
+    is_sw = Column(String(1))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class SwIndustryMember(Base):
+    """申万行业成分股映射（Phase 3F-1，全局快照，对应 Tushare index_member_all 接口）。
+
+    供 AI 行业景气度分析与 stock_basic.industry 字段切换（Phase 3F-2 轨道 A/B）。
+    """
+
+    __tablename__ = "sw_industry_member"
+    ts_code = Column(String, primary_key=True, index=True)
+    index_code = Column(String, primary_key=True)
+    index_name = Column(String)
+    sw_l1_code = Column(String)
+    sw_l1_name = Column(String)
+    sw_l2_code = Column(String, index=True)
+    sw_l2_name = Column(String)
+    sw_l3_code = Column(String)
+    sw_l3_name = Column(String)
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class Repurchase(Base):
     __tablename__ = "repurchase"
     ts_code = Column(String, primary_key=True)

@@ -30,6 +30,7 @@ from data.persistence.daos.share_float_dao import ShareFloatDao
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.stk_limit_dao import StkLimitDao
+from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
 from data.persistence.daos.sync_dao import SyncDao
 from data.persistence.daos.top_inst_dao import TopInstDao
 from utils.config_handler import ConfigHandler
@@ -108,6 +109,8 @@ class CacheManager:
             self.pledge_detail_dao = PledgeDetailDao(self.engine)
             self.share_float_dao = ShareFloatDao(self.engine)
             self.stk_holdertrade_dao = StkHoldertradeDao(self.engine)
+            self.sw_industry_classify_dao = SwIndustryClassifyDao(self.engine)
+            self.sw_industry_member_dao = SwIndustryMemberDao(self.engine)
 
             self._schema_initialized = False
 
@@ -164,6 +167,8 @@ class CacheManager:
         self.pledge_detail_dao.engine = self.engine
         self.share_float_dao.engine = self.engine
         self.stk_holdertrade_dao.engine = self.engine
+        self.sw_industry_classify_dao.engine = self.engine
+        self.sw_industry_member_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -208,6 +213,8 @@ class CacheManager:
             self.pledge_detail_dao.engine = None
             self.share_float_dao.engine = None
             self.stk_holdertrade_dao.engine = None
+            self.sw_industry_classify_dao.engine = None
+            self.sw_industry_member_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -861,6 +868,22 @@ class CacheManager:
     async def save_stk_holdertrade(self, df: pd.DataFrame):
         """Phase 3E：股东增减持入库。"""
         return await self.stk_holdertrade_dao.save_stk_holdertrade(df)
+
+    async def save_sw_industry_classify(self, df: pd.DataFrame):
+        """Phase 3F-1：申万行业分类入库。"""
+        return await self.sw_industry_classify_dao.save_sw_industry_classify(df)
+
+    async def save_sw_industry_member(self, df: pd.DataFrame):
+        """Phase 3F-1：申万行业成分股映射入库。"""
+        return await self.sw_industry_member_dao.save_sw_industry_member(df)
+
+    async def get_sw_industry_by_ts_code(self, ts_code: str) -> pd.DataFrame:
+        """Phase 3F-1：按 ts_code 反查所属申万行业（v1.10.0 P2-6 命名）。
+
+        代理到 ``SwIndustryMemberDao.get_sw_industry_by_ts_code``，返回该
+        ts_code 关联的所有申万行业成分记录（含 L1/L2/L3 行业代码与名称）。
+        """
+        return await self.sw_industry_member_dao.get_sw_industry_by_ts_code(ts_code)
 
     async def save_repurchase(self, df: pd.DataFrame):
         return await self.financial_dao.save_repurchase(df)
