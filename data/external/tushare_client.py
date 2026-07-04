@@ -1940,6 +1940,42 @@ class TushareClient:
             fields="date,on,1w,2w,1m,3m,6m,9m,1y",
         )
 
+    async def get_shibor_lpr(self, start_date: str | None = None, end_date: str | None = None):
+        """Get LPR (Loan Prime Rate) data.
+
+        Phase 3G §4.3.4：shibor_lpr API 返回 1 年/5 年 LPR 数据，
+        挂 @log_async_operation（由 _handle_api_call 提供）+ 显式 fields。
+        LPR 与 shibor 同表存储（shibor_daily），按 date 主键合并。
+        """
+        return await self._handle_api_call(
+            self.pro.shibor_lpr,
+            start_date=start_date,
+            end_date=end_date,
+            fields="date,lpr_1y,lpr_5y",
+        )
+
+    async def get_express(
+        self,
+        ts_code: str | None = None,
+        ann_date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get express (performance express) data.
+
+        Phase 3G §4.3.4：业绩快报，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。早于正式财报 30-60 天公告，AI 可提前反应业绩拐点。
+        按 ann_date 增量同步（参考 forecast 模式）。
+        """
+        return await self._handle_api_call(
+            self.pro.express,
+            ts_code=ts_code,
+            ann_date=ann_date,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,end_date,ann_date,type,revenue,n_income,total_profit,yoy_sales,yoy_profit,yoy_dedu_np,deduct_profit",
+        )
+
     async def get_top10_holders(
         self,
         ts_code: str | None = None,

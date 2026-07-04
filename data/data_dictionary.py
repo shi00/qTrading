@@ -671,6 +671,34 @@ TABLE_DEFINITIONS = {
             "6m": "col_6m",
             "9m": "col_9m",
             "1y": "col_1y",
+            # Phase 3G §4.3.4：LPR 字段（shibor_lpr API 返回，与 shibor 同表）
+            "lpr_1y": "col_lpr_1y",
+            "lpr_5y": "col_lpr_5y",
+        },
+    },
+    # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+    "express": {
+        "alias": "tab_express",
+        "desc": "业绩快报",
+        "sync_config": {
+            "strategy": "batch",
+            "api": "get_express",
+            "date_col": "ann_date",
+            "keys": ["ts_code", "end_date", "ann_date"],
+        },
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
+        "columns": {
+            "ts_code": "col_ts_code",
+            "end_date": "col_end_date",
+            "ann_date": "col_ann_date",
+            "type": "col_type",
+            "revenue": "col_revenue",
+            "n_income": "col_n_income",
+            "total_profit": "col_total_profit",
+            "yoy_sales": "col_yoy_sales",
+            "yoy_profit": "col_yoy_profit",
+            "yoy_dedu_np": "col_yoy_dedu_np",
+            "deduct_profit": "col_deduct_profit",
         },
     },
     "stk_holdernumber": {

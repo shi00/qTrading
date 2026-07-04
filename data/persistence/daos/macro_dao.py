@@ -75,7 +75,7 @@ class MacroDao(BaseDao):
                         None 表示不限制（取最新一期）。
 
         Returns:
-            DataFrame with latest shibor rates (date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y)
+            DataFrame with latest shibor rates (date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y, lpr_1y, lpr_5y)
         """
         try:
             # [DB-005] ShiborDaily contains reserved words ('on') and columns starting with digits ('1w' etc.).
@@ -91,6 +91,9 @@ class MacroDao(BaseDao):
                 getattr(t.c, "6m"),
                 getattr(t.c, "9m"),
                 getattr(t.c, "1y"),
+                # Phase 3G §4.3.4：LPR 字段
+                t.c.lpr_1y,
+                t.c.lpr_5y,
             ]
             stmt = sa.select(*cols)
             if as_of_date is not None:

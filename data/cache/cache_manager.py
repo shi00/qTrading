@@ -19,6 +19,7 @@ from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
     BaseDao,
 )  # Expose static helpers via BaseDao if needed, or keeping usage internal
+from data.persistence.daos.express_dao import ExpressDao
 from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
@@ -111,6 +112,8 @@ class CacheManager:
             self.stk_holdertrade_dao = StkHoldertradeDao(self.engine)
             self.sw_industry_classify_dao = SwIndustryClassifyDao(self.engine)
             self.sw_industry_member_dao = SwIndustryMemberDao(self.engine)
+            # Phase 3G §4.3.4：业绩快报 DAO
+            self.express_dao = ExpressDao(self.engine)
 
             self._schema_initialized = False
 
@@ -169,6 +172,7 @@ class CacheManager:
         self.stk_holdertrade_dao.engine = self.engine
         self.sw_industry_classify_dao.engine = self.engine
         self.sw_industry_member_dao.engine = self.engine
+        self.express_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -215,6 +219,7 @@ class CacheManager:
             self.stk_holdertrade_dao.engine = None
             self.sw_industry_classify_dao.engine = None
             self.sw_industry_member_dao.engine = None
+            self.express_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -851,6 +856,10 @@ class CacheManager:
     async def save_fina_forecast(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_forecast(df)
 
+    # Phase 3G §4.3.4：业绩快报
+    async def save_express(self, df: pd.DataFrame):
+        return await self.express_dao.save_express(df)
+
     async def save_fina_mainbz(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_mainbz(df)
 
@@ -1117,6 +1126,11 @@ class CacheManager:
         """获取业绩预告"""
         return await self.financial_dao.get_fina_forecast_batch([ts_code], as_of_date=as_of_date)
 
+    # Phase 3G §4.3.4：业绩快报
+    async def get_express(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """获取业绩快报"""
+        return await self.express_dao.get_express_batch([ts_code], as_of_date=as_of_date)
+
     # --- 股东数据方法 ---
     async def get_top10_holders(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取前十大股东"""
@@ -1215,6 +1229,8 @@ class CacheManager:
             self.stk_holdertrade_dao.get_stk_holdertrade_batch(ts_codes, as_of_date=as_of_date),
             # Phase 3F-2：申万二级行业名预取（双保险，与轨道 B 读时 JOIN 互补）
             self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes),
+            # Phase 3G §4.3.4：业绩快报预取（早于正式财报 30-60 天）
+            self.express_dao.get_express_batch(ts_codes, as_of_date=as_of_date),
         )
 
         batch_keys = [
@@ -1230,6 +1246,7 @@ class CacheManager:
             "share_float",
             "holdertrade",
             "sw_industry",
+            "express",
         ]
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):

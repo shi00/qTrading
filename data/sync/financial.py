@@ -634,6 +634,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     if df is not None and not df.empty:
                         save_map = {
                             "fina_forecast": self.context.cache.save_fina_forecast,
+                            # Phase 3G §4.3.4：业绩快报（参考 forecast 模式）
+                            "express": self.context.cache.save_express,
                             "dividend": self.context.cache.save_dividend,
                             "repurchase": self.context.cache.save_repurchase,
                         }

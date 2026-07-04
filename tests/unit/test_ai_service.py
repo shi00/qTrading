@@ -2482,11 +2482,12 @@ class TestFilterAvailableLabelsAndStrategyTier:
                 "points_2000": 1,
                 "points_5000": 2,
             }.get(tier, 0)
-            # points_120 档位：shibor 保留，macro_full 移除
-            client.is_api_covered_by_tier.side_effect = lambda api, tier=None: api == "shibor"
+            # points_120 档位：shibor 保留（含 shibor_lpr 同段落），macro_full 移除
+            # Phase 3G §4.3.4：required_apis 追加 shibor_lpr，mock 需同时覆盖
+            client.is_api_covered_by_tier.side_effect = lambda api, tier=None: api in {"shibor", "shibor_lpr"}
             labels = ["ai_label_shibor", "ai_label_macro_full"]
             result = filter_available_labels(labels, "points_120", set())
-            assert "ai_label_shibor" in result  # points_120，仅依赖 shibor
+            assert "ai_label_shibor" in result  # points_120，仅依赖 shibor + shibor_lpr
             assert "ai_label_macro_full" not in result  # points_2000，依赖 cn_m/cn_cpi/cn_ppi
 
     def test_get_strategy_min_tier(self):

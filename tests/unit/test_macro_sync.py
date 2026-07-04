@@ -447,6 +447,93 @@ class TestMacroSyncSyncShiborDaily:
         assert len(result.errors) > 0
 
 
+class TestMacroSyncSyncShiborDailyWithLpr:
+    """Phase 3G §4.3.4：_sync_shibor_daily 同时拉取 LPR 并按 date 合并入库。"""
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_daily_includes_lpr(self):
+        """shibor + LPR 数据同时拉取时，按 date merge 后传入 save_shibor_daily。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        # shibor 返回 on/1w/3m 列
+        ctx.api.get_shibor = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "date": ["20240614"],
+                    "on": [1.8],
+                    "1w": [1.9],
+                    "3m": [2.0],
+                }
+            )
+        )
+        # LPR 返回 lpr_1y/lpr_5y 列
+        ctx.api.get_shibor_lpr = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "date": ["20240614"],
+                    "lpr_1y": [3.45],
+                    "lpr_5y": [3.95],
+                }
+            )
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        # 验证 save_shibor_daily 被调用，且传入的 df 包含 LPR 列
+        strategy.dao.save_shibor_daily.assert_awaited_once()
+        saved_df: pd.DataFrame = strategy.dao.save_shibor_daily.call_args.args[0]
+        assert "lpr_1y" in saved_df.columns
+        assert "lpr_5y" in saved_df.columns
+        # 验证 merge 后 LPR 值正确
+        row = saved_df[saved_df["date"] == "20240614"].iloc[0]
+        assert row["lpr_1y"] == 3.45
+        assert row["lpr_5y"] == 3.95
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_daily_lpr_permission_denied_fallback(self):
+        """LPR 权限不足时降级为仅同步 shibor，不阻断主流程。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [1.8]}))
+        ctx.api.get_shibor_lpr = AsyncMock(side_effect=TushareAPIPermissionError("shibor_lpr", "denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        # 验证 shibor 仍被入库（降级路径）
+        strategy.dao.save_shibor_daily.assert_awaited_once()
+        saved_df: pd.DataFrame = strategy.dao.save_shibor_daily.call_args.args[0]
+        # LPR 列不应出现（未 merge）
+        assert "lpr_1y" not in saved_df.columns
+        # result 不应包含 LPR 权限错误（降级处理，不抛错）
+        assert not any("shibor_lpr" in err for err in result.errors)
+
+
 class TestMacroSyncSyncIndexWeights:
     @pytest.mark.asyncio
     async def test_already_up_to_date(self):

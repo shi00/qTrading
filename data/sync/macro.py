@@ -451,7 +451,23 @@ class MacroSyncStrategy(ISyncStrategy):
                 start_date=start_str,
                 end_date=end_str,
             )
+
+            # Phase 3G §4.3.4：同时拉取 LPR 数据，按 date 合并到同一 df 后入库
+            # LPR 权限不足时降级为仅同步 shibor（与 shibor 同档位 points_120，通常一并可用）
+            lpr_df: pd.DataFrame | None = None
+            try:
+                lpr_df = await self.context.api.get_shibor_lpr(
+                    start_date=start_str,
+                    end_date=end_str,
+                )
+            except TushareAPIPermissionError:
+                logger.warning("[MacroSync] Shibor | ⛔ Permission denied for shibor_lpr API")
+            except Exception as lpr_err:
+                logger.debug("[MacroSync] Shibor | LPR fetch failed, continuing with shibor only: %s", lpr_err)
+
             if df is not None and not df.empty:
+                if lpr_df is not None and not lpr_df.empty:
+                    df = df.merge(lpr_df, on="date", how="outer")
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
                 logger.debug("[MacroSync] Shibor | Saved %s records", count)

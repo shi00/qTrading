@@ -1575,6 +1575,74 @@ class AIStrategyMixin:
             return ""
         return f"- {I18n.get('ai_holder_trade')}: " + "；".join(items)
 
+    @staticmethod
+    def _format_express_section(df: pd.DataFrame) -> str:
+        """格式化业绩快报段落（Phase 3G §4.3.4）。
+
+        入参 df 由 ``get_express_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
+        仅返回每只股票最新一期快报，故直接取 ``iloc[0]``。
+
+        业绩快报早于正式财报 30-60 天公告，AI 可提前反应业绩拐点。
+        营收/净利/扣非单位由元转换为亿元（÷1e8）保留 2 位小数。
+
+        格式示例：``- 业绩快报: 2024Q3 营收 50.00亿（+25.0% YoY）、净利 8.00亿（+40.0% YoY）、扣非 7.50亿（+35.0% YoY）（公告日 2024-10-15）``
+        """
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        end_date = row.get("end_date")
+        ann_date = row.get("ann_date")
+
+        # end_date 为 Date 类型（季度末日期），转换为 "YYYYQN" 格式
+        quarter_str = str(end_date) if end_date is not None else I18n.get("ai_unknown")
+        try:
+            d = pd.to_datetime(str(end_date))
+            q = (d.month - 1) // 3 + 1
+            quarter_str = f"{d.year}Q{q}"
+        except Exception:
+            pass
+
+        # 拼接营收/净利/扣非段落（单位转换：元 → 亿元）
+        parts: list[str] = []
+        revenue = row.get("revenue")
+        yoy_sales = row.get("yoy_sales")
+        if revenue is not None and not pd.isna(revenue):
+            rev_str = f"{I18n.get('ai_express_revenue')}: {float(revenue) / 1e8:.2f}{I18n.get('ai_billion_yuan')}"
+            if yoy_sales is not None and not pd.isna(yoy_sales):
+                rev_str += f"（{float(yoy_sales):+.1f}% YoY）"
+            parts.append(rev_str)
+
+        n_income = row.get("n_income")
+        yoy_profit = row.get("yoy_profit")
+        if n_income is not None and not pd.isna(n_income):
+            ni_str = f"{I18n.get('ai_express_n_income')}: {float(n_income) / 1e8:.2f}{I18n.get('ai_billion_yuan')}"
+            if yoy_profit is not None and not pd.isna(yoy_profit):
+                ni_str += f"（{float(yoy_profit):+.1f}% YoY）"
+            parts.append(ni_str)
+
+        deduct_profit = row.get("deduct_profit")
+        yoy_dedu_np = row.get("yoy_dedu_np")
+        if deduct_profit is not None and not pd.isna(deduct_profit):
+            dp_str = f"{I18n.get('ai_express_deduct')}: {float(deduct_profit) / 1e8:.2f}{I18n.get('ai_billion_yuan')}"
+            if yoy_dedu_np is not None and not pd.isna(yoy_dedu_np):
+                dp_str += f"（{float(yoy_dedu_np):+.1f}% YoY）"
+            parts.append(dp_str)
+
+        if not parts:
+            return ""
+
+        # 公告日格式化为 YYYY-MM-DD
+        ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
+        try:
+            ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        return (
+            f"- {I18n.get('ai_express')}: {quarter_str} "
+            f"{'、'.join(parts)}（{I18n.get('ai_express_ann_date')}: {ann_str}）"
+        )
+
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1801,6 +1869,25 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_sw_industry")
 
+            # Phase 3G §4.3.4：业绩快报（express）— 早于正式财报 30-60 天，提前反应业绩拐点
+            if prefetched and ts_code in prefetched and "express" in prefetched[ts_code]:
+                express_df = prefetched[ts_code]["express"]
+            else:
+                express_df = await cache.get_express(ts_code, as_of_date=as_of_date)
+
+            if express_df is not None and not express_df.empty:
+                express_line = _build_stale_section(
+                    "express",
+                    express_df,
+                    self._format_express_section,
+                    date_column="ann_date",
+                )
+                if express_line:
+                    lines.append(express_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_express")
+
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -1937,6 +2024,29 @@ class AIStrategyMixin:
                     )
                     if shibor_section:
                         lines.append(shibor_section)
+                        has_data = True
+
+                # Phase 3G §4.3.4：LPR 段落（与 shibor 同表 shibor_daily，独立 stale 标注）
+                # shibor_lpr 在 points_120 覆盖内，正常注入（无 stale 标注）
+                lpr_lines: list[str] = []
+                lpr_1y = shibor_latest.get("lpr_1y")
+                if lpr_1y is not None:
+                    lpr_lines.append(f"- {I18n.get('macro_lpr_1y')}: {lpr_1y:.2f}%")
+
+                lpr_5y = shibor_latest.get("lpr_5y")
+                if lpr_5y is not None:
+                    lpr_lines.append(f"- {I18n.get('macro_lpr_5y')}: {lpr_5y:.2f}%")
+
+                if lpr_lines:
+                    lpr_text = "\n".join(lpr_lines)
+                    lpr_section = _build_stale_section(
+                        "shibor_lpr",
+                        shibor,
+                        lambda _df: lpr_text,
+                        date_column="date",
+                    )
+                    if lpr_section:
+                        lines.append(lpr_section)
                         has_data = True
 
         except Exception as e:

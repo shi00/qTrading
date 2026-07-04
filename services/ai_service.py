@@ -100,6 +100,8 @@ _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_top_inst",
     # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
     "ai_label_sw_industry",
+    # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+    "ai_label_express",
 }
 
 AVAILABLE_DATA_LABELS: frozenset[str] = frozenset(_AVAILABLE_DATA_LABEL_KEYS)
@@ -176,7 +178,8 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     "ai_label_kline": ("points_120", frozenset({"daily", "adj_factor"})),
     "ai_label_valuation": ("points_120", frozenset({"daily_basic"})),
     # v1.6.0 拆分：shibor 段落独立标签（points_120，仅依赖 shibor API）
-    "ai_label_shibor": ("points_120", frozenset({"shibor"})),
+    # Phase 3G §4.3.4：required_apis 追加 shibor_lpr（LPR 与 shibor 同段落注入）
+    "ai_label_shibor": ("points_120", frozenset({"shibor", "shibor_lpr"})),
     # v1.6.0 拆分：宏观完整段落（cn_m/cn_cpi/cn_ppi，points_2000）
     # Phase 2D §3.2.6：cn_gdp 全链路补全，required_apis 追加 cn_gdp
     "ai_label_macro_full": ("points_2000", frozenset({"cn_m", "cn_cpi", "cn_ppi", "cn_gdp"})),
@@ -219,8 +222,9 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
     "ai_label_sw_industry": ("points_2000", frozenset({"index_classify", "index_member_all"})),
     # 新增标签（Phase 3 追加时同步加入此 map）：
-    # "ai_label_lpr": ("points_120", frozenset({"shibor_lpr"})),  # Phase 3G
-    # "ai_label_express": ("points_2000", frozenset({"express"})),  # Phase 3G
+    # "ai_label_lpr": ("points_120", frozenset({"shibor_lpr"})),  # Phase 3G（已合并到 ai_label_shibor）
+    # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+    "ai_label_express": ("points_2000", frozenset({"express"})),
     # "ai_label_cyq_perf": ("points_10000", frozenset({"cyq_perf"})),  # Phase 3H 需独立购买
     # "ai_label_forecast_eps": ("points_10000", frozenset({"forecast_eps"})),  # Phase 3H 需独立购买
 }

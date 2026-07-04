@@ -77,6 +77,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_holder_trade",
             # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
             "ai_label_sw_industry",
+            # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+            "ai_label_express",
             # _build_capital_flow_text 子项
             "ai_label_main_flow",
             "ai_label_top_list",
@@ -148,6 +150,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_holder_trade",
             # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
             "ai_label_sw_industry",
+            # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+            "ai_label_express",
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
@@ -351,6 +355,8 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
         mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API（无预取时回退到 cache.get_express）
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -403,6 +409,8 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
         mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -457,6 +465,8 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
         mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1440,6 +1450,8 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
         mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API（无预取时回退到 cache.get_express）
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1464,6 +1476,8 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
         mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API（无预取时回退到 cache.get_express）
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1499,6 +1513,8 @@ def _make_fake_cache():
     cache.get_pledge_detail = _async_return(pd.DataFrame())
     cache.get_share_float_upcoming = _async_return(pd.DataFrame())
     cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+    # Phase 3G §4.3.4：express API
+    cache.get_express = _async_return(pd.DataFrame())
     cache.get_concepts = _async_return({})
     return cache
 

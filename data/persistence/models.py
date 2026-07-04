@@ -675,6 +675,32 @@ class ShiborDaily(Base):
     m6 = Column(Numeric(12, 4), name="6m")
     m9 = Column(Numeric(12, 4), name="9m")
     y1 = Column(Numeric(12, 4), name="1y")
+    # Phase 3G §4.3.4：LPR 数据（shibor_lpr API 返回，与 shibor 同表按 date 合并）
+    lpr_1y = Column(Numeric(12, 4))
+    lpr_5y = Column(Numeric(12, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class Express(Base):
+    """业绩快报（Phase 3G §4.3.4）。
+
+    Tushare ``express`` API 返回，早于正式财报 30-60 天公告，
+    AI 可提前反应业绩拐点。表名 ``express`` 非SQL保留字，但注释说明语义（R17）。
+    """
+
+    __tablename__ = "express"
+    ts_code = Column(String, primary_key=True)
+    end_date = Column(Date, primary_key=True)
+    ann_date = Column(Date, primary_key=True, index=True)
+    type = Column(String)
+    revenue = Column(Numeric(20, 4))
+    n_income = Column(Numeric(20, 4))
+    total_profit = Column(Numeric(20, 4))
+    yoy_sales = Column(Numeric(12, 4))
+    yoy_profit = Column(Numeric(12, 4))
+    yoy_dedu_np = Column(Numeric(12, 4))
+    deduct_profit = Column(Numeric(20, 4))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 

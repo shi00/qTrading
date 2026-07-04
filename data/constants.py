@@ -196,6 +196,13 @@ FINANCIAL_BATCH_TABLES = {
         "key": ["ts_code", "end_date", "ann_date"],
         "desc": "业绩预告",
     },
+    # Phase 3G §4.3.4：业绩快报（按 ann_date 增量，参考 forecast 模式）
+    "express": {
+        "api": "get_express",
+        "date_col": "ann_date",
+        "key": ["ts_code", "end_date", "ann_date"],
+        "desc": "业绩快报",
+    },
     "dividend": {
         "api": "get_dividend",
         "date_col": "ann_date",
@@ -265,6 +272,7 @@ HEALTH_REPORT_ORDER = [
     "daily_quotes",
     "financial_reports",
     "fina_forecast",
+    "express",
     "daily_indicators",
     # Global (AI)
     "macro_economy",
