@@ -467,7 +467,15 @@ class MacroSyncStrategy(ISyncStrategy):
 
             if df is not None and not df.empty:
                 if lpr_df is not None and not lpr_df.empty:
-                    df = df.merge(lpr_df, on="date", how="outer")
+                    # how="left"：以 shibor 日频为主表，避免 LPR 缺失日引入 NaN 覆盖 shibor 列；
+                    # LPR 为月频数据，仅在发布日对齐 shibor 行写入，其他日 lpr_1y/lpr_5y 为 NaN
+                    # （_save_upsert 会将 NaN 转 None，因 macro_dao 未标记 null_protected，已有 LPR 值会被覆盖为 NULL）
+                    # 故仅当 LPR date 与 shibor date 完全对齐时才合并，否则跳过 LPR merge
+                    common_dates = set(df["date"]).intersection(set(lpr_df["date"]))
+                    if common_dates:
+                        df = df.merge(lpr_df, on="date", how="left")
+                    else:
+                        logger.debug("[MacroSync] Shibor | LPR dates do not intersect shibor dates, skipping LPR merge")
                 count = await self.dao.save_shibor_daily(df)
                 result.added += count if count else 0
                 logger.debug("[MacroSync] Shibor | Saved %s records", count)
