@@ -64,6 +64,7 @@ class TushareProApi(typing.Protocol):
     cn_gdp: Callable[..., pd.DataFrame]
     stk_limit: Callable[..., pd.DataFrame]
     share_float: Callable[..., pd.DataFrame]
+    stk_holdertrade: Callable[..., pd.DataFrame]
 
 
 class TushareAPIPermissionError(Exception):
@@ -280,6 +281,7 @@ class TushareClient:
         "stk_limit": "stk_limit",
         "pledge_detail": "pledge_detail",
         "share_float": "share_float",
+        "stk_holdertrade": "stk_holdertrade",
     }
 
     def __new__(cls, *args, **kwargs):
@@ -1833,6 +1835,25 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             fields="ts_code,ann_date,float_date,float_share,float_ratio,float_type",
+        )
+
+    async def get_stk_holdertrade(
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get stk_holdertrade (shareholder trade) data.
+
+        Phase 3E §3.2：股东增减持，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。返回产业资本（高管/公司）增减持行为数据。
+        """
+        return await self._handle_api_call(
+            self.pro.stk_holdertrade,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,change_ratio,after_share,after_ratio",
         )
 
     async def get_repurchase(

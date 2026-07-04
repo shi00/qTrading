@@ -71,6 +71,10 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_top_holder",
             "ai_label_holder_count",
             "ai_label_forecast",
+            # Phase 3D：限售解禁（share_float API，points_5000）
+            "ai_label_share_float",
+            # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
+            "ai_label_holder_trade",
             # _build_capital_flow_text 子项
             "ai_label_main_flow",
             "ai_label_top_list",
@@ -136,6 +140,10 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_top_holder",
             "ai_label_holder_count",
             "ai_label_forecast",
+            # Phase 3D：限售解禁（share_float API，points_5000）
+            "ai_label_share_float",
+            # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
+            "ai_label_holder_trade",
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
@@ -337,6 +345,8 @@ class TestInvariant3BuilderLabelEquivalence:
         )
         mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -387,6 +397,8 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
         mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -439,6 +451,8 @@ class TestInvariant3BuilderLabelEquivalence:
         )
         mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -829,6 +843,8 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         )
         mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
             capital={},
@@ -1381,6 +1397,8 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
         mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1403,6 +1421,8 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
         mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
         mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1436,6 +1456,8 @@ def _make_fake_cache():
     cache.get_stk_holdernumber = _async_return(pd.DataFrame())
     cache.get_fina_forecast = _async_return(pd.DataFrame())
     cache.get_pledge_detail = _async_return(pd.DataFrame())
+    cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+    cache.get_stk_holdertrade = _async_return(pd.DataFrame())
     cache.get_concepts = _async_return({})
     return cache
 

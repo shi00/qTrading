@@ -533,6 +533,23 @@ class ShareFloat(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class StkHoldertrade(Base):
+    """股东增减持（Phase 3E，产业资本信号，供 AI 分析高管/公司层面增减持行为）。"""
+
+    __tablename__ = "stk_holdertrade"
+    ts_code = Column(String, primary_key=True)
+    ann_date = Column(Date, primary_key=True, index=True)
+    holder_name = Column(String(100), primary_key=True)
+    holder_type = Column(String(2))
+    in_de = Column(String(2), primary_key=True)
+    change_vol = Column(Numeric(20, 4))
+    change_ratio = Column(Numeric(8, 4))
+    after_share = Column(Numeric(20, 4))
+    after_ratio = Column(Numeric(8, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class Repurchase(Base):
     __tablename__ = "repurchase"
     ts_code = Column(String, primary_key=True)

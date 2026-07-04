@@ -706,6 +706,74 @@ class TestHolderSyncSyncTop10Holders:
         assert result >= 0
 
 
+class TestHolderSyncStkHoldertrade:
+    """Phase 3E：_sync_stk_holdertrade 单元测试。
+
+    stk_holdertrade 是事件驱动数据，sync 窗口 [today-90, today]，
+    单次 API 调用全市场查询，无 pledge_stat 的循环重试逻辑。
+    """
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_stk_holdertrade = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 1)],
+                    "holder_name": ["张三"],
+                    "holder_type": ["G"],
+                    "in_de": ["IN"],
+                    "change_vol": [10000.0],
+                    "change_ratio": [0.5],
+                    "after_share": [1000000.0],
+                    "after_ratio": [50.0],
+                }
+            )
+        )
+        ctx.cache = MagicMock()
+        ctx.cache.save_stk_holdertrade = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_stk_holdertrade()
+        assert count == 1
+        assert date == datetime.date(2024, 6, 14)
+        ctx.cache.save_stk_holdertrade.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_data(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_stk_holdertrade = AsyncMock(return_value=pd.DataFrame())
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_stk_holdertrade()
+        assert count == 0
+        assert date == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_api_error(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_stk_holdertrade = AsyncMock(side_effect=Exception("API Error"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_stk_holdertrade()
+        assert count == -1
+        assert date is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled(self):
+        ctx = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._cancelled = True
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_stk_holdertrade()
+        assert count == -1
+        assert date is None
+
+
 class TestHolderSyncGetEffectiveTradeDateNone:
     @pytest.mark.asyncio
     async def test_none_return_falls_back(self):

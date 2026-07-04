@@ -47,6 +47,8 @@ class TestNoUnnecessaryFieldMappings:
             "block_trade",
             "limit_list",
             "suspend_d",
+            # Phase 3D：share_float 重命名 float_type → share_type（与 ORM 列名对齐）
+            "share_float",
         }
         assert macro_mappings <= allowed_macro_mappings, (
             f"Unexpected macro mappings: {macro_mappings - allowed_macro_mappings}"

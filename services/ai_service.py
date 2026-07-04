@@ -87,6 +87,8 @@ _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_pledge_detail",
     # Phase 3D：限售解禁（share_float API，points_5000）
     "ai_label_share_float",
+    # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
+    "ai_label_holder_trade",
     "ai_label_top_holder",
     "ai_label_holder_count",
     "ai_label_main_flow",
@@ -210,8 +212,9 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     "ai_label_top_inst": ("points_2000", frozenset({"top_inst"})),
     # Phase 3D：限售解禁（share_float API，points_5000）
     "ai_label_share_float": ("points_5000", frozenset({"share_float"})),
+    # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
+    "ai_label_holder_trade": ("points_2000", frozenset({"stk_holdertrade"})),
     # 新增标签（Phase 3 追加时同步加入此 map）：
-    # "ai_label_holder_trade": ("points_2000", frozenset({"stk_holdertrade"})),  # Phase 3E
     # "ai_label_sw_industry": ("points_2000", frozenset({"index_classify", "index_member_all"})),  # Phase 3F-2
     # "ai_label_lpr": ("points_120", frozenset({"shibor_lpr"})),  # Phase 3G
     # "ai_label_express": ("points_2000", frozenset({"express"})),  # Phase 3G

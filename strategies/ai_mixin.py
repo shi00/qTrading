@@ -1539,6 +1539,42 @@ class AIStrategyMixin:
             return ""
         return f"- {I18n.get('ai_share_float')}: " + "；".join(items)
 
+    @staticmethod
+    def _format_holder_trade_section(df: pd.DataFrame) -> str:
+        """格式化股东增减持段落（Phase 3E）。
+
+        入参 df 由 ``get_stk_holdertrade_batch`` 返回，包含近期增减持记录。
+        最多展示 3 条最近记录。
+
+        格式示例：``- 股东增减持: 2024-06-01 张三 增持 100.00 万股（增持比例 0.5%）``
+        """
+        if df is None or df.empty:
+            return ""
+        recent = df.sort_values("ann_date", ascending=False).head(3)
+        items: list[str] = []
+        for _, row in recent.iterrows():
+            ann_date = row.get("ann_date")
+            date_str = str(ann_date) if ann_date is not None and not pd.isna(ann_date) else "N/A"
+            holder_name = row.get("holder_name")
+            name_str = str(holder_name) if holder_name is not None and not pd.isna(holder_name) else "N/A"
+            in_de = row.get("in_de")
+            if in_de == "IN":
+                action_str = I18n.get("ai_holder_trade_increase")
+            elif in_de == "DE":
+                action_str = I18n.get("ai_holder_trade_decrease")
+            else:
+                action_str = "N/A"
+            change_vol = row.get("change_vol")
+            vol_str = f"{float(change_vol):.2f}" if change_vol is not None and not pd.isna(change_vol) else "N/A"
+            change_ratio = row.get("change_ratio")
+            ratio_str = (
+                f"（{float(change_ratio):.2f}%）" if change_ratio is not None and not pd.isna(change_ratio) else ""
+            )
+            items.append(f"{date_str} {name_str} {action_str} {vol_str} 股{ratio_str}")
+        if not items:
+            return ""
+        return f"- {I18n.get('ai_holder_trade')}: " + "；".join(items)
+
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1667,6 +1703,25 @@ class AIStrategyMixin:
                     has_data = True
                     if labels_out is not None:
                         labels_out.append("ai_label_share_float")
+
+            # Phase 3E：股东增减持（stk_holdertrade）— 产业资本信号，与 share_float 互补
+            if prefetched and ts_code in prefetched and "holdertrade" in prefetched[ts_code]:
+                holdertrade_df = prefetched[ts_code]["holdertrade"]
+            else:
+                holdertrade_df = await cache.get_stk_holdertrade(ts_code, as_of_date=as_of_date)
+
+            if holdertrade_df is not None and not holdertrade_df.empty:
+                holdertrade_line = _build_stale_section(
+                    "stk_holdertrade",
+                    holdertrade_df,
+                    self._format_holder_trade_section,
+                    date_column="ann_date",
+                )
+                if holdertrade_line:
+                    lines.append(holdertrade_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_holder_trade")
 
             if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]
