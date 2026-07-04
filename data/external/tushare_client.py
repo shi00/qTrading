@@ -285,6 +285,7 @@ class TushareClient:
         "pledge_detail": "pledge_detail",
         "share_float": "share_float",
         "stk_holdertrade": "stk_holdertrade",
+        "express": "express",
     }
 
     def __new__(cls, *args, **kwargs):

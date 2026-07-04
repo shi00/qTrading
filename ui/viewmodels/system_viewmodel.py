@@ -166,7 +166,8 @@ class SystemViewModel:
         total = len(results)
 
         # 分类：全部 None（服务不可用/网络问题）或全部 False（Token 无效/积分严重不足）
-        if total > 0 and (available_count == 0 and unavailable_count == 0 or unavailable_count == total):
+        # P2-2：显式括号标明 ((A and B) or C) 语义，避免依赖 and/or 优先级推断
+        if total > 0 and ((available_count == 0 and unavailable_count == 0) or unavailable_count == total):
             result = {"type": "all_failed", "tier": tier}
         elif total > 0 and unavailable_count / total > 0.5:
             # 档位声明过高检测（False 比例 > 50% 视为档位过高）

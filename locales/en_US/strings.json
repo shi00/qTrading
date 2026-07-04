@@ -883,7 +883,7 @@
     "sys_tier_probe_button": "Run Probe",
     "sys_tier_probe_in_progress": "Probing...",
     "sys_tier_probe_in_progress_with_count": "Probing ({completed}/{total})...",
-    "sys_tier_probe_completed": "Probe Completed (available {available}, unavailable {unavailable})",
+    "sys_tier_probe_completed": "Probe Completed (available {available}, unavailable {unavailable}, unknown {unknown})",
     "sys_tier_probe_failed": "Probe Failed",
     "sys_tier_probe_all_failed": "All probes failed, please check Token & network",
     "sys_tier_tier_too_high": "Current tier too high, some probes failed ({false_count}/{total})",

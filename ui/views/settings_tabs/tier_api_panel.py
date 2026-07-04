@@ -516,7 +516,9 @@ class TierApiPanel(ft.Column):
         self.tier_dropdown.disabled = False
         self._current_tier = tier
         self.tier_dropdown.value = tier
-        self.progress_text.value = I18n.get("sys_tier_probe_completed", available=available, unavailable=unavailable)
+        self.progress_text.value = I18n.get(
+            "sys_tier_probe_completed", available=available, unavailable=unavailable, unknown=unknown
+        )
         # 刷新 API 列表（用最新 probe 结果）
         from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
 

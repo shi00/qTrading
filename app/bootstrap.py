@@ -211,16 +211,24 @@ async def _maybe_auto_probe_on_startup() -> None:
 def _validate_strategy_tier_coverage() -> None:
     """Phase 2A.1 Task 2A.1.10：启动期校验已注册策略是否都在 _STRATEGY_MIN_TIER 中登记。
 
-    委托给 ``services/ai_service.validate_strategy_tier_coverage`` 实现（R1 红线：
-    app/ 可引用 services/，但 strategies/ 不可引用 services/，因此校验逻辑必须经
-    app/ 中转）。warning 不 raise，避免阻断启动。
+    R1 红线：services/ 不可导入 strategies/（反向依赖禁止），因此由 app/ 层（可同时
+    引用 services/ 和 strategies/）查询 ``StrategyManager().strategies.keys()`` 后
+    注入 ``services.ai_service.validate_strategy_tier_coverage``。warning 不 raise，
+    避免阻断启动。
     """
     try:
         from services.ai_service import validate_strategy_tier_coverage
+        from strategies.all_strategies import StrategyManager
 
-        validate_strategy_tier_coverage()
+        registered_keys = set(StrategyManager().strategies.keys())
     except Exception as e:
         logger.warning("[Bootstrap] validate_strategy_tier_coverage skipped: %s", e)
+        return
+
+    try:
+        validate_strategy_tier_coverage(registered_keys)
+    except Exception as e:
+        logger.warning("[Bootstrap] validate_strategy_tier_coverage failed: %s", e)
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):

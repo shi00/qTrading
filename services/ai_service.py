@@ -319,24 +319,16 @@ def get_strategy_min_tier(strategy_key: str) -> str:
     return _STRATEGY_MIN_TIER.get(strategy_key, "points_120")
 
 
-def validate_strategy_tier_coverage() -> None:
+def validate_strategy_tier_coverage(registered_keys: set[str]) -> None:
     """启动期校验已注册策略是否都在 _STRATEGY_MIN_TIER 中登记。
 
     Phase 2A.1 §4.4.6 v1.10.0 P2-2：避免新增策略时忘记在 _STRATEGY_MIN_TIER 登记
     导致 UX 静默退化（提示缺失）。**不 raise**（避免阻断启动），仅 warning 提示。
 
-    分层说明（R1 红线）：strategies/ 不可导入 services/，因此校验逻辑放在
-    services/ai_service.py 暴露的函数中，由 app/bootstrap.py 启动流程中调用
-    （app/ 可同时引用 services/ 和 strategies/）。
+    分层说明（R1 红线）：services/ 不可导入 strategies/（反向依赖禁止），因此
+    由 app/bootstrap.py 调用方查询 ``StrategyManager().strategies.keys()`` 后
+    注入 ``registered_keys`` 参数（app/ 可同时引用 services/ 和 strategies/）。
     """
-    try:
-        from strategies.all_strategies import StrategyManager
-
-        registered_keys = set(StrategyManager().strategies.keys())
-    except Exception as e:
-        logger.warning("[AIService] validate_strategy_tier_coverage skipped: %s", e)
-        return
-
     for key in registered_keys:
         if key not in _STRATEGY_MIN_TIER:
             logger.warning(

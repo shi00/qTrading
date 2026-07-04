@@ -620,6 +620,9 @@ MVD_SHIBOR_DAILY = {
     "m6": Decimal("2.40"),  # name="6m"
     "m9": Decimal("2.45"),  # name="9m"
     "y1": Decimal("2.50"),  # name="1y"
+    # Phase 3G §4.3.3：LPR 利率（shibor_daily 扩列）
+    "lpr_1y": Decimal("3.10"),
+    "lpr_5y": Decimal("3.60"),
 }
 
 MVD_MARKET_NEWS = {

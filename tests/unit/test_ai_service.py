@@ -2506,21 +2506,19 @@ class TestFilterAvailableLabelsAndStrategyTier:
         assert get_strategy_min_tier("unknown_strategy") == "points_120"
 
     def test_validate_strategy_tier_coverage_warns_on_missing(self, caplog):
-        """validate_strategy_tier_coverage 对未登记策略 warning 不 raise。"""
+        """validate_strategy_tier_coverage 对未登记策略 warning 不 raise。
+
+        R1 红线修复（v1.10.0 检视 P0-1）：函数改为接收 ``registered_keys`` 参数，
+        不再跨层导入 strategies/，由 app/bootstrap.py 注入。测试直接传入 set。
+        """
         from services.ai_service import validate_strategy_tier_coverage
 
-        with patch("strategies.all_strategies.StrategyManager") as mock_sm:
-            # 包含一个未登记的策略 key
-            mock_sm.return_value.strategies = {
-                "oversold": MagicMock(),  # 已登记
-                "unknown_new_strategy": MagicMock(),  # 未登记，应触发 warning
-            }
-            with caplog.at_level("WARNING"):
-                # 不应 raise
-                validate_strategy_tier_coverage()
-            # 验证 warning 日志包含未登记策略 key
-            warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
-            assert any("unknown_new_strategy" in msg for msg in warning_messages)
+        with caplog.at_level("WARNING"):
+            # 不应 raise
+            validate_strategy_tier_coverage({"oversold", "unknown_new_strategy"})
+        # 验证 warning 日志包含未登记策略 key
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert any("unknown_new_strategy" in msg for msg in warning_messages)
 
     def test_universal_rules_contains_stale_clause(self):
         """_UNIVERSAL_RULES 应含【铁律4】stale 数据处理条款。"""

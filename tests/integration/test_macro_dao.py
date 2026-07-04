@@ -30,7 +30,7 @@ class TestMacroDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest(self, macro_dao):
-        """Level 2: 验证最新 Shibor 利率查询"""
+        """Level 2: 验证最新 Shibor 利率查询（含 Phase 3G LPR 扩列字段）"""
         df = await macro_dao.get_shibor_latest()
 
         assert df is not None
@@ -41,6 +41,11 @@ class TestMacroDaoIntegrity:
         assert "1y" in df.columns
         assert df["on"].iloc[0] == Decimal("1.85")
         assert df["1y"].iloc[0] == Decimal("2.50")
+        # Phase 3G §4.3.3：LPR 扩列字段验证
+        assert "lpr_1y" in df.columns, "lpr_1y 字段未在查询结果中"
+        assert "lpr_5y" in df.columns, "lpr_5y 字段未在查询结果中"
+        assert df["lpr_1y"].iloc[0] == Decimal("3.10")
+        assert df["lpr_5y"].iloc[0] == Decimal("3.60")
 
     @pytest.mark.asyncio
     async def test_get_macro_economy_latest(self, macro_dao):

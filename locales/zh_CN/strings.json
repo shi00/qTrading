@@ -777,7 +777,7 @@
     "sys_tier_probe_button": "触发探测",
     "sys_tier_probe_in_progress": "探测中...",
     "sys_tier_probe_in_progress_with_count": "探测中（{completed}/{total}）...",
-    "sys_tier_probe_completed": "探测完成（可用 {available}，不可用 {unavailable}）",
+    "sys_tier_probe_completed": "探测完成（可用 {available}，不可用 {unavailable}，未知 {unknown}）",
     "sys_tier_probe_failed": "探测失败",
     "sys_tier_probe_all_failed": "全部探测失败，请检查 Token 与网络",
     "sys_tier_tier_too_high": "当前档位过高，部分接口探测失败（{false_count}/{total}）",

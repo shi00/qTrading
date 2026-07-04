@@ -12,7 +12,7 @@ import pandas as pd
 from data.persistence.models import Express, get_model_columns, get_model_pk_columns
 from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +82,9 @@ class ExpressDao(BaseDao):
                     ts_codes,
                 )
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            # R5 红线：僵尸引擎操作必须传播，不得被下面的 Exception 吞没
             raise
         except Exception as e:
             logger.warning("[ExpressDao] Failed to get express batch: %s", DataSanitizer.sanitize_error(e))

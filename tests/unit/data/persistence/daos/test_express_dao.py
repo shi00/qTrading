@@ -130,3 +130,17 @@ class TestGetExpressBatch:
         result = await dao.get_express_batch(["000001.SZ"])
 
         assert result.empty
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """EngineDisposedError 必须传播（R5），不返回空 DataFrame。
+
+        v1.10.0 检视 P1-1 修复：补 ``except EngineDisposedError: raise`` 分支。
+        """
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+
+        with pytest.raises(EngineDisposedError):
+            await dao.get_express_batch(["000001.SZ"])
