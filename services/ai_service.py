@@ -83,6 +83,8 @@ _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_main_business",
     "ai_label_dividend",
     "ai_label_pledge",
+    # Phase 3B：股权质押明细（pledge_detail API，points_2000）
+    "ai_label_pledge_detail",
     "ai_label_top_holder",
     "ai_label_holder_count",
     "ai_label_main_flow",
@@ -186,7 +188,10 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     "ai_label_audit": ("points_2000", frozenset({"fina_audit"})),
     "ai_label_main_business": ("points_2000", frozenset({"fina_mainbz"})),
     "ai_label_dividend": ("points_2000", frozenset({"dividend"})),
-    "ai_label_pledge": ("points_2000", frozenset({"pledge_stat", "pledge_detail"})),
+    # Phase 3B：pledge_stat（统计）与 pledge_detail（明细）拆分为独立标签，
+    # 避免 pledge_detail 不可用时连 pledge_stat 段落也消失
+    "ai_label_pledge": ("points_2000", frozenset({"pledge_stat"})),
+    "ai_label_pledge_detail": ("points_2000", frozenset({"pledge_detail"})),
     "ai_label_top_holder": ("points_2000", frozenset({"top10_holders"})),
     "ai_label_holder_count": ("points_2000", frozenset({"stk_holdernumber"})),
     "ai_label_main_flow": ("points_2000", frozenset({"moneyflow", "moneyflow_hsgt"})),

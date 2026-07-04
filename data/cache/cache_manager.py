@@ -23,6 +23,7 @@ from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.market_dao import MarketDao
+from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
@@ -102,6 +103,7 @@ class CacheManager:
             self.backtest_dao = BacktestDAO(self.engine)
             self.top_inst_dao = TopInstDao(self.engine)
             self.stk_limit_dao = StkLimitDao(self.engine)
+            self.pledge_detail_dao = PledgeDetailDao(self.engine)
 
             self._schema_initialized = False
 
@@ -155,6 +157,7 @@ class CacheManager:
         self.backtest_dao.engine = self.engine
         self.top_inst_dao.engine = self.engine
         self.stk_limit_dao.engine = self.engine
+        self.pledge_detail_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -196,6 +199,7 @@ class CacheManager:
             self.backtest_dao.engine = None
             self.top_inst_dao.engine = None
             self.stk_limit_dao.engine = None
+            self.pledge_detail_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -838,6 +842,10 @@ class CacheManager:
     async def save_pledge_stat(self, df: pd.DataFrame):
         return await self.financial_dao.save_pledge_stat(df)
 
+    async def save_pledge_detail(self, df: pd.DataFrame):
+        """Phase 3B：股权质押明细入库。"""
+        return await self.pledge_detail_dao.save_pledge_detail(df)
+
     async def save_repurchase(self, df: pd.DataFrame):
         return await self.financial_dao.save_repurchase(df)
 
@@ -1045,6 +1053,10 @@ class CacheManager:
         """获取股权质押统计"""
         return await self.financial_dao.get_pledge_stat_batch([ts_code], as_of_date=as_of_date)
 
+    async def get_pledge_detail(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """Phase 3B：获取股权质押明细"""
+        return await self.pledge_detail_dao.get_pledge_detail_batch([ts_code], as_of_date=as_of_date)
+
     async def get_fina_forecast(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取业绩预告"""
         return await self.financial_dao.get_fina_forecast_batch([ts_code], as_of_date=as_of_date)
@@ -1139,6 +1151,8 @@ class CacheManager:
             self.financial_dao.get_financial_reports_history_batch(ts_codes, as_of_date=as_of_date),
             self.holder_dao.get_stk_holdernumber_batch(ts_codes, as_of_date=as_of_date),
             self.financial_dao.get_fina_forecast_batch(ts_codes, as_of_date=as_of_date),
+            # Phase 3B：pledge_detail 双预取（与 pledge_stat 互补）
+            self.pledge_detail_dao.get_pledge_detail_batch(ts_codes, as_of_date=as_of_date),
         )
 
         batch_keys = [
@@ -1150,6 +1164,7 @@ class CacheManager:
             "financial_history",
             "holdernumber",
             "forecast",
+            "pledge_detail",
         ]
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):

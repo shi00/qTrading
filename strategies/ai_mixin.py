@@ -1442,6 +1442,45 @@ class AIStrategyMixin:
             f"（{I18n.get('ai_forecast_ann_date')}: {ann_str}）"
         )
 
+    @staticmethod
+    def _format_pledge_detail_section(df: pd.DataFrame) -> str:
+        """格式化股权质押明细段落（Phase 3B）。
+
+        入参 df 由 ``get_pledge_detail_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
+        仅返回每只股票最新一期明细，故直接取 ``iloc[0]``。
+
+        格式示例：``- 质押明细: 质押股数 1000.00 万股（无限售 800.00，有限售 200.00），占总股本 35.2%``
+        """
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        pledge_amount = row.get("pledge_amount")
+        unlimited = row.get("unlimited_pledge_amount")
+        limited = row.get("limited_pledge_amount")
+        total_pledge = row.get("total_pledge_amount")
+        pledge_ratio = row.get("pledge_ratio")
+
+        parts: list[str] = []
+        if pledge_amount is not None and not pd.isna(pledge_amount):
+            parts.append(f"{I18n.get('ai_pledge_amount')}: {float(pledge_amount):.2f}")
+        if total_pledge is not None and not pd.isna(total_pledge):
+            parts.append(f"{I18n.get('ai_pledge_total')}: {float(total_pledge):.2f}")
+        if unlimited is not None and not pd.isna(unlimited):
+            parts.append(f"{I18n.get('ai_pledge_unlimited')}: {float(unlimited):.2f}")
+        if limited is not None and not pd.isna(limited):
+            parts.append(f"{I18n.get('ai_pledge_limited')}: {float(limited):.2f}")
+
+        if not parts:
+            return ""
+
+        detail_str = "（" + "，".join(parts) + "）"
+        ratio_str = (
+            f"，{I18n.get('ai_pledge_ratio')} {float(pledge_ratio):.1f}%"
+            if pledge_ratio is not None and not pd.isna(pledge_ratio)
+            else ""
+        )
+        return f"- {I18n.get('ai_pledge_detail')}: {detail_str}{ratio_str}"
+
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1532,6 +1571,25 @@ class AIStrategyMixin:
                     has_data = True
                     if labels_out is not None:
                         labels_out.append("ai_label_pledge")
+
+            # Phase 3B：股权质押明细（pledge_detail）— 与 pledge_stat 互补，提供更细粒度的质押信息
+            if prefetched and ts_code in prefetched and "pledge_detail" in prefetched[ts_code]:
+                pledge_detail_df = prefetched[ts_code]["pledge_detail"]
+            else:
+                pledge_detail_df = await cache.get_pledge_detail(ts_code, as_of_date=as_of_date)
+
+            if pledge_detail_df is not None and not pledge_detail_df.empty:
+                pledge_detail_line = _build_stale_section(
+                    "pledge_detail",
+                    pledge_detail_df,
+                    self._format_pledge_detail_section,
+                    date_column="end_date",
+                )
+                if pledge_detail_line:
+                    lines.append(pledge_detail_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_pledge_detail")
 
             if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]

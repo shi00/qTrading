@@ -424,6 +424,26 @@ TABLE_DEFINITIONS = {
             "pledge_ratio": "col_pledge_ratio",
         },
     },
+    "pledge_detail": {
+        "alias": "tab_pledge_detail",
+        "desc": "股权质押明细",
+        "sync_config": {
+            "strategy": "stock",
+            "api": "get_pledge_detail",
+            "date_col": "end_date",
+            "keys": ["ts_code", "end_date"],
+        },
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
+        "columns": {
+            "ts_code": "col_ts_code",
+            "end_date": "col_end_date",
+            "pledge_amount": "col_pledge_amount",
+            "unlimited_pledge_amount": "col_unlimited_pledge_amount",
+            "limited_pledge_amount": "col_limited_pledge_amount",
+            "total_pledge_amount": "col_total_pledge_amount",
+            "pledge_ratio": "col_pledge_ratio",
+        },
+    },
     "repurchase": {
         "alias": "tab_repurchase",
         "desc": "股票回购",

@@ -503,6 +503,21 @@ class PledgeStat(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class PledgeDetail(Base):
+    """股权质押明细（Phase 3B，与 pledge_stat 互补，提供更细粒度的质押信息供 AI 分析）。"""
+
+    __tablename__ = "pledge_detail"
+    ts_code = Column(String, primary_key=True)
+    end_date = Column(Date, primary_key=True, index=True)
+    pledge_amount = Column(Numeric(20, 4))
+    unlimited_pledge_amount = Column(Numeric(20, 4))
+    limited_pledge_amount = Column(Numeric(20, 4))
+    total_pledge_amount = Column(Numeric(20, 4))
+    pledge_ratio = Column(Numeric(12, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class Repurchase(Base):
     __tablename__ = "repurchase"
     ts_code = Column(String, primary_key=True)

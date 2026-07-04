@@ -54,6 +54,7 @@ class TushareProApi(typing.Protocol):
     forecast: Callable[..., pd.DataFrame]
     fina_mainbz: Callable[..., pd.DataFrame]
     pledge_stat: Callable[..., pd.DataFrame]
+    pledge_detail: Callable[..., pd.DataFrame]
     repurchase: Callable[..., pd.DataFrame]
     dividend: Callable[..., pd.DataFrame]
     shibor: Callable[..., pd.DataFrame]
@@ -274,6 +275,7 @@ class TushareClient:
         "margin_daily": "margin_detail",
         "block_trade": "block_trade",
         "stk_limit": "stk_limit",
+        "pledge_detail": "pledge_detail",
     }
 
     def __new__(cls, *args, **kwargs):
@@ -1795,6 +1797,19 @@ class TushareClient:
             ts_code=ts_code,
             end_date=end_date,
             fields="ts_code,end_date,pledge_count,unrest_pledge,rest_pledge,total_share,pledge_ratio",
+        )
+
+    async def get_pledge_detail(self, ts_code: str | None = None, end_date: str | None = None):
+        """Get share pledge detail.
+
+        Phase 3B §3.2：股权质押明细，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。与 pledge_stat（统计）互补，提供更细粒度的质押信息供 AI 分析。
+        """
+        return await self._handle_api_call(
+            self.pro.pledge_detail,
+            ts_code=ts_code,
+            end_date=end_date,
+            fields="ts_code,end_date,pledge_amount,unlimited_pledge_amount,limited_pledge_amount,total_pledge_amount,pledge_ratio",
         )
 
     async def get_repurchase(

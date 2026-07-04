@@ -18,6 +18,7 @@ from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.top_inst_dao import TopInstDao
 from data.persistence.daos.stk_limit_dao import StkLimitDao
+from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
 
 pytestmark = pytest.mark.unit
 
@@ -48,6 +49,7 @@ def _make_mgr():
     mgr.backtest_dao = MagicMock(spec=BacktestDAO)
     mgr.top_inst_dao = MagicMock(spec=TopInstDao)
     mgr.stk_limit_dao = MagicMock(spec=StkLimitDao)
+    mgr.pledge_detail_dao = MagicMock(spec=PledgeDetailDao)
     return mgr
 
 
