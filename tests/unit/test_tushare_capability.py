@@ -40,12 +40,18 @@ class TestTableToApiMap:
             "northbound_holding",
             "moneyflow_daily",
             "top_list",
+            "top_inst",
             "limit_list",
             "margin_daily",
             "block_trade",
         ]
         for table in expected_tables:
             assert table in client.TABLE_TO_API_MAP, f"Missing mapping for {table}"
+
+    def test_top_inst_maps_to_top_inst_api(self, tushare_client_mocks):
+        """Phase 2E：top_inst 表名映射到同名 Tushare API。"""
+        client, _, _ = tushare_client_mocks
+        assert client.TABLE_TO_API_MAP["top_inst"] == "top_inst"
 
     def test_limit_list_maps_to_limit_list_d_api(self, tushare_client_mocks):
         """本地表名 limit_list 应映射到 Tushare API 名 limit_list_d（带 _d 后缀）。

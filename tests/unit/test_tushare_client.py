@@ -526,6 +526,37 @@ class TestTushareClientApiMethods:
         assert call_args.kwargs["quarter"] == "2024Q4"
         assert "gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy" in call_args.kwargs["fields"]
 
+    @pytest.mark.asyncio
+    async def test_get_top_inst_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 2E §3.2.7：get_top_inst 委托 _handle_api_call，传递 trade_date 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "name": ["平安银行"],
+                "close": [10.0],
+                "pct_change": [1.0],
+                "amount": [1000000.0],
+                "net_amount": [500000.0],
+                "buy_amount": [800000.0],
+                "buy_value": [8000000.0],
+                "sell_amount": [300000.0],
+                "sell_value": [3000000.0],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_top_inst(trade_date="20240614")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.top_inst callable
+        assert callable(call_args.args[0])
+        # kwargs 含 trade_date 和 fields
+        assert call_args.kwargs["trade_date"] == "20240614"
+        assert "ts_code,trade_date,name,close,pct_change,amount" in call_args.kwargs["fields"]
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):

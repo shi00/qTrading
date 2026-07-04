@@ -176,6 +176,25 @@ class TopList(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class TopInst(Base):
+    """龙虎榜机构席位交易明细（Phase 2E top_inst 已封装 API 激活）。"""
+
+    __tablename__ = "top_inst"
+    ts_code = Column(String, primary_key=True)
+    trade_date = Column(Date, primary_key=True, index=True)
+    name = Column(String)
+    close = Column(Numeric(12, 4))
+    pct_change = Column(Numeric(8, 4))
+    amount = Column(Numeric(20, 4))
+    net_amount = Column(Numeric(20, 4))
+    buy_amount = Column(Numeric(20, 4))
+    buy_value = Column(Numeric(20, 4))
+    sell_amount = Column(Numeric(20, 4))
+    sell_value = Column(Numeric(20, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class SyncStatus(Base):
     __tablename__ = "sync_status"
     table_name = Column(String, primary_key=True)

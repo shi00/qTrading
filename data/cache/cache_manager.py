@@ -27,6 +27,7 @@ from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.stock_dao import StockDao
 from data.persistence.daos.sync_dao import SyncDao
+from data.persistence.daos.top_inst_dao import TopInstDao
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
@@ -98,6 +99,7 @@ class CacheManager:
             self.macro_dao = MacroDao(self.engine)
             self.holder_dao = HolderDao(self.engine)
             self.backtest_dao = BacktestDAO(self.engine)
+            self.top_inst_dao = TopInstDao(self.engine)
 
             self._schema_initialized = False
 
@@ -149,6 +151,7 @@ class CacheManager:
         self.macro_dao.engine = self.engine
         self.holder_dao.engine = self.engine
         self.backtest_dao.engine = self.engine
+        self.top_inst_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -188,6 +191,7 @@ class CacheManager:
             self.macro_dao.engine = None
             self.holder_dao.engine = None
             self.backtest_dao.engine = None
+            self.top_inst_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -393,6 +397,16 @@ class CacheManager:
         Returns: Dict[ts_code, List[concept_name]]
         """
         return await self.stock_dao.get_concepts(ts_codes)  # type: ignore[return-value]  # DAO return type may vary from expected dict structure
+
+    async def get_stock_concepts(self, ts_code: str) -> list[str]:
+        """Phase 2E：单股反查所属概念标签列表。
+
+        区别于现有 ``get_concepts(ts_codes)``（批量 → ``dict[ts_code, list[str]]``），
+        本方法接受单个 ts_code，直接返回该股票的概念标签列表，便于 AI 策略层单股反查。
+        实现复用 ``stock_dao.get_concepts``，避免重复 SQL。
+        """
+        concepts_map = await self.stock_dao.get_concepts([ts_code])
+        return concepts_map.get(ts_code, [])
 
     # --- Daily Quotes ---
     async def save_daily_quotes(
@@ -886,6 +900,14 @@ class CacheManager:
 
     async def get_top_list_range(self, start_date: str, end_date: str):
         return await self.quote_dao.get_top_list_range(start_date, end_date)
+
+    async def save_top_inst(self, df: pd.DataFrame):
+        """Phase 2E：top_inst 龙虎榜机构席位明细入库。"""
+        return await self.top_inst_dao.save_top_inst(df)
+
+    async def get_top_inst_batch(self, ts_codes: list[str], as_of_date=None):
+        """Phase 2E：批量查询 top_inst 数据。"""
+        return await self.top_inst_dao.get_top_inst_batch(ts_codes, as_of_date)
 
     async def save_block_trade(self, df: pd.DataFrame):
         return await self.quote_dao.save_block_trade(df)

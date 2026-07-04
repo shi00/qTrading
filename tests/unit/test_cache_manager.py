@@ -16,6 +16,7 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.backtest_dao import BacktestDAO
+from data.persistence.daos.top_inst_dao import TopInstDao
 
 pytestmark = pytest.mark.unit
 
@@ -44,6 +45,7 @@ def _make_mgr():
     mgr.macro_dao = MagicMock(spec=MacroDao)
     mgr.holder_dao = MagicMock(spec=HolderDao)
     mgr.backtest_dao = MagicMock(spec=BacktestDAO)
+    mgr.top_inst_dao = MagicMock(spec=TopInstDao)
     return mgr
 
 

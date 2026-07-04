@@ -267,6 +267,7 @@ class TushareClient:
         "northbound_holding": "hk_hold",
         "moneyflow_daily": "moneyflow",
         "top_list": "top_list",
+        "top_inst": "top_inst",
         "limit_list": "limit_list_d",
         "margin_daily": "margin_detail",
         "block_trade": "block_trade",
@@ -1531,9 +1532,16 @@ class TushareClient:
         return attach_top_list_column_units(df)
 
     async def get_top_inst(self, trade_date: str | None):
-        """LHB Institutional Seat Transaction Detail"""
+        """LHB Institutional Seat Transaction Detail.
 
-        return await self._handle_api_call(self.pro.top_inst, trade_date=trade_date)
+        Phase 2E §3.2.7：激活已封装 API，挂 @log_async_operation（由 _handle_api_call 提供）+ 显式 fields。
+        """
+
+        return await self._handle_api_call(
+            self.pro.top_inst,
+            trade_date=trade_date,
+            fields="ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,buy_value,sell_amount,sell_value",
+        )
 
     async def get_hk_hold(self, trade_date: str | None):
         """Northbound (HK->Connect) holdings"""
