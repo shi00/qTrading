@@ -444,6 +444,27 @@ TABLE_DEFINITIONS = {
             "pledge_ratio": "col_pledge_ratio",
         },
     },
+    "share_float": {
+        "alias": "tab_share_float",
+        "desc": "限售解禁",
+        "sync_config": {
+            "strategy": "stock",
+            "api": "get_share_float",
+            "date_col": "float_date",
+            "keys": ["ts_code", "float_date"],
+        },
+        "quality_config": {"tier": 1, "monitor": True, "sparse": True},
+        "type": "stock",
+        "columns": {
+            "ts_code": "col_ts_code",
+            "ann_date": "col_ann_date",
+            "float_date": "col_float_date",
+            "float_share": "col_float_share",
+            "float_ratio": "col_float_ratio",
+            "holder_name": "col_holder_name",
+            "share_type": "col_share_type",
+        },
+    },
     "repurchase": {
         "alias": "tab_repurchase",
         "desc": "股票回购",

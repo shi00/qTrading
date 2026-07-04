@@ -1512,6 +1512,33 @@ class AIStrategyMixin:
         )
         return f"- {I18n.get('ai_pledge_detail')}: {detail_str}{ratio_str}"
 
+    @staticmethod
+    def _format_share_float_section(df: pd.DataFrame) -> str:
+        """格式化限售解禁段落（Phase 3D）。
+
+        入参 df 由 ``get_share_float_upcoming_batch`` 返回，包含未来解禁记录。
+        最多展示 3 条最近解禁事件。
+
+        格式示例：``- 限售解禁: 2024-08-15 解禁 1000.00 万股（5.2%）；2024-09-20 解禁 500.00 万股（2.6%）``
+        """
+        if df is None or df.empty:
+            return ""
+        items: list[str] = []
+        for _, row in df.head(3).iterrows():
+            float_date = row.get("float_date")
+            float_share = row.get("float_share")
+            float_ratio = row.get("float_ratio")
+            if hasattr(float_date, "strftime"):
+                date_str = float_date.strftime("%Y-%m-%d")
+            else:
+                date_str = str(float_date) if float_date is not None else "N/A"
+            share_str = f"{float(float_share):.2f}" if float_share is not None and not pd.isna(float_share) else "N/A"
+            ratio_str = f"（{float(float_ratio):.1f}%）" if float_ratio is not None and not pd.isna(float_ratio) else ""
+            items.append(f"{date_str} 解禁 {share_str} 万股{ratio_str}")
+        if not items:
+            return ""
+        return f"- {I18n.get('ai_share_float')}: " + "；".join(items)
+
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1621,6 +1648,25 @@ class AIStrategyMixin:
                     has_data = True
                     if labels_out is not None:
                         labels_out.append("ai_label_pledge_detail")
+
+            # Phase 3D：限售解禁（share_float）— 未来解禁压力，与 pledge_stat/pledge_detail 互补
+            if prefetched and ts_code in prefetched and "share_float" in prefetched[ts_code]:
+                share_float_df = prefetched[ts_code]["share_float"]
+            else:
+                share_float_df = await cache.get_share_float_upcoming(ts_code, as_of_date=as_of_date)
+
+            if share_float_df is not None and not share_float_df.empty:
+                share_float_line = _build_stale_section(
+                    "share_float",
+                    share_float_df,
+                    self._format_share_float_section,
+                    date_column="ann_date",
+                )
+                if share_float_line:
+                    lines.append(share_float_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_share_float")
 
             if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]

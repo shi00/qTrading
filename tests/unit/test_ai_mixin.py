@@ -1091,6 +1091,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
@@ -1107,6 +1108,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "审计意见" in result_text
@@ -1123,6 +1125,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "质押比例" in result_text
@@ -1147,6 +1150,7 @@ class TestBuildAuxiliaryDataText:
         )
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "股东人数" in result_text
@@ -1171,6 +1175,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "分红" in result_text
@@ -1196,6 +1201,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
         cache.get_fina_forecast = AsyncMock(return_value=pd.DataFrame())
         cache.get_pledge_detail = AsyncMock(return_value=pd.DataFrame())
+        cache.get_share_float_upcoming = AsyncMock(return_value=pd.DataFrame())
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is False
         assert result_text == ""
@@ -1212,6 +1218,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "质押比例较高" in result_text
@@ -1237,6 +1244,7 @@ class TestBuildAuxiliaryDataText:
         )
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
         assert result_valid is True
         assert "股东人数" in result_text
@@ -1256,6 +1264,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         prefetched = {
             "000001.SZ": {
                 "audit": pd.DataFrame({"audit_result": ["标准无保留意见"]}),
@@ -1286,6 +1295,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         await s._build_auxiliary_data_text("000001.SZ", cache, as_of_date="20240701")
         cache.get_fina_audit.assert_called_once_with("000001.SZ", as_of_date="20240701")
         cache.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date="20240701")
@@ -1307,6 +1317,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         await s._build_auxiliary_data_text("000001.SZ", cache)
         cache.get_fina_audit.assert_called_once_with("000001.SZ", as_of_date=None)
         cache.get_fina_mainbz.assert_called_once_with("000001.SZ", as_of_date=None)
@@ -1326,6 +1337,7 @@ class TestBuildAuxiliaryDataText:
         cache.get_stk_holdernumber = AsyncMock(return_value=None)
         cache.get_fina_forecast = AsyncMock(return_value=None)
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         holders_df = pd.DataFrame(
             {
                 "end_date": ["20231231", "20231231"],
@@ -1369,6 +1381,7 @@ class TestBuildAuxiliaryDataText:
             )
         )
         cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         labels_out: list[str] = []
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
             client = mock_tc.return_value
@@ -1413,6 +1426,7 @@ class TestBuildAuxiliaryDataText:
                 }
             )
         )
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         labels_out: list[str] = []
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
             client = mock_tc.return_value
@@ -1460,6 +1474,7 @@ class TestBuildAuxiliaryDataText:
                 }
             )
         )
+        cache.get_share_float_upcoming = AsyncMock(return_value=None)
         labels_out: list[str] = []
         with patch("data.external.tushare_client.TushareClient") as mock_tc:
             client = mock_tc.return_value
@@ -1474,6 +1489,95 @@ class TestBuildAuxiliaryDataText:
         assert "1000000.00" in result_text
         # 标签仍加入 labels_out（stale 数据仍注入，标签照常收集，由 filter_available_labels 过滤）
         assert "ai_label_pledge_detail" in labels_out
+
+    @pytest.mark.asyncio
+    async def test_build_auxiliary_data_text_includes_share_float(self):
+        """Phase 3D：当 cache.get_share_float_upcoming 返回有效数据时，_build_auxiliary_data_text
+        应注入限售解禁段落，并将 ai_label_share_float 加入 labels_out。
+
+        share_float 段落经 _build_stale_section 标注：档位覆盖内（points_5000）时无
+        stale 前缀，仅注入 _format_share_float_section 输出。本测试 mock TushareClient
+        确保档位覆盖为 True，避免依赖默认 config 档位，保证测试稳定性。
+        """
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(return_value=None)
+        cache.get_fina_mainbz = AsyncMock(return_value=None)
+        cache.get_dividend = AsyncMock(return_value=None)
+        cache.get_pledge_stat = AsyncMock(return_value=None)
+        cache.get_top10_holders = AsyncMock(return_value=None)
+        cache.get_stk_holdernumber = AsyncMock(return_value=None)
+        cache.get_fina_forecast = AsyncMock(return_value=None)
+        cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 1)],
+                    "float_date": [datetime.date(2024, 8, 15)],
+                    "float_share": [1000.0],
+                    "float_ratio": [5.2],
+                    "share_type": ["定向增发"],
+                }
+            )
+        )
+        labels_out: list[str] = []
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            # share_float API 在 points_5000 覆盖内 → 无 stale 标注
+            client.is_api_covered_by_tier.return_value = True
+            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+        assert result_valid is True
+        assert "限售解禁" in result_text
+        assert "2024-08-15" in result_text
+        assert "1000.00" in result_text
+        assert "5.2%" in result_text
+        assert "ai_label_share_float" in labels_out
+
+    @pytest.mark.asyncio
+    async def test_share_float_stale_annotation(self):
+        """Phase 3D：share_float 段落在档位不覆盖（如 points_120 降级）时，
+        _build_stale_section 返回 stale 前缀 + formatter(df)。
+
+        本测试 mock TushareClient.is_api_covered_by_tier 返回 False，模拟 share_float
+        不在当前档位覆盖内（降级场景），验证 stale 标注 + 历史数据仍注入。
+        """
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        cache.get_fina_audit = AsyncMock(return_value=None)
+        cache.get_fina_mainbz = AsyncMock(return_value=None)
+        cache.get_dividend = AsyncMock(return_value=None)
+        cache.get_pledge_stat = AsyncMock(return_value=None)
+        cache.get_top10_holders = AsyncMock(return_value=None)
+        cache.get_stk_holdernumber = AsyncMock(return_value=None)
+        cache.get_fina_forecast = AsyncMock(return_value=None)
+        cache.get_pledge_detail = AsyncMock(return_value=None)
+        cache.get_share_float_upcoming = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 1)],
+                    "float_date": [datetime.date(2024, 8, 15)],
+                    "float_share": [1000.0],
+                    "float_ratio": [5.2],
+                    "share_type": ["定向增发"],
+                }
+            )
+        )
+        labels_out: list[str] = []
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            # share_float API 不在 points_120 覆盖内 → stale 标注
+            client.is_api_covered_by_tier.return_value = False
+            result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels_out)
+        assert result_valid is True
+        # stale 标注前缀（ann_date 为 2024-06-01）
+        assert "【数据停止更新，最后更新：2024-06-01】" in result_text
+        # 仍注入历史数据
+        assert "限售解禁" in result_text
+        assert "1000.00" in result_text
+        # 标签仍加入 labels_out（stale 数据仍注入，标签照常收集，由 filter_available_labels 过滤）
+        assert "ai_label_share_float" in labels_out
 
 
 class TestBuildMacroContext:
@@ -1980,6 +2084,7 @@ class TestBuilderLabelsOut:
         )
         cache.get_fina_forecast = AsyncMock(return_value=pd.DataFrame())
         cache.get_pledge_detail = AsyncMock(return_value=pd.DataFrame())
+        cache.get_share_float_upcoming = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result_valid  # 有效数据
@@ -1998,6 +2103,7 @@ class TestBuilderLabelsOut:
         cache.get_stk_holdernumber = AsyncMock(return_value=pd.DataFrame())
         cache.get_fina_forecast = AsyncMock(return_value=pd.DataFrame())
         cache.get_pledge_detail = AsyncMock(return_value=pd.DataFrame())
+        cache.get_share_float_upcoming = AsyncMock(return_value=pd.DataFrame())
         labels: list[str] = []
         result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache, labels_out=labels)
         assert result_valid is False
@@ -2147,6 +2253,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
             cache.get_fina_forecast = AsyncMock(return_value=None)
             cache.get_pledge_detail = AsyncMock(return_value=None)
+            cache.get_share_float_upcoming = AsyncMock(return_value=None)
             result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is False
             assert result_text == ""
@@ -2168,6 +2275,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
             cache.get_fina_forecast = AsyncMock(return_value=None)
             cache.get_pledge_detail = AsyncMock(return_value=None)
+            cache.get_share_float_upcoming = AsyncMock(return_value=None)
             result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is False
             assert result_text == ""
@@ -2189,6 +2297,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
             cache.get_fina_forecast = AsyncMock(return_value=None)
             cache.get_pledge_detail = AsyncMock(return_value=None)
+            cache.get_share_float_upcoming = AsyncMock(return_value=None)
             result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is True
             assert result_text  # 非空
@@ -2211,6 +2320,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
             cache.get_fina_forecast = AsyncMock(return_value=None)
             cache.get_pledge_detail = AsyncMock(return_value=None)
+            cache.get_share_float_upcoming = AsyncMock(return_value=None)
             result_text, result_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
             assert result_valid is True
             assert result_text  # 非空
@@ -2237,6 +2347,7 @@ class TestAuxiliaryDataLocaleIndependentSentinel:
             cache.get_stk_holdernumber = AsyncMock(return_value=None)
             cache.get_fina_forecast = AsyncMock(return_value=None)
             cache.get_pledge_detail = AsyncMock(return_value=None)
+            cache.get_share_float_upcoming = AsyncMock(return_value=None)
             _, zh_valid = await s._build_auxiliary_data_text("000001.SZ", cache)
 
             # 切换到 en_US 后再构建一次（同样无数据）

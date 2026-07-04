@@ -541,6 +541,71 @@ class TestHolderSyncSyncPledgeStat:
         assert saved_df.loc[0, "ann_date"] == _dt.date(2024, 6, 16)
 
 
+class TestHolderSyncShareFloat:
+    """Phase 3D：_sync_share_float 单元测试。
+
+    share_float 是事件驱动数据，sync 窗口 [today-90, today+30]，
+    单次 API 调用全市场查询，无 pledge_stat 的循环重试逻辑。
+    """
+
+    @pytest.mark.asyncio
+    async def test_with_data(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_share_float = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "ann_date": [datetime.date(2024, 6, 1)],
+                    "float_date": [datetime.date(2024, 8, 15)],
+                    "float_share": [1000.0],
+                    "float_ratio": [5.2],
+                    "share_type": ["定向增发"],
+                }
+            )
+        )
+        ctx.cache = MagicMock()
+        ctx.cache.save_share_float = AsyncMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_share_float()
+        assert count == 1
+        assert date == datetime.date(2024, 6, 14)
+        ctx.cache.save_share_float.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_data(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_share_float = AsyncMock(return_value=pd.DataFrame())
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_share_float()
+        assert count == 0
+        assert date == datetime.date(2024, 6, 14)
+
+    @pytest.mark.asyncio
+    async def test_api_error(self):
+        ctx = MagicMock()
+        ctx.api = MagicMock()
+        ctx.api.get_share_float = AsyncMock(side_effect=Exception("API Error"))
+        strategy = HolderSyncStrategy(ctx)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_share_float()
+        assert count == -1
+        assert date is None
+
+    @pytest.mark.asyncio
+    async def test_cancelled(self):
+        ctx = MagicMock()
+        strategy = HolderSyncStrategy(ctx)
+        strategy._cancelled = True
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        count, date = await strategy._sync_share_float()
+        assert count == -1
+        assert date is None
+
+
 class TestHolderSyncSyncStkHoldernumber:
     @pytest.mark.asyncio
     async def test_with_data(self):

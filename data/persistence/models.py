@@ -518,6 +518,21 @@ class PledgeDetail(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class ShareFloat(Base):
+    """限售解禁（Phase 3D，限售股解禁数据，供 AI 分析解禁压力与减持风险）。"""
+
+    __tablename__ = "share_float"
+    ts_code = Column(String, primary_key=True)
+    ann_date = Column(Date, index=True)
+    float_date = Column(Date, primary_key=True, index=True)
+    float_share = Column(Numeric(20, 4))
+    float_ratio = Column(Numeric(8, 4))
+    holder_name = Column(String(100))
+    share_type = Column(String(50))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class Repurchase(Base):
     __tablename__ = "repurchase"
     ts_code = Column(String, primary_key=True)

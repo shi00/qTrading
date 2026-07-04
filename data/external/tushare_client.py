@@ -63,6 +63,7 @@ class TushareProApi(typing.Protocol):
     stk_holdernumber: Callable[..., pd.DataFrame]
     cn_gdp: Callable[..., pd.DataFrame]
     stk_limit: Callable[..., pd.DataFrame]
+    share_float: Callable[..., pd.DataFrame]
 
 
 class TushareAPIPermissionError(Exception):
@@ -129,6 +130,8 @@ class TushareClient:
         "cn_m": {"month": "period"},
         # Phase 2D §3.2.6：cn_gdp API 返回 quarter 列，重命名为 period 统一处理
         "cn_gdp": {"quarter": "period"},
+        # Phase 3D：share_float API 返回 float_type，重命名为 share_type（与 ORM 列名对齐）
+        "share_float": {"float_type": "share_type"},
     }
 
     _SLOW_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
@@ -276,6 +279,7 @@ class TushareClient:
         "block_trade": "block_trade",
         "stk_limit": "stk_limit",
         "pledge_detail": "pledge_detail",
+        "share_float": "share_float",
     }
 
     def __new__(cls, *args, **kwargs):
@@ -1810,6 +1814,25 @@ class TushareClient:
             ts_code=ts_code,
             end_date=end_date,
             fields="ts_code,end_date,pledge_amount,unlimited_pledge_amount,limited_pledge_amount,total_pledge_amount,pledge_ratio",
+        )
+
+    async def get_share_float(
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get share float (unlock) data.
+
+        Phase 3D §3.2：限售解禁，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。float_type 经 _COLUMN_RENAMES 重命名为 share_type。
+        """
+        return await self._handle_api_call(
+            self.pro.share_float,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,ann_date,float_date,float_share,float_ratio,float_type",
         )
 
     async def get_repurchase(
