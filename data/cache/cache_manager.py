@@ -885,6 +885,15 @@ class CacheManager:
         """
         return await self.sw_industry_member_dao.get_sw_industry_by_ts_code(ts_code)
 
+    async def get_sw_l2_mapping(self, ts_codes: list[str] | None = None) -> dict[str, str]:
+        """Phase 3F-2 轨道 A：批量查询 ts_code → 申万二级行业名映射。
+
+        用于 ``sync_stock_basic`` 写时覆写 ``stock_basic.industry`` 列、
+        ``prefetch_auxiliary_data`` 批量预取双保险。无映射的 ts_code 不在结果中，
+        调用方应据此"有则覆写、无则保留 API 原始值"（v1.9.0 M-4）。
+        """
+        return await self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes)
+
     async def save_repurchase(self, df: pd.DataFrame):
         return await self.financial_dao.save_repurchase(df)
 
@@ -1204,6 +1213,8 @@ class CacheManager:
             self.share_float_dao.get_share_float_upcoming_batch(ts_codes, as_of_date=as_of_date),
             # Phase 3E：stk_holdertrade 预取（近期增减持记录）
             self.stk_holdertrade_dao.get_stk_holdertrade_batch(ts_codes, as_of_date=as_of_date),
+            # Phase 3F-2：申万二级行业名预取（双保险，与轨道 B 读时 JOIN 互补）
+            self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes),
         )
 
         batch_keys = [
@@ -1218,6 +1229,7 @@ class CacheManager:
             "pledge_detail",
             "share_float",
             "holdertrade",
+            "sw_industry",
         ]
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):
@@ -1228,7 +1240,16 @@ class CacheManager:
                 batch_results[key] = raw
 
         for key, df in batch_results.items():
-            if df is None or df.empty:
+            if df is None:
+                continue
+            # Phase 3F-2：sw_industry 预取返回 dict[str, str]（ts_code → sw_l2_name），
+            # 不参与 DataFrame groupby 路径，单独按 ts_code 分发。
+            if isinstance(df, dict):
+                for code in ts_codes:
+                    if code in df:
+                        result[code][key] = df[code]
+                continue
+            if df.empty:
                 continue
             if "ts_code" not in df.columns:
                 logger.warning(

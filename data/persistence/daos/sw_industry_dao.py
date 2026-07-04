@@ -88,3 +88,53 @@ class SwIndustryMemberDao(BaseDao):
                 DataSanitizer.sanitize_error(e),
             )
             return pd.DataFrame()
+
+    async def get_sw_l2_mapping(self, ts_codes: list[str] | None = None) -> dict[str, str]:
+        """批量查询 ts_code → 申万二级行业名（sw_l2_name）映射（Phase 3F-2 轨道 A 写时覆写）。
+
+        用于 ``sync_stock_basic`` 写入前覆写 ``industry`` 列、``prefetch_auxiliary_data``
+        批量预取双保险。同一 ts_code 在 sw_industry_member 中可能对应多个 index_code，
+        但 sw_l2_name 一致，故按 ts_code 去重取任一非空值即可。
+
+        Args:
+            ts_codes: 股票代码列表，None 表示查询全表（用于 sync_stock_basic 全量覆写）。
+
+        Returns:
+            {ts_code: sw_l2_name} 字典。无映射或不在此列表的 ts_code 不包含在结果中。
+        """
+        try:
+            if ts_codes is None:
+                df = await self._read_db(
+                    """
+                    SELECT DISTINCT ts_code, sw_l2_name
+                    FROM sw_industry_member
+                    WHERE sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                    """,
+                )
+            elif len(ts_codes) == 0:
+                return {}
+            else:
+                df = await self.chunked_in_query(
+                    self._read_db,
+                    """
+                    SELECT DISTINCT ts_code, sw_l2_name
+                    FROM sw_industry_member
+                    WHERE sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                      AND ts_code IN ({placeholders})
+                    """,
+                    ts_codes,
+                )
+        except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "[SwIndustryMemberDao] Failed to get sw_l2 mapping: %s",
+                DataSanitizer.sanitize_error(e),
+            )
+            return {}
+
+        if df is None or df.empty:
+            return {}
+        return dict(zip(df["ts_code"], df["sw_l2_name"], strict=False))

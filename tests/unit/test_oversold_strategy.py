@@ -484,6 +484,25 @@ class TestOversoldComputeSectorStats(unittest.TestCase):
         result = s._compute_sector_stats(data)
         self.assertEqual(result, {})
 
+    def test_sector_stats_with_sw_industry(self):
+        """Phase 3F-2：screening_data 的 industry 列来自 screener_dao COALESCE 后的申万行业，
+        _compute_sector_stats 应按申万二级行业名分组统计（无需修改代码，自动获益）。"""
+        s = OversoldStrategy()
+        data = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ", "600519.SH"],
+                "industry": ["银行Ⅱ", "银行Ⅱ", "白酒Ⅱ"],
+                "pct_chg": [1.0, -0.5, 2.0],
+            }
+        )
+        result = s._compute_sector_stats(data)
+        self.assertIn("银行Ⅱ", result)
+        self.assertEqual(result["银行Ⅱ"]["count"], 2)
+        self.assertEqual(result["银行Ⅱ"]["up_count"], 1)
+        self.assertEqual(result["银行Ⅱ"]["down_count"], 1)
+        self.assertIn("白酒Ⅱ", result)
+        self.assertEqual(result["白酒Ⅱ"]["up_count"], 1)
+
 
 class TestOversoldBuildTurnoverContextBranches(unittest.TestCase):
     def test_shrink_trend(self):

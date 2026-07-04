@@ -512,6 +512,27 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 )
                 return 0
 
+            # Phase 3F-2 轨道 A 写时替换：若 sw_industry_member 有该 ts_code 的申万二级
+            # 映射则覆写 industry 列；无映射则保留 API 原始值（v1.9.0 M-4，避免
+            # sw_industry_member 同步失败导致全部 NULL）。不新增 industry_raw 列（v1.7.0 S4）。
+            if "industry" in df_all.columns and "ts_code" in df_all.columns:
+                try:
+                    sw_l2_map = await self.cache.get_sw_l2_mapping()
+                except Exception as e:
+                    logger.warning(
+                        "[DataProcessor] Sync Basic | ⚠️ sw_l2_mapping query failed, keep API raw industry: %s",
+                        e,
+                    )
+                    sw_l2_map = {}
+                if sw_l2_map:
+                    mapped_mask = df_all["ts_code"].isin(sw_l2_map)
+                    df_all.loc[mapped_mask, "industry"] = df_all.loc[mapped_mask, "ts_code"].map(sw_l2_map)
+                    logger.debug(
+                        "[DataProcessor] Sync Basic | SW industry overwrite: %s / %s stocks",
+                        int(mapped_mask.sum()),
+                        len(df_all),
+                    )
+
             count = await self.cache.save_stock_basic(df_all)
             if count > 0:
                 active_count = len(df_all[df_all["list_status"] == "L"])

@@ -397,6 +397,39 @@ class TestScreenerDaoBuildScreeningSql:
         assert "PARTITION BY ts_code" in sql
 
 
+class TestScreenerDaoSwIndustryJoin:
+    """Phase 3F-2 轨道 B：验证 screener_dao SQL 使用 LEFT JOIN sw_industry_member + COALESCE。
+
+    M-4 约束：无申万映射时 COALESCE 回退到 b.industry，保留 API 原始值。
+    """
+
+    def test_screener_sql_uses_sw_industry(self):
+        """_build_screening_sql 必须包含 sw_industry_member JOIN 与 COALESCE 行业覆写。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql()
+        assert "sw_industry_member" in sql
+        assert "COALESCE(m.sw_l2_name, b.industry)" in sql
+        assert "LEFT JOIN LATERAL" in sql
+
+    def test_screener_sql_range_uses_sw_industry(self):
+        """_build_screening_sql_range 必须包含 sw_industry_member JOIN 与 COALESCE 行业覆写。"""
+        dao = ScreenerDao(MagicMock())
+        sql = dao._build_screening_sql_range()
+        assert "sw_industry_member" in sql
+        assert "COALESCE(m.sw_l2_name, b.industry)" in sql
+        assert "LEFT JOIN LATERAL" in sql
+
+    def test_industry_fallback_when_sw_missing(self):
+        """COALESCE 语义验证：SQL 文本必须包含 COALESCE(m.sw_l2_name, b.industry)，
+        确保无申万映射时回退到 stock_basic.industry（M-4 无映射保留原始值）。"""
+        dao = ScreenerDao(MagicMock())
+        sql_single = dao._build_screening_sql()
+        sql_range = dao._build_screening_sql_range()
+        fallback_pattern = "COALESCE(m.sw_l2_name, b.industry) AS industry"
+        assert fallback_pattern in sql_single, "单日 SQL 缺少 COALESCE 回退"
+        assert fallback_pattern in sql_range, "区间 SQL 缺少 COALESCE 回退"
+
+
 class TestScreenerDaoGetLatestClosedTradeDate:
     @pytest.mark.asyncio
     async def test_returns_date_string(self):

@@ -31,6 +31,51 @@ class TestReviewManagerInit:
         assert rm.alpha_loss_threshold == 2.0
 
 
+class TestReviewManagerSwIndustryPassThrough:
+    """Phase 3F-2 轨道 B：验证 save_results 能正确传递申万行业字段。
+
+    screener_dao 的 SQL 已改为 COALESCE(m.sw_l2_name, b.industry) AS industry，
+    review_manager.save_results 通过 _s(row, "industry") 读取后写入 screening_history，
+    无需修改代码即可传递申万行业（自动获益）。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_save_results_preserves_sw_industry(self, mock_cm, mock_tc):
+        """含申万二级行业名的 df 经 save_results 后，industry 字段应原样写入 record。"""
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_screener_dao = MagicMock()
+        mock_screener_dao.save_screening_results = AsyncMock(return_value=1)
+        mock_cache.screener_dao = mock_screener_dao
+
+        rm = ReviewManager()
+        rm.cache = mock_cache
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "industry": ["银行Ⅱ"],
+                "trade_date": ["20240615"],
+                "close": [10.0],
+                "pct_chg": [1.0],
+                "vol": [1e6],
+                "amount": [1e7],
+                "turnover_rate": [1.5],
+                "ai_score": [80],
+                "ai_reason": ["test"],
+            }
+        )
+        await rm.save_results("test_strategy", df, trade_date="20240615")
+
+        mock_screener_dao.save_screening_results.assert_called_once()
+        saved_records = mock_screener_dao.save_screening_results.call_args.args[0]
+        assert len(saved_records) == 1
+        assert saved_records[0]["industry"] == "银行Ⅱ"
+
+
 class TestReviewManagerRunReview:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")

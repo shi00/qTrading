@@ -21,6 +21,7 @@ from data.persistence.daos.stk_limit_dao import StkLimitDao
 from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
 from data.persistence.daos.share_float_dao import ShareFloatDao
 from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
+from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
 
 pytestmark = pytest.mark.unit
 
@@ -57,6 +58,10 @@ def _make_mgr():
     mgr.share_float_dao.get_share_float_upcoming_batch = AsyncMock(return_value=pd.DataFrame())
     mgr.stk_holdertrade_dao = MagicMock(spec=StkHoldertradeDao)
     mgr.stk_holdertrade_dao.get_stk_holdertrade_batch = AsyncMock(return_value=pd.DataFrame())
+    # Phase 3F-2：sw_industry DAO（prefetch_auxiliary_data 引用 get_sw_l2_mapping）
+    mgr.sw_industry_classify_dao = MagicMock(spec=SwIndustryClassifyDao)
+    mgr.sw_industry_member_dao = MagicMock(spec=SwIndustryMemberDao)
+    mgr.sw_industry_member_dao.get_sw_l2_mapping = AsyncMock(return_value={})
     return mgr
 
 

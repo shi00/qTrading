@@ -75,6 +75,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_share_float",
             # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
             "ai_label_holder_trade",
+            # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
+            "ai_label_sw_industry",
             # _build_capital_flow_text 子项
             "ai_label_main_flow",
             "ai_label_top_list",
@@ -144,6 +146,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_share_float",
             # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
             "ai_label_holder_trade",
+            # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
+            "ai_label_sw_industry",
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
@@ -462,6 +466,43 @@ class TestInvariant3BuilderLabelEquivalence:
         )
         assert result == ("", False)
         assert labels == []
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_includes_sw_industry_label(self):
+        """Phase 3F-2：prefetched 含 sw_industry 字段时，_build_auxiliary_data_text
+        应注入申万行业段落并注册 ai_label_sw_industry 标签。"""
+        mixin = AIStrategyMixin()
+        mixin.cache = _make_fake_cache()
+        # 仅预取 sw_industry 字段（字符串），其余辅助数据返回空 DataFrame
+        prefetched = {"000001.SZ": {"sw_industry": "半导体Ⅱ"}}
+
+        labels: list[str] = []
+        result_text, is_valid = await mixin._build_auxiliary_data_text(
+            "000001.SZ",
+            mixin.cache,
+            prefetched=prefetched,
+            labels_out=labels,
+        )
+        assert is_valid is True
+        assert "ai_label_sw_industry" in labels
+        assert I18n.get("ai_label_sw_industry") in result_text
+        assert "半导体Ⅱ" in result_text
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_sw_industry_empty_no_label(self):
+        """Phase 3F-2：prefetched 含 sw_industry 但为空字符串时，不注册标签。"""
+        mixin = AIStrategyMixin()
+        mixin.cache = _make_fake_cache()
+        prefetched = {"000001.SZ": {"sw_industry": ""}}
+
+        labels: list[str] = []
+        result_text, is_valid = await mixin._build_auxiliary_data_text(
+            "000001.SZ",
+            mixin.cache,
+            prefetched=prefetched,
+            labels_out=labels,
+        )
+        assert "ai_label_sw_industry" not in labels
 
     def test_capital_flow_has_data_registers_labels(self):
         mf_df = pd.DataFrame(

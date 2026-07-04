@@ -1791,6 +1791,16 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_forecast")
 
+            # Phase 3F-2：申万行业（sw_industry_member 全局快照，月度更新，无 stale 标注）
+            # prefetched[ts_code]["sw_industry"] 为 sw_l2_name 字符串（cache_manager 已分发）
+            if prefetched and ts_code in prefetched and "sw_industry" in prefetched[ts_code]:
+                sw_industry_name = prefetched[ts_code]["sw_industry"]
+                if sw_industry_name:
+                    lines.append(f"- {I18n.get('ai_label_sw_industry')}: {sw_industry_name}")
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_sw_industry")
+
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
