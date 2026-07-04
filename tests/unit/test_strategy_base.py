@@ -345,10 +345,17 @@ class TestAIIntegration(unittest.TestCase):
         for cls in self.MARKET_STRATEGY_CLASSES:
             with self.subTest(strategy=cls.__name__):
                 instance = cls()
-                self.assertFalse(
-                    instance.enable_ai_analysis,
-                    f"{cls.__name__} should have enable_ai_analysis=False",
-                )
+                # Phase 3C：InstitutionalStrategy 已激活 AI（依赖 top_inst 数据，§4.2.3）
+                if cls is InstitutionalStrategy:
+                    self.assertTrue(
+                        instance.enable_ai_analysis,
+                        f"{cls.__name__} should have enable_ai_analysis=True (Phase 3C)",
+                    )
+                else:
+                    self.assertFalse(
+                        instance.enable_ai_analysis,
+                        f"{cls.__name__} should have enable_ai_analysis=False",
+                    )
 
     def test_fundamental_strategies_enable_ai(self):
         for cls in self.FUNDAMENTAL_STRATEGY_CLASSES:

@@ -92,6 +92,8 @@ _AVAILABLE_DATA_LABEL_KEYS: set[str] = {
     "ai_label_northbound",
     # Phase 3A：业绩预告（fina_forecast，forecast API，points_2000）
     "ai_label_forecast",
+    # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
+    "ai_label_top_inst",
 }
 
 AVAILABLE_DATA_LABELS: frozenset[str] = frozenset(_AVAILABLE_DATA_LABEL_KEYS)
@@ -201,8 +203,10 @@ _LABEL_TIER_MAP: dict[str, tuple[str, frozenset[str]]] = {
     "ai_label_northbound": ("points_2000", frozenset({"hk_hold"})),
     # Phase 3A：业绩预告（forecast API，points_2000）
     "ai_label_forecast": ("points_2000", frozenset({"forecast"})),
+    # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
+    # top_inst 独立标签，权限不足时仅此标签被过滤，不影响 ai_label_top_list（§4.2.3）
+    "ai_label_top_inst": ("points_2000", frozenset({"top_inst"})),
     # 新增标签（Phase 3 追加时同步加入此 map）：
-    # "ai_label_top_inst": ("points_2000", frozenset({"top_inst"})),  # Phase 3C
     # "ai_label_share_float": ("points_5000", frozenset({"share_float"})),  # Phase 3D
     # "ai_label_holder_trade": ("points_2000", frozenset({"stk_holdertrade"})),  # Phase 3E
     # "ai_label_sw_industry": ("points_2000", frozenset({"index_classify", "index_member_all"})),  # Phase 3F-2

@@ -75,6 +75,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
+            # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
+            "ai_label_top_inst",
             # _build_history_text 子项
             "ai_label_kline",
             # _mixin_analyze_single 块级标签（Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full）
@@ -137,6 +139,8 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
+            # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
+            "ai_label_top_inst",
             "ai_label_kline",
             "ai_label_shibor",
             "ai_label_macro_full",

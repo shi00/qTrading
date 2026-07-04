@@ -462,6 +462,7 @@ class AIStrategyMixin:
         moneyflow_df = pd.DataFrame()
         top_list_df = pd.DataFrame()
         northbound_df = pd.DataFrame()
+        top_inst_df = pd.DataFrame()
 
         if trade_date:
             try:
@@ -479,11 +480,18 @@ class AIStrategyMixin:
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))
 
+            # Phase 3C：top_inst 龙虎榜机构席位预取（auxiliary 数据，权限不足时由 _build_stale_section 标注）
+            try:
+                top_inst_df = await dp.cache.get_top_inst_batch(all_ts_codes, as_of_date=trade_date)  # type: ignore[union-attr]
+            except Exception as e:
+                logger.warning("[AIStrategyMixin] Failed to pre-fetch top_inst: %s", DataSanitizer.sanitize_error(e))
+
         logger.info(
-            "[AIStrategyMixin] Pre-fetched capital data: moneyflow=%d, top_list=%d, northbound=%d",
+            "[AIStrategyMixin] Pre-fetched capital data: moneyflow=%d, top_list=%d, northbound=%d, top_inst=%d",
             len(moneyflow_df),
             len(top_list_df),
             len(northbound_df),
+            len(top_inst_df),
         )
 
         # --- Pre-fetch Auxiliary Data (Audit, Dividend, Pledge, Holders) ---
@@ -500,6 +508,7 @@ class AIStrategyMixin:
                 "moneyflow_df": moneyflow_df,
                 "top_list_df": top_list_df,
                 "northbound_df": northbound_df,
+                "top_inst_df": top_inst_df,
                 "trade_date": trade_date,
             },
             history=prefetched_history,
@@ -1261,6 +1270,28 @@ class AIStrategyMixin:
                     parts.append(I18n.get("ai_north_no_record"))
             else:
                 parts.append(I18n.get("ai_north_na"))
+
+            # Phase 3C：top_inst 龙虎榜机构席位（auxiliary 数据，遵循 §4.4.5 stale 标注）
+            # 与 top_list/northbound 不同：top_inst 是 Phase 3C 新增段落，按 §4.4.5 设计
+            # 空 df 不注入占位文本（不污染 prompt）；非空但档位不覆盖时由 _build_stale_section 标注。
+            ti_df = prefetched.get("top_inst_df")
+            if ti_df is not None and not ti_df.empty:
+                stock_ti = ti_df[ti_df["ts_code"] == ts_code]
+                if not stock_ti.empty:
+
+                    def _format_top_inst(df: pd.DataFrame) -> str:
+                        row = df.iloc[0]
+                        net_amt = sf(row.get("net_amount"))
+                        return (
+                            f"{I18n.get('ai_top_inst_yes')} ({I18n.get('ai_net_buy')}: "
+                            f"{format_amount(net_amt, TOP_LIST_NET_AMOUNT_UNIT)})"
+                        )
+
+                    section = _build_stale_section("top_inst", stock_ti, _format_top_inst, date_column="trade_date")
+                    if section:
+                        parts.append(section)
+                        if labels_out is not None:
+                            labels_out.append("ai_label_top_inst")
 
             return "\n".join(parts)
 

@@ -32,6 +32,7 @@ def _make_mock_dp(*, is_cancelled: bool = False, trade_date: str | None = None) 
     dp.cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
     dp.cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+    dp.cache.get_top_inst_batch = AsyncMock(return_value=pd.DataFrame())
     dp.cache.prefetch_auxiliary_data = AsyncMock(return_value={})
     dp.cache.get_macro_economy = AsyncMock(return_value=None)
     dp.cache.get_shibor_latest = AsyncMock(return_value=None)
@@ -874,6 +875,65 @@ class TestBuildCapitalFlowText:
             },
         )
         assert "净买入: 1.20亿元" in text
+
+    def test_build_capital_flow_text_includes_top_inst(self):
+        """Phase 3C：top_inst 段落注入 + ai_label_top_inst 标签注册。
+
+        覆盖 §4.2.3 测试约束：验证 _build_capital_flow_text 预取 top_inst 后
+        输出含 ai_label_top_inst 标签，且段落文本含 locale key 翻译。
+        """
+        ti_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [pd.Timestamp("2024-01-18")],
+                "net_amount": [120000000.0],  # 1.2 亿元
+            }
+        )
+        labels: list[str] = []
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.is_api_covered_by_tier.return_value = True  # 档位覆盖，无 stale 标注
+            text = AIStrategyMixin._build_capital_flow_text(
+                "000001.SZ",
+                {"top_inst_df": ti_df},
+                labels_out=labels,
+            )
+        assert I18n.get("ai_top_inst_yes") in text
+        assert "净买入" in text  # ai_net_buy 翻译
+        assert "ai_label_top_inst" in labels
+
+    def test_build_capital_flow_text_top_inst_empty_no_label(self):
+        """Phase 3C：top_inst 段空 df 时不注入占位文本、不注册标签（§4.4.5）。"""
+        labels: list[str] = []
+        text = AIStrategyMixin._build_capital_flow_text(
+            "000001.SZ",
+            {"top_inst_df": pd.DataFrame()},
+            labels_out=labels,
+        )
+        assert I18n.get("ai_top_inst_yes") not in text
+        assert "ai_label_top_inst" not in labels
+
+    def test_build_capital_flow_text_top_inst_stale_annotation(self):
+        """Phase 3C：top_inst 档位不覆盖时由 _build_stale_section 标注 stale。"""
+        ti_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [pd.Timestamp("2024-01-18")],
+                "net_amount": [120000000.0],
+            }
+        )
+        labels: list[str] = []
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.is_api_covered_by_tier.return_value = False  # 档位不覆盖，stale 标注
+            text = AIStrategyMixin._build_capital_flow_text(
+                "000001.SZ",
+                {"top_inst_df": ti_df},
+                labels_out=labels,
+            )
+        assert "【数据停止更新" in text
+        assert I18n.get("ai_top_inst_yes") in text
+        assert "ai_label_top_inst" in labels
 
 
 class TestBuildFinancialsText:
