@@ -187,3 +187,135 @@ class TestGetSwIndustryByTsCode:
 
         assert result.empty
         mock_sanitizer.sanitize_error.assert_called_once_with(original_error)
+
+
+class TestGetSwL2Mapping:
+    """get_sw_l2_mapping 三分支（None / 空 list / 非空 list）+ 异常分层 + 结果构造。"""
+
+    @pytest.mark.asyncio
+    async def test_none_ts_codes_queries_full_table(self):
+        """ts_codes=None 时走全表查询分支（无 IN 子句），返回 dict 映射。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ"],
+                    "sw_l2_name": ["种植业", "房地产开发"],
+                }
+            )
+        )
+
+        result = await dao.get_sw_l2_mapping(None)
+
+        assert result == {"000001.SZ": "种植业", "000002.SZ": "房地产开发"}
+        dao._read_db.assert_awaited_once()
+        sql_arg = dao._read_db.call_args.args[0]
+        # None 分支：SQL 不含 IN ({placeholders}) 占位符
+        assert "{placeholders}" not in sql_arg
+        # 全表查询无 WHERE 参数：_read_db 仅接收 SQL 一个位置参数
+        assert len(dao._read_db.call_args.args) == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_list_returns_empty_dict_without_query(self):
+        """ts_codes=[] 时直接返回 {}，不发起查询。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock()
+
+        result = await dao.get_sw_l2_mapping([])
+
+        assert result == {}
+        dao._read_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_specific_ts_codes_uses_chunked_in_query(self):
+        """ts_codes 非空时走 chunked_in_query 分支（IN 子句 + 分块）。"""
+        dao = _make_member_dao()
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "sw_l2_name": ["种植业"]})
+        # chunked_in_query 是 staticmethod，通过实例属性覆盖以拦截调用
+        dao.chunked_in_query = AsyncMock(return_value=expected_df)
+
+        result = await dao.get_sw_l2_mapping(["000001.SZ", "000002.SZ"])
+
+        assert result == {"000001.SZ": "种植业"}
+        dao.chunked_in_query.assert_awaited_once()
+        # 第一个参数是 _read_db 可调用对象，第二个是 SQL 模板（含 {placeholders}）
+        sql_template = dao.chunked_in_query.call_args.args[1]
+        assert "{placeholders}" in sql_template
+        assert "ts_code IN" in sql_template
+        # 第三个参数是 ts_codes 列表
+        assert dao.chunked_in_query.call_args.args[2] == ["000001.SZ", "000002.SZ"]
+        # _read_db 不应被直接调用（由 chunked_in_query 内部调用）
+        dao._read_db.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates(self):
+        """asyncio.CancelledError 必须传播（R2），不返回空 dict。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock(side_effect=asyncio.CancelledError())
+
+        with pytest.raises(asyncio.CancelledError):
+            await dao.get_sw_l2_mapping(None)
+
+    @pytest.mark.asyncio
+    async def test_engine_disposed_propagates(self):
+        """EngineDisposedError 必须传播（R5），不返回空 dict。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+
+        with pytest.raises(EngineDisposedError):
+            await dao.get_sw_l2_mapping(None)
+
+    @pytest.mark.asyncio
+    async def test_other_exception_returns_empty_dict_with_sanitization(self):
+        """非 Cancelled/EngineDisposed 异常 sanitize 后返回空 dict。"""
+        dao = _make_member_dao()
+        original_error = RuntimeError("db error with sensitive: token=abc")
+        dao._read_db = AsyncMock(side_effect=original_error)
+
+        with patch("data.persistence.daos.sw_industry_dao.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error = MagicMock(return_value="sanitized error")
+            result = await dao.get_sw_l2_mapping(None)
+
+        assert result == {}
+        mock_sanitizer.sanitize_error.assert_called_once_with(original_error)
+
+    @pytest.mark.asyncio
+    async def test_none_df_result_returns_empty_dict(self):
+        """_read_db 返回 None 时返回空 dict。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock(return_value=None)
+
+        result = await dao.get_sw_l2_mapping(None)
+
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_empty_df_result_returns_empty_dict(self):
+        """_read_db 返回空 DataFrame 时返回空 dict。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock(return_value=pd.DataFrame())
+
+        result = await dao.get_sw_l2_mapping(None)
+
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_dict_zip_preserves_ts_code_to_l2_mapping(self):
+        """返回的 dict 通过 zip(ts_code, sw_l2_name) 构造，保留多行映射。"""
+        dao = _make_member_dao()
+        dao._read_db = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000002.SZ", "600000.SH"],
+                    "sw_l2_name": ["种植业", "房地产开发", "股份制银行"],
+                }
+            )
+        )
+
+        result = await dao.get_sw_l2_mapping(None)
+
+        assert result == {
+            "000001.SZ": "种植业",
+            "000002.SZ": "房地产开发",
+            "600000.SH": "股份制银行",
+        }
