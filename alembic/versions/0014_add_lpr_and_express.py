@@ -51,9 +51,10 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=False), server_default=sa.text("now()")),
         sa.PrimaryKeyConstraint("ts_code", "end_date", "ann_date"),
     )
-    # NOTE(lazy): 不为 ts_code 单独创建索引。复合主键 (ts_code, end_date, ann_date) 已支持
+    # 不为 ts_code 单独创建索引。复合主键 (ts_code, end_date, ann_date) 已支持
     # ts_code 单列前缀查询，独立索引冗余。ORM 中 ts_code 也未声明 index=True，
-    # 创建索引会导致 alembic check 报告 ORM 与 DB 索引差异。ceiling: 永远不需要。upgrade: 无。
+    # 创建索引会导致 alembic check 报告 ORM 与 DB 索引差异。
+    # ann_date 索引用于 get_express_batch 的 ann_date <= $N 范围查询优化。
 
 
 def downgrade() -> None:

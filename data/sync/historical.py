@@ -65,7 +65,6 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
     def __init__(self, context: typing.Any):
         super().__init__(context)
-        self._lazy_event = None  # ST-01: Lazy init
         self._tasks_lock = threading.Lock()
         self._active_tasks = set()
 

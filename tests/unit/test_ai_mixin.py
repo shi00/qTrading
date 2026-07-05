@@ -1945,6 +1945,54 @@ class TestBuildMacroContext:
         assert "GDP" not in result
 
     @pytest.mark.asyncio
+    async def test_build_macro_context_with_m2_and_gdp_rows(self):
+        """Phase 2D §3.2.6 修复：m2 行与 GDP 行共存时不应产生 "nan%" 污染。
+
+        DAO 返回最多 2 行（月度行 + GDP 行），二者 period 不同（月度 YYYY-MM-01 vs
+        季度末日）。_build_macro_context 需分别定位 m2 行和 GDP 行，避免从 GDP 行
+        读取 m2_yoy（NaN）导致 "nan%" 输出。
+        """
+        s = ConcreteStrategy()
+        cache = MagicMock()
+        # 模拟生产场景：2 行数据，月度行含 m2_yoy，GDP 行含 gdp_yoy
+        cache.get_macro_economy = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "period": [
+                        datetime.date(2024, 12, 31),  # GDP 行（季度末日）
+                        datetime.date(2024, 12, 1),  # m2 行（月初）
+                    ],
+                    "publish_date": [
+                        datetime.date(2025, 1, 20),  # GDP 发布更晚
+                        datetime.date(2025, 1, 16),  # m2 发布
+                    ],
+                    "m2_yoy": [None, 8.5],  # GDP 行 m2_yoy 为 NULL
+                    "cpi": [None, 0.2],
+                    "ppi": [None, -1.5],
+                    "gdp_yoy": [5.2, None],  # m2 行 gdp_yoy 为 NULL
+                    "pi_yoy": [3.1, None],
+                    "si_yoy": [5.0, None],
+                    "ti_yoy": [5.8, None],
+                }
+            )
+        )
+        cache.get_shibor_latest = AsyncMock(return_value=None)
+        result = await s._build_macro_context(cache)
+
+        # m2 段落应正确注入（从 m2 行读取，非 GDP 行的 NaN）
+        assert "8.50" in result  # m2_yoy
+        assert "0.20" in result  # cpi
+        assert "-1.50" in result  # ppi
+        # 关键断言：不应出现 "nan%" 污染
+        assert "nan%" not in result
+        # GDP 段落应正确注入（从 GDP 行读取）
+        assert "5.20" in result  # gdp_yoy
+        assert "3.10" in result  # pi_yoy
+        assert "5.00" in result  # si_yoy
+        assert "5.80" in result  # ti_yoy
+        assert "2024Q4" in result  # quarter 推断
+
+    @pytest.mark.asyncio
     async def test_build_macro_context_includes_lpr(self):
         """Phase 3G §4.3.4：_build_macro_context 应注入 LPR 段落（lpr_1y/lpr_5y）。
 

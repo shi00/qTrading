@@ -418,7 +418,12 @@ class SystemTab(ft.Container):
             self.show_snack(DataSanitizer.sanitize_error(ex), color=AppColors.ERROR)
 
     def _on_locale_change(self, new_locale: str | None = None):
-        """语言变更回调 - 更新 Settings UI 文本"""
+        """语言变更回调 - 更新 Settings UI 文本
+
+        Args:
+            new_locale: 可选 locale 代码（用于测试显式注入）；I18n.subscribe
+                调用时不会传参，依赖默认值 None。
+        """
         try:
             self.language_dropdown.label = I18n.get_language_label()
             self.language_dropdown.tooltip = I18n.get_language_label()

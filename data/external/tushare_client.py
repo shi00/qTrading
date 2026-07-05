@@ -259,6 +259,9 @@ class TushareClient:
         "points_15000": frozenset(
             {
                 # 常规 500/min，特色无上限（特色数据仍需独立购买才能访问）
+                # NOTE(lazy): points_15000 当前与 points_10000 API 集相同（特色数据需独立购买）.
+                #   ceiling: Tushare 暂无 15000 积分专属 API.
+                #   upgrade: 当 Tushare 新增 15000 积分专属 API 时，在此追加。
             }
         ),
     }

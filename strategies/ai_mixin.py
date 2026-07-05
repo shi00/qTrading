@@ -1861,13 +1861,19 @@ class AIStrategyMixin:
 
             # Phase 3F-2：申万行业（sw_industry_member 全局快照，月度更新，无 stale 标注）
             # prefetched[ts_code]["sw_industry"] 为 sw_l2_name 字符串（cache_manager 已分发）
+            # 注入前检查档位覆盖：points_120 降级时 index_classify/index_member_all 不在覆盖内，
+            # filter_available_labels 已过滤 ai_label_sw_industry 标签；此处同步跳过 body 注入，
+            # 避免 <available_data> 块不列但 prompt body 仍注入的设计矛盾。
             if prefetched and ts_code in prefetched and "sw_industry" in prefetched[ts_code]:
                 sw_industry_name = prefetched[ts_code]["sw_industry"]
                 if sw_industry_name:
-                    lines.append(f"- {I18n.get('ai_label_sw_industry')}: {sw_industry_name}")
-                    has_data = True
-                    if labels_out is not None:
-                        labels_out.append("ai_label_sw_industry")
+                    from data.external.tushare_client import TushareClient
+
+                    if TushareClient().is_api_covered_by_tier("index_classify"):
+                        lines.append(f"- {I18n.get('ai_label_sw_industry')}: {sw_industry_name}")
+                        has_data = True
+                        if labels_out is not None:
+                            labels_out.append("ai_label_sw_industry")
 
             # Phase 3G §4.3.4：业绩快报（express）— 早于正式财报 30-60 天，提前反应业绩拐点
             if prefetched and ts_code in prefetched and "express" in prefetched[ts_code]:
@@ -1926,23 +1932,36 @@ class AIStrategyMixin:
         try:
             macro = await cache.get_macro_economy(as_of_date=as_of_date)
             if macro is not None and not macro.empty:
-                latest = macro.iloc[0]
+                # Phase 2D §3.2.6 修复：m2 行与 GDP 行 period 不同（月度 vs 季度末日），
+                # 作为独立行存储。DAO 返回最多 2 行，需分别定位月度行和 GDP 行。
+                # 用 pd.notna() 判断字段是否可用，避免 NaN 被 `is not None` 误判为有效值。
+                m2_row = (
+                    macro.dropna(subset=["m2_yoy"]).iloc[0]
+                    if "m2_yoy" in macro.columns and not macro.dropna(subset=["m2_yoy"]).empty
+                    else None
+                )
+                gdp_row = (
+                    macro.dropna(subset=["gdp_yoy"]).iloc[0]
+                    if "gdp_yoy" in macro.columns and not macro.dropna(subset=["gdp_yoy"]).empty
+                    else None
+                )
 
                 # Phase 2A.1 §4.4.5：m2/cpi/ppi 段落对应 ai_label_macro_full（points_2000），
                 # cn_m/cn_cpi/cn_ppi 在 points_2000 覆盖内；points_120 降级时按子段落 stale 标注。
                 # cn_m 作为整个 macro 段落的代理（三者档位一致）
                 macro_lines: list[str] = []
-                m2_yoy = latest.get("m2_yoy")
-                if m2_yoy is not None:
-                    macro_lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
+                if m2_row is not None:
+                    m2_yoy = m2_row.get("m2_yoy")
+                    if pd.notna(m2_yoy):
+                        macro_lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
 
-                cpi = latest.get("cpi")
-                if cpi is not None:
-                    macro_lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
+                    cpi = m2_row.get("cpi")
+                    if pd.notna(cpi):
+                        macro_lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
 
-                ppi = latest.get("ppi")
-                if ppi is not None:
-                    macro_lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
+                    ppi = m2_row.get("ppi")
+                    if pd.notna(ppi):
+                        macro_lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
 
                 if macro_lines:
                     macro_text = "\n".join(macro_lines)
@@ -1958,29 +1977,30 @@ class AIStrategyMixin:
                         has_data = True
 
                 # Phase 2D §3.2.6：cn_gdp 段落（季度数据，period 为季度末日）
-                # GDP 行与 m2 行 period 不同，latest 可能只有 GDP 或只有 m2；分别 stale 标注
+                # GDP 行与 m2 行 period 不同，分别 stale 标注
                 gdp_lines: list[str] = []
-                gdp_yoy = latest.get("gdp_yoy")
-                if gdp_yoy is not None:
-                    # 从 period（季度末日）推断 quarter 字符串，如 2024-12-31 → "2024Q4"
-                    period = latest.get("period")
-                    quarter_str = ""
-                    if hasattr(period, "year") and hasattr(period, "month"):
-                        q = (period.month - 1) // 3 + 1
-                        quarter_str = f"（{period.year}Q{q}）"
-                    gdp_lines.append(f"- {I18n.get('macro_gdp_yoy')}{quarter_str}: {gdp_yoy:.2f}%")
+                if gdp_row is not None:
+                    gdp_yoy = gdp_row.get("gdp_yoy")
+                    if pd.notna(gdp_yoy):
+                        # 从 period（季度末日）推断 quarter 字符串，如 2024-12-31 → "2024Q4"
+                        period = gdp_row.get("period")
+                        quarter_str = ""
+                        if hasattr(period, "year") and hasattr(period, "month"):
+                            q = (period.month - 1) // 3 + 1
+                            quarter_str = f"（{period.year}Q{q}）"
+                        gdp_lines.append(f"- {I18n.get('macro_gdp_yoy')}{quarter_str}: {gdp_yoy:.2f}%")
 
-                    pi_yoy = latest.get("pi_yoy")
-                    if pi_yoy is not None:
-                        gdp_lines.append(f"- {I18n.get('macro_pi_yoy')}: {pi_yoy:.2f}%")
+                        pi_yoy = gdp_row.get("pi_yoy")
+                        if pd.notna(pi_yoy):
+                            gdp_lines.append(f"- {I18n.get('macro_pi_yoy')}: {pi_yoy:.2f}%")
 
-                    si_yoy = latest.get("si_yoy")
-                    if si_yoy is not None:
-                        gdp_lines.append(f"- {I18n.get('macro_si_yoy')}: {si_yoy:.2f}%")
+                        si_yoy = gdp_row.get("si_yoy")
+                        if pd.notna(si_yoy):
+                            gdp_lines.append(f"- {I18n.get('macro_si_yoy')}: {si_yoy:.2f}%")
 
-                    ti_yoy = latest.get("ti_yoy")
-                    if ti_yoy is not None:
-                        gdp_lines.append(f"- {I18n.get('macro_ti_yoy')}: {ti_yoy:.2f}%")
+                        ti_yoy = gdp_row.get("ti_yoy")
+                        if pd.notna(ti_yoy):
+                            gdp_lines.append(f"- {I18n.get('macro_ti_yoy')}: {ti_yoy:.2f}%")
 
                 if gdp_lines:
                     gdp_text = "\n".join(gdp_lines)

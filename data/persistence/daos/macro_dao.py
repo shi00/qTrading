@@ -6,7 +6,7 @@ import sqlalchemy as sa
 
 from data.persistence.models import MacroEconomy, ShiborDaily, get_model_columns, get_model_pk_columns
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,8 @@ class MacroDao(BaseDao):
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning("[MacroDao] Failed to get shibor latest: %s", e)
             return pd.DataFrame()
@@ -124,7 +126,8 @@ class MacroDao(BaseDao):
 
         Note:
             Phase 2D §3.2.6：GDP 行与月度行 period 不同（季度末日 vs 月初），
-            LIMIT 1 可能取到 GDP 行或月度行；调用方需处理字段缺失（NaN）情况。
+            二者作为独立行存储。返回最多 2 行（publish_date 倒序）：最新月度行
+            + 最新 GDP 行。调用方需用 ``pd.notna()`` 判断各字段是否可用。
         """
         try:
             t = MacroEconomy.__table__
@@ -152,11 +155,15 @@ class MacroDao(BaseDao):
             stmt = sa.select(*cols)
             if as_of_date is not None:
                 stmt = stmt.where(t.c.publish_date <= as_of_date)
-            stmt = stmt.order_by(t.c.publish_date.desc()).limit(1)
+            # 返回最多 2 行：月度行（m2/cpi/ppi）与 GDP 行（gdp_yoy/pi_yoy 等）
+            # period 不同（月度 YYYY-MM-01 vs 季度末日），作为独立行存储。
+            stmt = stmt.order_by(t.c.publish_date.desc()).limit(2)
 
             df = await self._read_db_select(stmt)
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[MacroDao] Failed to get macro economy latest: %s", e)
