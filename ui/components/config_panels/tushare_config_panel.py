@@ -91,6 +91,16 @@ class TushareConfigPanel(ft.Container):
             self.token_input.width = AppStyles.CONTROL_WIDTH_LG
             self.token_input.hint_text = I18n.get("tushare_token_hint")
 
+        # v1.11.0 P0：token 配置面板内嵌积分档位下拉框，避免新用户默认 points_5000 触发限流
+        self.tier_dropdown = ft.Dropdown(
+            label=I18n.get("sys_tier_label_in_token_panel"),
+            value=ConfigHandler.get_tushare_point_tier(),
+            width=AppStyles.CONTROL_WIDTH_MD,
+            options=self._build_tier_options(),
+            on_change=self._on_tier_change,
+            hint_text=I18n.get("sys_tier_hint_in_token_panel"),
+        )
+
         self.verify_button = ft.ElevatedButton(
             text=I18n.get("tushare_verify"),
             icon=ft.Icons.VERIFIED_USER_OUTLINED,
@@ -138,7 +148,17 @@ class TushareConfigPanel(ft.Container):
     def reload_config(self):
         saved_token = ConfigHandler.get_token() or ""
         self.token_input.value = saved_token
+        self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
         self._safe_update()
+
+    def _build_tier_options(self) -> list[ft.dropdown.Option]:
+        """构建 5 档下拉选项（points_120/2000/5000/10000/15000）。
+
+        与 TierApiPanel 同源 i18n key，不抽象共享（YAGNI，5 行重复成本 < 抽象成本）。
+        """
+        from data.constants import TUSHARE_POINT_TIERS
+
+        return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
 
     def _build_ui(self) -> ft.Control:
         if self._compact:
@@ -148,6 +168,8 @@ class TushareConfigPanel(ft.Container):
     def _build_compact_ui(self) -> ft.Column:
         controls = [
             self.token_input,
+            ft.Container(height=10),
+            self.tier_dropdown,
             ft.Container(height=10),
             ft.Row(
                 [self.verify_button],
@@ -196,6 +218,7 @@ class TushareConfigPanel(ft.Container):
                             spacing=10,
                             wrap=True,
                         ),
+                        self.tier_dropdown,
                         ft.Row(
                             [self.status_icon, self.status_text],
                             spacing=5,
@@ -211,6 +234,41 @@ class TushareConfigPanel(ft.Container):
     def _on_input_change(self, e):
         if self.on_change:
             self.on_change()
+
+    async def _on_tier_change(self, e):
+        """档位变更：持久化 + 重建限速器 + 清除旧 probe 缓存。
+
+        R16：set_tier/reload_limiters 是同步 IO，必须 offload 到 io_pool。
+        verify_token 后续 probe 会自动用新档位预筛（无需此处触发）。
+        """
+        new_tier = self.tier_dropdown.value
+        if not new_tier or new_tier == ConfigHandler.get_tushare_point_tier():
+            return
+
+        try:
+            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_point_tier, new_tier)
+            if not success:
+                self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
+                self._show_error(I18n.get("sys_tier_save_failed"))
+                self._safe_update()
+                return
+
+            from data.external.tushare_client import TushareClient
+
+            client = TushareClient()
+            await ThreadPoolManager().run_async(TaskType.IO, client.reload_rate_limiters)
+            client.clear_capability_cache()
+
+            self._show_success(I18n.get("sys_tier_saved_success"))
+        except Exception as exc:
+            logger.warning(
+                "[TushareConfigPanel] Failed to save tier: %s",
+                DataSanitizer.sanitize_error(exc),
+                exc_info=True,
+            )
+            self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
+            self._show_error(I18n.get("sys_tier_save_failed"))
+            self._safe_update()
 
     def _on_verify_click(self, e):
         if self._is_verifying:
@@ -236,6 +294,9 @@ class TushareConfigPanel(ft.Container):
             self.verify_button.disabled = loading
             self.token_input.disabled = loading
             self.save_button.disabled = loading
+            # v1.11.0 P1-1：verify_token 期间禁用 tier_dropdown，避免档位变更与 probe 并发
+            # （reload_rate_limiters + clear_capability_cache 与 probe 写入 cache 竞态）
+            self.tier_dropdown.disabled = loading
 
             if loading:
                 self.status_text.value = I18n.get("tushare_verifying")
@@ -395,12 +456,19 @@ class TushareConfigPanel(ft.Container):
             self.save_button.text = I18n.get("tushare_save")
             self.register_link.text = I18n.get("tushare_register")
             self.no_token_text.value = I18n.get("tushare_no_token")
+            # §5.8 i18n：tier_dropdown label/hint/options 重建（选项文本含档位说明需翻译）
+            self.tier_dropdown.label = I18n.get("sys_tier_label_in_token_panel")
+            self.tier_dropdown.hint_text = I18n.get("sys_tier_hint_in_token_panel")
+            self.tier_dropdown.options = self._build_tier_options()
             self._safe_update()
         except Exception as e:
             logger.warning("[TushareConfigPanel] refresh_locale failed: %s", e, exc_info=True)
 
     def did_mount(self):
+        # 刷新 tier_dropdown 到 ConfigHandler 最新值（TierApiPanel 可能在别处修改档位）
+        self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+        self._safe_update()
 
     def will_unmount(self):
         if self._locale_subscription_id:

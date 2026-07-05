@@ -1412,7 +1412,9 @@ class ConfigHandler:
 
     @staticmethod
     def set_tushare_point_tier(tier):
-        valid_tiers = {"points_120", "points_2000", "points_5000", "points_10000", "points_15000"}
+        from data.constants import TUSHARE_POINT_TIERS  # lazy import 延迟 utils→data 反向依赖到调用时
+
+        valid_tiers = set(TUSHARE_POINT_TIERS)
         if tier not in valid_tiers:
             return False
         return ConfigHandler.set_typed("tushare_point_tier", str(tier))

@@ -165,13 +165,9 @@ class TierApiPanel(ft.Column):
 
     def _build_tier_options(self) -> list[ft.dropdown.Option]:
         """构建档位下拉框选项（locale 变更时重建）。"""
-        return [
-            ft.dropdown.Option("points_120", I18n.get("sys_tier_points_120_label")),
-            ft.dropdown.Option("points_2000", I18n.get("sys_tier_points_2000_label")),
-            ft.dropdown.Option("points_5000", I18n.get("sys_tier_points_5000_label")),
-            ft.dropdown.Option("points_10000", I18n.get("sys_tier_points_10000_label")),
-            ft.dropdown.Option("points_15000", I18n.get("sys_tier_points_15000_label")),
-        ]
+        from data.constants import TUSHARE_POINT_TIERS
+
+        return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
 
     def _build_api_list_controls(self) -> list[ft.Control]:
         """构建 API 列表控件（按当前档位过滤 _TIER_API_COVERAGE）。
