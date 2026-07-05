@@ -39,25 +39,49 @@ class TestI18nKeysCompleteness(unittest.TestCase):
         from data.data_dictionary import TABLE_DEFINITIONS, COMMON_COLUMNS
 
         zh_keys = self._load_keys("zh_CN")
+        en_keys = self._load_keys("en_US")
 
-        missing_table_aliases = []
+        # zh_CN 与 en_US 双向校验：alias、表特定 columns、COMMON_COLUMNS 均需在两个 locale 中定义。
+        # 此前仅检查 COMMON_COLUMNS 且仅查 zh_CN，导致 top_inst/stk_limit/pledge_detail 等表的
+        # 表特定字段（如 col_buy_amount、col_up_limit）漏检，30 个 key 缺失未被发现。
+        missing_aliases_zh: list[str] = []
+        missing_aliases_en: list[str] = []
+        missing_cols_zh: list[str] = []
+        missing_cols_en: list[str] = []
         for table_name, meta in TABLE_DEFINITIONS.items():
             alias = meta.get("alias")
-            if alias and alias not in zh_keys:
-                missing_table_aliases.append(f"{table_name}:{alias}")
+            if alias:
+                if alias not in zh_keys:
+                    missing_aliases_zh.append(f"{table_name}:{alias}")
+                if alias not in en_keys:
+                    missing_aliases_en.append(f"{table_name}:{alias}")
+            for col_name, i18n_key in meta.get("columns", {}).items():
+                if i18n_key not in zh_keys:
+                    missing_cols_zh.append(f"{table_name}.{col_name}:{i18n_key}")
+                if i18n_key not in en_keys:
+                    missing_cols_en.append(f"{table_name}.{col_name}:{i18n_key}")
 
-        missing_col_keys = []
         for col_name, i18n_key in COMMON_COLUMNS.items():
             if i18n_key not in zh_keys:
-                missing_col_keys.append(f"{col_name}:{i18n_key}")
+                missing_cols_zh.append(f"COMMON.{col_name}:{i18n_key}")
+            if i18n_key not in en_keys:
+                missing_cols_en.append(f"COMMON.{col_name}:{i18n_key}")
 
         self.assertFalse(
-            missing_table_aliases,
-            f"Missing table alias i18n keys: {missing_table_aliases[:10]}",
+            missing_aliases_zh,
+            f"Missing table alias i18n keys in zh_CN: {missing_aliases_zh[:10]}",
         )
         self.assertFalse(
-            missing_col_keys,
-            f"Missing column i18n keys: {missing_col_keys[:10]}",
+            missing_aliases_en,
+            f"Missing table alias i18n keys in en_US: {missing_aliases_en[:10]}",
+        )
+        self.assertFalse(
+            missing_cols_zh,
+            f"Missing column i18n keys in zh_CN: {missing_cols_zh[:10]}",
+        )
+        self.assertFalse(
+            missing_cols_en,
+            f"Missing column i18n keys in en_US: {missing_cols_en[:10]}",
         )
 
     def test_no_empty_values(self):
