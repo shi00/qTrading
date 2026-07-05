@@ -2214,6 +2214,8 @@ class TestTushareConfigPanelTierDropdown:
         """档位下拉框必须包含 5 个选项（points_120/2000/5000/10000/15000）。"""
         mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
         panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        # ft.Dropdown.options 类型为 Optional[List[...]]，迭代前需类型收窄（与 L1741 同模式）
+        assert panel.tier_dropdown.options is not None
         option_keys = [opt.key for opt in panel.tier_dropdown.options]
         assert option_keys == [
             "points_120",
