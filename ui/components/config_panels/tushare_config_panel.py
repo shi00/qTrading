@@ -156,13 +156,9 @@ class TushareConfigPanel(ft.Container):
 
         与 TierApiPanel 同源 i18n key，不抽象共享（YAGNI，5 行重复成本 < 抽象成本）。
         """
-        return [
-            ft.dropdown.Option(key="points_120", text=I18n.get("sys_tier_points_120_label")),
-            ft.dropdown.Option(key="points_2000", text=I18n.get("sys_tier_points_2000_label")),
-            ft.dropdown.Option(key="points_5000", text=I18n.get("sys_tier_points_5000_label")),
-            ft.dropdown.Option(key="points_10000", text=I18n.get("sys_tier_points_10000_label")),
-            ft.dropdown.Option(key="points_15000", text=I18n.get("sys_tier_points_15000_label")),
-        ]
+        from data.constants import TUSHARE_POINT_TIERS
+
+        return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
 
     def _build_ui(self) -> ft.Control:
         if self._compact:

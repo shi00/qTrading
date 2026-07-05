@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from data.constants import TUSHARE_POINT_TIERS
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
 DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)
@@ -171,9 +172,7 @@ class AppConfig(BaseModel):
 
     request_max_retries: int = Field(default=3, ge=0, le=10)
     tushare_timeout: int = Field(default=30, ge=5, le=300)
-    tushare_point_tier: str = Field(
-        default="points_5000", pattern=r"^(points_120|points_2000|points_5000|points_10000|points_15000)$"
-    )
+    tushare_point_tier: str = Field(default="points_5000", pattern=rf"^({'|'.join(TUSHARE_POINT_TIERS)})$")
 
     theme_name: str = Field(default="dark", pattern="^(light|dark)$")
     locale: str = Field(default="zh", pattern="^(zh|zh_CN|en|en_US)$")

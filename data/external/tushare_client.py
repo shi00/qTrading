@@ -10,7 +10,7 @@ import pandas as pd
 import requests
 import tushare as ts
 
-from data.constants import attach_hsgt_column_units, attach_top_list_column_units
+from data.constants import TUSHARE_POINT_TIERS, attach_hsgt_column_units, attach_top_list_column_units
 from utils.config_handler import ConfigHandler
 from utils.rate_limiter import TokenBucket
 from utils.sanitizers import DataSanitizer
@@ -290,6 +290,12 @@ class TushareClient:
         "stk_holdertrade": "stk_holdertrade",
         "express": "express",
     }
+
+    # 一致性断言：防止 dict 字面量 key 与 TUSHARE_POINT_TIERS 单一真相源漂移
+    # 字面量 key 因 Python 语法限制无法引用常量，用 assert 兜底（§1.5 懒代码必须验证）
+    assert set(_POINT_TIER_PRESETS.keys()) == set(TUSHARE_POINT_TIERS), "_POINT_TIER_PRESETS drift"
+    assert set(_TIER_ORDER.keys()) == set(TUSHARE_POINT_TIERS), "_TIER_ORDER drift"
+    assert set(_TIER_API_COVERAGE.keys()) == set(TUSHARE_POINT_TIERS), "_TIER_API_COVERAGE drift"
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
