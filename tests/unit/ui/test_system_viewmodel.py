@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from data.external.tushare_client import TushareClient
 from ui.viewmodels.system_viewmodel import SystemViewModel
 
 pytestmark = pytest.mark.unit
@@ -22,7 +23,8 @@ def _patch_full_chain(monkeypatch, *, probe_results: dict[str, bool | None], set
     使 ThreadPoolManager.run_async 直接调用同步函数（避免线程池依赖），
     TushareClient().probe_api_capabilities 返回 probe_results。
     """
-    mock_client = MagicMock()
+    # spec=TushareClient 强制接口契约（避免 MagicMock 接受任意属性访问导致拼写错误漏检）
+    mock_client = MagicMock(spec=TushareClient)
     mock_client.probe_api_capabilities = AsyncMock(return_value=probe_results)
     mock_client.get_capability_cache = MagicMock(return_value=probe_results)
     mock_client.clear_capability_cache = MagicMock()

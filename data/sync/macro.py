@@ -470,7 +470,10 @@ class MacroSyncStrategy(ISyncStrategy):
                     # how="left"：以 shibor 日频为主表，避免 LPR 缺失日引入 NaN 覆盖 shibor 列；
                     # LPR 为月频数据，仅在发布日对齐 shibor 行写入，其他日 lpr_1y/lpr_5y 为 NaN
                     # （_save_upsert 会将 NaN 转 None，因 macro_dao 未标记 null_protected，已有 LPR 值会被覆盖为 NULL）
-                    # 故仅当 LPR date 与 shibor date 完全对齐时才合并，否则跳过 LPR merge
+                    # 故仅当 LPR date 与 shibor date 有交集时才合并（交集非空即合并），否则跳过 LPR merge
+                    # 已知限制：LPR 发布日若为非工作日（周末），因 shibor 主表无该日行，该 LPR 数据会丢失；
+                    # 下次同步时 LPR API 仍返回该日数据，但 shibor 主表仍无该日行，数据持续丢失。
+                    # ceiling: 月频 LPR 单次丢失最多 1 条/月. upgrade: 改用独立 upsert 按 date 主键写入.
                     common_dates = set(df["date"]).intersection(set(lpr_df["date"]))
                     if common_dates:
                         df = df.merge(lpr_df, on="date", how="left")
