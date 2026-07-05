@@ -2186,6 +2186,148 @@ class TestTushareConfigPanelExtended:
         on_loading.assert_called_with(True)
 
 
+class TestTushareConfigPanelTierDropdown:
+    """TushareConfigPanel 内嵌积分档位下拉框测试（v1.11.0 P0：token 配置即引导选档位）。
+
+    覆盖场景：
+    - 渲染：tier_dropdown 存在且默认值来自 ConfigHandler
+    - 保存：on_change 触发 set_tier + reload_rate_limiters + clear_capability_cache
+    - 失败：保存失败回滚下拉框
+    - 同步：did_mount 从 ConfigHandler 刷新（TierApiPanel 修改后同步）
+    - i18n：refresh_locale 重建 options + label + hint
+    """
+
+    def test_tier_dropdown_rendered(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """tier_dropdown 实例存在且类型正确。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_120"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        assert hasattr(panel, "tier_dropdown")
+        assert isinstance(panel.tier_dropdown, ft.Dropdown)
+
+    def test_tier_dropdown_default_value_from_config(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """默认值取自 ConfigHandler.get_tushare_point_tier()，而非硬编码。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_2000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        assert panel.tier_dropdown.value == "points_2000"
+
+    def test_tier_dropdown_has_five_options(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """档位下拉框必须包含 5 个选项（points_120/2000/5000/10000/15000）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        option_keys = [opt.key for opt in panel.tier_dropdown.options]
+        assert option_keys == [
+            "points_120",
+            "points_2000",
+            "points_5000",
+            "points_10000",
+            "points_15000",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_on_tier_change_saves_to_config_handler(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """on_change 触发 set_tushare_point_tier 持久化新档位。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        mock_ch_for_panels.set_tushare_point_tier.return_value = True
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        with (
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            panel.tier_dropdown.value = "points_120"
+            await panel._on_tier_change(MagicMock())
+
+        mock_ch_for_panels.set_tushare_point_tier.assert_called_once_with("points_120")
+
+    @pytest.mark.asyncio
+    async def test_on_tier_change_reloads_rate_limiters_and_clears_cache(
+        self, mock_ch_for_panels, mock_i18n, mock_page
+    ):
+        """保存成功后必须 reload_rate_limiters + clear_capability_cache（避免旧限速/旧 probe 残留）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        mock_ch_for_panels.set_tushare_point_tier.return_value = True
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        with (
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            panel.tier_dropdown.value = "points_2000"
+            await panel._on_tier_change(MagicMock())
+
+            mock_client.reload_rate_limiters.assert_called_once()
+            mock_client.clear_capability_cache.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_tier_change_failure_rolls_back_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """set_tier 返回 False 时回滚下拉框到当前实际档位并显示失败提示。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        mock_ch_for_panels.set_tushare_point_tier.return_value = False
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        with (
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            panel.tier_dropdown.value = "points_120"
+            await panel._on_tier_change(MagicMock())
+
+            # 回滚到 ConfigHandler 当前值
+            assert panel.tier_dropdown.value == "points_5000"
+            # 失败提示（status_text 包含 sys_tier_save_failed key）
+            assert panel.status_text.value == "sys_tier_save_failed"
+            # 失败时不 reload_limiters
+            mock_client.reload_rate_limiters.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_tier_change_noop_when_value_unchanged(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """档位未变化时短路返回，不触发持久化（避免冗余 IO）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        with (
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+
+            panel.tier_dropdown.value = "points_5000"  # 与 ConfigHandler 相同
+            await panel._on_tier_change(MagicMock())
+
+            mock_ch_for_panels.set_tushare_point_tier.assert_not_called()
+            mock_client.reload_rate_limiters.assert_not_called()
+
+    def test_did_mount_syncs_tier_from_config(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """did_mount 时刷新 tier_dropdown 到 ConfigHandler 最新值（TierApiPanel 修改后同步）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        # 模拟 TierApiPanel 修改档位后回到 token 面板
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_15000"
+        panel.did_mount()
+
+        assert panel.tier_dropdown.value == "points_15000"
+
+    def test_refresh_locale_rebuilds_tier_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """locale 变更时重建 tier_dropdown 的 label/hint/options（§5.8 i18n 规范）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        panel.refresh_locale()
+
+        # 验证 I18n.get 被调用至少包含 tier 相关 key
+        called_keys = [call.args[0] for call in mock_i18n.get.call_args_list]
+        assert "sys_tier_label_in_token_panel" in called_keys
+        assert "sys_tier_hint_in_token_panel" in called_keys
+        assert "sys_tier_points_120_label" in called_keys
+
+
 class TestCallbackInjection:
     """验证回调注入机制：Component 通过回调调用 Service，而非直接导入。"""
 
