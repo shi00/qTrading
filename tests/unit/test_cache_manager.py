@@ -16,6 +16,13 @@ from data.persistence.daos.screener_dao import ScreenerDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.backtest_dao import BacktestDAO
+from data.persistence.daos.top_inst_dao import TopInstDao
+from data.persistence.daos.stk_limit_dao import StkLimitDao
+from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
+from data.persistence.daos.share_float_dao import ShareFloatDao
+from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
+from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
+from data.persistence.daos.express_dao import ExpressDao
 
 pytestmark = pytest.mark.unit
 
@@ -44,6 +51,21 @@ def _make_mgr():
     mgr.macro_dao = MagicMock(spec=MacroDao)
     mgr.holder_dao = MagicMock(spec=HolderDao)
     mgr.backtest_dao = MagicMock(spec=BacktestDAO)
+    mgr.top_inst_dao = MagicMock(spec=TopInstDao)
+    mgr.stk_limit_dao = MagicMock(spec=StkLimitDao)
+    mgr.pledge_detail_dao = MagicMock(spec=PledgeDetailDao)
+    # Phase 3D/3E：share_float + stk_holdertrade DAO（prefetch_auxiliary_data 引用）
+    mgr.share_float_dao = MagicMock(spec=ShareFloatDao)
+    mgr.share_float_dao.get_share_float_upcoming_batch = AsyncMock(return_value=pd.DataFrame())
+    mgr.stk_holdertrade_dao = MagicMock(spec=StkHoldertradeDao)
+    mgr.stk_holdertrade_dao.get_stk_holdertrade_batch = AsyncMock(return_value=pd.DataFrame())
+    # Phase 3F-2：sw_industry DAO（prefetch_auxiliary_data 引用 get_sw_l2_mapping）
+    mgr.sw_industry_classify_dao = MagicMock(spec=SwIndustryClassifyDao)
+    mgr.sw_industry_member_dao = MagicMock(spec=SwIndustryMemberDao)
+    mgr.sw_industry_member_dao.get_sw_l2_mapping = AsyncMock(return_value={})
+    # Phase 3G §4.3.4：express DAO（prefetch_auxiliary_data 引用 get_express_batch）
+    mgr.express_dao = MagicMock(spec=ExpressDao)
+    mgr.express_dao.get_express_batch = AsyncMock(return_value=pd.DataFrame())
     return mgr
 
 

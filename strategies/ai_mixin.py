@@ -45,6 +45,44 @@ from utils.time_utils import get_now, to_yyyymmdd_str
 logger = logging.getLogger(__name__)
 
 
+def _build_stale_section(
+    api_name: str,
+    df: pd.DataFrame,
+    formatter: typing.Callable[[pd.DataFrame], str],
+    date_column: str = "ann_date",
+) -> str:
+    """统一 stale 标注格式。
+
+    Phase 2A.1 §4.4.5 v1.6.0 P1-7：模块级辅助函数，作为 ``AIStrategyMixin``
+    的基类静态方法供子类复用，避免在多 ``_build_*_text`` 方法中重复实现
+    stale 检查逻辑。
+
+    Args:
+        api_name: 该子段落对应的 API 名（如 "share_float" / "cn_m"）
+        df: 该子段落的数据 DataFrame
+        formatter: 格式化函数，接收 df 返回该子段落的文本
+        date_column: df 中代表"最后更新日期"的列名，默认 "ann_date"。
+            v1.8.0 P2-D 修订：由各 _build_*_text 调用时传入实际列名
+            （如 trade_date/date/month）。
+
+    Returns:
+        - df 为空 → 返回空字符串（不注入）
+        - api_name 不在当前档位覆盖内 → 返回 stale 前缀 + formatter(df)
+        - api_name 在档位覆盖内 → 返回 formatter(df)（无 stale 标注）
+    """
+    if df.empty:
+        return ""
+    from data.external.tushare_client import TushareClient
+
+    client = TushareClient()
+    if not client.is_api_covered_by_tier(api_name):
+        last_update = (
+            pd.to_datetime(df[date_column].max()).strftime("%Y-%m-%d") if date_column in df.columns else "未知"
+        )
+        return f"【数据停止更新，最后更新：{last_update}】\n" + formatter(df)
+    return formatter(df)
+
+
 @dataclass
 class PreFetchedContext:
     """
@@ -424,6 +462,7 @@ class AIStrategyMixin:
         moneyflow_df = pd.DataFrame()
         top_list_df = pd.DataFrame()
         northbound_df = pd.DataFrame()
+        top_inst_df = pd.DataFrame()
 
         if trade_date:
             try:
@@ -441,11 +480,18 @@ class AIStrategyMixin:
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))
 
+            # Phase 3C：top_inst 龙虎榜机构席位预取（auxiliary 数据，权限不足时由 _build_stale_section 标注）
+            try:
+                top_inst_df = await dp.cache.get_top_inst_batch(all_ts_codes, as_of_date=trade_date)  # type: ignore[union-attr]
+            except Exception as e:
+                logger.warning("[AIStrategyMixin] Failed to pre-fetch top_inst: %s", DataSanitizer.sanitize_error(e))
+
         logger.info(
-            "[AIStrategyMixin] Pre-fetched capital data: moneyflow=%d, top_list=%d, northbound=%d",
+            "[AIStrategyMixin] Pre-fetched capital data: moneyflow=%d, top_list=%d, northbound=%d, top_inst=%d",
             len(moneyflow_df),
             len(top_list_df),
             len(northbound_df),
+            len(top_inst_df),
         )
 
         # --- Pre-fetch Auxiliary Data (Audit, Dividend, Pledge, Holders) ---
@@ -462,6 +508,7 @@ class AIStrategyMixin:
                 "moneyflow_df": moneyflow_df,
                 "top_list_df": top_list_df,
                 "northbound_df": northbound_df,
+                "top_inst_df": top_inst_df,
                 "trade_date": trade_date,
             },
             history=prefetched_history,
@@ -775,7 +822,12 @@ class AIStrategyMixin:
                 financial_labels.extend(auxiliary_labels)
             if prefetched.macro_context:
                 financials_parts.append(f"\n{prefetched.macro_context}")
-                financial_labels.append("ai_label_macro")
+                # Phase 2A.1 §4.1 v1.6.0 P0-1：拆分 ai_label_macro 为
+                # ai_label_shibor（points_120，shibor 段落）+ ai_label_macro_full
+                # （points_2000，cn_m/cn_cpi/cn_ppi 段落）。filter_available_labels
+                # 按档位动态过滤（points_120 时 ai_label_macro_full 被移除）
+                financial_labels.append("ai_label_shibor")
+                financial_labels.append("ai_label_macro_full")
 
             financials_text = "\n".join(financials_parts)
 
@@ -1219,6 +1271,28 @@ class AIStrategyMixin:
             else:
                 parts.append(I18n.get("ai_north_na"))
 
+            # Phase 3C：top_inst 龙虎榜机构席位（auxiliary 数据，遵循 §4.4.5 stale 标注）
+            # 与 top_list/northbound 不同：top_inst 是 Phase 3C 新增段落，按 §4.4.5 设计
+            # 空 df 不注入占位文本（不污染 prompt）；非空但档位不覆盖时由 _build_stale_section 标注。
+            ti_df = prefetched.get("top_inst_df")
+            if ti_df is not None and not ti_df.empty:
+                stock_ti = ti_df[ti_df["ts_code"] == ts_code]
+                if not stock_ti.empty:
+
+                    def _format_top_inst(df: pd.DataFrame) -> str:
+                        row = df.iloc[0]
+                        net_amt = sf(row.get("net_amount"))
+                        return (
+                            f"{I18n.get('ai_top_inst_yes')} ({I18n.get('ai_net_buy')}: "
+                            f"{format_amount(net_amt, TOP_LIST_NET_AMOUNT_UNIT)})"
+                        )
+
+                    section = _build_stale_section("top_inst", stock_ti, _format_top_inst, date_column="trade_date")
+                    if section:
+                        parts.append(section)
+                        if labels_out is not None:
+                            labels_out.append("ai_label_top_inst")
+
             return "\n".join(parts)
 
         except Exception as e:
@@ -1355,6 +1429,220 @@ class AIStrategyMixin:
                 labels_out.clear()
             return ("", False)
 
+    @staticmethod
+    def _format_forecast_section(df: pd.DataFrame) -> str:
+        """格式化业绩预告段落（Phase 3A）。
+
+        入参 df 由 ``get_fina_forecast_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
+        仅返回每只股票最新一期预告，故直接取 ``iloc[0]``。
+
+        格式示例：``- 业绩预告: 2024Q3 预增 50.0%-70.0%（公告日 2024-10-15）``
+        """
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        end_date = row.get("end_date")
+        ann_date = row.get("ann_date")
+        forecast_type = row.get("type") or I18n.get("ai_unknown")
+        p_min = row.get("p_change_min")
+        p_max = row.get("p_change_max")
+
+        # end_date 为 Date 类型（季度末日期），转换为 "YYYYQN" 格式
+        quarter_str = str(end_date) if end_date is not None else I18n.get("ai_unknown")
+        try:
+            d = pd.to_datetime(str(end_date))
+            q = (d.month - 1) // 3 + 1
+            quarter_str = f"{d.year}Q{q}"
+        except Exception:
+            pass
+
+        # 拼接预告幅度区间
+        range_str = ""
+        if p_min is not None and not pd.isna(p_min) and p_max is not None and not pd.isna(p_max):
+            range_str = f" {float(p_min):.1f}%-{float(p_max):.1f}%"
+
+        # 公告日格式化为 YYYY-MM-DD
+        ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
+        try:
+            ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        return (
+            f"- {I18n.get('ai_forecast')}: {quarter_str} {forecast_type}{range_str}"
+            f"（{I18n.get('ai_forecast_ann_date')}: {ann_str}）"
+        )
+
+    @staticmethod
+    def _format_pledge_detail_section(df: pd.DataFrame) -> str:
+        """格式化股权质押明细段落（Phase 3B）。
+
+        入参 df 由 ``get_pledge_detail_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
+        仅返回每只股票最新一期明细，故直接取 ``iloc[0]``。
+
+        格式示例：``- 质押明细: 质押股数 1000.00 万股（无限售 800.00，有限售 200.00），占总股本 35.2%``
+        """
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        pledge_amount = row.get("pledge_amount")
+        unlimited = row.get("unlimited_pledge_amount")
+        limited = row.get("limited_pledge_amount")
+        total_pledge = row.get("total_pledge_amount")
+        pledge_ratio = row.get("pledge_ratio")
+
+        parts: list[str] = []
+        if pledge_amount is not None and not pd.isna(pledge_amount):
+            parts.append(f"{I18n.get('ai_pledge_amount')}: {float(pledge_amount):.2f}")
+        if total_pledge is not None and not pd.isna(total_pledge):
+            parts.append(f"{I18n.get('ai_pledge_total')}: {float(total_pledge):.2f}")
+        if unlimited is not None and not pd.isna(unlimited):
+            parts.append(f"{I18n.get('ai_pledge_unlimited')}: {float(unlimited):.2f}")
+        if limited is not None and not pd.isna(limited):
+            parts.append(f"{I18n.get('ai_pledge_limited')}: {float(limited):.2f}")
+
+        if not parts:
+            return ""
+
+        detail_str = "（" + "，".join(parts) + "）"
+        ratio_str = (
+            f"，{I18n.get('ai_pledge_ratio')} {float(pledge_ratio):.1f}%"
+            if pledge_ratio is not None and not pd.isna(pledge_ratio)
+            else ""
+        )
+        return f"- {I18n.get('ai_pledge_detail')}: {detail_str}{ratio_str}"
+
+    @staticmethod
+    def _format_share_float_section(df: pd.DataFrame) -> str:
+        """格式化限售解禁段落（Phase 3D）。
+
+        入参 df 由 ``get_share_float_upcoming_batch`` 返回，包含未来解禁记录。
+        最多展示 3 条最近解禁事件。
+
+        格式示例：``- 限售解禁: 2024-08-15 解禁 1000.00 万股（5.2%）；2024-09-20 解禁 500.00 万股（2.6%）``
+        """
+        if df is None or df.empty:
+            return ""
+        items: list[str] = []
+        for _, row in df.head(3).iterrows():
+            float_date = row.get("float_date")
+            float_share = row.get("float_share")
+            float_ratio = row.get("float_ratio")
+            if hasattr(float_date, "strftime"):
+                date_str = float_date.strftime("%Y-%m-%d")
+            else:
+                date_str = str(float_date) if float_date is not None else "N/A"
+            share_str = f"{float(float_share):.2f}" if float_share is not None and not pd.isna(float_share) else "N/A"
+            ratio_str = f"（{float(float_ratio):.1f}%）" if float_ratio is not None and not pd.isna(float_ratio) else ""
+            items.append(f"{date_str} 解禁 {share_str} 万股{ratio_str}")
+        if not items:
+            return ""
+        return f"- {I18n.get('ai_share_float')}: " + "；".join(items)
+
+    @staticmethod
+    def _format_holder_trade_section(df: pd.DataFrame) -> str:
+        """格式化股东增减持段落（Phase 3E）。
+
+        入参 df 由 ``get_stk_holdertrade_batch`` 返回，包含近期增减持记录。
+        最多展示 3 条最近记录。
+
+        格式示例：``- 股东增减持: 2024-06-01 张三 增持 100.00 万股（增持比例 0.5%）``
+        """
+        if df is None or df.empty:
+            return ""
+        recent = df.sort_values("ann_date", ascending=False).head(3)
+        items: list[str] = []
+        for _, row in recent.iterrows():
+            ann_date = row.get("ann_date")
+            date_str = str(ann_date) if ann_date is not None and not pd.isna(ann_date) else "N/A"
+            holder_name = row.get("holder_name")
+            name_str = str(holder_name) if holder_name is not None and not pd.isna(holder_name) else "N/A"
+            in_de = row.get("in_de")
+            if in_de == "IN":
+                action_str = I18n.get("ai_holder_trade_increase")
+            elif in_de == "DE":
+                action_str = I18n.get("ai_holder_trade_decrease")
+            else:
+                action_str = "N/A"
+            change_vol = row.get("change_vol")
+            vol_str = f"{float(change_vol):.2f}" if change_vol is not None and not pd.isna(change_vol) else "N/A"
+            change_ratio = row.get("change_ratio")
+            ratio_str = (
+                f"（{float(change_ratio):.2f}%）" if change_ratio is not None and not pd.isna(change_ratio) else ""
+            )
+            items.append(f"{date_str} {name_str} {action_str} {vol_str} 股{ratio_str}")
+        if not items:
+            return ""
+        return f"- {I18n.get('ai_holder_trade')}: " + "；".join(items)
+
+    @staticmethod
+    def _format_express_section(df: pd.DataFrame) -> str:
+        """格式化业绩快报段落（Phase 3G §4.3.4）。
+
+        入参 df 由 ``get_express_batch`` 返回，使用 ``DISTINCT ON (ts_code)``
+        仅返回每只股票最新一期快报，故直接取 ``iloc[0]``。
+
+        业绩快报早于正式财报 30-60 天公告，AI 可提前反应业绩拐点。
+        营收/净利/扣非单位由元转换为亿元（÷1e8）保留 2 位小数。
+
+        格式示例：``- 业绩快报: 2024Q3 营收 50.00亿（+25.0% YoY）、净利 8.00亿（+40.0% YoY）、扣非 7.50亿（+35.0% YoY）（公告日 2024-10-15）``
+        """
+        if df is None or df.empty:
+            return ""
+        row = df.iloc[0]
+        end_date = row.get("end_date")
+        ann_date = row.get("ann_date")
+
+        # end_date 为 Date 类型（季度末日期），转换为 "YYYYQN" 格式
+        quarter_str = str(end_date) if end_date is not None else I18n.get("ai_unknown")
+        try:
+            d = pd.to_datetime(str(end_date))
+            q = (d.month - 1) // 3 + 1
+            quarter_str = f"{d.year}Q{q}"
+        except Exception:
+            pass
+
+        # 拼接营收/净利/扣非段落（单位转换：元 → 亿元）
+        parts: list[str] = []
+        revenue = row.get("revenue")
+        yoy_sales = row.get("yoy_sales")
+        if revenue is not None and not pd.isna(revenue):
+            rev_str = f"{I18n.get('ai_express_revenue')}: {float(revenue) / 1e8:.2f}{I18n.get('ai_billion_yuan')}"
+            if yoy_sales is not None and not pd.isna(yoy_sales):
+                rev_str += f"（{float(yoy_sales):+.1f}% YoY）"
+            parts.append(rev_str)
+
+        n_income = row.get("n_income")
+        yoy_profit = row.get("yoy_profit")
+        if n_income is not None and not pd.isna(n_income):
+            ni_str = f"{I18n.get('ai_express_n_income')}: {float(n_income) / 1e8:.2f}{I18n.get('ai_billion_yuan')}"
+            if yoy_profit is not None and not pd.isna(yoy_profit):
+                ni_str += f"（{float(yoy_profit):+.1f}% YoY）"
+            parts.append(ni_str)
+
+        deduct_profit = row.get("deduct_profit")
+        yoy_dedu_np = row.get("yoy_dedu_np")
+        if deduct_profit is not None and not pd.isna(deduct_profit):
+            dp_str = f"{I18n.get('ai_express_deduct')}: {float(deduct_profit) / 1e8:.2f}{I18n.get('ai_billion_yuan')}"
+            if yoy_dedu_np is not None and not pd.isna(yoy_dedu_np):
+                dp_str += f"（{float(yoy_dedu_np):+.1f}% YoY）"
+            parts.append(dp_str)
+
+        if not parts:
+            return ""
+
+        # 公告日格式化为 YYYY-MM-DD
+        ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
+        try:
+            ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+        return (
+            f"- {I18n.get('ai_express')}: {quarter_str} "
+            f"{'、'.join(parts)}（{I18n.get('ai_express_ann_date')}: {ann_str}）"
+        )
+
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1446,6 +1734,63 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_pledge")
 
+            # Phase 3B：股权质押明细（pledge_detail）— 与 pledge_stat 互补，提供更细粒度的质押信息
+            if prefetched and ts_code in prefetched and "pledge_detail" in prefetched[ts_code]:
+                pledge_detail_df = prefetched[ts_code]["pledge_detail"]
+            else:
+                pledge_detail_df = await cache.get_pledge_detail(ts_code, as_of_date=as_of_date)
+
+            if pledge_detail_df is not None and not pledge_detail_df.empty:
+                pledge_detail_line = _build_stale_section(
+                    "pledge_detail",
+                    pledge_detail_df,
+                    self._format_pledge_detail_section,
+                    date_column="end_date",
+                )
+                if pledge_detail_line:
+                    lines.append(pledge_detail_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_pledge_detail")
+
+            # Phase 3D：限售解禁（share_float）— 未来解禁压力，与 pledge_stat/pledge_detail 互补
+            if prefetched and ts_code in prefetched and "share_float" in prefetched[ts_code]:
+                share_float_df = prefetched[ts_code]["share_float"]
+            else:
+                share_float_df = await cache.get_share_float_upcoming(ts_code, as_of_date=as_of_date)
+
+            if share_float_df is not None and not share_float_df.empty:
+                share_float_line = _build_stale_section(
+                    "share_float",
+                    share_float_df,
+                    self._format_share_float_section,
+                    date_column="ann_date",
+                )
+                if share_float_line:
+                    lines.append(share_float_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_share_float")
+
+            # Phase 3E：股东增减持（stk_holdertrade）— 产业资本信号，与 share_float 互补
+            if prefetched and ts_code in prefetched and "holdertrade" in prefetched[ts_code]:
+                holdertrade_df = prefetched[ts_code]["holdertrade"]
+            else:
+                holdertrade_df = await cache.get_stk_holdertrade(ts_code, as_of_date=as_of_date)
+
+            if holdertrade_df is not None and not holdertrade_df.empty:
+                holdertrade_line = _build_stale_section(
+                    "stk_holdertrade",
+                    holdertrade_df,
+                    self._format_holder_trade_section,
+                    date_column="ann_date",
+                )
+                if holdertrade_line:
+                    lines.append(holdertrade_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_holder_trade")
+
             if prefetched and ts_code in prefetched and "holders" in prefetched[ts_code]:
                 holders_df = prefetched[ts_code]["holders"]
             else:
@@ -1495,6 +1840,60 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_holder_count")
 
+            # Phase 3A：业绩预告（fina_forecast）— 表已建 + DAO 读取已激活，注入 AI
+            if prefetched and ts_code in prefetched and "forecast" in prefetched[ts_code]:
+                forecast_df = prefetched[ts_code]["forecast"]
+            else:
+                forecast_df = await cache.get_fina_forecast(ts_code, as_of_date=as_of_date)
+
+            if forecast_df is not None and not forecast_df.empty:
+                forecast_line = _build_stale_section(
+                    "forecast",
+                    forecast_df,
+                    self._format_forecast_section,
+                    date_column="ann_date",
+                )
+                if forecast_line:
+                    lines.append(forecast_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_forecast")
+
+            # Phase 3F-2：申万行业（sw_industry_member 全局快照，月度更新，无 stale 标注）
+            # prefetched[ts_code]["sw_industry"] 为 sw_l2_name 字符串（cache_manager 已分发）
+            # 注入前检查档位覆盖：points_120 降级时 index_classify/index_member_all 不在覆盖内，
+            # filter_available_labels 已过滤 ai_label_sw_industry 标签；此处同步跳过 body 注入，
+            # 避免 <available_data> 块不列但 prompt body 仍注入的设计矛盾。
+            if prefetched and ts_code in prefetched and "sw_industry" in prefetched[ts_code]:
+                sw_industry_name = prefetched[ts_code]["sw_industry"]
+                if sw_industry_name:
+                    from data.external.tushare_client import TushareClient
+
+                    if TushareClient().is_api_covered_by_tier("index_classify"):
+                        lines.append(f"- {I18n.get('ai_label_sw_industry')}: {sw_industry_name}")
+                        has_data = True
+                        if labels_out is not None:
+                            labels_out.append("ai_label_sw_industry")
+
+            # Phase 3G §4.3.4：业绩快报（express）— 早于正式财报 30-60 天，提前反应业绩拐点
+            if prefetched and ts_code in prefetched and "express" in prefetched[ts_code]:
+                express_df = prefetched[ts_code]["express"]
+            else:
+                express_df = await cache.get_express(ts_code, as_of_date=as_of_date)
+
+            if express_df is not None and not express_df.empty:
+                express_line = _build_stale_section(
+                    "express",
+                    express_df,
+                    self._format_express_section,
+                    date_column="ann_date",
+                )
+                if express_line:
+                    lines.append(express_line)
+                    has_data = True
+                    if labels_out is not None:
+                        labels_out.append("ai_label_express")
+
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -1514,6 +1913,12 @@ class AIStrategyMixin:
         L3 修复：新增 Shibor 利率注入，对价值投资和固收相关策略有重要参考价值。
         B-P1-1 修复：新增 as_of_date 参数，在历史回放场景下按日期截断宏观数据，防止前视偏差。
 
+        Phase 2A.1 §4.4.5 v1.6.0 P0-1：按子段落分别 stale 标注
+        - shibor 段落（对应 ai_label_shibor，points_120）：shibor API 在 points_120
+          覆盖内，正常注入（无 stale 标注）
+        - m2/cpi/ppi 段落（对应 ai_label_macro_full，points_2000）：cn_m/cn_cpi/cn_ppi
+          在 points_2000 覆盖内；points_120 降级时按子段落 stale 标注注入历史数据
+
         Args:
             cache: 数据缓存实例
             as_of_date: 截止日期（含），None 表示不限制
@@ -1527,41 +1932,142 @@ class AIStrategyMixin:
         try:
             macro = await cache.get_macro_economy(as_of_date=as_of_date)
             if macro is not None and not macro.empty:
-                latest = macro.iloc[0]
+                # Phase 2D §3.2.6 修复：m2 行与 GDP 行 period 不同（月度 vs 季度末日），
+                # 作为独立行存储。DAO 返回最多 2 行，需分别定位月度行和 GDP 行。
+                # 用 pd.notna() 判断字段是否可用，避免 NaN 被 `is not None` 误判为有效值。
+                m2_row = (
+                    macro.dropna(subset=["m2_yoy"]).iloc[0]
+                    if "m2_yoy" in macro.columns and not macro.dropna(subset=["m2_yoy"]).empty
+                    else None
+                )
+                gdp_row = (
+                    macro.dropna(subset=["gdp_yoy"]).iloc[0]
+                    if "gdp_yoy" in macro.columns and not macro.dropna(subset=["gdp_yoy"]).empty
+                    else None
+                )
 
-                m2_yoy = latest.get("m2_yoy")
-                if m2_yoy is not None:
-                    lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
-                    has_data = True
+                # Phase 2A.1 §4.4.5：m2/cpi/ppi 段落对应 ai_label_macro_full（points_2000），
+                # cn_m/cn_cpi/cn_ppi 在 points_2000 覆盖内；points_120 降级时按子段落 stale 标注。
+                # cn_m 作为整个 macro 段落的代理（三者档位一致）
+                macro_lines: list[str] = []
+                if m2_row is not None:
+                    m2_yoy = m2_row.get("m2_yoy")
+                    if pd.notna(m2_yoy):
+                        macro_lines.append(f"- {I18n.get('macro_m2_yoy')}: {m2_yoy:.2f}%")
 
-                cpi = latest.get("cpi")
-                if cpi is not None:
-                    lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
-                    has_data = True
+                    cpi = m2_row.get("cpi")
+                    if pd.notna(cpi):
+                        macro_lines.append(f"- {I18n.get('macro_cpi')}: {cpi:.2f}")
 
-                ppi = latest.get("ppi")
-                if ppi is not None:
-                    lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
-                    has_data = True
+                    ppi = m2_row.get("ppi")
+                    if pd.notna(ppi):
+                        macro_lines.append(f"- {I18n.get('macro_ppi')}: {ppi:.2f}")
+
+                if macro_lines:
+                    macro_text = "\n".join(macro_lines)
+                    # 用 _build_stale_section 统一标注（cn_m 作为代理 API，date_column="period"）
+                    macro_section = _build_stale_section(
+                        "cn_m",
+                        macro,
+                        lambda _df: macro_text,
+                        date_column="period",
+                    )
+                    if macro_section:
+                        lines.append(macro_section)
+                        has_data = True
+
+                # Phase 2D §3.2.6：cn_gdp 段落（季度数据，period 为季度末日）
+                # GDP 行与 m2 行 period 不同，分别 stale 标注
+                gdp_lines: list[str] = []
+                if gdp_row is not None:
+                    gdp_yoy = gdp_row.get("gdp_yoy")
+                    if pd.notna(gdp_yoy):
+                        # 从 period（季度末日）推断 quarter 字符串，如 2024-12-31 → "2024Q4"
+                        period = gdp_row.get("period")
+                        quarter_str = ""
+                        if hasattr(period, "year") and hasattr(period, "month"):
+                            q = (period.month - 1) // 3 + 1
+                            quarter_str = f"（{period.year}Q{q}）"
+                        gdp_lines.append(f"- {I18n.get('macro_gdp_yoy')}{quarter_str}: {gdp_yoy:.2f}%")
+
+                        pi_yoy = gdp_row.get("pi_yoy")
+                        if pd.notna(pi_yoy):
+                            gdp_lines.append(f"- {I18n.get('macro_pi_yoy')}: {pi_yoy:.2f}%")
+
+                        si_yoy = gdp_row.get("si_yoy")
+                        if pd.notna(si_yoy):
+                            gdp_lines.append(f"- {I18n.get('macro_si_yoy')}: {si_yoy:.2f}%")
+
+                        ti_yoy = gdp_row.get("ti_yoy")
+                        if pd.notna(ti_yoy):
+                            gdp_lines.append(f"- {I18n.get('macro_ti_yoy')}: {ti_yoy:.2f}%")
+
+                if gdp_lines:
+                    gdp_text = "\n".join(gdp_lines)
+                    # cn_gdp 作为 GDP 段落代理 API，date_column="period"
+                    gdp_section = _build_stale_section(
+                        "cn_gdp",
+                        macro,
+                        lambda _df: gdp_text,
+                        date_column="period",
+                    )
+                    if gdp_section:
+                        lines.append(gdp_section)
+                        has_data = True
 
             shibor = await cache.get_shibor_latest(as_of_date=as_of_date)
             if shibor is not None and not shibor.empty:
                 shibor_latest = shibor.iloc[0]
 
+                shibor_lines: list[str] = []
                 on_rate = shibor_latest.get("on")
                 if on_rate is not None:
-                    lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
-                    has_data = True
+                    shibor_lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
 
                 w1_rate = shibor_latest.get("1w")
                 if w1_rate is not None:
-                    lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
-                    has_data = True
+                    shibor_lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
 
                 m3_rate = shibor_latest.get("3m")
                 if m3_rate is not None:
-                    lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
-                    has_data = True
+                    shibor_lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
+
+                if shibor_lines:
+                    shibor_text = "\n".join(shibor_lines)
+                    # shibor 段落对应 ai_label_shibor（points_120），shibor API 在 points_120 覆盖内
+                    # points_120 降级时 shibor 仍可正常注入（无 stale 标注）
+                    shibor_section = _build_stale_section(
+                        "shibor",
+                        shibor,
+                        lambda _df: shibor_text,
+                        date_column="date",
+                    )
+                    if shibor_section:
+                        lines.append(shibor_section)
+                        has_data = True
+
+                # Phase 3G §4.3.4：LPR 段落（与 shibor 同表 shibor_daily，独立 stale 标注）
+                # shibor_lpr 在 points_120 覆盖内，正常注入（无 stale 标注）
+                lpr_lines: list[str] = []
+                lpr_1y = shibor_latest.get("lpr_1y")
+                if lpr_1y is not None:
+                    lpr_lines.append(f"- {I18n.get('macro_lpr_1y')}: {lpr_1y:.2f}%")
+
+                lpr_5y = shibor_latest.get("lpr_5y")
+                if lpr_5y is not None:
+                    lpr_lines.append(f"- {I18n.get('macro_lpr_5y')}: {lpr_5y:.2f}%")
+
+                if lpr_lines:
+                    lpr_text = "\n".join(lpr_lines)
+                    lpr_section = _build_stale_section(
+                        "shibor_lpr",
+                        shibor,
+                        lambda _df: lpr_text,
+                        date_column="date",
+                    )
+                    if lpr_section:
+                        lines.append(lpr_section)
+                        has_data = True
 
         except Exception as e:
             logger.warning("[AIMixin] Failed to build macro context: %s", DataSanitizer.sanitize_error(e))

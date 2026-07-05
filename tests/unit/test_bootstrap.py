@@ -1,3 +1,5 @@
+import datetime
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -177,3 +179,99 @@ class TestInitializeServices:
         assert result["error"] == "db_upgrade_needed"
         assert result["current_rev"] == "abc123"
         assert result["head_rev"] == "def456"
+
+
+class TestMaybeAutoProbeOnStartup:
+    """Phase 2A.1 Task 2A.1.13：bootstrap 启动期自动 probe 测试。"""
+
+    def _make_client(self, *, token: str = "test_token", last_probe: datetime.datetime | None = None):
+        client = MagicMock()
+        client.token = token
+        client.get_last_probe_time = MagicMock(return_value=last_probe)
+        client.probe_api_capabilities = AsyncMock()
+        return client
+
+    @pytest.mark.asyncio
+    async def test_auto_probe_on_startup_within_7_days(self):
+        """距上次 probe 不到 7 天 → 不触发 probe。"""
+        now = datetime.datetime.now(datetime.UTC)
+        last_probe = now - datetime.timedelta(days=3)  # 3 天前，在 7 天内
+        client = self._make_client(last_probe=last_probe)
+
+        with (
+            patch("data.external.tushare_client.TushareClient", return_value=client),
+            patch("utils.time_utils.get_now", return_value=now),
+        ):
+            from app.bootstrap import _maybe_auto_probe_on_startup
+
+            await _maybe_auto_probe_on_startup()
+
+        client.probe_api_capabilities.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_probe_on_startup_over_7_days(self):
+        """距上次 probe 超过 7 天 → 触发 probe。"""
+        now = datetime.datetime.now(datetime.UTC)
+        last_probe = now - datetime.timedelta(days=10)  # 10 天前，超过 7 天
+        client = self._make_client(last_probe=last_probe)
+
+        with (
+            patch("data.external.tushare_client.TushareClient", return_value=client),
+            patch("utils.time_utils.get_now", return_value=now),
+        ):
+            from app.bootstrap import _maybe_auto_probe_on_startup
+
+            await _maybe_auto_probe_on_startup()
+
+        client.probe_api_capabilities.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_probe_on_startup_never_probed(self):
+        """从未 probe（last_probe is None）→ 触发 probe。"""
+        now = datetime.datetime.now(datetime.UTC)
+        client = self._make_client(last_probe=None)
+
+        with (
+            patch("data.external.tushare_client.TushareClient", return_value=client),
+            patch("utils.time_utils.get_now", return_value=now),
+        ):
+            from app.bootstrap import _maybe_auto_probe_on_startup
+
+            await _maybe_auto_probe_on_startup()
+
+        client.probe_api_capabilities.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_probe_on_startup_failure_tolerant(self):
+        """probe 抛 Exception → 降级 warning，不 raise（不影响主流程）。"""
+        now = datetime.datetime.now(datetime.UTC)
+        last_probe = now - datetime.timedelta(days=10)
+        client = self._make_client(last_probe=last_probe)
+        client.probe_api_capabilities = AsyncMock(side_effect=RuntimeError("network error"))
+
+        with (
+            patch("data.external.tushare_client.TushareClient", return_value=client),
+            patch("utils.time_utils.get_now", return_value=now),
+        ):
+            from app.bootstrap import _maybe_auto_probe_on_startup
+
+            # 不应 raise（异常降级 warning）
+            await _maybe_auto_probe_on_startup()
+
+        client.probe_api_capabilities.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_probe_on_startup_skips_when_no_token(self):
+        """Token 未配置 → 短路跳过，不读 AppState、不触发 probe。"""
+        now = datetime.datetime.now(datetime.UTC)
+        client = self._make_client(token="", last_probe=None)
+
+        with (
+            patch("data.external.tushare_client.TushareClient", return_value=client),
+            patch("utils.time_utils.get_now", return_value=now),
+        ):
+            from app.bootstrap import _maybe_auto_probe_on_startup
+
+            await _maybe_auto_probe_on_startup()
+
+        client.probe_api_capabilities.assert_not_called()

@@ -176,6 +176,40 @@ class TopList(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class TopInst(Base):
+    """龙虎榜机构席位交易明细（Phase 2E top_inst 已封装 API 激活）。"""
+
+    __tablename__ = "top_inst"
+    ts_code = Column(String, primary_key=True)
+    trade_date = Column(Date, primary_key=True, index=True)
+    name = Column(String)
+    close = Column(Numeric(12, 4))
+    pct_change = Column(Numeric(8, 4))
+    amount = Column(Numeric(20, 4))
+    net_amount = Column(Numeric(20, 4))
+    buy_amount = Column(Numeric(20, 4))
+    buy_value = Column(Numeric(20, 4))
+    sell_amount = Column(Numeric(20, 4))
+    sell_value = Column(Numeric(20, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class StkLimit(Base):
+    """每日涨跌停价格（Phase 2G stk_limit 涨跌停价格，仅数据层，不注入 AI）。"""
+
+    __tablename__ = "stk_limit"
+    ts_code = Column(String, primary_key=True)
+    trade_date = Column(Date, primary_key=True, index=True)
+    pre_close = Column(Numeric(12, 4))
+    up_limit = Column(Numeric(12, 4))
+    down_limit = Column(Numeric(12, 4))
+    # R17: limit 是 SQL 保留字，数据库列名映射为 limit_type
+    limit = Column(String, name="limit_type")
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class SyncStatus(Base):
     __tablename__ = "sync_status"
     table_name = Column(String, primary_key=True)
@@ -469,6 +503,88 @@ class PledgeStat(Base):
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
 
+class PledgeDetail(Base):
+    """股权质押明细（Phase 3B，与 pledge_stat 互补，提供更细粒度的质押信息供 AI 分析）。"""
+
+    __tablename__ = "pledge_detail"
+    ts_code = Column(String, primary_key=True)
+    end_date = Column(Date, primary_key=True, index=True)
+    pledge_amount = Column(Numeric(20, 4))
+    unlimited_pledge_amount = Column(Numeric(20, 4))
+    limited_pledge_amount = Column(Numeric(20, 4))
+    total_pledge_amount = Column(Numeric(20, 4))
+    pledge_ratio = Column(Numeric(12, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class ShareFloat(Base):
+    """限售解禁（Phase 3D，限售股解禁数据，供 AI 分析解禁压力与减持风险）。"""
+
+    __tablename__ = "share_float"
+    ts_code = Column(String, primary_key=True)
+    ann_date = Column(Date, index=True)
+    float_date = Column(Date, primary_key=True, index=True)
+    float_share = Column(Numeric(20, 4))
+    float_ratio = Column(Numeric(8, 4))
+    holder_name = Column(String(100))
+    share_type = Column(String(50))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class StkHoldertrade(Base):
+    """股东增减持（Phase 3E，产业资本信号，供 AI 分析高管/公司层面增减持行为）。"""
+
+    __tablename__ = "stk_holdertrade"
+    ts_code = Column(String, primary_key=True)
+    ann_date = Column(Date, primary_key=True, index=True)
+    holder_name = Column(String(100), primary_key=True)
+    holder_type = Column(String(2))
+    in_de = Column(String(2), primary_key=True)
+    change_vol = Column(Numeric(20, 4))
+    change_ratio = Column(Numeric(8, 4))
+    after_share = Column(Numeric(20, 4))
+    after_ratio = Column(Numeric(8, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class SwIndustryClassify(Base):
+    """申万行业分类（Phase 3F-1，全局快照，月度更新，对应 Tushare index_classify 接口）。"""
+
+    __tablename__ = "sw_industry_classify"
+    index_code = Column(String, primary_key=True)
+    level = Column(String(2), primary_key=True, index=True)
+    index_name = Column(String)
+    industry_code = Column(String, index=True)
+    industry_name = Column(String)
+    parent_code = Column(String)
+    is_sw = Column(String(1))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class SwIndustryMember(Base):
+    """申万行业成分股映射（Phase 3F-1，全局快照，对应 Tushare index_member_all 接口）。
+
+    供 AI 行业景气度分析与 stock_basic.industry 字段切换（Phase 3F-2 轨道 A/B）。
+    """
+
+    __tablename__ = "sw_industry_member"
+    ts_code = Column(String, primary_key=True, index=True)
+    index_code = Column(String, primary_key=True)
+    index_name = Column(String)
+    sw_l1_code = Column(String)
+    sw_l1_name = Column(String)
+    sw_l2_code = Column(String, index=True)
+    sw_l2_name = Column(String)
+    sw_l3_code = Column(String)
+    sw_l3_name = Column(String)
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
 class Repurchase(Base):
     __tablename__ = "repurchase"
     ts_code = Column(String, primary_key=True)
@@ -535,6 +651,15 @@ class MacroEconomy(Base):
     m0_yoy = Column(Numeric(12, 4))
     cpi = Column(Numeric(12, 4))
     ppi = Column(Numeric(12, 4))
+    # Phase 2D §3.2.6：cn_gdp 全链路补全（8 个 GDP 字段）
+    gdp = Column(Numeric(20, 4))
+    gdp_yoy = Column(Numeric(12, 4))
+    pi = Column(Numeric(20, 4))
+    pi_yoy = Column(Numeric(12, 4))
+    si = Column(Numeric(20, 4))
+    si_yoy = Column(Numeric(12, 4))
+    ti = Column(Numeric(20, 4))
+    ti_yoy = Column(Numeric(12, 4))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
 
@@ -550,6 +675,32 @@ class ShiborDaily(Base):
     m6 = Column(Numeric(12, 4), name="6m")
     m9 = Column(Numeric(12, 4), name="9m")
     y1 = Column(Numeric(12, 4), name="1y")
+    # Phase 3G §4.3.4：LPR 数据（shibor_lpr API 返回，与 shibor 同表按 date 合并）
+    lpr_1y = Column(Numeric(12, 4))
+    lpr_5y = Column(Numeric(12, 4))
+    updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
+    created_at = Column(DateTime(timezone=False), server_default=text("now()"))
+
+
+class Express(Base):
+    """业绩快报（Phase 3G §4.3.4）。
+
+    Tushare ``express`` API 返回，早于正式财报 30-60 天公告，
+    AI 可提前反应业绩拐点。表名 ``express`` 非SQL保留字，但注释说明语义（R17）。
+    """
+
+    __tablename__ = "express"
+    ts_code = Column(String, primary_key=True)
+    end_date = Column(Date, primary_key=True)
+    ann_date = Column(Date, primary_key=True, index=True)
+    type = Column(String)
+    revenue = Column(Numeric(20, 4))
+    n_income = Column(Numeric(20, 4))
+    total_profit = Column(Numeric(20, 4))
+    yoy_sales = Column(Numeric(12, 4))
+    yoy_profit = Column(Numeric(12, 4))
+    yoy_dedu_np = Column(Numeric(12, 4))
+    deduct_profit = Column(Numeric(20, 4))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
     created_at = Column(DateTime(timezone=False), server_default=text("now()"))
 

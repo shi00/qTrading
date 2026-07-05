@@ -11,7 +11,7 @@ import threading
 import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS, SYNC_RESULT_SKIPPED_PERMISSION
-from data.sync.base import ISyncStrategy, SyncResult
+from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import I18n
@@ -23,39 +23,6 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now, parse_date
 
 logger = logging.getLogger(__name__)
-
-
-def _is_peak_disclosure_season() -> bool:
-    """
-    Check if current month is in peak financial disclosure season.
-
-    Peak seasons in A-share market:
-    - April: Annual reports deadline (April 30)
-    - August: Semi-annual reports deadline (August 31)
-    - October: Q3 quarterly reports deadline (October 31)
-
-    During peak seasons, we reduce concurrency and increase delays
-    to avoid overwhelming the Tushare API and reduce rate limit errors.
-
-    Returns:
-        True if current month is in peak disclosure season.
-    """
-    current_month = get_now().month
-    return current_month in (4, 8, 10)
-
-
-def _get_seasonal_adjustments() -> tuple[int, float]:
-    """
-    Get concurrency and delay adjustments based on disclosure season.
-
-    Returns:
-        Tuple of (concurrency_factor, delay_multiplier):
-        - concurrency_factor: 1 for normal, 2 for peak (divide concurrency by this)
-        - delay_multiplier: 1.0 for normal, 2.0 for peak (multiply delay by this)
-    """
-    if _is_peak_disclosure_season():
-        return 2, 2.0
-    return 1, 1.0
 
 
 def _dedup_financial_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -260,7 +227,8 @@ class FinancialSyncStrategy(ISyncStrategy):
         total_stocks = len(all_stocks)
 
         # 2. Concurrency Control
-        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
+        concurrency_factor, _ = _get_seasonal_adjustments()
+        concurrency = max(1, ConfigHandler.get_sync_max_concurrent_heavy() // concurrency_factor)
         semaphore = asyncio.Semaphore(concurrency)
 
         # 3. Data-as-State Resume Logic
@@ -416,7 +384,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     )
 
         # Batch execution
-        batch_size = ConfigHandler.get_max_batch_rows()
+        batch_size = ConfigHandler.get_sync_full_batch_size()
         for i in range(0, len(pending_stocks), batch_size):
             if self._shutdown_event.is_set():
                 break
@@ -585,6 +553,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             tasks = [sync_one_target(item) for item in target_list]
 
             day_saved = 0
+            # Incremental 半批：使用 sync_batch_size // 2 降低 429 风险（高峰期披露密集，单日 target 量大）。
             _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
             for batch_start in range(0, len(tasks), _BATCH_SIZE):
                 batch = tasks[batch_start : batch_start + _BATCH_SIZE]
@@ -651,7 +620,8 @@ class FinancialSyncStrategy(ISyncStrategy):
             total,
         )
 
-        concurrency = ConfigHandler.get_sync_max_concurrent_heavy()
+        concurrency_factor, _ = _get_seasonal_adjustments()
+        concurrency = max(1, ConfigHandler.get_sync_max_concurrent_heavy() // concurrency_factor)
         semaphore = asyncio.Semaphore(concurrency)
 
         async def sync_one_date_table(date_str, table_name, table_cfg):
@@ -664,6 +634,8 @@ class FinancialSyncStrategy(ISyncStrategy):
                     if df is not None and not df.empty:
                         save_map = {
                             "fina_forecast": self.context.cache.save_fina_forecast,
+                            # Phase 3G §4.3.4：业绩快报（参考 forecast 模式）
+                            "express": self.context.cache.save_express,
                             "dividend": self.context.cache.save_dividend,
                             "repurchase": self.context.cache.save_repurchase,
                         }

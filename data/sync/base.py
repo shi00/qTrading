@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Any
 
 from utils.correlation import ensure_correlation_id
+from utils.time_utils import get_now
 
 # Forward declaration for type hinting if needed,
 # but usually avoid circular imports by strict typing or Protocol
@@ -22,6 +23,39 @@ from utils.correlation import ensure_correlation_id
 # from data.cache.cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
+
+
+def _is_peak_disclosure_season() -> bool:
+    """
+    Check if current month is in peak financial disclosure season.
+
+    Peak seasons in A-share market:
+    - April: Annual reports deadline (April 30)
+    - August: Semi-annual reports deadline (August 31)
+    - October: Q3 quarterly reports deadline (October 31)
+
+    During peak seasons, we reduce concurrency and increase delays
+    to avoid overwhelming the Tushare API and reduce rate limit errors.
+
+    Returns:
+        True if current month is in peak disclosure season.
+    """
+    current_month = get_now().month
+    return current_month in (4, 8, 10)
+
+
+def _get_seasonal_adjustments() -> tuple[int, float]:
+    """
+    Get concurrency and delay adjustments based on disclosure season.
+
+    Returns:
+        Tuple of (concurrency_factor, delay_multiplier):
+        - concurrency_factor: 1 for normal, 2 for peak (divide concurrency by this)
+        - delay_multiplier: 1.0 for normal, 2.0 for peak (multiply delay by this)
+    """
+    if _is_peak_disclosure_season():
+        return 2, 2.0
+    return 1, 1.0
 
 
 class SyncStatus(StrEnum):

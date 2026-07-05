@@ -137,7 +137,12 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                     exc_info=True,
                                 )
 
-            tasks = [sync_one_board(str(row["板块名称"]), str(row["板块代码"])) for _, row in df_boards.iterrows()]
+            # Phase 2F: 循环体每 200 条检查 _check_cancelled，响应取消信号
+            tasks: list = []
+            for i, (_, row) in enumerate(df_boards.iterrows()):
+                if i > 0 and i % 200 == 0 and self._check_cancelled(result):
+                    return result
+                tasks.append(sync_one_board(str(row["板块名称"]), str(row["板块代码"])))
             await gather_return_exceptions_propagating_cancel(*tasks)
 
             if self._check_cancelled(result):
@@ -222,7 +227,10 @@ class LimitListSyncStrategy(ISyncStrategy):
                 return result
 
             records: list[dict] = []
-            for _, row in df.iterrows():
+            # Phase 2F: 循环体每 200 条检查 _check_cancelled，响应取消信号
+            for i, (_, row) in enumerate(df.iterrows()):
+                if i > 0 and i % 200 == 0 and self._check_cancelled(result):
+                    return result
                 ts_code = row.get("ts_code")
                 if not ts_code:
                     continue

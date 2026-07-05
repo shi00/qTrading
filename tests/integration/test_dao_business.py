@@ -758,6 +758,30 @@ class TestScreenerDao:
         assert result["pe_ttm"].iloc[0] == 5.0
         assert result["roe"].iloc[0] == 12.0
 
+    async def test_get_screening_data_sw_industry_override(
+        self, screener_dao, clean_db, setup_stock_data, test_engine: AsyncEngine
+    ):
+        """Phase 3F-2 轨道 B：验证 COALESCE(m.sw_l2_name, b.industry) 覆写路径。
+
+        setup_stock_data 已注入 stock_basic.industry='银行'，此处追加
+        sw_industry_member.sw_l2_name='银行II'，验证 COALESCE 返回 '银行II' 而非 '银行'。
+        单元测试 test_screener_dao.py 仅做 SQL 字符串断言，本测试验证实际查询语义。
+        """
+        async with test_engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO sw_industry_member "
+                    "(ts_code, index_code, index_name, sw_l1_code, sw_l1_name, sw_l2_code, sw_l2_name) "
+                    "VALUES ('000001.SZ', '801711.SI', '申万二级：银行II', '801710', '银行', '801711', '银行II')"
+                )
+            )
+
+        result = await screener_dao.get_screening_data(trade_date=_RECENT_DATE)
+        assert not result.empty
+        assert result["ts_code"].iloc[0] == "000001.SZ"
+        # COALESCE 覆写：返回 sw_l2_name='银行II' 而非 stock_basic.industry='银行'
+        assert result["industry"].iloc[0] == "银行II"
+
     async def test_save_screening_results_column_order(self, screener_dao, clean_db):
         """验证动态列推导与 tuple 顺序一致，防止列错位"""
         from data.persistence.models import ScreeningHistory, get_model_columns

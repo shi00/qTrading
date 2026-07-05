@@ -1598,3 +1598,125 @@ class _NoToastPage:
 
     def update(self, *args, **kwargs):
         pass
+
+
+class TestStrategyTierHint:
+    """Phase 2A.1 Task 2A.1.13：screener_view 策略档位不足提示测试。
+
+    覆盖 `_update_tier_hint_text` 三态行为：
+    - 当前档位 < 策略所需档位 → 显示 ``sys_strategy_tier_hint`` 本地化提示
+    - 当前档位 ≥ 策略所需档位 → 隐藏提示
+    - locale 变更后提示文案重新读取（§5.8 规范：纯 UI 操作）
+    """
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.mock_as = mock_app_styles
+        self.mock_vm = MagicMock()
+        self.mock_vm.strategy_mgr = MagicMock()
+        self.mock_vm.strategy_mgr.get_all_with_dependencies.return_value = {}
+        self.mock_vm.dispose = MagicMock()
+        self.mock_vm.get_current_page_data.return_value = None
+        self.mock_vm.page_no = 1
+        self.mock_vm.total_pages = 0
+        self.mock_vm.total_items = 0
+        self.mock_vm.sort_column = None
+        self.mock_vm.sort_ascending = True
+        self.patches = [
+            patch("ui.views.screener_view.I18n", self.mock_i18n),
+            patch("ui.views.screener_view.AppColors", self.mock_ac),
+            patch("ui.views.screener_view.AppStyles", self.mock_as),
+            patch("ui.views.screener_view.ScreenerViewModel", return_value=self.mock_vm),
+            patch("ui.views.screener_view.PaginatedTable", MagicMock()),
+            patch("ui.views.screener_view.UILogger"),
+            patch("ui.views.screener_view.MetaDataManager"),
+            patch("ui.views.screener_view.StockDetailDialog"),
+            # no-op: Flet update() requires page binding; UI state tested via mock attributes
+            patch("flet.core.control.Control.update"),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _make_view(self, mock_page):
+        view = ScreenerView(mock_page)
+        set_page(view, wrap_mock_page(mock_page))
+        return view
+
+    def _patch_tier_deps(self, *, current_tier: str, min_tier: str):
+        """Patch ``_update_tier_hint_text`` 延迟导入的三个模块级符号。
+
+        ``_update_tier_hint_text`` 内部通过函数体 ``from ... import`` 延迟导入，
+        因此 patch 必须针对真实模块路径（不是 ``ui.views.screener_view`` 别名）。
+        """
+        from data.external.tushare_client import TushareClient as _RealClient
+
+        tier_order = _RealClient._TIER_ORDER  # ClassVar，直接读取避免实例化
+
+        mock_client = MagicMock(spec=_RealClient)
+        mock_client.get_tier_order.side_effect = lambda tier: tier_order.get(tier, 0)
+
+        return (
+            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+            patch("services.ai_service.get_strategy_min_tier", return_value=min_tier),
+            patch(
+                "utils.config_handler.ConfigHandler.get_tushare_point_tier",
+                return_value=current_tier,
+            ),
+        )
+
+    def test_strategy_tier_hint_shown_when_insufficient(self, mock_page):
+        """当前档位低于策略所需档位 → tier_hint_text 可见且 value 为本地化文案。"""
+        view = self._make_view(mock_page)
+        view.selected_strategy = "value"
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_tier_deps(current_tier="points_120", min_tier="points_5000"):
+                stack.enter_context(p)
+            view._update_tier_hint_text()
+        assert view.tier_hint_text.visible is True
+        assert view.tier_hint_text.value == "sys_strategy_tier_hint"
+
+    def test_strategy_tier_hint_hidden_when_sufficient(self, mock_page):
+        """当前档位 ≥ 策略所需档位 → tier_hint_text 不可见。"""
+        view = self._make_view(mock_page)
+        view.selected_strategy = "value"
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_tier_deps(current_tier="points_5000", min_tier="points_120"):
+                stack.enter_context(p)
+            view._update_tier_hint_text()
+        assert view.tier_hint_text.visible is False
+
+    def test_strategy_tier_hint_locale_change(self, mock_page):
+        """§5.8 规范：locale 变更后 ``_update_tier_hint_text`` 重新读取本地化文案。
+
+        场景：档位不足时提示文案随 locale 切换动态更新。
+        """
+        view = self._make_view(mock_page)
+        view.selected_strategy = "value"
+
+        # 第一次调用：模拟 zh_CN locale，提示文案为中文
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: (
+            "当前档位不足以支持该策略的 AI 分析" if key == "sys_strategy_tier_hint" else key
+        )
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_tier_deps(current_tier="points_120", min_tier="points_5000"):
+                stack.enter_context(p)
+            view._update_tier_hint_text()
+        assert view.tier_hint_text.visible is True
+        assert view.tier_hint_text.value == "当前档位不足以支持该策略的 AI 分析"
+
+        # 第二次调用：模拟 locale 切换到 en_US，提示文案应重新读取
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: (
+            "Current tier insufficient for AI analysis" if key == "sys_strategy_tier_hint" else key
+        )
+        with contextlib.ExitStack() as stack:
+            for p in self._patch_tier_deps(current_tier="points_120", min_tier="points_5000"):
+                stack.enter_context(p)
+            view._update_tier_hint_text()
+        assert view.tier_hint_text.visible is True
+        assert view.tier_hint_text.value == "Current tier insufficient for AI analysis"

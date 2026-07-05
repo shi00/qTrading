@@ -4,7 +4,13 @@ import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 
-from data.sync.macro import MacroSyncStrategy, _parse_period
+from data.sync.macro import (
+    MacroSyncStrategy,
+    _parse_period,
+    _quarter_to_period_end,
+    _compute_gdp_publish_date,
+    _latest_quarter_before,
+)
 from data.sync.base import SyncContext, SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
@@ -111,6 +117,127 @@ class TestMacroSyncMergeMacroData:
         assert result is not None
 
 
+class TestMacroSyncQuarterHelpers:
+    """Phase 2D §3.2.6：cn_gdp quarter 转换辅助函数测试。"""
+
+    def test_quarter_to_period_end_q1(self):
+        assert _quarter_to_period_end("2024Q1") == datetime.date(2024, 3, 31)
+
+    def test_quarter_to_period_end_q2(self):
+        assert _quarter_to_period_end("2024Q2") == datetime.date(2024, 6, 30)
+
+    def test_quarter_to_period_end_q3(self):
+        assert _quarter_to_period_end("2024Q3") == datetime.date(2024, 9, 30)
+
+    def test_quarter_to_period_end_q4(self):
+        assert _quarter_to_period_end("2024Q4") == datetime.date(2024, 12, 31)
+
+    def test_quarter_to_period_end_lowercase_q(self):
+        assert _quarter_to_period_end("2024q4") == datetime.date(2024, 12, 31)
+
+    def test_quarter_to_period_end_invalid_returns_none(self):
+        assert _quarter_to_period_end("invalid") is None
+        assert _quarter_to_period_end("2024") is None
+        assert _quarter_to_period_end("2024Q5") is None
+        assert _quarter_to_period_end(None) is None
+
+    def test_compute_gdp_publish_date_q4_crosses_year(self):
+        """Q4 季度末日 12-31，发布日期为次年 1 月 20 日。"""
+        period = datetime.date(2024, 12, 31)
+        assert _compute_gdp_publish_date(period) == datetime.date(2025, 1, 20)
+
+    def test_compute_gdp_publish_date_q1(self):
+        period = datetime.date(2024, 3, 31)
+        assert _compute_gdp_publish_date(period) == datetime.date(2024, 4, 20)
+
+    def test_latest_quarter_before_q1_month(self):
+        """1-3 月应返回去年 Q4。"""
+        assert _latest_quarter_before(datetime.date(2024, 2, 15)) == "2023Q4"
+        assert _latest_quarter_before(datetime.date(2024, 3, 31)) == "2023Q4"
+
+    def test_latest_quarter_before_q2_month(self):
+        """4-6 月应返回当年 Q1。"""
+        assert _latest_quarter_before(datetime.date(2024, 5, 15)) == "2024Q1"
+
+    def test_latest_quarter_before_q3_month(self):
+        """7-9 月应返回当年 Q2。"""
+        assert _latest_quarter_before(datetime.date(2024, 8, 15)) == "2024Q2"
+
+    def test_latest_quarter_before_q4_month(self):
+        """10-12 月应返回当年 Q3。"""
+        assert _latest_quarter_before(datetime.date(2024, 11, 15)) == "2024Q3"
+
+
+class TestMacroSyncMergeMacroDataWithGdp:
+    """Phase 2D §3.2.6：_merge_macro_data 第 4 个 df 参数（GDP）测试。"""
+
+    def test_merge_with_gdp_appends_gdp_rows(self):
+        """GDP 数据应作为独立行 concat（period 为季度末日）。"""
+        df_m2 = pd.DataFrame({"period": ["202412"], "m2": [100.0], "m2_yoy": [5.0]})
+        df_gdp = pd.DataFrame(
+            {
+                "period": ["2024Q4"],
+                "gdp": [35000000.0],
+                "gdp_yoy": [5.2],
+                "pi": [2500000.0],
+                "pi_yoy": [3.1],
+                "si": [14000000.0],
+                "si_yoy": [5.0],
+                "ti": [18500000.0],
+                "ti_yoy": [5.8],
+            }
+        )
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None, df_gdp)
+
+        assert result is not None
+        assert not result.empty
+        # 应有 2 行：月度行 + GDP 行
+        assert len(result) == 2
+        # GDP 字段应存在
+        assert "gdp_yoy" in result.columns
+        # GDP 行的 period 应为季度末日 2024-12-31
+        gdp_row = result[result["gdp_yoy"].notna()]
+        assert len(gdp_row) == 1
+        assert gdp_row.iloc[0]["period"] == datetime.date(2024, 12, 31)
+        # GDP 行的 publish_date 应为 2025-01-20（季度结束后次月 20 日）
+        assert gdp_row.iloc[0]["publish_date"] == datetime.date(2025, 1, 20)
+
+    def test_merge_with_gdp_only(self):
+        """仅 GDP 数据（无 m2/cpi/ppi）时应返回 GDP 行。"""
+        df_gdp = pd.DataFrame(
+            {
+                "period": ["2024Q4"],
+                "gdp": [35000000.0],
+                "gdp_yoy": [5.2],
+            }
+        )
+        result = MacroSyncStrategy._merge_macro_data(None, None, None, df_gdp)
+
+        assert result is not None
+        assert not result.empty
+        assert "gdp_yoy" in result.columns
+        assert result.iloc[0]["period"] == datetime.date(2024, 12, 31)
+
+    def test_merge_with_none_gdp_falls_back_to_original_behavior(self):
+        """df_gdp=None 时应与原 3 参数行为一致。"""
+        df_m2 = pd.DataFrame({"period": ["202412"], "m2": [100.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None, None)
+
+        assert result is not None
+        assert "m2" in result.columns
+        # 不应有 GDP 字段（因为 df_gdp 为 None）
+        assert "gdp_yoy" not in result.columns
+
+    def test_merge_with_empty_gdp_falls_back_to_original_behavior(self):
+        """df_gdp 为空 DataFrame 时应与原 3 参数行为一致。"""
+        df_m2 = pd.DataFrame({"period": ["202412"], "m2": [100.0]})
+        result = MacroSyncStrategy._merge_macro_data(df_m2, None, None, pd.DataFrame())
+
+        assert result is not None
+        assert "m2" in result.columns
+        assert "gdp_yoy" not in result.columns
+
+
 class TestMacroSyncCancelSemantics:
     @pytest.mark.asyncio
     async def test_cancel_sets_status(self):
@@ -202,6 +329,73 @@ class TestMacroSyncSyncMacroMonthly:
         await strategy._sync_macro_monthly(result)
         assert len(result.errors) > 0
 
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_includes_cn_gdp(self):
+        """Phase 2D §3.2.6：_sync_macro_monthly 应调用 get_cn_gdp 拉取 GDP 数据。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(
+            return_value=pd.DataFrame({"period": ["202412"], "m2": [100.0], "m2_yoy": [5.0]})
+        )
+        ctx.api.get_cn_gdp = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    # latest 为 2024-12-01 时，Q4 未结束，_latest_quarter_before 返回 "2024Q3"
+                    "period": ["2024Q3"],
+                    "gdp": [35000000.0],
+                    "gdp_yoy": [5.2],
+                    "pi": [2500000.0],
+                    "pi_yoy": [3.1],
+                    "si": [14000000.0],
+                    "si_yoy": [5.0],
+                    "ti": [18500000.0],
+                    "ti_yoy": [5.8],
+                }
+            )
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        # latest 为 2024-12-01（12 月），Q4 未结束，_latest_quarter_before 返回 "2024Q3"
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=datetime.date(2024, 12, 1))
+        strategy.dao.save_macro_economy = AsyncMock(return_value=2)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+
+        # 验证 get_cn_gdp 被调用，quarter 参数为 "2024Q3"
+        ctx.api.get_cn_gdp.assert_called_once_with(quarter="2024Q3")
+        # 验证 save_macro_economy 被调用（merged 含 GDP 行）
+        strategy.dao.save_macro_economy.assert_called_once()
+        saved_df = strategy.dao.save_macro_economy.call_args.args[0]
+        # 应包含 GDP 字段
+        assert "gdp_yoy" in saved_df.columns
+
+    @pytest.mark.asyncio
+    async def test_sync_macro_monthly_gdp_permission_denied_does_not_block_m2(self):
+        """Phase 2D：cn_gdp 权限不足不应阻断 m2/cpi/ppi 同步。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_macro_data = AsyncMock(return_value=pd.DataFrame({"period": ["202412"], "m2": [100.0]}))
+        ctx.api.get_cn_gdp = AsyncMock(side_effect=TushareAPIPermissionError("cn_gdp", "no permission"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_macro_latest_date = AsyncMock(return_value=datetime.date(2024, 12, 1))
+        strategy.dao.save_macro_economy = AsyncMock(return_value=1)
+
+        result = SyncResult()
+        await strategy._sync_macro_monthly(result)
+
+        # m2 数据应正常保存（不被 GDP 权限错误阻断）
+        strategy.dao.save_macro_economy.assert_called_once()
+        # 不应有 fatal error（GDP 权限不足只记录 warning，不写入 result.errors）
+        assert all("Macro Monthly" not in e or "permission" not in e.lower() for e in result.errors)
+
 
 class TestMacroSyncSyncShiborDaily:
     @pytest.mark.asyncio
@@ -251,6 +445,93 @@ class TestMacroSyncSyncShiborDaily:
         result = SyncResult()
         await strategy._sync_shibor_daily(result)
         assert len(result.errors) > 0
+
+
+class TestMacroSyncSyncShiborDailyWithLpr:
+    """Phase 3G §4.3.4：_sync_shibor_daily 同时拉取 LPR 并按 date 合并入库。"""
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_daily_includes_lpr(self):
+        """shibor + LPR 数据同时拉取时，按 date merge 后传入 save_shibor_daily。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        # shibor 返回 on/1w/3m 列
+        ctx.api.get_shibor = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "date": ["20240614"],
+                    "on": [1.8],
+                    "1w": [1.9],
+                    "3m": [2.0],
+                }
+            )
+        )
+        # LPR 返回 lpr_1y/lpr_5y 列
+        ctx.api.get_shibor_lpr = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "date": ["20240614"],
+                    "lpr_1y": [3.45],
+                    "lpr_5y": [3.95],
+                }
+            )
+        )
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        # 验证 save_shibor_daily 被调用，且传入的 df 包含 LPR 列
+        strategy.dao.save_shibor_daily.assert_awaited_once()
+        saved_df: pd.DataFrame = strategy.dao.save_shibor_daily.call_args.args[0]
+        assert "lpr_1y" in saved_df.columns
+        assert "lpr_5y" in saved_df.columns
+        # 验证 merge 后 LPR 值正确
+        row = saved_df[saved_df["date"] == "20240614"].iloc[0]
+        assert row["lpr_1y"] == 3.45
+        assert row["lpr_5y"] == 3.95
+
+    @pytest.mark.asyncio
+    async def test_sync_shibor_daily_lpr_permission_denied_fallback(self):
+        """LPR 权限不足时降级为仅同步 shibor，不阻断主流程。"""
+        ctx = MagicMock()
+        ctx.cache = MagicMock()
+        ctx.cache.engine = MagicMock()
+        ctx.cache.update_sync_status = AsyncMock()
+        ctx.api = MagicMock()
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [1.8]}))
+        ctx.api.get_shibor_lpr = AsyncMock(side_effect=TushareAPIPermissionError("shibor_lpr", "denied"))
+        strategy = MacroSyncStrategy(ctx)
+        strategy.dao = MagicMock()
+        strategy.dao.get_shibor_latest_date = AsyncMock(return_value=None)
+        strategy.dao.save_shibor_daily = AsyncMock(return_value=1)
+        strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        with patch("utils.config_handler.ConfigHandler.get_init_history_years", return_value=1):
+            ctx.processor = MagicMock()
+            ctx.processor.trade_calendar.get_trade_dates = AsyncMock(
+                return_value=[datetime.date(2023, 1, 1), datetime.date(2024, 6, 14)]
+            )
+            result = SyncResult()
+            await strategy._sync_shibor_daily(result)
+
+        # 验证 shibor 仍被入库（降级路径）
+        strategy.dao.save_shibor_daily.assert_awaited_once()
+        saved_df: pd.DataFrame = strategy.dao.save_shibor_daily.call_args.args[0]
+        # LPR 列不应出现（未 merge）
+        assert "lpr_1y" not in saved_df.columns
+        # result 不应包含 LPR 权限错误（降级处理，不抛错）
+        assert not any("shibor_lpr" in err for err in result.errors)
 
 
 class TestMacroSyncSyncIndexWeights:

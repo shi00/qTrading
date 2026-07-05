@@ -30,7 +30,7 @@ class TestMacroDaoIntegrity:
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest(self, macro_dao):
-        """Level 2: 验证最新 Shibor 利率查询"""
+        """Level 2: 验证最新 Shibor 利率查询（含 Phase 3G LPR 扩列字段）"""
         df = await macro_dao.get_shibor_latest()
 
         assert df is not None
@@ -41,6 +41,11 @@ class TestMacroDaoIntegrity:
         assert "1y" in df.columns
         assert df["on"].iloc[0] == Decimal("1.85")
         assert df["1y"].iloc[0] == Decimal("2.50")
+        # Phase 3G §4.3.3：LPR 扩列字段验证
+        assert "lpr_1y" in df.columns, "lpr_1y 字段未在查询结果中"
+        assert "lpr_5y" in df.columns, "lpr_5y 字段未在查询结果中"
+        assert df["lpr_1y"].iloc[0] == Decimal("3.10")
+        assert df["lpr_5y"].iloc[0] == Decimal("3.60")
 
     @pytest.mark.asyncio
     async def test_get_macro_economy_latest(self, macro_dao):
@@ -56,6 +61,22 @@ class TestMacroDaoIntegrity:
         assert df["m2_yoy"].iloc[0] == Decimal("8.5")
         assert df["cpi"].iloc[0] == Decimal("1.8")
         assert df["ppi"].iloc[0] == Decimal("-1.2")
+
+    @pytest.mark.asyncio
+    async def test_get_macro_economy_latest_includes_gdp(self, macro_dao):
+        """Phase 2D §3.2.6：验证 get_macro_economy_latest 返回 8 个 GDP 字段。"""
+        df = await macro_dao.get_macro_economy_latest()
+
+        assert df is not None
+        assert not df.empty
+        # Phase 2D: 8 个 GDP 字段必须在 SELECT 列表中
+        for col in ("gdp", "gdp_yoy", "pi", "pi_yoy", "si", "si_yoy", "ti", "ti_yoy"):
+            assert col in df.columns, f"GDP 字段 {col} 未在查询结果中"
+        # 验证 MVD 注入的具体值
+        assert df["gdp_yoy"].iloc[0] == Decimal("5.2")
+        assert df["pi_yoy"].iloc[0] == Decimal("3.1")
+        assert df["si_yoy"].iloc[0] == Decimal("5.0")
+        assert df["ti_yoy"].iloc[0] == Decimal("5.8")
 
     @pytest.mark.asyncio
     async def test_get_macro_latest_date(self, macro_dao):

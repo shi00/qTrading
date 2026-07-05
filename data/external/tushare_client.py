@@ -54,12 +54,20 @@ class TushareProApi(typing.Protocol):
     forecast: Callable[..., pd.DataFrame]
     fina_mainbz: Callable[..., pd.DataFrame]
     pledge_stat: Callable[..., pd.DataFrame]
+    pledge_detail: Callable[..., pd.DataFrame]
     repurchase: Callable[..., pd.DataFrame]
     dividend: Callable[..., pd.DataFrame]
     shibor: Callable[..., pd.DataFrame]
     top10_holders: Callable[..., pd.DataFrame]
     index_weight: Callable[..., pd.DataFrame]
     stk_holdernumber: Callable[..., pd.DataFrame]
+    cn_gdp: Callable[..., pd.DataFrame]
+    stk_limit: Callable[..., pd.DataFrame]
+    share_float: Callable[..., pd.DataFrame]
+    stk_holdertrade: Callable[..., pd.DataFrame]
+    # Phase 3F-1 §4.3.2：申万行业分类（全局快照，不加入 TABLE_TO_API_MAP）
+    index_classify: Callable[..., pd.DataFrame]
+    index_member_all: Callable[..., pd.DataFrame]
 
 
 class TushareAPIPermissionError(Exception):
@@ -114,10 +122,20 @@ class TushareClient:
 
     _ASYNC_TIMEOUT_MULTIPLIER = 1.5
 
+    # Phase 2B §3.2.5：probe 专用桶配额（50/min 独立配额，避免被同步任务挤压）
+    _PROBE_RATE_LIMIT_RPM = 50
+
+    # Phase 2B §3.2.5：probe 互斥标志（单线程 asyncio 同步段内原子，避免档位切换/手动按钮/启动自动并发）
+    _probe_in_progress: bool = False
+
     _COLUMN_RENAMES = {
         "cn_cpi": {"month": "period", "nt_val": "cpi"},
         "cn_ppi": {"month": "period", "ppi_yoy": "ppi"},
         "cn_m": {"month": "period"},
+        # Phase 2D §3.2.6：cn_gdp API 返回 quarter 列，重命名为 period 统一处理
+        "cn_gdp": {"quarter": "period"},
+        # Phase 3D：share_float API 返回 float_type，重命名为 share_type（与 ORM 列名对齐）
+        "share_float": {"float_type": "share_type"},
     }
 
     _SLOW_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
@@ -140,41 +158,137 @@ class TushareClient:
         "fina_indicator": 0.3,
         "disclosure_date": 0.5,
         "forecast": 0.5,
+        "stk_limit": 0.5,
     }
 
-    _FAST_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
-        "daily": 2.5,
-        "daily_basic": 2.5,
-        "adj_factor": 2.5,
-        "trade_cal": 5.0,
-        "stock_basic": 5.0,
-        "index_daily": 2.5,
-        "index_dailybasic": 2.5,
-        "index_weight": 2.5,
-    }
-
-    # 积分档位 → 推荐全局 req/min 预设。官方档位对照见 docs/积分挡位.PNG
+    # 积分档位 → 全局 req/min 预设。官方档位对照见 docs/积分挡位.PNG
     # 官方实际频次只有三档：120分=50/min，2000/3000分=200/min，5000分及以上=500/min
     # 5000+ 积分频次均为 500/min，差异在于数据权限（更多特色接口）
-    # 因子表（_SLOW/_FAST_API_OVERRIDES）按 standard=200/min 推导：
-    #   财报核心(income/balancesheet/cashflow/fina_indicator) 0.3 -> 60/min (2000分文档约60-80/min)
-    #   公告/预告(disclosure_date/forecast/fina_audit/fina_mainbz) 0.5 -> 100/min
-    #   行情类(daily/daily_basic/adj_factor/index_*) 2.5 -> 500/min (pro档顶满官方上限)
-    #   元数据(trade_cal/stock_basic) 5.0 -> 1000/min (standard档；pro档受全局500上限约束)
     _POINT_TIER_PRESETS: typing.ClassVar[dict[str, int]] = {
-        "free": 50,
-        "standard": 200,
-        "pro": 500,
+        "points_120": 50,
+        "points_2000": 200,
+        "points_5000": 500,
+        "points_10000": 500,
+        "points_15000": 500,
     }
+
+    # 档位顺序值（用于 get_tier_apis 合并低档位 API 集合）
+    _TIER_ORDER: typing.ClassVar[dict[str, int]] = {
+        "points_120": 0,
+        "points_2000": 1,
+        "points_5000": 2,
+        "points_10000": 3,
+        "points_15000": 4,
+    }
+
+    # 档位 API 覆盖映射（层层包含，每档只列新增项，get_tier_apis 合并低档位）
+    # 按设计文档 v1.10.0 §3.2.1 完整定义
+    _TIER_API_COVERAGE: typing.ClassVar[dict[str, frozenset[str]]] = {
+        "points_120": frozenset(
+            {
+                # 50/min 档位：基础元数据 + 日线 + shibor + shibor_lpr
+                "trade_cal",
+                "stock_basic",
+                "daily",
+                "daily_basic",
+                "adj_factor",
+                "index_daily",
+                "index_dailybasic",
+                "index_weight",
+                "shibor",
+                "shibor_lpr",
+            }
+        ),
+        "points_2000": frozenset(
+            {
+                # 200/min 档位：+ 财务报表 + 股东 + 龙虎榜 + 概念 + 宏观 + 资金流 + 市场异动
+                "income",
+                "balancesheet",
+                "cashflow",
+                "fina_indicator",
+                "fina_mainbz",
+                "fina_audit",
+                "forecast",
+                "dividend",
+                "repurchase",
+                "stk_holdernumber",
+                "top10_holders",
+                "pledge_stat",
+                "pledge_detail",
+                "top_list",
+                "top_inst",
+                "concept",
+                "concept_detail",
+                "moneyflow",
+                "moneyflow_hsgt",
+                "hk_hold",
+                "block_trade",
+                "limit_list_d",
+                "suspend_d",
+                "margin_detail",
+                "stk_holdertrade",
+                "stk_limit",
+                "express",
+                "index_classify",
+                "index_member_all",
+                "cn_m",
+                "cn_cpi",
+                "cn_ppi",
+                "cn_gdp",
+                "stock_company",
+                "stk_managers",
+                "stk_surv",
+                "stk_factor_pro",
+                "top10_floatholders",  # 假设 points_2000 可访问（待 probe 验证）
+                "disclosure_date",
+            }
+        ),
+        "points_5000": frozenset(
+            {
+                # 500/min 档位：+ share_float（3000 积分）+ 无日上限
+                "share_float",
+            }
+        ),
+        "points_10000": frozenset(
+            {
+                # 常规 500/min + 特色 300/min（特色数据需独立购买）
+                "cyq_perf",
+                "forecast_eps",  # 需独立购买
+            }
+        ),
+        "points_15000": frozenset(
+            {
+                # 常规 500/min，特色无上限（特色数据仍需独立购买才能访问）
+                # NOTE(lazy): points_15000 当前与 points_10000 API 集相同（特色数据需独立购买）.
+                #   ceiling: Tushare 暂无 15000 积分专属 API.
+                #   upgrade: 当 Tushare 新增 15000 积分专属 API 时，在此追加。
+            }
+        ),
+    }
+
+    # 需独立购买的特色数据 API（即使积分足够也需单独付费）
+    _INDEPENDENT_PURCHASE_APIS: typing.ClassVar[frozenset[str]] = frozenset(
+        {
+            "cyq_perf",  # 筹码分布
+            "forecast_eps",  # 盈利预测
+            "rating",  # 券商评级（"券商研报库"独立权限）
+        }
+    )
 
     TABLE_TO_API_MAP: dict[str, str] = {
         "moneyflow_hsgt": "moneyflow_hsgt",
         "northbound_holding": "hk_hold",
         "moneyflow_daily": "moneyflow",
         "top_list": "top_list",
+        "top_inst": "top_inst",
         "limit_list": "limit_list_d",
         "margin_daily": "margin_detail",
         "block_trade": "block_trade",
+        "stk_limit": "stk_limit",
+        "pledge_detail": "pledge_detail",
+        "share_float": "share_float",
+        "stk_holdertrade": "stk_holdertrade",
+        "express": "express",
     }
 
     def __new__(cls, *args, **kwargs):
@@ -197,6 +311,9 @@ class TushareClient:
                 # 显式重置熔断标志，符合 _bg_tasks 显式清理风格（虽实例销毁后冗余，但防御性写法）
                 if hasattr(cls._instance, "_token_invalid"):
                     cls._instance._token_invalid = False
+                # 显式重置 probe 互斥标志，避免上一测试用例残留 True 导致下一测试 probe 被跳过
+                if hasattr(cls._instance, "_probe_in_progress"):
+                    cls._instance._probe_in_progress = False
             cls._instance = None
             cls._initialized = False
 
@@ -209,37 +326,33 @@ class TushareClient:
             cls._instance._bg_tasks.clear()
 
     def _resolve_rate_limit(self) -> int:
-        """
-        Resolve effective rate limit based on point tier preset or manual config.
-
-        Priority:
-        1. If tier is in _POINT_TIER_PRESETS (free/standard/pro), use preset value.
-        2. Otherwise (custom tier), fall back to manual limit from config.
+        """Resolve effective rate limit based on point tier preset.
 
         Returns:
-            Effective rate limit (requests per minute), or 0 if not configured.
+            Effective rate limit (requests per minute), or 0 if tier unknown.
         """
         tier = self._get_tushare_point_tier()
-        preset = self._POINT_TIER_PRESETS.get(tier)
-        if preset is not None:
-            return preset
-        return self._get_tushare_api_limit()
+        return self._POINT_TIER_PRESETS.get(tier, 0)
 
     def reload_rate_limiters(self):
         """Rebuild rate limiters from current config. Call after tier/limit change in settings."""
         with self._lock:
-            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
         logger.info("[API] Rate limiters reloaded from config")
 
-    def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket]]:
+    def _build_rate_limiters(self) -> tuple[TokenBucket | None, dict[str, TokenBucket], TokenBucket]:
         """
         Build rate limiters based on config.
-        Supports three tiers: default, slow APIs, and fast APIs.
+
+        Phase 2B §3.2.5: 返回三元组（全局 + per-API + probe 专用 50/min）。
+        probe 专用桶与全局桶同步创建（避免 R11 跨循环复用同步原语）。
         """
         limit_per_min = self._resolve_rate_limit()
         if not limit_per_min or limit_per_min <= 0:
             logger.info("[API] Rate Limiter disabled (No limit set)")
-            return None, {}
+            # probe 专用桶仍创建（probe 不依赖档位，独立 50/min 配额）
+            probe_limiter = self._build_probe_rate_limiter()
+            return None, {}, probe_limiter
 
         rate_per_sec = limit_per_min / 60.0
         capacity = max(10, rate_per_sec * 2)
@@ -271,22 +384,18 @@ class TushareClient:
                 factor,
             )
 
-        for api_name, factor in self._FAST_API_OVERRIDES.items():
-            fast_rate = rate_per_sec * factor
-            fast_capacity = max(10, fast_rate * 2)
-            api_limiters[api_name] = TokenBucket(
-                start_tokens=fast_capacity,
-                capacity=fast_capacity,
-                rate=fast_rate,
-            )
-            logger.info(
-                "[API] Fast API limiter for '%s': %.0f req/min (factor=%s)",
-                api_name,
-                fast_rate * 60,
-                factor,
-            )
+        probe_limiter = self._build_probe_rate_limiter()
+        return rate_limiter, api_limiters, probe_limiter
 
-        return rate_limiter, api_limiters
+    def _build_probe_rate_limiter(self) -> TokenBucket:
+        """Phase 2B §3.2.5: probe 专用桶（50/min 独立配额，与全局桶同步创建）。"""
+        probe_rate_per_sec = self._PROBE_RATE_LIMIT_RPM / 60.0
+        probe_capacity = max(5, probe_rate_per_sec * 2)
+        return TokenBucket(
+            start_tokens=probe_capacity,
+            capacity=probe_capacity,
+            rate=probe_rate_per_sec,
+        )
 
     def __init__(self, token: str | None = None, *, config=None, clock=None):
         if self._initialized:
@@ -305,18 +414,20 @@ class TushareClient:
             self._loaded_years: set[str] = set()
             self._calendar_lock = threading.Lock()
 
-            self._capability_cache: dict[str, bool] = {}
+            self._capability_cache: dict[str, bool | None] = {}
             self._capability_cache_lock = threading.Lock()
             self._bg_tasks: set[asyncio.Task] = set()
             # 全局 token 熔断标志：token 失效时置 True，阻止后续 API 调用避免无效重试刷屏。
             # 由 set_token() 重置，_reset_singleton() 销毁实例时随实例回收。
             self._token_invalid: bool = False
+            # Phase 2A.1 §3.2.10：上次 probe 时间，由 persist/load_capabilities_to_app_state 维护
+            self._last_probe_time: datetime.datetime | None = None
 
             self.token = token or self._get_token()
             self.timeout = self._get_tushare_timeout()
             self.max_retries = self._get_request_max_retries()
 
-            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 
             if self.token:
                 ts.set_token(self.token)
@@ -352,11 +463,6 @@ class TushareClient:
         if self._config is not None:
             return self._config.get_tushare_point_tier()
         return ConfigHandler.get_tushare_point_tier()
-
-    def _get_tushare_api_limit(self):
-        if self._config is not None:
-            return self._config.get_tushare_api_limit()
-        return ConfigHandler.get_tushare_api_limit()
 
     @property
     def is_token_invalid(self) -> bool:
@@ -399,7 +505,7 @@ class TushareClient:
             # 显式传 token，避免依赖 tushare SDK 全局状态
             self.pro = ts.pro_api(token=token, timeout=self.timeout) if token else None
 
-            self._rate_limiter, self._api_limiters = self._build_rate_limiters()
+            self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 
             cache_size = len(self._capability_cache)
             self._capability_cache.clear()
@@ -443,10 +549,37 @@ class TushareClient:
             self._capability_cache.clear()
             logger.info("[API] Capability cache cleared")
 
-    def get_capability_cache(self) -> dict[str, bool]:
+    def get_capability_cache(self) -> dict[str, bool | None]:
         """Get a copy of the capability cache."""
         with self._capability_cache_lock:
             return dict(self._capability_cache)
+
+    def get_last_probe_time(self) -> datetime.datetime | None:
+        """返回上次 probe 完成时间（公共 getter，避免外部访问私有 _last_probe_time）。"""
+        return self._last_probe_time
+
+    def get_tier_order(self, tier: str) -> int:
+        """返回档位的顺序值（公共方法，避免外部访问私有 _TIER_ORDER）。"""
+        return self._TIER_ORDER.get(tier, 0)
+
+    def get_tier_apis(self, tier: str | None = None) -> frozenset[str]:
+        """获取档位覆盖的 API 集合（内部合并所有 ≤当前档位的集合）。
+
+        _TIER_API_COVERAGE 每个档位只列新增项，本方法合并低档位。
+        """
+        tier = tier or self._get_tushare_point_tier()
+        order = self._TIER_ORDER.get(tier, 0)
+        return frozenset().union(
+            *(apis for t, apis in self._TIER_API_COVERAGE.items() if self._TIER_ORDER.get(t, 0) <= order)
+        )
+
+    def is_api_covered_by_tier(self, api_name: str, tier: str | None = None) -> bool:
+        """检查 API 是否被档位覆盖（不含独立付费判断）。"""
+        return api_name in self.get_tier_apis(tier)
+
+    def is_independent_purchase(self, api_name: str) -> bool:
+        """检查 API 是否需要独立购买。"""
+        return api_name in self._INDEPENDENT_PURCHASE_APIS
 
     async def _persist_capability_safely(self) -> None:
         """Fire-and-forget persistence of capability cache to AppState.
@@ -465,10 +598,12 @@ class TushareClient:
         """
         Return list of tables that are available for the current token.
 
-        Rules:
-        - Tables not in TABLE_TO_API_MAP are always included (base data)
-        - Tables in TABLE_TO_API_MAP are included only if API is available or unknown
-        - Tables with API explicitly marked as unavailable are excluded
+        Phase 2A.1 §3.2.7 双层过滤：
+        - 第一层（档位覆盖）：API 必须在当前档位覆盖内（``is_api_covered_by_tier``）
+        - 第二层（probe 验证）：API 在档位覆盖内但 probe 验证为 False 时排除；
+          None（未探测）不阻塞（保留以允许首次启动尚未 probe 时同步基础数据）
+        - 不在 TABLE_TO_API_MAP 的表（基础数据）始终包含
+        - 独立付费 API（cyq_perf/forecast_eps）即使在档位覆盖内，仍受 probe 验证约束
 
         Args:
             all_tables: List of table names to filter
@@ -479,8 +614,18 @@ class TushareClient:
         effective = []
         for table in all_tables:
             api_name = self.TABLE_TO_API_MAP.get(table)
-            if api_name is None or self.is_api_available(api_name) is not False:
+            if api_name is None:
+                # 基础数据表（无 API 依赖）：始终包含
                 effective.append(table)
+                continue
+            # 第一层：档位覆盖
+            if not self.is_api_covered_by_tier(api_name):
+                # 档位不足：跳过同步（DB 历史数据保留，由 stale 标注机制处理）
+                continue
+            # 第二层：probe 验证（None 不阻塞）
+            if self.is_api_available(api_name) is False:
+                continue
+            effective.append(table)
         return effective
 
     @log_async_operation(
@@ -513,9 +658,12 @@ class TushareClient:
         with self._capability_cache_lock:
             capabilities = dict(self._capability_cache)
 
+        # Phase 2A.1 §3.2.10：追加 last_probe_time ISO 8601 字符串，用于启动时自动 probe 判断
+        last_probe_iso = self._last_probe_time.isoformat() if self._last_probe_time else None
         payload = {
             "token_hash": token_hash,
             "capabilities": capabilities,
+            "last_probe_time": last_probe_iso,
         }
         await set_app_state(engine, "tushare_capabilities", json.dumps(payload))
         logger.info("[TushareClient] Persisted %s capabilities to AppState", len(capabilities))
@@ -552,6 +700,16 @@ class TushareClient:
             if payload.get("token_hash") == token_hash:
                 with self._capability_cache_lock:
                     self._capability_cache.update(payload.get("capabilities", {}))
+                # Phase 2A.1 §3.2.10：同步读取 last_probe_time（ISO 8601）
+                last_probe_str = payload.get("last_probe_time")
+                if last_probe_str:
+                    try:
+                        self._last_probe_time = datetime.datetime.fromisoformat(last_probe_str)
+                    except (ValueError, TypeError):
+                        logger.warning("[TushareClient] Invalid last_probe_time format: %s", last_probe_str)
+                        self._last_probe_time = None
+                else:
+                    self._last_probe_time = None
                 logger.info("[TushareClient] Loaded %s capabilities from AppState", len(self._capability_cache))
             else:
                 logger.debug("[TushareClient] Token hash mismatch, skipping capability load")
@@ -562,12 +720,26 @@ class TushareClient:
         operation_name="TushareClient.probe_api_capabilities",
         threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
     )
-    async def probe_api_capabilities(self) -> dict[str, bool | None]:
+    async def probe_api_capabilities(
+        self,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, bool | None]:
         """
         Probe key APIs to determine their availability for current token.
 
-        Tests each API with minimal parameters to detect permission errors.
-        Results are cached and persisted to AppState.
+        Phase 2B §3.2.5 实测基础设施：
+        - 入口互斥（``_probe_in_progress`` bool 标志，单线程 asyncio 同步段内原子）
+        - 入口快照（取消/异常时回滚 ``_capability_cache``，避免部分污染）
+        - 档位预筛（``is_api_covered_by_tier`` 过滤候选池）
+        - 并行探测（semaphore=4 + ``gather_return_exceptions_propagating_cancel`` 传播 CancelledError）
+        - 三态分类（True/False/None，None 不写入 ``_capability_cache``）
+        - 服务不可用检测（None 比例 >80% 保留旧缓存）
+        - Token 无效检测（False 比例 >90% 记 error 日志）
+        - 进度回调（``progress_callback(completed, total)``）
+        - 取消回滚 + finally 置 ``_probe_in_progress=False``
+
+        Args:
+            progress_callback: 可选进度回调，签名为 (completed_count, total_count)
 
         Returns:
             dict mapping API names to availability:
@@ -575,47 +747,281 @@ class TushareClient:
             - False: API is not available (permission denied)
             - None: Unable to determine (other error)
         """
+        from utils.async_utils import gather_return_exceptions_propagating_cancel
         from utils.time_utils import get_now
 
-        recent_date = get_now().strftime("%Y%m%d")
-        PROBE_STOCK_CODE = "000001.SZ"
-        PROBE_RECENT_PERIOD = "20241231"
-        probe_configs: list[tuple[str, dict]] = [
-            ("daily", {"trade_date": recent_date}),
-            ("moneyflow_hsgt", {"trade_date": recent_date}),
-            ("moneyflow", {"trade_date": recent_date}),
-            ("hk_hold", {"trade_date": recent_date}),
-            ("top_list", {"trade_date": recent_date}),
-            ("limit_list_d", {"trade_date": recent_date}),
-            ("margin_detail", {"trade_date": recent_date}),
-            ("block_trade", {"trade_date": recent_date}),
-            ("fina_indicator", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-            ("fina_mainbz", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-            ("stk_holdernumber", {"ts_code": PROBE_STOCK_CODE, "enddate": PROBE_RECENT_PERIOD}),
-            ("top10_holders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
-        ]
+        # probe 互斥：单线程 asyncio 同步段内 ``if _probe_in_progress`` 与
+        # ``self._probe_in_progress = True`` 之间无 await，理论原子。
+        if self._probe_in_progress:
+            logger.warning("[TushareClient] Probe already in progress, skipping")
+            # 浅拷贝（bool 不可变足够）；调用方检测 _probe_in_progress 决定 UI 反馈
+            return dict(self._capability_cache)
+        self._probe_in_progress = True
 
-        results: dict[str, bool | None] = {}
+        # 入口快照：取消/异常时回滚到入口状态（v1.9.0 P0-3/M-3）
+        cache_snapshot = dict(self._capability_cache)
 
-        for api_name, params in probe_configs:
-            try:
-                func = getattr(self.pro, api_name)
-                await self._handle_api_call(func, **params)
-                results[api_name] = True
-                self.mark_api_available(api_name)
-            except TushareAPIPermissionError:
-                results[api_name] = False
-                self.mark_api_unavailable(api_name)
-            except Exception as e:
-                results[api_name] = None
-                logger.warning(
-                    "[TushareClient] Probe %s failed with non-permission error: %s",
-                    api_name,
-                    DataSanitizer.sanitize_error(e),
+        try:
+            recent_date = get_now().strftime("%Y%m%d")
+            PROBE_STOCK_CODE = "000001.SZ"
+            PROBE_RECENT_PERIOD = f"{get_now().year - 1}1231"
+
+            # 完整候选池（29 项 = 现有 12 + 追加 17 含 cyq_perf/forecast_eps 独立付费）
+            probe_configs: list[tuple[str, dict]] = [
+                # 现有 12 项
+                ("daily", {"trade_date": recent_date}),
+                ("moneyflow_hsgt", {"trade_date": recent_date}),
+                ("moneyflow", {"trade_date": recent_date}),
+                ("hk_hold", {"trade_date": recent_date}),
+                ("top_list", {"trade_date": recent_date}),
+                ("limit_list_d", {"trade_date": recent_date}),
+                ("margin_detail", {"trade_date": recent_date}),
+                ("block_trade", {"trade_date": recent_date}),
+                ("fina_indicator", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("fina_mainbz", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("stk_holdernumber", {"ts_code": PROBE_STOCK_CODE, "enddate": PROBE_RECENT_PERIOD}),
+                ("top10_holders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                # P0 必接入（5 个，官方确认 ≤5000）
+                ("share_float", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
+                ("stk_holdertrade", {"ts_code": PROBE_STOCK_CODE, "ann_date": recent_date}),
+                ("index_classify", {"level": "L1", "src": "SW2021"}),
+                ("index_member_all", {"index_code": "801010.SI"}),
+                ("top_inst", {"trade_date": recent_date}),
+                # P0 待实测（2 个）
+                ("stk_factor_pro", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
+                ("top10_floatholders", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                # P1 推荐接入（4 个）
+                ("stk_limit", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
+                ("express", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("pledge_detail", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+                ("shibor_lpr", {"date": recent_date}),
+                # P1 待实测（3 个）
+                ("stock_company", {"ts_code": PROBE_STOCK_CODE}),
+                ("stk_managers", {"ts_code": PROBE_STOCK_CODE}),
+                ("stk_surv", {"ts_code": PROBE_STOCK_CODE, "start_date": recent_date, "end_date": recent_date}),
+                # cn_gdp 激活（1 个，v1.10.0 P0-1：quarter 参数）
+                ("cn_gdp", {"quarter": f"{get_now().year - 1}Q4"}),
+                # 独立付费特色数据（2 个，仅 points_10000+ 档位会探测）
+                ("cyq_perf", {"ts_code": PROBE_STOCK_CODE, "trade_date": recent_date}),
+                ("forecast_eps", {"ts_code": PROBE_STOCK_CODE, "period": PROBE_RECENT_PERIOD}),
+            ]
+
+            # 档位预筛：仅 probe 当前档位覆盖内的 API
+            current_tier = self._get_tushare_point_tier()
+            filtered_configs = [
+                (api, params) for api, params in probe_configs if self.is_api_covered_by_tier(api, current_tier)
+            ]
+            skipped = len(probe_configs) - len(filtered_configs)
+            if skipped > 0:
+                logger.info(
+                    "[TushareClient] Probe pre-filtered by tier=%s: %d candidates → %d to probe (skipped %d not covered)",
+                    current_tier,
+                    len(probe_configs),
+                    len(filtered_configs),
+                    skipped,
                 )
 
-        await self.persist_capabilities_to_app_state()
-        return results
+            total = len(filtered_configs)
+            if total == 0:
+                self._last_probe_time = get_now()
+                await self.persist_capabilities_to_app_state()
+                return {}
+
+            # 并行探测过滤后的候选（semaphore=4 + gather 传播 CancelledError）
+            semaphore = asyncio.Semaphore(4)
+            completed_counter = [0]  # list 包装以便闭包内修改
+
+            async def _probe_with_progress(name: str, params: dict) -> tuple[str, bool | None]:
+                result = await self._probe_one(semaphore, name, params)
+                completed_counter[0] += 1
+                if progress_callback is not None:
+                    try:
+                        progress_callback(completed_counter[0], total)
+                    except Exception as cb_exc:  # pragma: no cover - UI 回调异常不应阻塞 probe
+                        logger.warning("[TushareClient] Probe progress_callback failed: %s", cb_exc)
+                return result
+
+            results_list = await gather_return_exceptions_propagating_cancel(
+                *[_probe_with_progress(name, params) for name, params in filtered_configs]
+            )
+            results: dict[str, bool | None] = {}
+            for item in results_list:
+                if isinstance(item, Exception):
+                    # _probe_one 已捕获内部异常，此处 Exception 不应发生；
+                    # 防御性处理：跳过该 item
+                    logger.warning("[TushareClient] Probe returned unexpected exception: %s", item)
+                    continue
+                if isinstance(item, tuple):
+                    api_name, available = item
+                    results[api_name] = available
+
+            # 服务不可用检测（None 比例 >80% 保留旧缓存，不清空）
+            none_count = sum(1 for v in results.values() if v is None)
+            if total > 0 and none_count / total > 0.8:
+                logger.warning(
+                    "[TushareClient] Probe %d/%d APIs returned None (network error?), Tushare service may be unavailable; "
+                    "preserving existing _capability_cache for degraded run",
+                    none_count,
+                    total,
+                )
+                # 保留旧缓存，仅更新 last_probe_time 标记本次 probe 尝试过
+                self._last_probe_time = get_now()
+                await self.persist_capabilities_to_app_state()
+                return self.get_capability_cache()
+
+            # Token 无效检测（False 比例 >90% 记 error 日志）
+            false_count = sum(1 for v in results.values() if v is False)
+            if total > 0 and false_count / total > 0.9:
+                logger.error(
+                    "[TushareClient] Probe %d/%d APIs returned False (permission denied), Token may be invalid or积分严重不足",
+                    false_count,
+                    total,
+                )
+
+            # gather 全部成功后统一写入 _capability_cache（None 不写入，避免污染）
+            for api_name, available in results.items():
+                if available is True:
+                    self.mark_api_available(api_name)
+                elif available is False:
+                    self.mark_api_unavailable(api_name)
+                # None 不写入 _capability_cache（保持原值或不存在）
+
+            self._last_probe_time = get_now()
+            await self.persist_capabilities_to_app_state()
+            return results
+        except asyncio.CancelledError:
+            # 取消时回滚 _capability_cache 到入口快照（R2 红线：raise 传播）
+            logger.info("[TushareClient] Probe cancelled, rolling back _capability_cache to entry snapshot")
+            self._capability_cache = cache_snapshot
+            raise
+        except Exception as exc:
+            # 其他异常（网络抖动等非取消）也回退到入口快照，避免部分污染
+            logger.warning(
+                "[TushareClient] Probe failed, rolling back _capability_cache to entry snapshot: %s",
+                exc,
+            )
+            self._capability_cache = cache_snapshot
+            return self.get_capability_cache()
+        finally:
+            self._probe_in_progress = False
+
+    @log_async_operation(
+        operation_name="TushareClient._handle_probe_call",
+        threshold_ms=PerfThreshold.EXTERNAL_NETWORK,
+    )
+    async def _handle_probe_call(self, api_name: str, func: typing.Callable, **params: typing.Any) -> None:
+        """Phase 2B §3.2.5: probe 专用调用 wrapper。
+
+        与 ``_handle_api_call`` 的差异：
+        - 两段消费：全局桶 + probe 专用桶（50/min 独立配额）
+        - 复用 io_pool / timeout / DataSanitizer / 权限判定
+        - 跳过 reduce_rate / on_success（probe 是一次性探测，不永久降速）
+        - 权限拒绝抛 TushareAPIPermissionError（由 ``_probe_one`` 分类为 False）
+
+        R2 红线：内部 await 必须响应 CancelledError，不吞没。
+        """
+        import contextvars
+        import functools
+
+        from utils.thread_pool import ThreadPoolManager
+
+        if not self.pro:
+            raise Exception("Tushare Token not set. Please set your token in settings.")
+
+        # 两段消费：全局桶 + probe 专用桶
+        if self._rate_limiter is not None:
+            await self._rate_limiter.consume_async(1)
+        await self._probe_rate_limiter.consume_async(1)
+
+        # 格式化日期参数（与 _handle_api_call 一致）
+        formatted_kwargs = {}
+        for k, v in params.items():
+            if isinstance(v, (datetime.date, datetime.datetime)):
+                formatted_kwargs[k] = v.strftime("%Y%m%d")
+            else:
+                formatted_kwargs[k] = v
+
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(
+                    ThreadPoolManager().io_pool,
+                    lambda ctx=ctx: ctx.run(functools.partial(func, **formatted_kwargs)),
+                ),
+                timeout=self.timeout * self._ASYNC_TIMEOUT_MULTIPLIER,
+            )
+        except Exception as e:
+            error_msg = str(e)
+            error_msg_lower = error_msg.lower()
+            # 权限判定（复用 PERMISSION_DENIED_KEYWORDS + TOKEN_INVALID_KEYWORDS）
+            is_token_invalid = any(k in error_msg_lower for k in TOKEN_INVALID_KEYWORDS)
+            is_permission_error = is_token_invalid or any(k in error_msg_lower for k in PERMISSION_DENIED_KEYWORDS)
+            if is_permission_error:
+                # 权限拒绝抛 TushareAPIPermissionError，由 _probe_one 分类为 False
+                raise TushareAPIPermissionError(api_name, error_msg) from e
+            # 其他异常（429 / 网络错误等）原样抛出，由 _probe_one 分类为 None
+            # 不调用 reduce_rate（probe 一次性探测，不永久降速）
+            raise
+
+    async def _probe_one(
+        self,
+        semaphore: asyncio.Semaphore,
+        api_name: str,
+        params: dict,
+    ) -> tuple[str, bool | None]:
+        """Phase 2B §3.2.5: 单个 API 探测，返回三态结果。
+
+        三态分类：
+        - True: API 可用（_handle_probe_call 成功）
+        - False: 权限拒绝（TushareAPIPermissionError）
+        - None: 未知（其他异常，如网络错误 / 429）
+
+        v1.9.0 P0-3 修订：本方法**不**直接调用 ``mark_api_available`` / ``mark_api_unavailable``，
+        只返回 ``(api_name, True/False/None)``。统一由 ``probe_api_capabilities`` 主体在 gather
+        全部成功后写入 ``_capability_cache``，避免并行期间中间污染 + 取消时回滚失效。
+        """
+        from utils.error_classifier import classify_error, classify_severity
+
+        async with semaphore:
+            func = getattr(self.pro, api_name, None)
+            if func is None:
+                logger.warning("[TushareClient] Probe %s: API not found in SDK", api_name)
+                return (api_name, None)
+            try:
+                await self._handle_probe_call(api_name, func, **params)
+                return (api_name, True)
+            except TushareAPIPermissionError:
+                # 区分"积分不足"vs"需独立购买"
+                if self.is_independent_purchase(api_name):
+                    logger.info(
+                        "[TushareClient] Probe %s: permission denied (requires independent purchase, points sufficient but not purchased)",
+                        api_name,
+                    )
+                else:
+                    logger.info("[TushareClient] Probe %s: permission denied (insufficient points)", api_name)
+                return (api_name, False)
+            except Exception as e:
+                # 区分 429 限流 vs 网络错误（429 不 reduce_rate，仅记日志，下次 probe 重试）
+                error_msg = str(e).lower()
+                if "429" in error_msg or "rate" in error_msg:
+                    logger.warning(
+                        "[TushareClient] Probe %s: 429 rate limited (will retry next probe cycle)",
+                        api_name,
+                    )
+                else:
+                    # 使用 classify_error + classify_severity 分类（CLAUDE.md §5.7 错误处理标准模式）
+                    error_type = classify_error(e, context="probe")
+                    severity = classify_severity(e, context="probe")
+                    log_level = logging.WARNING if severity != "system" else logging.ERROR
+                    logger.log(
+                        log_level,
+                        "[TushareClient] Probe %s error (type=%s): %s",
+                        api_name,
+                        error_type.get("code", "unknown"),
+                        DataSanitizer.sanitize_error(e),
+                    )
+                return (api_name, None)
 
     @log_async_operation(
         operation_name="tushare_api_call",
@@ -638,11 +1044,9 @@ class TushareClient:
         """
         import functools
 
-        import functools as _functools
-
         from utils.thread_pool import ThreadPoolManager
 
-        if isinstance(func, _functools.partial) and func.args:
+        if isinstance(func, functools.partial) and func.args:
             api_name = str(func.args[0])
         else:
             api_name = getattr(func, "__name__", str(func))
@@ -667,9 +1071,9 @@ class TushareClient:
             )
 
         # 全局 token 熔断：token 已失效时快速失败，避免每个 API 独立重试刷屏。
-        # 注意：_token_invalid 的读写未持锁（async 路径不能持 threading.Lock），
-        # 与 set_token 的有锁写入存在极窄竞态窗口；最坏情况是 set_token 后被旧协程
-        # 覆盖为 True 导致持续误熔断，需用户再次 set_token 自愈。
+        # NOTE(lazy): _token_invalid 读写未持锁（async 路径不能持 threading.Lock）.
+        #   ceiling: set_token 后被旧协程覆盖为 True 导致持续误熔断（极窄竞态窗口，需用户再次 set_token 自愈）.
+        #   upgrade: 改用 asyncio.Lock 或 atomic 标志位（如 asyncio.Event）替换 bool 字段.
         if self._token_invalid:
             raise TushareAPIPermissionError(
                 api_name,
@@ -677,10 +1081,11 @@ class TushareClient:
             )
 
         for i in range(self.max_retries):
+            # 两段消费：全局 _rate_limiter 始终先消费，per-API limiter 额外收紧
+            if self._rate_limiter:
+                await self._rate_limiter.consume_async(1)
             if api_limiter:
                 await api_limiter.consume_async(1)
-            elif self._rate_limiter:
-                await self._rate_limiter.consume_async(1)
 
             try:
                 if not self.pro:
@@ -705,10 +1110,11 @@ class TushareClient:
 
                 self.mark_api_available(api_name)
 
+                # 两段消费配套：两个桶分别 on_success
+                if self._rate_limiter:
+                    self._rate_limiter.on_success()
                 if api_limiter:
                     api_limiter.on_success()
-                elif self._rate_limiter:
-                    self._rate_limiter.on_success()
 
                 return result
             except Exception as e:
@@ -770,12 +1176,14 @@ class TushareClient:
                     raise
 
                 if is_rate_limit:
-                    active_limiter = api_limiter or self._rate_limiter
-                    if active_limiter:
-                        active_limiter.reduce_rate(factor=0.5)
+                    # 两段消费配套：两个桶分别 reduce_rate
+                    if self._rate_limiter:
+                        self._rate_limiter.reduce_rate(factor=0.5)
+                    if api_limiter:
+                        api_limiter.reduce_rate(factor=0.5)
 
                     sleep_time = 5 + random.uniform(0, 5) + i * 5
-                    current_rpm = active_limiter.current_rate_per_min if active_limiter else 0
+                    current_rpm = self._rate_limiter.current_rate_per_min if self._rate_limiter else 0
                     logger.warning(
                         "[tushare_api] RATE_LIMITED (%s): adaptive slowdown -> %.0f/min, backoff=%.1fs (attempt %d/%d)",
                         api_name,
@@ -806,7 +1214,7 @@ class TushareClient:
                         api_name,
                         DataSanitizer.sanitize_error(e),
                     )
-                    raise e
+                    raise
 
                 await asyncio.sleep(1)
         raise RuntimeError(f"[tushare_api] All {self.max_retries} retries exhausted for {api_name}")
@@ -1151,9 +1559,32 @@ class TushareClient:
         return attach_top_list_column_units(df)
 
     async def get_top_inst(self, trade_date: str | None):
-        """LHB Institutional Seat Transaction Detail"""
+        """LHB Institutional Seat Transaction Detail.
 
-        return await self._handle_api_call(self.pro.top_inst, trade_date=trade_date)
+        Phase 2E §3.2.7：激活已封装 API，挂 @log_async_operation（由 _handle_api_call 提供）+ 显式 fields。
+        """
+
+        return await self._handle_api_call(
+            self.pro.top_inst,
+            trade_date=trade_date,
+            fields="ts_code,trade_date,name,close,pct_change,amount,net_amount,buy_amount,buy_value,sell_amount,sell_value",
+        )
+
+    async def get_stk_limit(self, trade_date: str | None):
+        """Daily Limit Up/Down Price.
+
+        Phase 2G §3.2：stk_limit 涨跌停价格（仅数据层，不注入 AI），
+        挂 @log_async_operation（由 _handle_api_call 提供）+ 显式 fields。
+
+        Note: Tushare API 返回字段名为 "limit"（SQL 保留字），DAO 层 save_stk_limit
+        在写入数据库时重命名为 "limit_type"（R17）。
+        """
+
+        return await self._handle_api_call(
+            self.pro.stk_limit,
+            trade_date=trade_date,
+            fields="ts_code,trade_date,pre_close,up_limit,down_limit,limit",
+        )
 
     async def get_hk_hold(self, trade_date: str | None):
         """Northbound (HK->Connect) holdings"""
@@ -1390,6 +1821,95 @@ class TushareClient:
             fields="ts_code,end_date,pledge_count,unrest_pledge,rest_pledge,total_share,pledge_ratio",
         )
 
+    async def get_pledge_detail(self, ts_code: str | None = None, end_date: str | None = None):
+        """Get share pledge detail.
+
+        Phase 3B §3.2：股权质押明细，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。与 pledge_stat（统计）互补，提供更细粒度的质押信息供 AI 分析。
+        """
+        return await self._handle_api_call(
+            self.pro.pledge_detail,
+            ts_code=ts_code,
+            end_date=end_date,
+            fields="ts_code,end_date,pledge_amount,unlimited_pledge_amount,limited_pledge_amount,total_pledge_amount,pledge_ratio",
+        )
+
+    async def get_share_float(
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get share float (unlock) data.
+
+        Phase 3D §3.2：限售解禁，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。float_type 经 _COLUMN_RENAMES 重命名为 share_type。
+        """
+        return await self._handle_api_call(
+            self.pro.share_float,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,ann_date,float_date,float_share,float_ratio,float_type",
+        )
+
+    async def get_stk_holdertrade(
+        self,
+        ts_code: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get stk_holdertrade (shareholder trade) data.
+
+        Phase 3E §3.2：股东增减持，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。返回产业资本（高管/公司）增减持行为数据。
+        """
+        return await self._handle_api_call(
+            self.pro.stk_holdertrade,
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,change_ratio,after_share,after_ratio",
+        )
+
+    async def get_index_classify(self, level: str = "L1", src: str = "SW2021"):
+        """Get 申万行业分类（index_classify）。
+
+        Phase 3F-1 §4.3.2：申万行业分类（全局快照），挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。申万行业不加入 TABLE_TO_API_MAP（不参与交易日快照权限裁剪）。
+
+        Args:
+            level: 行业级别（L1/L2/L3），默认 L1。
+            src: 来源（SW2021 表示 2021 版申万行业分类）。
+
+        Returns:
+            DataFrame，包含 index_code/index_name/level/industry_code/industry_name/parent_code/is_sw。
+        """
+        return await self._handle_api_call(
+            self.pro.index_classify,
+            level=level,
+            src=src,
+            fields="index_code,index_name,level,industry_code,industry_name,parent_code,is_sw",
+        )
+
+    async def get_index_member_all(self, index_code: str | None = None):
+        """Get 申万行业成分股（index_member_all）。
+
+        Phase 3F-1 §4.3.2：申万行业成分股映射（全局快照），挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。申万行业不加入 TABLE_TO_API_MAP（不参与交易日快照权限裁剪）。
+
+        Args:
+            index_code: 指数代码（如 "801010.SI"）。None 时返回全市场成分股。
+
+        Returns:
+            DataFrame，包含 ts_code/index_code/index_name/sw_l1_code..sw_l3_name。
+        """
+        return await self._handle_api_call(
+            self.pro.index_member_all,
+            index_code=index_code,
+            fields="ts_code,index_code,index_name,sw_l1_code,sw_l1_name,sw_l2_code,sw_l2_name,sw_l3_code,sw_l3_name",
+        )
+
     async def get_repurchase(
         self,
         ts_code: str | None = None,
@@ -1431,6 +1951,42 @@ class TushareClient:
             start_date=start_date,
             end_date=end_date,
             fields="date,on,1w,2w,1m,3m,6m,9m,1y",
+        )
+
+    async def get_shibor_lpr(self, start_date: str | None = None, end_date: str | None = None):
+        """Get LPR (Loan Prime Rate) data.
+
+        Phase 3G §4.3.4：shibor_lpr API 返回 1 年/5 年 LPR 数据，
+        挂 @log_async_operation（由 _handle_api_call 提供）+ 显式 fields。
+        LPR 与 shibor 同表存储（shibor_daily），按 date 主键合并。
+        """
+        return await self._handle_api_call(
+            self.pro.shibor_lpr,
+            start_date=start_date,
+            end_date=end_date,
+            fields="date,lpr_1y,lpr_5y",
+        )
+
+    async def get_express(
+        self,
+        ts_code: str | None = None,
+        ann_date: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ):
+        """Get express (performance express) data.
+
+        Phase 3G §4.3.4：业绩快报，挂 @log_async_operation（由 _handle_api_call 提供）
+        + 显式 fields。早于正式财报 30-60 天公告，AI 可提前反应业绩拐点。
+        按 ann_date 增量同步（参考 forecast 模式）。
+        """
+        return await self._handle_api_call(
+            self.pro.express,
+            ts_code=ts_code,
+            ann_date=ann_date,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,end_date,ann_date,type,revenue,n_income,total_profit,yoy_sales,yoy_profit,yoy_dedu_np,deduct_profit",
         )
 
     async def get_top10_holders(
@@ -1512,3 +2068,25 @@ class TushareClient:
         if isinstance(end_m, (datetime.date, datetime.datetime)):
             end_m = f"{end_m.year}{end_m.month:02d}"
         return await self._handle_api_call(func, start_m=start_m, end_m=end_m)
+
+    async def get_cn_gdp(self, quarter: str):
+        """Get China GDP data by quarter.
+
+        Phase 2D §3.2.6 v1.10.0 P0-1：cn_gdp API 期望 ``quarter`` 参数（如 "2024Q4"），
+        与 ``get_macro_data(api_name, start_m, end_m)`` 的 YYYYMM 参数 schema 不兼容，
+        故新增专用 wrapper。
+
+        Args:
+            quarter: 季度字符串，格式 "YYYYQN"（如 "2024Q4"）。
+
+        Returns:
+            DataFrame with columns: quarter (renamed to period by _COLUMN_RENAMES),
+            gdp, gdp_yoy, pi, pi_yoy, si, si_yoy, ti, ti_yoy。
+        """
+        if self.pro is None:
+            return None
+        return await self._handle_api_call(
+            self.pro.cn_gdp,
+            quarter=quarter,
+            fields="quarter,gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy",
+        )

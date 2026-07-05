@@ -12,7 +12,6 @@ from data.constants import (
     TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
 )
 from data.external.tushare_client import TushareClient
-from utils.config_handler import ConfigHandler
 
 pytestmark = pytest.mark.integration
 
@@ -67,10 +66,10 @@ class TestTushareClient:
         mock_api_instance.daily.return_value = mock_df
         mock_api_instance.adj_factor.return_value = None
 
-        # Mock Config to return a known limit
+        # Mock TushareClient rate limit resolution (Phase 2B 重构后限流值由 _resolve_rate_limit 返回)
         with patch.object(
-            ConfigHandler,
-            "get_tushare_api_limit",
+            TushareClient,
+            "_resolve_rate_limit",
             return_value=60,
         ):  # 1s interval
             client = TushareClient(token="dummy")
@@ -211,14 +210,15 @@ class TestSlowApiLimiters:
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_api_limiters_initialized(self, mock_set_token, mock_pro_api):
-        """API 限流器按 _SLOW_API_OVERRIDES 和 _FAST_API_OVERRIDES 正确创建"""
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        """API 限流器按 _SLOW_API_OVERRIDES 正确创建（Phase 2B 重构后仅慢速 API 有专用限流器）"""
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
             assert "top10_holders" in client._api_limiters
             assert "concept_detail" in client._api_limiters
-            assert "daily" in client._api_limiters
-            assert len(client._api_limiters) > 2
+            # Phase 2B 重构后移除 _FAST_API_OVERRIDES，daily 不再有专用限流器
+            assert "daily" not in client._api_limiters
+            assert len(client._api_limiters) >= 2
 
             top10_limiter = client._api_limiters["top10_holders"]
             expected_rate = (200 / 60.0) * 0.5
@@ -228,15 +228,11 @@ class TestSlowApiLimiters:
             expected_rate_concept = (200 / 60.0) * 0.3
             assert abs(concept_limiter.rate - expected_rate_concept) < 0.005
 
-            daily_limiter = client._api_limiters["daily"]
-            expected_rate_daily = (200 / 60.0) * 2.5
-            assert abs(daily_limiter.rate - expected_rate_daily) < 0.005
-
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     def test_no_api_limiters_when_rate_limit_disabled(self, mock_set_token, mock_pro_api):
         """无限流配置时不创建API限流器"""
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
             client = TushareClient(token="dummy")
 
             assert client._rate_limiter is None
@@ -255,7 +251,7 @@ class TestSlowApiLimiters:
         mock_api_instance.top10_holders.__name__ = "top10_holders"
         mock_api_instance.top10_holders.return_value = mock_df
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
             api_limiter = client._api_limiters["top10_holders"]
@@ -268,36 +264,28 @@ class TestSlowApiLimiters:
 
             await client.get_top10_holders(ts_code="000001.SZ", period="20231231")
 
+            # Phase 2B 两段消费：general + api 限流器都被调用
             api_limiter.consume_async.assert_called_once()
-            general_limiter.consume_async.assert_not_called()
+            general_limiter.consume_async.assert_called_once()
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
     @patch("tushare.set_token")
     async def test_fast_api_uses_dedicated_limiter(self, mock_set_token, mock_pro_api, mock_sleep):
-        """daily API 调用走专用快速限流器"""
-        import functools
-
+        """daily API（非慢速 API）只走 general_limiter，无专用限流器（Phase 2B 重构后无 _FAST_API_OVERRIDES）"""
         mock_api_instance = MagicMock()
         mock_pro_api.return_value = mock_api_instance
 
         mock_df = MagicMock()
         mock_df.empty = False
+        mock_api_instance.daily.return_value = mock_df
+        mock_api_instance.adj_factor.return_value = None
 
-        mock_daily_func = MagicMock(return_value=mock_df)
-        mock_daily_func.__name__ = "daily"
-        mock_api_instance.daily = functools.partial(mock_daily_func, "daily")
-
-        mock_adj_func = MagicMock(return_value=None)
-        mock_adj_func.__name__ = "adj_factor"
-        mock_api_instance.adj_factor = functools.partial(mock_adj_func, "adj_factor")
-
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
-            api_limiter = client._api_limiters["daily"]
-            api_limiter.consume_async = AsyncMock()
-            api_limiter.on_success = MagicMock()
+            # daily 不在 _SLOW_API_OVERRIDES 中，无专用限流器
+            assert "daily" not in client._api_limiters
 
             general_limiter = client._rate_limiter
             general_limiter.consume_async = AsyncMock()
@@ -305,8 +293,8 @@ class TestSlowApiLimiters:
 
             await client.get_daily_quotes(ts_code="000001.SZ")
 
-            api_limiter.consume_async.assert_called_once()
-            general_limiter.consume_async.assert_not_called()
+            # 只走 general_limiter（daily + adj_factor 各消费一次，共 2 次）
+            assert general_limiter.consume_async.call_count >= 1
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -320,7 +308,7 @@ class TestSlowApiLimiters:
         mock_df.empty = False
         mock_api_instance.income.return_value = mock_df
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
             general_limiter = client._rate_limiter
@@ -349,7 +337,7 @@ class TestSlowApiLimiters:
         ]
         mock_api_instance.adj_factor.return_value = None
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
             general_limiter = client._rate_limiter
@@ -374,7 +362,7 @@ class TestSlowApiLimiters:
             MagicMock(empty=False),
         ]
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
             api_limiter = client._api_limiters["top10_holders"]
@@ -387,8 +375,9 @@ class TestSlowApiLimiters:
 
             await client.get_top10_holders(ts_code="000001.SZ", period="20231231")
 
+            # Phase 2B 两段消费配套：两个桶分别 reduce_rate
             api_limiter.reduce_rate.assert_called_once_with(factor=0.5)
-            general_limiter.reduce_rate.assert_not_called()
+            general_limiter.reduce_rate.assert_called_once_with(factor=0.5)
 
     @patch("asyncio.sleep", new_callable=AsyncMock)
     @patch("tushare.pro_api")
@@ -403,7 +392,7 @@ class TestSlowApiLimiters:
         mock_api_instance.daily.return_value = mock_df
         mock_api_instance.adj_factor.return_value = None
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
 
             general_limiter = client._rate_limiter
@@ -424,7 +413,7 @@ class TestSlowApiLimiters:
 
         mock_api_instance.daily.side_effect = Exception("积分不足，无权访问此接口")
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="dummy")
             client._rate_limiter = None
 
@@ -442,13 +431,13 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.set_token")
     def test_set_token_rebuilds_rate_limiter(self, mock_set_token, mock_pro_api):
         """set_token 更新 token 后重建通用限流器"""
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=120):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=120):
             client = TushareClient(token="old_token")
 
             old_limiter = client._rate_limiter
             assert old_limiter is not None
 
-            with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+            with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
                 client.set_token("new_token")
 
                 assert client._rate_limiter is not None
@@ -458,15 +447,16 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.set_token")
     def test_set_token_rebuilds_api_limiters(self, mock_set_token, mock_pro_api):
         """set_token 后API限流器被重建"""
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=120):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=120):
             client = TushareClient(token="old_token")
 
-            with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+            with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
                 client.set_token("new_token")
 
                 assert "top10_holders" in client._api_limiters
                 assert "concept_detail" in client._api_limiters
-                assert "daily" in client._api_limiters
+                # Phase 2B 重构后移除 _FAST_API_OVERRIDES，daily 不再有专用限流器
+                assert "daily" not in client._api_limiters
 
                 new_top10 = client._api_limiters["top10_holders"]
                 expected_rate = (200 / 60.0) * 0.5
@@ -476,13 +466,13 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.set_token")
     def test_set_token_clears_limiters_when_disabled(self, mock_set_token, mock_pro_api):
         """set_token 时无限流配置应清空限流器"""
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client = TushareClient(token="old_token")
 
             assert client._rate_limiter is not None
             assert len(client._api_limiters) > 0
 
-            with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+            with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
                 client.set_token("new_token")
 
                 assert client._rate_limiter is None
@@ -492,12 +482,12 @@ class TestSetTokenRebuildsLimiters:
     @patch("tushare.set_token")
     def test_set_token_creates_limiter_when_previously_none(self, mock_set_token, mock_pro_api):
         """set_token 时从无限流变为有限流应创建限流器"""
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
             client = TushareClient(token="old_token")
 
             assert client._rate_limiter is None
 
-            with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+            with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
                 client.set_token("new_token")
 
                 assert client._rate_limiter is not None
@@ -514,7 +504,7 @@ class TestClassVariableDirtyDataFix:
         """_reset_singleton 后新实例的交易日历缓存应为空"""
         mock_pro_api.return_value = MagicMock()
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
             client1 = TushareClient(token="token1")
             client1._trade_cal_cache.add("20250101")
             client1._loaded_years.add("2025")
@@ -523,7 +513,7 @@ class TestClassVariableDirtyDataFix:
 
         TushareClient._reset_singleton()
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
             client2 = TushareClient(token="token2")
             assert len(client2._trade_cal_cache) == 0
             assert len(client2._loaded_years) == 0
@@ -534,14 +524,14 @@ class TestClassVariableDirtyDataFix:
         """_reset_singleton 后新实例的限流器应为全新对象"""
         mock_pro_api.return_value = MagicMock()
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client1 = TushareClient(token="token1")
             old_limiter = client1._rate_limiter
             old_api_limiter = client1._api_limiters.get("top10_holders")
 
         TushareClient._reset_singleton()
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=200):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=200):
             client2 = TushareClient(token="token2")
             assert client2._rate_limiter is not old_limiter
             assert client2._api_limiters.get("top10_holders") is not old_api_limiter
@@ -552,7 +542,7 @@ class TestClassVariableDirtyDataFix:
         """交易日历缓存应为实例变量而非类变量"""
         mock_pro_api.return_value = MagicMock()
 
-        with patch.object(ConfigHandler, "get_tushare_api_limit", return_value=0):
+        with patch.object(TushareClient, "_resolve_rate_limit", return_value=0):
             client = TushareClient(token="dummy")
             assert "_trade_cal_cache" in client.__dict__
             assert "_loaded_years" in client.__dict__

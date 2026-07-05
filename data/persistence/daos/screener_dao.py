@@ -140,7 +140,7 @@ class ScreenerDao(BaseDao):
         return f"""
               SELECT b.ts_code,
                      b.name,
-                     b.industry,
+                     COALESCE(m.sw_l2_name, b.industry) AS industry,
                      b.list_date,
                      b.list_status,
                      q.trade_date,
@@ -184,6 +184,13 @@ class ScreenerDao(BaseDao):
                                          WHERE ann_date <= $3) f_inner
                                    WHERE f_inner.rn = 1) f
                                   ON b.ts_code = f.ts_code
+                        LEFT JOIN LATERAL (
+                            SELECT sw_l2_name
+                            FROM sw_industry_member
+                            WHERE ts_code = b.ts_code
+                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                            LIMIT 1
+                        ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = $6
                WHERE {close_condition}b.list_status = 'L'
                  AND b.list_date <= $4
@@ -213,7 +220,7 @@ class ScreenerDao(BaseDao):
         return f"""
               SELECT b.ts_code,
                      b.name,
-                     b.industry,
+                     COALESCE(m.sw_l2_name, b.industry) AS industry,
                      b.list_date,
                      b.list_status,
                      cal.cal_date AS trade_date,
@@ -256,6 +263,13 @@ class ScreenerDao(BaseDao):
                             ORDER BY f_inner.ann_date DESC, f_inner.end_date DESC
                             LIMIT 1
                         ) f ON TRUE
+                        LEFT JOIN LATERAL (
+                            SELECT sw_l2_name
+                            FROM sw_industry_member
+                            WHERE ts_code = b.ts_code
+                              AND sw_l2_name IS NOT NULL AND sw_l2_name <> ''
+                            LIMIT 1
+                        ) m ON TRUE
                         LEFT JOIN suspend_d s ON b.ts_code = s.ts_code AND s.trade_date = cal.cal_date
                WHERE {close_condition}b.list_status = 'L'
                  AND b.list_date <= cal.cal_date

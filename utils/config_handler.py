@@ -1322,12 +1322,22 @@ class ConfigHandler:
 
     @staticmethod
     def get_sync_max_concurrent_heavy():
+        """按当前 tushare_point_tier 动态 clamp 并发上限。
+
+        映射（设计文档 v1.10.0 §3.2.2）：
+        - points_120 → 1（50/min ≈ 0.83 req/s）
+        - points_2000 → 3（200/min ≈ 3.3 req/s）
+        - points_5000/10000/15000 → 8（500/min ≈ 8.3 req/s）
+        - 未知/非法 → 8（保守兜底，正常情况下 Pydantic pattern 已拦截）
+        """
         val = ConfigHandler.get_typed("sync_max_concurrent_heavy", int, 5)
-        return max(1, min(val, 20))
+        tier = ConfigHandler.get_tushare_point_tier()
+        tier_limit = {"points_120": 1, "points_2000": 3}.get(tier, 8)
+        return max(1, min(val, tier_limit))
 
     @staticmethod
     def set_sync_max_concurrent_heavy(val):
-        safe_val = max(1, min(int(val), 20))
+        safe_val = max(1, min(int(val), 8))
         return ConfigHandler.save_config({"sync_max_concurrent_heavy": safe_val})
 
     @staticmethod
@@ -1359,14 +1369,6 @@ class ConfigHandler:
         return ConfigHandler.set_typed("ai_news_max_concurrent", safe_val)
 
     @staticmethod
-    def get_sync_concurrency_light():
-        return ConfigHandler.get_typed("sync_concurrency_light", int, 20)
-
-    @staticmethod
-    def set_sync_concurrency_light(val):
-        return ConfigHandler.set_typed("sync_concurrency_light", int(val))
-
-    @staticmethod
     def get_sync_batch_size():
         val = ConfigHandler.get_typed("sync_batch_size", int, 50)
         return max(5, min(val, 200))
@@ -1375,6 +1377,16 @@ class ConfigHandler:
     def set_sync_batch_size(val):
         safe_val = max(5, min(int(val), 200))
         return ConfigHandler.save_config({"sync_batch_size": safe_val})
+
+    @staticmethod
+    def get_sync_full_batch_size():
+        val = ConfigHandler.get_typed("sync_full_batch_size", int, 200)
+        return max(10, min(val, 500))
+
+    @staticmethod
+    def set_sync_full_batch_size(val):
+        safe_val = max(10, min(int(val), 500))
+        return ConfigHandler.save_config({"sync_full_batch_size": safe_val})
 
     # === API Robustness Parameters ===
 
@@ -1395,20 +1407,12 @@ class ConfigHandler:
         return ConfigHandler.set_typed("tushare_timeout", int(seconds))
 
     @staticmethod
-    def get_tushare_api_limit():
-        return ConfigHandler.get_typed("tushare_api_rate_limit", int, 200)
-
-    @staticmethod
-    def set_tushare_api_limit(limit):
-        return ConfigHandler.set_typed("tushare_api_rate_limit", int(limit))
-
-    @staticmethod
     def get_tushare_point_tier():
-        return ConfigHandler.get_typed("tushare_point_tier", str, "custom")
+        return ConfigHandler.get_typed("tushare_point_tier", str, "points_5000")
 
     @staticmethod
     def set_tushare_point_tier(tier):
-        valid_tiers = {"free", "standard", "pro", "custom"}
+        valid_tiers = {"points_120", "points_2000", "points_5000", "points_10000", "points_15000"}
         if tier not in valid_tiers:
             return False
         return ConfigHandler.set_typed("tushare_point_tier", str(tier))

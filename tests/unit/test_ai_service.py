@@ -2410,3 +2410,126 @@ class TestAnalyzeStockExternalTextNeutralization:
         assert "<recent_news>" in first_system
         assert "<global_context>" in first_system
         assert "不可信" in first_system
+
+
+class TestFilterAvailableLabelsAndStrategyTier:
+    """Phase 2A.1 Task 2A.1.13：filter_available_labels / 策略档位 / universal_rules 测试。"""
+
+    def test_filter_labels_by_tier(self):
+        """filter_available_labels 第一层：档位覆盖过滤（label 最低档位 > 当前档位时移除）。"""
+        from services.ai_service import filter_available_labels
+
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.get_tier_order.side_effect = lambda tier: {
+                "points_120": 0,
+                "points_2000": 1,
+                "points_5000": 2,
+                "points_10000": 3,
+                "points_15000": 4,
+            }.get(tier, 0)
+            # points_2000 档位：ai_label_roe_trend (min=points_2000) 应保留
+            # ai_label_macro_full (min=points_2000) 应保留
+            labels = ["ai_label_roe_trend", "ai_label_macro_full", "ai_label_quote_snapshot"]
+            result = filter_available_labels(labels, "points_2000", set())
+            assert "ai_label_roe_trend" in result
+            assert "ai_label_macro_full" in result
+            assert "ai_label_quote_snapshot" in result  # points_120 档位，应保留
+
+    def test_filter_labels_by_probe(self):
+        """filter_available_labels 第三层：probe 验证检查（required_apis 与 unavailable_apis 有交集时移除）。"""
+        from services.ai_service import filter_available_labels
+
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.get_tier_order.side_effect = lambda tier: {
+                "points_120": 0,
+                "points_2000": 1,
+                "points_5000": 2,
+                "points_10000": 3,
+                "points_15000": 4,
+            }.get(tier, 0)
+            # fina_indicator 不可用时，ai_label_roe_trend 应被移除（required_apis={"fina_indicator"}）
+            client.is_api_covered_by_tier.return_value = True
+            labels = ["ai_label_roe_trend", "ai_label_quote_snapshot"]
+            result = filter_available_labels(labels, "points_2000", {"fina_indicator"})
+            assert "ai_label_roe_trend" not in result  # fina_indicator 不可用
+            assert "ai_label_quote_snapshot" in result  # 无 API 依赖
+
+    def test_filter_labels_raises_on_unmapped(self):
+        """filter_available_labels 对未注册标签 fail-fast raise ValueError（R14 红线扩展）。"""
+        from services.ai_service import filter_available_labels
+
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.get_tier_order.side_effect = lambda tier: {
+                "points_120": 0,
+                "points_2000": 1,
+                "points_5000": 2,
+            }.get(tier, 0)
+            client.is_api_covered_by_tier.return_value = True
+            with pytest.raises(ValueError, match="must register.*R14"):
+                filter_available_labels(["ai_label_unknown_xyz"], "points_5000", set())
+
+    def test_filter_labels_macro_split_by_tier(self):
+        """v1.6.0 拆分：ai_label_shibor (points_120) 与 ai_label_macro_full (points_2000) 独立过滤。"""
+        from services.ai_service import filter_available_labels
+
+        with patch("data.external.tushare_client.TushareClient") as mock_tc:
+            client = mock_tc.return_value
+            client.get_tier_order.side_effect = lambda tier: {
+                "points_120": 0,
+                "points_2000": 1,
+                "points_5000": 2,
+            }.get(tier, 0)
+            # points_120 档位：shibor 保留（含 shibor_lpr 同段落），macro_full 移除
+            # Phase 3G §4.3.4：required_apis 追加 shibor_lpr，mock 需同时覆盖
+            client.is_api_covered_by_tier.side_effect = lambda api, tier=None: api in {"shibor", "shibor_lpr"}
+            labels = ["ai_label_shibor", "ai_label_macro_full"]
+            result = filter_available_labels(labels, "points_120", set())
+            assert "ai_label_shibor" in result  # points_120，仅依赖 shibor + shibor_lpr
+            assert "ai_label_macro_full" not in result  # points_2000，依赖 cn_m/cn_cpi/cn_ppi
+
+    def test_get_strategy_min_tier(self):
+        """get_strategy_min_tier 返回策略建议最低档位；未登记策略默认 points_120。"""
+        from services.ai_service import get_strategy_min_tier
+
+        # 已登记策略
+        assert get_strategy_min_tier("oversold") == "points_120"
+        assert get_strategy_min_tier("volume_breakout") == "points_120"
+        assert get_strategy_min_tier("value") == "points_2000"
+        assert get_strategy_min_tier("growth") == "points_2000"
+        assert get_strategy_min_tier("dividend") == "points_2000"
+        assert get_strategy_min_tier("cashflow") == "points_2000"
+        assert get_strategy_min_tier("large_pe") == "points_2000"
+        # 未登记策略默认 points_120
+        assert get_strategy_min_tier("unknown_strategy") == "points_120"
+
+    def test_validate_strategy_tier_coverage_warns_on_missing(self, caplog):
+        """validate_strategy_tier_coverage 对未登记策略 warning 不 raise。
+
+        R1 红线修复（v1.10.0 检视 P0-1）：函数改为接收 ``registered_keys`` 参数，
+        不再跨层导入 strategies/，由 app/bootstrap.py 注入。测试直接传入 set。
+        """
+        from services.ai_service import validate_strategy_tier_coverage
+
+        with caplog.at_level("WARNING"):
+            # 不应 raise
+            validate_strategy_tier_coverage({"oversold", "unknown_new_strategy"})
+        # 验证 warning 日志包含未登记策略 key
+        warning_messages = [r.message for r in caplog.records if r.levelname == "WARNING"]
+        assert any("unknown_new_strategy" in msg for msg in warning_messages)
+
+    def test_universal_rules_contains_stale_clause(self):
+        """_UNIVERSAL_RULES 应含【铁律4】stale 数据处理条款。"""
+        from core.prompt_base import _UNIVERSAL_RULES
+
+        # 铁律4 关键内容
+        assert "【铁律4】" in _UNIVERSAL_RULES
+        assert "数据停止更新" in _UNIVERSAL_RULES
+        assert "静态快照" in _UNIVERSAL_RULES
+        assert "uncertainty_factors" in _UNIVERSAL_RULES
+        # 不得拒绝分析
+        assert "不得因 stale 数据存在而拒绝分析" in _UNIVERSAL_RULES
+        # 不得用于趋势判断
+        assert "不得将该数据用于趋势" in _UNIVERSAL_RULES

@@ -18,6 +18,7 @@ from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
 from data.sync.macro import MacroSyncStrategy
+from data.sync.sw_industry import SwIndustrySyncStrategy
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
@@ -115,6 +116,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 "historical": HistoricalSyncStrategy(self.context),
                 "macro": MacroSyncStrategy(self.context),
                 "holder": HolderSyncStrategy(self.context),
+                "sw_industry": SwIndustrySyncStrategy(self.context),
             }
 
             # Memory Cache for high-frequency small data
@@ -509,6 +511,27 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     "[DataProcessor] Sync Basic | ⚠️ Remote API returned empty dataset",
                 )
                 return 0
+
+            # Phase 3F-2 轨道 A 写时替换：若 sw_industry_member 有该 ts_code 的申万二级
+            # 映射则覆写 industry 列；无映射则保留 API 原始值（v1.9.0 M-4，避免
+            # sw_industry_member 同步失败导致全部 NULL）。不新增 industry_raw 列（v1.7.0 S4）。
+            if "industry" in df_all.columns and "ts_code" in df_all.columns:
+                try:
+                    sw_l2_map = await self.cache.get_sw_l2_mapping()
+                except Exception as e:
+                    logger.warning(
+                        "[DataProcessor] Sync Basic | ⚠️ sw_l2_mapping query failed, keep API raw industry: %s",
+                        e,
+                    )
+                    sw_l2_map = {}
+                if sw_l2_map:
+                    mapped_mask = df_all["ts_code"].isin(sw_l2_map)
+                    df_all.loc[mapped_mask, "industry"] = df_all.loc[mapped_mask, "ts_code"].map(sw_l2_map)
+                    logger.debug(
+                        "[DataProcessor] Sync Basic | SW industry overwrite: %s / %s stocks",
+                        int(mapped_mask.sum()),
+                        len(df_all),
+                    )
 
             count = await self.cache.save_stock_basic(df_all)
             if count > 0:

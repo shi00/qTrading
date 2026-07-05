@@ -127,6 +127,8 @@ class ScreenerView(ft.Container):
         # UI State
         self.selected_strategy = None
         self._pending_strategy_key = None  # For deep linking
+        # Phase 2A.1 Task 2A.1.11：策略显示名缓存，供 refresh_locale 重建 tier_hint 文案
+        self._strategy_display_names: dict[str, str] = {}
 
         self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)  # pragma: no cover
 
@@ -147,6 +149,14 @@ class ScreenerView(ft.Container):
             I18n.get("screener_no_strategy_hint"),  # pragma: no cover
             size=13,  # pragma: no cover
             color=AppColors.TEXT_PRIMARY,  # pragma: no cover
+            no_wrap=False,  # pragma: no cover
+        )  # pragma: no cover
+        # Phase 2A.1 Task 2A.1.11：策略档位不足提示（非阻断，仅提示 AI 置信度可能偏低）
+        self.tier_hint_text = ft.Text(  # pragma: no cover
+            "",  # pragma: no cover
+            size=12,  # pragma: no cover
+            color=AppColors.WARNING,  # pragma: no cover
+            visible=False,  # pragma: no cover
             no_wrap=False,  # pragma: no cover
         )  # pragma: no cover
 
@@ -463,6 +473,9 @@ class ScreenerView(ft.Container):
             if self.selected_strategy:
                 self._render_strategy_params()
 
+            # Phase 2A.1 Task 2A.1.11：语言切换后重建策略档位提示文案（§5.8 规范：纯 UI 操作）
+            self._update_tier_hint_text()
+
             if self.page:
                 self.update()
         except Exception as e:
@@ -491,6 +504,8 @@ class ScreenerView(ft.Container):
                 return
 
             options = []
+            # Phase 2A.1 Task 2A.1.11：同步维护显示名缓存，供 refresh_locale 重建 tier_hint
+            self._strategy_display_names.clear()
             for key, info in strategies_with_dep.items():
                 strategy_obj = self.vm.strategy_mgr.get_strategy(key)
                 if strategy_obj and hasattr(strategy_obj, "name_key"):
@@ -499,6 +514,7 @@ class ScreenerView(ft.Container):
                     name = info["name"]
                 if info.get("missing_apis"):
                     name = f"{name} ⚠️"
+                self._strategy_display_names[key] = name
                 options.append(ft.dropdown.Option(key, name))
 
             self.strategy_dropdown.options = options
@@ -586,6 +602,7 @@ class ScreenerView(ft.Container):
             [  # pragma: no cover
                 ft.Row([self.strategy_dropdown], spacing=10),  # pragma: no cover
                 self.strategy_desc_text,  # pragma: no cover
+                self.tier_hint_text,  # pragma: no cover
                 self.params_container,  # pragma: no cover
             ],  # pragma: no cover
             spacing=10,  # pragma: no cover
@@ -949,10 +966,44 @@ class ScreenerView(ft.Container):
             self.strategy_desc_text.value = ""
             self.strategy_desc_text.color = AppColors.TEXT_PRIMARY
 
+        # Phase 2A.1 Task 2A.1.11：策略档位不足提示（非阻断，仅文本提示）
+        self._update_tier_hint_text()
+
         self.strategy_desc_text.update()
+        self.tier_hint_text.update()
         self.run_btn.update()
 
         self._render_strategy_params()
+
+    def _update_tier_hint_text(self) -> None:
+        """Phase 2A.1 Task 2A.1.11：根据当前策略与档位更新 tier_hint_text。
+
+        比较当前档位与 ``get_strategy_min_tier(selected_strategy)``，低于时显示
+        ``sys_strategy_tier_hint`` 本地化提示（非阻断，仅提示 AI 置信度可能偏低）。
+        refresh_locale 也会调用本方法重建提示文案。
+        """
+        if not self.selected_strategy:
+            self.tier_hint_text.visible = False
+            return
+
+        try:
+            # lazy import 避免循环依赖；services/ 与 data/ 都是 ui/ 的合法下游层（§4.1）
+            from data.external.tushare_client import TushareClient
+            from services.ai_service import get_strategy_min_tier
+            from utils.config_handler import ConfigHandler
+
+            current_tier = ConfigHandler.get_tushare_point_tier()
+            min_tier = get_strategy_min_tier(self.selected_strategy)
+            client = TushareClient()
+            if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
+                self.tier_hint_text.value = I18n.get("sys_strategy_tier_hint")
+                self.tier_hint_text.visible = True
+            else:
+                self.tier_hint_text.visible = False
+        except Exception as e:
+            # 单例未初始化或档位读取失败时降级隐藏，避免阻塞 UI（§5.8 规范 9 异常降级）
+            logger.debug("[ScreenerView] tier hint update skipped: %s", e, exc_info=True)
+            self.tier_hint_text.visible = False
 
     async def _on_run_click(self, e):
         UILogger.log_action(

@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -7,8 +8,9 @@ import hashlib
 from data.external.tushare_client import TushareClient, TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
 
-# P2-5: 文件含真实 asyncio.sleep（10s 长睡眠），标注 slow 以便 CI 分轨运行
-pytestmark = [pytest.mark.unit, pytest.mark.slow]
+# 文件级标记 unit。历史曾因 slow_persist 使用 asyncio.sleep(10) 整文件标 slow，
+# 但被测任务在测试中立即 cancel，sleep 时长不影响断言；改为 unit 以纳入默认 CI 门禁。
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
@@ -22,6 +24,9 @@ def tushare_client_mocks():
         mock_ch.get_tushare_timeout.return_value = 30
         mock_ch.get_request_max_retries.return_value = 3
         mock_ch.get_tushare_api_limit.return_value = 120
+        # 档位驱动模型需要有效档位值，否则 is_api_covered_by_tier 因 tier 不在
+        # _TIER_ORDER 中返回 0（points_120），导致 points_2000+ 的 API 全被过滤
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client = TushareClient(token="test_token")
         yield client, mock_ts, mock_ch
 
@@ -40,12 +45,24 @@ class TestTableToApiMap:
             "northbound_holding",
             "moneyflow_daily",
             "top_list",
+            "top_inst",
             "limit_list",
             "margin_daily",
             "block_trade",
+            "stk_limit",
         ]
         for table in expected_tables:
             assert table in client.TABLE_TO_API_MAP, f"Missing mapping for {table}"
+
+    def test_top_inst_maps_to_top_inst_api(self, tushare_client_mocks):
+        """Phase 2E：top_inst 表名映射到同名 Tushare API。"""
+        client, _, _ = tushare_client_mocks
+        assert client.TABLE_TO_API_MAP["top_inst"] == "top_inst"
+
+    def test_stk_limit_maps_to_stk_limit_api(self, tushare_client_mocks):
+        """Phase 2G：stk_limit 表名映射到同名 Tushare API。"""
+        client, _, _ = tushare_client_mocks
+        assert client.TABLE_TO_API_MAP["stk_limit"] == "stk_limit"
 
     def test_limit_list_maps_to_limit_list_d_api(self, tushare_client_mocks):
         """本地表名 limit_list 应映射到 Tushare API 名 limit_list_d（带 _d 后缀）。
@@ -275,12 +292,17 @@ class TestProbeApiCapabilities:
 
         call_log = []
 
-        async def mock_handle(func, **kwargs):
-            call_log.append(kwargs)
-            return MagicMock()
+        async def mock_probe_call(api_name, func, **params):
+            # probe_api_capabilities 内部调用 _handle_probe_call（非 _handle_api_call），
+            # 捕获 params 以验证 ts_code/period/enddate 参数正确性
+            call_log.append(params)
 
+        # 固定时间避免年末边界导致 period 断言不稳定：
+        # get_now().year - 1 = 2024 → PROBE_RECENT_PERIOD = "20241231"
+        fixed_now = datetime.datetime(2025, 1, 1)
         with (
-            patch.object(client, "_handle_api_call", side_effect=mock_handle),
+            patch("utils.time_utils.get_now", return_value=fixed_now),
+            patch.object(client, "_handle_probe_call", new_callable=AsyncMock, side_effect=mock_probe_call),
             patch.object(client, "persist_capabilities_to_app_state", new_callable=AsyncMock),
         ):
             await client.probe_api_capabilities()
@@ -398,9 +420,10 @@ class TestRuntimePermissionPersistence:
         client, mock_ts, mock_ch = tushare_client_mocks
         client._bg_tasks = set()  # Ensure initialized
 
-        # Mock _persist_capability_safely to be a slow coroutine so we can observe the task
+        # Mock _persist_capability_safely to be a long-running coroutine so we can observe the task
+        # 任务在测试末尾被 cancel，sleep 时长不影响断言；用 0.1 即可观察强引用持有
         async def slow_persist():
-            await asyncio.sleep(10)
+            await asyncio.sleep(0.1)
 
         mock_func = MagicMock()
         mock_func.__name__ = "daily"

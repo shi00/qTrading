@@ -6,12 +6,12 @@ import pandas as pd
 import datetime
 import requests
 
-from data.external.tushare_client import TushareClient
+from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 
 pytestmark = pytest.mark.unit
 
 
-def _make_client(token="test_token", limit=120):
+def _make_client(token="test_token", tier="points_5000"):
     """Helper for tests that need independent client creation (e.g. reinit scenarios)."""
     with (
         patch("data.external.tushare_client.ts") as mock_ts,
@@ -21,8 +21,7 @@ def _make_client(token="test_token", limit=120):
         mock_ch.get_token.return_value = token
         mock_ch.get_tushare_timeout.return_value = 30
         mock_ch.get_request_max_retries.return_value = 3
-        mock_ch.get_tushare_api_limit.return_value = limit
-        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_point_tier.return_value = tier
         client = TushareClient(token=token)
     return client
 
@@ -37,8 +36,7 @@ def tushare_client_mocks():
         mock_ch.get_token.return_value = "test_token"
         mock_ch.get_tushare_timeout.return_value = 30
         mock_ch.get_request_max_retries.return_value = 3
-        mock_ch.get_tushare_api_limit.return_value = 120
-        mock_ch.get_tushare_point_tier.return_value = "custom"
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client = TushareClient(token="test_token")
         yield client, mock_ts, mock_ch
 
@@ -57,8 +55,7 @@ class TestTushareClientInit:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             assert client.pro is None
 
@@ -72,8 +69,7 @@ class TestTushareClientInit:
             mock_ch.get_token.return_value = "test_token"
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 120
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             TushareClient(token="test_token")
             mock_ts.pro_api.assert_not_called()
 
@@ -88,8 +84,7 @@ class TestTushareClientInit:
                 mock_ch.get_token.return_value = "old_token"
                 mock_ch.get_tushare_timeout.return_value = 30
                 mock_ch.get_request_max_retries.return_value = 3
-                mock_ch.get_tushare_api_limit.return_value = 120
-                mock_ch.get_tushare_point_tier.return_value = "custom"
+                mock_ch.get_tushare_point_tier.return_value = "points_5000"
                 TushareClient(token="new_token")
                 mock_set.assert_called_once_with("new_token")
 
@@ -103,8 +98,7 @@ class TestTushareClientInit:
             mock_ch.get_token.return_value = "test_token"
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 120
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             TushareClient(token=None)
             mock_ts.pro_api.assert_not_called()
 
@@ -112,7 +106,6 @@ class TestTushareClientInit:
 class TestTushareClientSetToken:
     def test_set_token(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_api_limit.return_value = 120
         client.set_token("new_token")
         assert client.token == "new_token"
         mock_ts.set_token.assert_called_with("new_token")
@@ -155,8 +148,7 @@ class TestTushareClientHandleApiCall:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 1
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             with pytest.raises(Exception, match="Token not set"):
                 await client._handle_api_call(lambda: None)
@@ -315,8 +307,7 @@ class TestTushareClientGetTradeDates:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             with pytest.raises(Exception, match="Tushare Token not set"):
                 client.get_trade_dates("20240101", "20240630")
@@ -497,65 +488,338 @@ class TestTushareClientApiMethods:
         result = await client.get_macro_data("cn_cpi")
         assert result is not None
 
+    @pytest.mark.asyncio
+    async def test_get_cn_gdp_wrapper_returns_none_when_pro_is_none(self, tushare_client_mocks):
+        """Phase 2D §3.2.6：pro 为 None 时 get_cn_gdp 返回 None。"""
+        client, _, _ = tushare_client_mocks
+        client.pro = None
+        result = await client.get_cn_gdp(quarter="2024Q4")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_cn_gdp_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 2D §3.2.6：get_cn_gdp 委托 _handle_api_call，传递 quarter 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "quarter": ["2024Q4"],
+                "gdp": [35000000.0],
+                "gdp_yoy": [5.2],
+                "pi": [2500000.0],
+                "pi_yoy": [3.1],
+                "si": [14000000.0],
+                "si_yoy": [5.0],
+                "ti": [18500000.0],
+                "ti_yoy": [5.8],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_cn_gdp(quarter="2024Q4")
+
+        assert result is not None
+        # 验证 _handle_api_call 被调用，传入 pro.cn_gdp + quarter + 显式 fields
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.cn_gdp callable
+        assert callable(call_args.args[0])
+        # kwargs 含 quarter 和 fields
+        assert call_args.kwargs["quarter"] == "2024Q4"
+        assert "gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy" in call_args.kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_top_inst_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 2E §3.2.7：get_top_inst 委托 _handle_api_call，传递 trade_date 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "name": ["平安银行"],
+                "close": [10.0],
+                "pct_change": [1.0],
+                "amount": [1000000.0],
+                "net_amount": [500000.0],
+                "buy_amount": [800000.0],
+                "buy_value": [8000000.0],
+                "sell_amount": [300000.0],
+                "sell_value": [3000000.0],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_top_inst(trade_date="20240614")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.top_inst callable
+        assert callable(call_args.args[0])
+        # kwargs 含 trade_date 和 fields
+        assert call_args.kwargs["trade_date"] == "20240614"
+        assert "ts_code,trade_date,name,close,pct_change,amount" in call_args.kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_stk_limit_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 2G §3.2：get_stk_limit 委托 _handle_api_call，传递 trade_date 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20240614"],
+                "pre_close": [9.5],
+                "up_limit": [10.45],
+                "down_limit": [8.55],
+                "limit": ["U"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_stk_limit(trade_date="20240614")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.stk_limit callable
+        assert callable(call_args.args[0])
+        # kwargs 含 trade_date 和 fields
+        assert call_args.kwargs["trade_date"] == "20240614"
+        assert "ts_code,trade_date,pre_close,up_limit,down_limit,limit" in call_args.kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_index_classify_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 3F-1 §4.3.2：get_index_classify 委托 _handle_api_call，传递 level/src 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "index_code": ["801010.SI"],
+                "index_name": ["农林牧渔"],
+                "level": ["L1"],
+                "industry_code": ["110000"],
+                "industry_name": ["农林牧渔"],
+                "parent_code": [""],
+                "is_sw": ["1"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_index_classify(level="L1", src="SW2021")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.index_classify callable
+        assert callable(call_args.args[0])
+        # kwargs 含 level/src 和 fields
+        assert call_args.kwargs["level"] == "L1"
+        assert call_args.kwargs["src"] == "SW2021"
+        assert "index_code,index_name,level,industry_code,industry_name,parent_code,is_sw" in call_args.kwargs["fields"]
+
+    @pytest.mark.asyncio
+    async def test_get_index_member_all_wrapper_delegates_to_handle_api_call(self, tushare_client_mocks):
+        """Phase 3F-1 §4.3.2：get_index_member_all 委托 _handle_api_call，传递 index_code 和显式 fields。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "index_code": ["801010.SI"],
+                "index_name": ["农林牧渔"],
+                "sw_l1_code": ["110000"],
+                "sw_l1_name": ["农林牧渔"],
+                "sw_l2_code": ["110100"],
+                "sw_l2_name": ["种植业"],
+                "sw_l3_code": ["110101"],
+                "sw_l3_name": ["玉米"],
+            }
+        )
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+        result = await client.get_index_member_all(index_code="801010.SI")
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        # 第一个位置参数是 pro.index_member_all callable
+        assert callable(call_args.args[0])
+        # kwargs 含 index_code 和 fields（含 L1/L2/L3 全字段）
+        assert call_args.kwargs["index_code"] == "801010.SI"
+        fields_str = call_args.kwargs["fields"]
+        assert "ts_code" in fields_str
+        assert "sw_l1_code" in fields_str
+        assert "sw_l2_code" in fields_str
+        assert "sw_l3_code" in fields_str
+
+    @pytest.mark.asyncio
+    async def test_get_index_member_all_wrapper_allows_none_index_code(self, tushare_client_mocks):
+        """Phase 3F-1 §4.3.2：get_index_member_all 接受 index_code=None（拉取全市场）。"""
+        client, _, _ = tushare_client_mocks
+        expected_df = pd.DataFrame({"ts_code": ["000001.SZ"], "index_code": ["801010.SI"]})
+        client._handle_api_call = AsyncMock(return_value=expected_df)
+
+        result = await client.get_index_member_all(index_code=None)
+
+        assert result is not None
+        client._handle_api_call.assert_called_once()
+        call_args = client._handle_api_call.call_args
+        assert call_args.kwargs["index_code"] is None
+
 
 class TestTushareClientBuildRateLimiters:
     def test_with_limit(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 120
-        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
+        client._rate_limiter, client._api_limiters, client._probe_rate_limiter = client._build_rate_limiters()
         assert client._rate_limiter is not None
         assert "top10_holders" in client._api_limiters
+        assert client._probe_rate_limiter is not None
 
     def test_without_limit(self, tushare_client_mocks):
+        """未知档位应禁用限速器（_POINT_TIER_PRESETS.get 返回 0），但 probe 专用桶仍创建。"""
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 0
-        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
+        mock_ch.get_tushare_point_tier.return_value = "unknown_tier"
+        client._rate_limiter, client._api_limiters, client._probe_rate_limiter = client._build_rate_limiters()
         assert client._rate_limiter is None
+        assert client._api_limiters == {}
+        # probe 专用桶不依赖档位，仍创建
+        assert client._probe_rate_limiter is not None
 
     def test_resolve_rate_limit_uses_tier_preset(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "pro"
-        mock_ch.get_tushare_api_limit.return_value = 999
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         limit = client._resolve_rate_limit()
         assert limit == 500
 
-    def test_resolve_rate_limit_custom_falls_back_to_manual(self, tushare_client_mocks):
-        client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 333
-        limit = client._resolve_rate_limit()
-        assert limit == 333
-
     def test_build_rate_limiters_honors_tier(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "pro"
-        mock_ch.get_tushare_api_limit.return_value = 0
-        client._rate_limiter, client._api_limiters = client._build_rate_limiters()
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
+        client._rate_limiter, client._api_limiters, client._probe_rate_limiter = client._build_rate_limiters()
         assert client._rate_limiter is not None
         assert pytest.approx(client._rate_limiter.rate * 60, abs=1) == 500
 
+    def test_probe_rate_limiter_is_50_rpm(self, tushare_client_mocks):
+        """Phase 2B: probe 专用桶应为 50/min（_PROBE_RATE_LIMIT_RPM）。"""
+        client, _, _ = tushare_client_mocks
+        client._rate_limiter, client._api_limiters, client._probe_rate_limiter = client._build_rate_limiters()
+        assert client._probe_rate_limiter is not None
+        assert pytest.approx(client._probe_rate_limiter.rate * 60, abs=1) == 50
+
     def test_reload_rate_limiters_updates_instance(self, tushare_client_mocks):
+        """reload_rate_limiters 应根据当前档位重建限速器，rate 随档位变化。"""
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 120
+        # 先 reload 到 points_120，记录 old_rate（fixture 初始化为 points_5000，需显式 reload 切换）
+        mock_ch.get_tushare_point_tier.return_value = "points_120"
+        client.reload_rate_limiters()
         assert client._rate_limiter is not None
         old_rate = client._rate_limiter.rate
-        mock_ch.get_tushare_api_limit.return_value = 600
+        # 切换到 points_5000 并 reload，验证 rate 变化
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client.reload_rate_limiters()
         assert client._rate_limiter is not None
         assert client._rate_limiter.rate != old_rate
 
     def test_reload_rate_limiters_with_tier_change(self, tushare_client_mocks):
         client, mock_ts, mock_ch = tushare_client_mocks
-        mock_ch.get_tushare_point_tier.return_value = "custom"
-        mock_ch.get_tushare_api_limit.return_value = 120
+        mock_ch.get_tushare_point_tier.return_value = "points_120"
         client.reload_rate_limiters()
-        assert client._rate_limiter.rate * 60 == pytest.approx(120, abs=1)
-        mock_ch.get_tushare_point_tier.return_value = "pro"
+        assert client._rate_limiter.rate * 60 == pytest.approx(50, abs=1)
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
         client.reload_rate_limiters()
         assert client._rate_limiter.rate * 60 == pytest.approx(500, abs=1)
+
+    @pytest.mark.asyncio
+    async def test_global_limiter_always_consumed(self, tushare_client_mocks):
+        """两段消费：全局 _rate_limiter 始终先消费，per-API limiter 额外收紧。
+
+        _handle_api_call 通过 func.__name__ 推断 api_name，故需显式设置 __name__
+        使其命中 _api_limiters["top10_holders"]。
+        """
+        client, _, _ = tushare_client_mocks
+        client._rate_limiter = MagicMock()
+        client._rate_limiter.consume_async = AsyncMock()
+        client._api_limiters = {"top10_holders": MagicMock()}
+        client._api_limiters["top10_holders"].consume_async = AsyncMock()
+        func = MagicMock()
+        func.__name__ = "top10_holders"  # _handle_api_call 通过 __name__ 推断 api_name
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
+            await client._handle_api_call(func)
+        # 两段消费契约：全局桶与 per-API 桶各消费 1 个 token
+        client._rate_limiter.consume_async.assert_awaited_once_with(1)
+        client._api_limiters["top10_holders"].consume_async.assert_awaited_once_with(1)
+
+    def test_fast_api_overrides_removed(self, tushare_client_mocks):
+        """_FAST_API_OVERRIDES ClassVar 应已删除（Phase 2A 移除 fast API 循环）。"""
+        assert not hasattr(TushareClient, "_FAST_API_OVERRIDES")
+
+    def test_slow_api_limiter_stacks_on_global(self, tushare_client_mocks):
+        """slow API limiter 在全局桶基础上额外收紧（factor < 1.0）。"""
+        client, _, _ = tushare_client_mocks
+        client._rate_limiter, client._api_limiters, _ = client._build_rate_limiters()
+        # slow API limiter 应存在且 rate 低于全局
+        assert "top10_holders" in client._api_limiters
+        global_rate = client._rate_limiter.rate
+        slow_rate = client._api_limiters["top10_holders"].rate
+        assert slow_rate < global_rate
+
+
+class TestTushareClientTierApiCoverage:
+    """档位 API 覆盖映射 + 独立付费 API 标记测试。"""
+
+    def test_tier_api_coverage_points_120_has_basic_apis(self):
+        """points_120 档位应覆盖基础元数据 + 日线 + shibor。"""
+        apis = TushareClient().get_tier_apis("points_120")
+        assert "trade_cal" in apis
+        assert "stock_basic" in apis
+        assert "daily" in apis
+        assert "shibor" in apis
+
+    def test_tier_api_coverage_points_2000_adds_financial_apis(self):
+        """points_2000 应在 points_120 基础上新增财务/股东/龙虎榜等。"""
+        apis_120 = TushareClient().get_tier_apis("points_120")
+        apis_2000 = TushareClient().get_tier_apis("points_2000")
+        # points_2000 包含 points_120 的所有 API
+        assert apis_120.issubset(apis_2000)
+        # 新增项
+        assert "income" in apis_2000
+        assert "top10_holders" in apis_2000
+        assert "top_list" in apis_2000
+
+    def test_tier_api_coverage_points_5000_adds_share_float(self):
+        """points_5000 应在 points_2000 基础上新增 share_float。"""
+        apis_2000 = TushareClient().get_tier_apis("points_2000")
+        apis_5000 = TushareClient().get_tier_apis("points_5000")
+        assert apis_2000.issubset(apis_5000)
+        assert "share_float" in apis_5000
+        assert "share_float" not in apis_2000
+
+    def test_tier_api_coverage_points_10000_adds_independent_purchase(self):
+        """points_10000 应在 points_5000 基础上新增 cyq_perf / forecast_eps。"""
+        apis_5000 = TushareClient().get_tier_apis("points_5000")
+        apis_10000 = TushareClient().get_tier_apis("points_10000")
+        assert apis_5000.issubset(apis_10000)
+        assert "cyq_perf" in apis_10000
+        assert "forecast_eps" in apis_10000
+
+    def test_tier_api_coverage_points_15000_no_new_apis(self):
+        """points_15000 与 points_10000 API 集合相同（频次相同，仅积分门槛不同）。"""
+        apis_10000 = TushareClient().get_tier_apis("points_10000")
+        apis_15000 = TushareClient().get_tier_apis("points_15000")
+        assert apis_10000 == apis_15000
+
+    def test_is_api_covered_by_tier_returns_bool(self):
+        """is_api_covered_by_tier 返回 bool 类型。"""
+        client = TushareClient()
+        assert client.is_api_covered_by_tier("daily", "points_120") is True
+        assert client.is_api_covered_by_tier("income", "points_120") is False
+
+    def test_independent_purchase_apis(self):
+        """独立付费 API 集合应包含 cyq_perf / forecast_eps / rating。"""
+        assert TushareClient().is_independent_purchase("cyq_perf") is True
+        assert TushareClient().is_independent_purchase("forecast_eps") is True
+        assert TushareClient().is_independent_purchase("rating") is True
+        assert TushareClient().is_independent_purchase("daily") is False
+
+    def test_get_tier_apis_uses_current_tier_when_none_passed(self, tushare_client_mocks):
+        """get_tier_apis(None) 应使用当前档位（从 ConfigHandler 读取）。"""
+        client, _, mock_ch = tushare_client_mocks
+        mock_ch.get_tushare_point_tier.return_value = "points_5000"
+        apis = client.get_tier_apis()
+        assert "share_float" in apis
 
 
 class TestTushareClientConstants:
@@ -571,12 +835,6 @@ class TestTushareClientConstants:
     def test_slow_api_overrides(self):
         assert "top10_holders" in TushareClient._SLOW_API_OVERRIDES
         assert "concept_detail" in TushareClient._SLOW_API_OVERRIDES
-
-    def test_fast_api_overrides(self):
-        assert "daily" in TushareClient._FAST_API_OVERRIDES
-        assert "daily_basic" in TushareClient._FAST_API_OVERRIDES
-        assert "trade_cal" in TushareClient._FAST_API_OVERRIDES
-        assert "index_dailybasic" in TushareClient._FAST_API_OVERRIDES
 
 
 class TestTushareClientReset:
@@ -892,8 +1150,7 @@ class TestTushareClientGetTradeCal:
             mock_ch.get_token.return_value = ""
             mock_ch.get_tushare_timeout.return_value = 30
             mock_ch.get_request_max_retries.return_value = 3
-            mock_ch.get_tushare_api_limit.return_value = 0
-            mock_ch.get_tushare_point_tier.return_value = "custom"
+            mock_ch.get_tushare_point_tier.return_value = "points_5000"
             client = TushareClient()
             with pytest.raises(Exception, match="Tushare Token not set"):
                 await client.get_trade_cal("20240601", "20240630")
@@ -1202,3 +1459,417 @@ class TestTushareClientSimpleApiMethods:
         client.pro = MagicMock(spec=[])
         result = await client.get_macro_data("cn_cpi")
         assert result is None
+
+
+class TestTushareClientProbeAndEffectiveTables:
+    """Phase 2A.1/2B：probe 按档位预筛 / 并行化 / 三态分类 / 双层过滤 / 持久化测试。"""
+
+    # Phase 2B: probe_configs 完整 29 项 API 名称
+    _ALL_PROBE_APIS = [
+        "daily",
+        "moneyflow_hsgt",
+        "moneyflow",
+        "hk_hold",
+        "top_list",
+        "limit_list_d",
+        "margin_detail",
+        "block_trade",
+        "fina_indicator",
+        "fina_mainbz",
+        "stk_holdernumber",
+        "top10_holders",
+        "share_float",
+        "stk_holdertrade",
+        "index_classify",
+        "index_member_all",
+        "top_inst",
+        "stk_factor_pro",
+        "top10_floatholders",
+        "stk_limit",
+        "express",
+        "pledge_detail",
+        "shibor_lpr",
+        "stock_company",
+        "stk_managers",
+        "stk_surv",
+        "cn_gdp",
+        "cyq_perf",
+        "forecast_eps",
+    ]
+
+    def _make_probed_client(self, tier="points_5000"):
+        """创建 client 并 mock pro API 方法（设置 __name__ 供 _handle_api_call 推断 api_name）。"""
+        client = _make_client(tier=tier)
+        # _make_client 的 with 块退出后 ConfigHandler patch 失效，需持续 mock _get_tushare_point_tier
+        client._get_tushare_point_tier = lambda: tier
+        # 为 probe_configs 中所有 API 在 pro 上挂 MagicMock（带 __name__）
+        for api_name in self._ALL_PROBE_APIS:
+            mock_func = MagicMock(return_value=pd.DataFrame({"a": [1]}))
+            mock_func.__name__ = api_name
+            setattr(client.pro, api_name, mock_func)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_probe_filters_by_tier(self):
+        """probe_api_capabilities 应按 is_api_covered_by_tier 预筛 probe_configs。"""
+        client = self._make_probed_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # Phase 2B: probe 走 _handle_probe_call（非 _handle_api_call）
+        called_apis: list[str] = []
+
+        async def fake_probe_call(api_name, func, **params):
+            called_apis.append(api_name)
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        # points_120 覆盖 daily + shibor_lpr（probe_configs 中仅这两项在 points_120 档位内）
+        assert "daily" in called_apis
+        assert "shibor_lpr" in called_apis
+        # points_2000+ 档位的 API 不应被 probe
+        assert "moneyflow" not in called_apis
+        assert "hk_hold" not in called_apis
+        assert "top_list" not in called_apis
+        assert "fina_indicator" not in called_apis
+        assert "top10_holders" not in called_apis
+        # results 中包含 daily + shibor_lpr
+        assert "daily" in results
+        assert "shibor_lpr" in results
+        assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_probe_independent_purchase_log(self):
+        """Phase 2B: probe_configs 扩展后含 cyq_perf/forecast_eps（points_10000 覆盖时被 probe）。"""
+        client = self._make_probed_client(tier="points_10000")
+        # points_10000 档位覆盖 cyq_perf / forecast_eps（即使需独立购买）
+        assert client.is_api_covered_by_tier("cyq_perf", "points_10000") is True
+        assert client.is_api_covered_by_tier("forecast_eps", "points_10000") is True
+        # is_independent_purchase 标记独立存在（不影响 is_api_covered_by_tier）
+        assert client.is_independent_purchase("cyq_perf") is True
+        assert client.is_independent_purchase("forecast_eps") is True
+        # Phase 2B: probe_configs 已含 cyq_perf/forecast_eps，points_10000 覆盖时被 probe
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client._handle_probe_call = AsyncMock(return_value=None)
+        results = await client.probe_api_capabilities()
+        assert "cyq_perf" in results
+        assert "forecast_eps" in results
+
+    @pytest.mark.asyncio
+    async def test_probe_skips_apis_not_in_tier(self):
+        """低档位下 probe 应跳过高档位 API。"""
+        client = self._make_probed_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        called_apis: list[str] = []
+
+        async def fake_probe_call(api_name, func, **params):
+            called_apis.append(api_name)
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+        # 所有 points_2000+ 档位的 API 都不应被 probe
+        for api in [
+            "moneyflow",
+            "hk_hold",
+            "top_list",
+            "fina_indicator",
+            "top10_holders",
+            "block_trade",
+            "margin_detail",
+        ]:
+            assert api not in called_apis, f"{api} should be skipped at points_120 tier"
+
+    @pytest.mark.asyncio
+    async def test_probe_includes_independent_purchase_at_high_tier(self):
+        """高档位下独立付费 API 在档位覆盖内（probe_configs 扩展后才会被 probe）。"""
+        client = self._make_probed_client(tier="points_10000")
+        # 验证档位覆盖关系
+        assert client.is_api_covered_by_tier("cyq_perf", "points_10000") is True
+        assert client.is_api_covered_by_tier("cyq_perf", "points_5000") is False
+        assert client.is_api_covered_by_tier("cyq_perf", "points_2000") is False
+        # forecast_eps 同理
+        assert client.is_api_covered_by_tier("forecast_eps", "points_10000") is True
+        assert client.is_api_covered_by_tier("forecast_eps", "points_5000") is False
+
+    @pytest.mark.asyncio
+    async def test_probe_mutex_skips_concurrent(self):
+        """Phase 2B: _probe_in_progress 互斥——已在 probe 中时返回当前缓存快照，不重复 probe。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # 预设互斥标志 + 缓存值
+        client._probe_in_progress = True
+        client.mark_api_available("daily")
+        probe_call_count = [0]
+
+        async def fake_probe_call(api_name, func, **params):
+            probe_call_count[0] += 1
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        # 互斥：不应调用 _handle_probe_call
+        assert probe_call_count[0] == 0
+        # 返回当前缓存快照
+        assert results.get("daily") is True
+
+    @pytest.mark.asyncio
+    async def test_probe_service_unavailable_detection(self):
+        """Phase 2B: None 比例 >80% 时保留旧缓存（服务不可用降级）。"""
+        client = self._make_probed_client(tier="points_120")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # 预设旧缓存（daily=True），验证降级时保留
+        client.mark_api_available("daily")
+
+        # points_120 覆盖 daily + shibor_lpr，全部抛网络错误 → None 比例 100% > 80%
+        async def fake_probe_call(api_name, func, **params):
+            raise requests.exceptions.ConnectionError("connection refused")
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        # 服务不可用 → 保留旧缓存，返回 get_capability_cache()
+        assert results.get("daily") is True
+        assert client.is_api_available("daily") is True
+
+    @pytest.mark.asyncio
+    async def test_probe_token_invalid_detection(self):
+        """Phase 2B: TushareAPIPermissionError（含 token_invalid）→ False，写入 _capability_cache。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "daily":
+                raise TushareAPIPermissionError(api_name, "您的token不对")
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        # daily 应为 False（权限错误）
+        assert results["daily"] is False
+        # capability_cache 中 daily 也应为 False
+        assert client.is_api_available("daily") is False
+
+    @pytest.mark.asyncio
+    async def test_probe_progress_callback(self):
+        """progress_callback 应被调用 N 次（N = filtered_configs 长度）。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client._handle_probe_call = AsyncMock(return_value=None)
+        progress_calls: list[tuple[int, int]] = []
+
+        def progress_cb(completed: int, total: int) -> None:
+            progress_calls.append((completed, total))
+
+        await client.probe_api_capabilities(progress_callback=progress_cb)
+        # Phase 2B: points_5000 覆盖 probe_configs 27 项（29 项减去 cyq_perf/forecast_eps 需 points_10000）
+        assert len(progress_calls) == 27
+        # 第一次调用 completed=1, total=27
+        assert progress_calls[0] == (1, 27)
+        # 最后一次调用 completed=27, total=27
+        assert progress_calls[-1] == (27, 27)
+
+    @pytest.mark.asyncio
+    async def test_probe_one_classifies_error(self):
+        """Phase 2B: probe 三态分类——True/False/None。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "moneyflow_hsgt":
+                raise TushareAPIPermissionError(api_name, "权限不足")  # 权限错误 → False
+            if api_name == "moneyflow":
+                raise Exception("network error")  # 其他错误 → None
+            return None  # 成功 → True
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        assert results["daily"] is True
+        assert results["moneyflow_hsgt"] is False
+        assert results["moneyflow"] is None
+
+    @pytest.mark.asyncio
+    async def test_probe_one_distinguishes_429(self):
+        """Phase 2B: 429 限流 → None（非 False），不触发 reduce_rate。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "daily":
+                raise Exception("429 too many requests")
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        # 429 → None（非 False）
+        assert results["daily"] is None
+        # None 不写入 cache
+        assert client.is_api_available("daily") is None
+
+    @pytest.mark.asyncio
+    async def test_probe_configs_has_29_entries(self):
+        """Phase 2B: probe_configs 扩展到 29 项（points_10000 覆盖全部）。"""
+        client = self._make_probed_client(tier="points_10000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client._handle_probe_call = AsyncMock(return_value=None)
+        results = await client.probe_api_capabilities()
+        assert len(results) == 29
+
+    @pytest.mark.asyncio
+    async def test_handle_probe_call_skips_reduce_rate(self):
+        """Phase 2B: _handle_probe_call 两段消费但不调 reduce_rate/on_success（probe 一次性探测）。"""
+        from utils.rate_limiter import TokenBucket
+
+        client = self._make_probed_client(tier="points_5000")
+        # 用 spec=TokenBucket 的 MagicMock 替换限速器
+        client._rate_limiter = MagicMock(spec=TokenBucket)
+        client._rate_limiter.consume_async = AsyncMock()
+        client._probe_rate_limiter = MagicMock(spec=TokenBucket)
+        client._probe_rate_limiter.consume_async = AsyncMock()
+
+        func = MagicMock(return_value=pd.DataFrame({"a": [1]}))
+        func.__name__ = "daily"
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "run_in_executor", new=AsyncMock(return_value=pd.DataFrame({"a": [1]}))):
+            await client._handle_probe_call("daily", func, trade_date="20240101")
+
+        # 两段消费
+        client._rate_limiter.consume_async.assert_awaited_once_with(1)
+        client._probe_rate_limiter.consume_async.assert_awaited_once_with(1)
+        # 不调 reduce_rate / on_success（probe 一次性探测，不永久降速）
+        client._rate_limiter.reduce_rate.assert_not_called()
+        client._rate_limiter.on_success.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_probe_parallel_with_semaphore(self):
+        """Phase 2B: probe 并行执行（semaphore=4 限制最大并发）。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+
+        current_concurrent = [0]
+        max_concurrent = [0]
+
+        async def fake_probe_call(api_name, func, **params):
+            current_concurrent[0] += 1
+            max_concurrent[0] = max(max_concurrent[0], current_concurrent[0])
+            await asyncio.sleep(0.01)
+            current_concurrent[0] -= 1
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        await client.probe_api_capabilities()
+        # semaphore=4，最大并发应 ≤ 4
+        assert max_concurrent[0] <= 4
+        # points_5000 有 27 个 API，并行执行应 > 1
+        assert max_concurrent[0] > 1
+
+    @pytest.mark.asyncio
+    async def test_probe_handles_none_state(self):
+        """Phase 2B: probe 三态 None 不写入 _capability_cache（保持原值或不存在）。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        # 预设 daily=True 在 cache 中
+        client.mark_api_available("daily")
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "daily":
+                raise requests.exceptions.ConnectionError("network error")
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        results = await client.probe_api_capabilities()
+        # daily 在 results 中为 None
+        assert results["daily"] is None
+        # 但 _capability_cache 中 daily 仍为 True（None 不写入）
+        assert client.is_api_available("daily") is True
+
+    @pytest.mark.asyncio
+    async def test_probe_propagates_cancelled_error(self):
+        """Phase 2B: probe 取消时 CancelledError 必须 raise（R2 红线）+ 回滚 cache + 释放互斥。"""
+        client = self._make_probed_client(tier="points_5000")
+        client.persist_capabilities_to_app_state = AsyncMock()
+        client.mark_api_available("daily")  # 预设值，验证回滚
+
+        async def fake_probe_call(api_name, func, **params):
+            if api_name == "daily":
+                raise asyncio.CancelledError()
+            return None
+
+        client._handle_probe_call = fake_probe_call
+        with pytest.raises(asyncio.CancelledError):
+            await client.probe_api_capabilities()
+
+        # CancelledError 后互斥标志应释放（finally 块）
+        assert client._probe_in_progress is False
+        # cache 应回滚到入口快照（daily=True 保留）
+        assert client.is_api_available("daily") is True
+
+    def test_effective_tables_filters_by_tier(self):
+        """get_effective_synced_tables 第一层：档位覆盖过滤。"""
+        client = self._make_probed_client(tier="points_120")
+        # TABLE_TO_API_MAP 中的表（需档位覆盖）
+        all_tables = [
+            "moneyflow_hsgt",  # api=moneyflow_hsgt，points_2000+ 才覆盖
+            "northbound_holding",  # api=hk_hold，points_2000+ 才覆盖
+            "moneyflow_daily",  # api=moneyflow，points_2000+ 才覆盖
+        ]
+        effective = client.get_effective_synced_tables(all_tables)
+        # points_120 档位不足，所有需要 points_2000+ API 的表都应被过滤
+        assert effective == []
+
+    def test_effective_tables_filters_by_probe(self):
+        """get_effective_synced_tables 第二层：probe 验证过滤（is_api_available() is False 时排除）。"""
+        client = self._make_probed_client(tier="points_5000")
+        # 标记 moneyflow 为不可用
+        client.mark_api_unavailable("moneyflow")
+        all_tables = ["moneyflow_daily"]  # api=moneyflow
+        effective = client.get_effective_synced_tables(all_tables)
+        assert "moneyflow_daily" not in effective
+
+    def test_effective_tables_preserves_none_probe(self):
+        """get_effective_synced_tables：probe 验证为 None（未探测）时不阻塞。"""
+        client = self._make_probed_client(tier="points_5000")
+        # 不设置 capability_cache（None 状态）
+        all_tables = ["moneyflow_daily"]  # api=moneyflow
+        effective = client.get_effective_synced_tables(all_tables)
+        assert "moneyflow_daily" in effective
+
+    def test_effective_tables_downgrade_preserves_db(self):
+        """档位降级后 is_api_covered_by_tier 返回 False；get_effective_synced_tables 跳过高档位 API 表。
+
+        DB 历史数据保留由 stale 标注机制处理（不在 get_effective_synced_tables 职责内），
+        本测试只验证档位覆盖判断的正确性。
+        """
+        client = self._make_probed_client(tier="points_2000")
+        # share_float 在 points_5000 才覆盖（显式传 tier 避免单例共享问题）
+        assert client.is_api_covered_by_tier("share_float", "points_5000") is True
+        assert client.is_api_covered_by_tier("share_float", "points_2000") is False
+        # points_2000 档位下 share_float 对应的表会被 get_effective_synced_tables 过滤
+        # （DB 数据保留是 sync 层职责，get_effective_synced_tables 只返回有效表列表）
+
+    @pytest.mark.asyncio
+    async def test_persist_last_probe_time(self):
+        """persist_capabilities_to_app_state payload 应包含 last_probe_time ISO 8601 字段。"""
+        import json
+
+        client = self._make_probed_client(tier="points_5000")
+        # 设置 _last_probe_time
+        client._last_probe_time = datetime.datetime(2024, 6, 15, 10, 30, 0)
+        # mock CacheManager.engine 和 set_app_state
+        captured_payload = {}
+
+        async def fake_set_app_state(engine, key, value):
+            captured_payload["key"] = key
+            captured_payload["value"] = value
+
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch("data.persistence.app_state_service.set_app_state", new=fake_set_app_state),
+        ):
+            mock_cm.return_value.engine = MagicMock()
+            await client.persist_capabilities_to_app_state()
+
+        assert captured_payload["key"] == "tushare_capabilities"
+        payload = json.loads(captured_payload["value"])
+        assert "last_probe_time" in payload
+        assert payload["last_probe_time"] == "2024-06-15T10:30:00"
+        assert "token_hash" in payload
+        assert "capabilities" in payload

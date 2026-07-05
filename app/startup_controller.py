@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -55,6 +56,9 @@ class StartupController:
         self._on_exit = on_exit
         self._state = StartupState.LOADING
         self._context = StartupContext()
+        # Phase 2A.1 Task 2A.1.9：保存 initialize_services 返回的 fire-and-forget
+        # auto probe 任务，供 main.py 注册到 ShutdownCoordinator。
+        self._auto_probe_task: asyncio.Task | None = None
 
     @property
     def state(self) -> StartupState:
@@ -63,6 +67,11 @@ class StartupController:
     @property
     def context(self) -> StartupContext:
         return self._context
+
+    @property
+    def auto_probe_task(self) -> asyncio.Task | None:
+        """Phase 2A.1 Task 2A.1.9：暴露给 main.py 以便注册到 ShutdownCoordinator。"""
+        return self._auto_probe_task
 
     def _transition(self, new_state: StartupState, **context_kwargs):
         self._state = new_state
@@ -88,6 +97,9 @@ class StartupController:
             logger.error("[Startup] initialize_services raised exception: %s", e, exc_info=True)
             self._transition(StartupState.INIT_FAILED, error="init_exception", detail=str(e))
             return
+
+        # Phase 2A.1 Task 2A.1.9：保存 auto_probe_task 以便 main.py 注册到 ShutdownCoordinator
+        self._auto_probe_task = result.get("auto_probe_task")
 
         if result["success"]:
             from utils.thread_pool import TaskType, ThreadPoolManager

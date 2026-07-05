@@ -45,6 +45,8 @@ def make_ctx():
     ctx.cache.save_repurchase = AsyncMock(return_value=1)
     ctx.cache.save_fina_mainbz = AsyncMock(return_value=1)
     ctx.cache.save_fina_audit = AsyncMock(return_value=1)
+    # Phase 3G §4.3.4：express save mock
+    ctx.cache.save_express = AsyncMock(return_value=1)
     ctx.cache.engine = MagicMock()
     ctx.cache.engine.begin = MagicMock()
     mock_conn = AsyncMock()
@@ -75,6 +77,8 @@ def make_ctx():
     ctx.api.get_forecast = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
     ctx.api.get_dividend = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
     ctx.api.get_repurchase = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
+    # Phase 3G §4.3.4：express API mock
+    ctx.api.get_express = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
     # Inject zero delay to avoid asyncio.sleep blocking in tests
     ctx.request_delay_provider = lambda is_heavy: 0.0
     return ctx
@@ -371,6 +375,40 @@ class TestFinancialSyncCorporateActions:
                 )
         strategy = FinancialSyncStrategy(ctx)
         await strategy._sync_corporate_actions_by_date(["20240614"])
+
+    @pytest.mark.asyncio
+    async def test_sync_includes_express(self):
+        """Phase 3G §4.3.4：_sync_corporate_actions_by_date 覆盖 express 表。
+
+        验证 express 在 FINANCIAL_BATCH_TABLES 中且其 save_func 被正确路由到
+        ctx.cache.save_express。
+        """
+        from data.constants import FINANCIAL_BATCH_TABLES
+
+        # 确认 express 已注册到 FINANCIAL_BATCH_TABLES
+        assert "express" in FINANCIAL_BATCH_TABLES
+        express_cfg = FINANCIAL_BATCH_TABLES["express"]
+        assert express_cfg["api"] == "get_express"
+        assert express_cfg["date_col"] == "ann_date"
+
+        ctx = make_ctx()
+        # 让 express API 返回非空数据以触发 save 路径
+        ctx.api.get_express = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "end_date": ["20240930"],
+                    "ann_date": ["20241015"],
+                    "revenue": [5.0e9],
+                    "n_income": [8.0e8],
+                }
+            )
+        )
+        strategy = FinancialSyncStrategy(ctx)
+        await strategy._sync_corporate_actions_by_date(["20241015"])
+
+        # 验证 save_express 被调用
+        ctx.cache.save_express.assert_awaited()
 
 
 class TestFinancialSyncGatherTolerance:
@@ -921,53 +959,53 @@ class TestPeakDisclosureSeason:
     """Tests for peak disclosure season detection and adjustments."""
 
     def test_is_peak_disclosure_season_april(self):
-        from data.sync.financial import _is_peak_disclosure_season
+        from data.sync.base import _is_peak_disclosure_season
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 4, 15)
             assert _is_peak_disclosure_season() is True
 
     def test_is_peak_disclosure_season_august(self):
-        from data.sync.financial import _is_peak_disclosure_season
+        from data.sync.base import _is_peak_disclosure_season
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 8, 20)
             assert _is_peak_disclosure_season() is True
 
     def test_is_peak_disclosure_season_october(self):
-        from data.sync.financial import _is_peak_disclosure_season
+        from data.sync.base import _is_peak_disclosure_season
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 10, 25)
             assert _is_peak_disclosure_season() is True
 
     def test_is_not_peak_disclosure_season_january(self):
-        from data.sync.financial import _is_peak_disclosure_season
+        from data.sync.base import _is_peak_disclosure_season
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 1, 15)
             assert _is_peak_disclosure_season() is False
 
     def test_is_not_peak_disclosure_season_june(self):
-        from data.sync.financial import _is_peak_disclosure_season
+        from data.sync.base import _is_peak_disclosure_season
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 15)
             assert _is_peak_disclosure_season() is False
 
     def test_get_seasonal_adjustments_normal_season(self):
-        from data.sync.financial import _get_seasonal_adjustments
+        from data.sync.base import _get_seasonal_adjustments
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 15)
             factor, multiplier = _get_seasonal_adjustments()
             assert factor == 1
             assert multiplier == 1.0
 
     def test_get_seasonal_adjustments_peak_season(self):
-        from data.sync.financial import _get_seasonal_adjustments
+        from data.sync.base import _get_seasonal_adjustments
 
-        with patch("data.sync.financial.get_now") as mock_now:
+        with patch("data.sync.base.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 4, 15)
             factor, multiplier = _get_seasonal_adjustments()
             assert factor == 2

@@ -81,7 +81,6 @@ def mock_config_handler():
     m.get_auto_update_time.return_value = "16:30"
     m.is_ai_concept_schedule_enabled.return_value = False
     m.get_ai_concept_schedule_time.return_value = "20:00"
-    m.get_tushare_api_limit.return_value = 200
     m.get_no_proxy_domains.return_value = []
     m.get_max_cpu_workers.return_value = 4
     m.get_db_connection_pool_size.return_value = 5
@@ -96,7 +95,7 @@ def mock_config_handler():
     m.get_sync_max_concurrent_heavy.return_value = 4
     m.get_log_level.return_value = "INFO"
     m.get_theme_name.return_value = "dark"
-    m.get_tushare_point_tier.return_value = "custom"
+    m.get_tushare_point_tier.return_value = "points_5000"
     return m
 
 

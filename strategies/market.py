@@ -229,7 +229,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
 @register_strategy("institutional")
 class InstitutionalStrategy(PolarsBaseStrategy):
     required_quality_tier = QualityTier.BRONZE
-    enable_ai_analysis = False
+    enable_ai_analysis = True
     required_context_keys: tuple[str, ...] = ("top_list",)
     required_tables: tuple[str, ...] = ("top_list",)
     required_apis: tuple[str, ...] = ("top_list",)

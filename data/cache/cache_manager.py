@@ -19,14 +19,21 @@ from data.persistence.daos.backtest_dao import BacktestDAO
 from data.persistence.daos.base_dao import (
     BaseDao,
 )  # Expose static helpers via BaseDao if needed, or keeping usage internal
+from data.persistence.daos.express_dao import ExpressDao
 from data.persistence.daos.financial_dao import FinancialDao
 from data.persistence.daos.holder_dao import HolderDao
 from data.persistence.daos.macro_dao import MacroDao
 from data.persistence.daos.market_dao import MarketDao
+from data.persistence.daos.pledge_detail_dao import PledgeDetailDao
 from data.persistence.daos.quote_dao import QuoteDao
 from data.persistence.daos.screener_dao import ScreenerDao
+from data.persistence.daos.share_float_dao import ShareFloatDao
+from data.persistence.daos.stk_holdertrade_dao import StkHoldertradeDao
 from data.persistence.daos.stock_dao import StockDao
+from data.persistence.daos.stk_limit_dao import StkLimitDao
+from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
 from data.persistence.daos.sync_dao import SyncDao
+from data.persistence.daos.top_inst_dao import TopInstDao
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
@@ -98,6 +105,15 @@ class CacheManager:
             self.macro_dao = MacroDao(self.engine)
             self.holder_dao = HolderDao(self.engine)
             self.backtest_dao = BacktestDAO(self.engine)
+            self.top_inst_dao = TopInstDao(self.engine)
+            self.stk_limit_dao = StkLimitDao(self.engine)
+            self.pledge_detail_dao = PledgeDetailDao(self.engine)
+            self.share_float_dao = ShareFloatDao(self.engine)
+            self.stk_holdertrade_dao = StkHoldertradeDao(self.engine)
+            self.sw_industry_classify_dao = SwIndustryClassifyDao(self.engine)
+            self.sw_industry_member_dao = SwIndustryMemberDao(self.engine)
+            # Phase 3G §4.3.4：业绩快报 DAO
+            self.express_dao = ExpressDao(self.engine)
 
             self._schema_initialized = False
 
@@ -149,6 +165,14 @@ class CacheManager:
         self.macro_dao.engine = self.engine
         self.holder_dao.engine = self.engine
         self.backtest_dao.engine = self.engine
+        self.top_inst_dao.engine = self.engine
+        self.stk_limit_dao.engine = self.engine
+        self.pledge_detail_dao.engine = self.engine
+        self.share_float_dao.engine = self.engine
+        self.stk_holdertrade_dao.engine = self.engine
+        self.sw_industry_classify_dao.engine = self.engine
+        self.sw_industry_member_dao.engine = self.engine
+        self.express_dao.engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -188,6 +212,14 @@ class CacheManager:
             self.macro_dao.engine = None
             self.holder_dao.engine = None
             self.backtest_dao.engine = None
+            self.top_inst_dao.engine = None
+            self.stk_limit_dao.engine = None
+            self.pledge_detail_dao.engine = None
+            self.share_float_dao.engine = None
+            self.stk_holdertrade_dao.engine = None
+            self.sw_industry_classify_dao.engine = None
+            self.sw_industry_member_dao.engine = None
+            self.express_dao.engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
@@ -393,6 +425,16 @@ class CacheManager:
         Returns: Dict[ts_code, List[concept_name]]
         """
         return await self.stock_dao.get_concepts(ts_codes)  # type: ignore[return-value]  # DAO return type may vary from expected dict structure
+
+    async def get_stock_concepts(self, ts_code: str) -> list[str]:
+        """Phase 2E：单股反查所属概念标签列表。
+
+        区别于现有 ``get_concepts(ts_codes)``（批量 → ``dict[ts_code, list[str]]``），
+        本方法接受单个 ts_code，直接返回该股票的概念标签列表，便于 AI 策略层单股反查。
+        实现复用 ``stock_dao.get_concepts``，避免重复 SQL。
+        """
+        concepts_map = await self.stock_dao.get_concepts([ts_code])
+        return concepts_map.get(ts_code, [])
 
     # --- Daily Quotes ---
     async def save_daily_quotes(
@@ -814,11 +856,52 @@ class CacheManager:
     async def save_fina_forecast(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_forecast(df)
 
+    # Phase 3G §4.3.4：业绩快报
+    async def save_express(self, df: pd.DataFrame):
+        return await self.express_dao.save_express(df)
+
     async def save_fina_mainbz(self, df: pd.DataFrame):
         return await self.financial_dao.save_fina_mainbz(df)
 
     async def save_pledge_stat(self, df: pd.DataFrame):
         return await self.financial_dao.save_pledge_stat(df)
+
+    async def save_pledge_detail(self, df: pd.DataFrame):
+        """Phase 3B：股权质押明细入库。"""
+        return await self.pledge_detail_dao.save_pledge_detail(df)
+
+    async def save_share_float(self, df: pd.DataFrame):
+        """Phase 3D：限售解禁入库。"""
+        return await self.share_float_dao.save_share_float(df)
+
+    async def save_stk_holdertrade(self, df: pd.DataFrame):
+        """Phase 3E：股东增减持入库。"""
+        return await self.stk_holdertrade_dao.save_stk_holdertrade(df)
+
+    async def save_sw_industry_classify(self, df: pd.DataFrame):
+        """Phase 3F-1：申万行业分类入库。"""
+        return await self.sw_industry_classify_dao.save_sw_industry_classify(df)
+
+    async def save_sw_industry_member(self, df: pd.DataFrame):
+        """Phase 3F-1：申万行业成分股映射入库。"""
+        return await self.sw_industry_member_dao.save_sw_industry_member(df)
+
+    async def get_sw_industry_by_ts_code(self, ts_code: str) -> pd.DataFrame:
+        """Phase 3F-1：按 ts_code 反查所属申万行业（v1.10.0 P2-6 命名）。
+
+        代理到 ``SwIndustryMemberDao.get_sw_industry_by_ts_code``，返回该
+        ts_code 关联的所有申万行业成分记录（含 L1/L2/L3 行业代码与名称）。
+        """
+        return await self.sw_industry_member_dao.get_sw_industry_by_ts_code(ts_code)
+
+    async def get_sw_l2_mapping(self, ts_codes: list[str] | None = None) -> dict[str, str]:
+        """Phase 3F-2 轨道 A：批量查询 ts_code → 申万二级行业名映射。
+
+        用于 ``sync_stock_basic`` 写时覆写 ``stock_basic.industry`` 列、
+        ``prefetch_auxiliary_data`` 批量预取双保险。无映射的 ts_code 不在结果中，
+        调用方应据此"有则覆写、无则保留 API 原始值"（v1.9.0 M-4）。
+        """
+        return await self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes)
 
     async def save_repurchase(self, df: pd.DataFrame):
         return await self.financial_dao.save_repurchase(df)
@@ -886,6 +969,18 @@ class CacheManager:
 
     async def get_top_list_range(self, start_date: str, end_date: str):
         return await self.quote_dao.get_top_list_range(start_date, end_date)
+
+    async def save_top_inst(self, df: pd.DataFrame):
+        """Phase 2E：top_inst 龙虎榜机构席位明细入库。"""
+        return await self.top_inst_dao.save_top_inst(df)
+
+    async def get_top_inst_batch(self, ts_codes: list[str], as_of_date=None):
+        """Phase 2E：批量查询 top_inst 数据。"""
+        return await self.top_inst_dao.get_top_inst_batch(ts_codes, as_of_date)
+
+    async def save_stk_limit(self, df: pd.DataFrame):
+        """Phase 2G：stk_limit 每日涨跌停价格入库（仅数据层，不注入 AI）。"""
+        return await self.stk_limit_dao.save_stk_limit(df)
 
     async def save_block_trade(self, df: pd.DataFrame):
         return await self.quote_dao.save_block_trade(df)
@@ -1015,6 +1110,27 @@ class CacheManager:
         """获取股权质押统计"""
         return await self.financial_dao.get_pledge_stat_batch([ts_code], as_of_date=as_of_date)
 
+    async def get_pledge_detail(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """Phase 3B：获取股权质押明细"""
+        return await self.pledge_detail_dao.get_pledge_detail_batch([ts_code], as_of_date=as_of_date)
+
+    async def get_share_float_upcoming(self, ts_code: str, as_of_date=None, days: int = 90) -> pd.DataFrame:
+        """Phase 3D：获取未来解禁记录"""
+        return await self.share_float_dao.get_share_float_upcoming_batch([ts_code], as_of_date=as_of_date, days=days)
+
+    async def get_stk_holdertrade(self, ts_code: str, as_of_date=None, days: int = 180) -> pd.DataFrame:
+        """Phase 3E：获取近期股东增减持记录"""
+        return await self.stk_holdertrade_dao.get_stk_holdertrade_batch([ts_code], as_of_date=as_of_date, days=days)
+
+    async def get_fina_forecast(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """获取业绩预告"""
+        return await self.financial_dao.get_fina_forecast_batch([ts_code], as_of_date=as_of_date)
+
+    # Phase 3G §4.3.4：业绩快报
+    async def get_express(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
+        """获取业绩快报"""
+        return await self.express_dao.get_express_batch([ts_code], as_of_date=as_of_date)
+
     # --- 股东数据方法 ---
     async def get_top10_holders(self, ts_code: str, as_of_date=None) -> pd.DataFrame:
         """获取前十大股东"""
@@ -1104,6 +1220,17 @@ class CacheManager:
             self.financial_dao.get_fina_mainbz_batch(ts_codes, as_of_date=as_of_date),
             self.financial_dao.get_financial_reports_history_batch(ts_codes, as_of_date=as_of_date),
             self.holder_dao.get_stk_holdernumber_batch(ts_codes, as_of_date=as_of_date),
+            self.financial_dao.get_fina_forecast_batch(ts_codes, as_of_date=as_of_date),
+            # Phase 3B：pledge_detail 双预取（与 pledge_stat 互补）
+            self.pledge_detail_dao.get_pledge_detail_batch(ts_codes, as_of_date=as_of_date),
+            # Phase 3D：share_float 预取（未来解禁记录）
+            self.share_float_dao.get_share_float_upcoming_batch(ts_codes, as_of_date=as_of_date),
+            # Phase 3E：stk_holdertrade 预取（近期增减持记录）
+            self.stk_holdertrade_dao.get_stk_holdertrade_batch(ts_codes, as_of_date=as_of_date),
+            # Phase 3F-2：申万二级行业名预取（双保险，与轨道 B 读时 JOIN 互补）
+            self.sw_industry_member_dao.get_sw_l2_mapping(ts_codes),
+            # Phase 3G §4.3.4：业绩快报预取（早于正式财报 30-60 天）
+            self.express_dao.get_express_batch(ts_codes, as_of_date=as_of_date),
         )
 
         batch_keys = [
@@ -1114,6 +1241,12 @@ class CacheManager:
             "mainbz",
             "financial_history",
             "holdernumber",
+            "forecast",
+            "pledge_detail",
+            "share_float",
+            "holdertrade",
+            "sw_industry",
+            "express",
         ]
         batch_results = {}
         for key, raw in zip(batch_keys, gather_results, strict=False):
@@ -1124,7 +1257,16 @@ class CacheManager:
                 batch_results[key] = raw
 
         for key, df in batch_results.items():
-            if df is None or df.empty:
+            if df is None:
+                continue
+            # Phase 3F-2：sw_industry 预取返回 dict[str, str]（ts_code → sw_l2_name），
+            # 不参与 DataFrame groupby 路径，单独按 ts_code 分发。
+            if isinstance(df, dict):
+                for code in ts_codes:
+                    if code in df:
+                        result[code][key] = df[code]
+                continue
+            if df.empty:
                 continue
             if "ts_code" not in df.columns:
                 logger.warning(

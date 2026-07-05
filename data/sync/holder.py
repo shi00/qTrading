@@ -126,6 +126,30 @@ class HolderSyncStrategy(ISyncStrategy):
                         count,
                     )
 
+            if errors < _MAX_ERRORS and not self._cancelled:
+                count, actual_date = await self._sync_share_float()
+                if count < 0:
+                    errors += 1
+                elif count > 0:
+                    result.added += count
+                    await self.context.cache.update_sync_status(
+                        "share_float",
+                        actual_date or await self._get_effective_trade_date(),
+                        count,
+                    )
+
+            if errors < _MAX_ERRORS and not self._cancelled:
+                count, actual_date = await self._sync_stk_holdertrade()
+                if count < 0:
+                    errors += 1
+                elif count > 0:
+                    result.added += count
+                    await self.context.cache.update_sync_status(
+                        "stk_holdertrade",
+                        actual_date or await self._get_effective_trade_date(),
+                        count,
+                    )
+
             if errors >= _MAX_ERRORS:
                 result.status = "partial"
                 result.errors.append(f"Aborted after {errors} errors")
@@ -556,6 +580,127 @@ class HolderSyncStrategy(ISyncStrategy):
             return -1, None
         except Exception as e:
             logger.warning("[HolderSync] Table | ⚠️ Error syncing pledge_stat: %s", e, exc_info=True)
+            return -1, None
+
+    async def _sync_share_float(self):
+        """
+        Fetch recent + upcoming share_float (限售解禁) by ann_date range.
+
+        share_float is event-driven: announcements are published ahead of the
+        actual float_date. Sync a window of [today - 90 days, today + 30 days]
+        to capture both recent and upcoming 解禁 events.
+
+        Returns (row_count, actual_date) on success, (-1, None) on error.
+        """
+        try:
+            today = await self._get_effective_trade_date()
+            start_date = (today - datetime.timedelta(days=90)).strftime("%Y%m%d")
+            end_date = (today + datetime.timedelta(days=30)).strftime("%Y%m%d")
+
+            if self._cancelled:
+                logger.debug("[HolderSync] share_float | Cancelled before API call.")
+                return -1, None
+
+            df = await self.context.api.get_share_float(start_date=start_date, end_date=end_date)
+
+            if df is not None and not df.empty:
+                await self.context.cache.save_share_float(df)
+                logger.debug(
+                    "[HolderSync] Table | share_float ann_date %s~%s: %s records",
+                    start_date,
+                    end_date,
+                    len(df),
+                )
+                return len(df), today
+
+            logger.debug(
+                "[HolderSync] Table | share_float ann_date %s~%s: no data",
+                start_date,
+                end_date,
+            )
+            return 0, today
+        except EngineDisposedError:
+            raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[HolderSync] ⛔ Permission denied for share_float",
+            )
+            try:
+                today = await self._get_effective_trade_date()
+                await self.context.cache.update_sync_status(
+                    "share_float",
+                    today,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except Exception as e:
+                logger.debug(
+                    "[HolderSync] share_float | Failed to record skipped_permission status: %s", e, exc_info=True
+                )
+            return -1, None
+        except Exception as e:
+            logger.warning("[HolderSync] Table | ⚠️ Error syncing share_float: %s", e, exc_info=True)
+            return -1, None
+
+    async def _sync_stk_holdertrade(self):
+        """
+        Fetch recent stk_holdertrade (股东增减持) by ann_date range.
+
+        stk_holdertrade is event-driven. Sync a window of
+        [today - 90 days, today] to capture recent 增减持 events.
+
+        Returns (row_count, actual_date) on success, (-1, None) on error.
+        """
+        try:
+            today = await self._get_effective_trade_date()
+            start_date = (today - datetime.timedelta(days=90)).strftime("%Y%m%d")
+            end_date = today.strftime("%Y%m%d")
+
+            if self._cancelled:
+                logger.debug("[HolderSync] stk_holdertrade | Cancelled before API call.")
+                return -1, None
+
+            df = await self.context.api.get_stk_holdertrade(start_date=start_date, end_date=end_date)
+
+            if df is not None and not df.empty:
+                await self.context.cache.save_stk_holdertrade(df)
+                logger.debug(
+                    "[HolderSync] Table | stk_holdertrade ann_date %s~%s: %s records",
+                    start_date,
+                    end_date,
+                    len(df),
+                )
+                return len(df), today
+
+            logger.debug(
+                "[HolderSync] Table | stk_holdertrade ann_date %s~%s: no data",
+                start_date,
+                end_date,
+            )
+            return 0, today
+        except EngineDisposedError:
+            raise
+        except TushareAPIPermissionError:
+            logger.warning(
+                "[HolderSync] ⛔ Permission denied for stk_holdertrade",
+            )
+            try:
+                today = await self._get_effective_trade_date()
+                await self.context.cache.update_sync_status(
+                    "stk_holdertrade",
+                    today,
+                    0,
+                    status="skipped_permission",
+                    last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
+                )
+            except Exception as e:
+                logger.debug(
+                    "[HolderSync] stk_holdertrade | Failed to record skipped_permission status: %s", e, exc_info=True
+                )
+            return -1, None
+        except Exception as e:
+            logger.warning("[HolderSync] Table | ⚠️ Error syncing stk_holdertrade: %s", e, exc_info=True)
             return -1, None
 
     @staticmethod

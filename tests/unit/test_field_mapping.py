@@ -39,13 +39,16 @@ class TestNoUnnecessaryFieldMappings:
         )
 
     def test_macro_mappings_are_intentional(self):
-        allowed_macro_mappings = {"cn_cpi", "cn_ppi", "cn_m"}
+        # Phase 2D §3.2.6：cn_gdp 加入 macro mappings（quarter → period）
+        allowed_macro_mappings = {"cn_cpi", "cn_ppi", "cn_m", "cn_gdp"}
         actual_mappings = set(TushareClient._COLUMN_RENAMES.keys())
         macro_mappings = actual_mappings - {
             "top_list",
             "block_trade",
             "limit_list",
             "suspend_d",
+            # Phase 3D：share_float 重命名 float_type → share_type（与 ORM 列名对齐）
+            "share_float",
         }
         assert macro_mappings <= allowed_macro_mappings, (
             f"Unexpected macro mappings: {macro_mappings - allowed_macro_mappings}"

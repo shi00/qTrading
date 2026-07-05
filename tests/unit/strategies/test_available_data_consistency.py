@@ -67,16 +67,29 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_main_business",
             "ai_label_dividend",
             "ai_label_pledge",
+            "ai_label_pledge_detail",
             "ai_label_top_holder",
             "ai_label_holder_count",
+            "ai_label_forecast",
+            # Phase 3D：限售解禁（share_float API，points_5000）
+            "ai_label_share_float",
+            # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
+            "ai_label_holder_trade",
+            # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
+            "ai_label_sw_industry",
+            # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+            "ai_label_express",
             # _build_capital_flow_text 子项
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
+            # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
+            "ai_label_top_inst",
             # _build_history_text 子项
             "ai_label_kline",
-            # _mixin_analyze_single 块级标签
-            "ai_label_macro",
+            # _mixin_analyze_single 块级标签（Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full）
+            "ai_label_shibor",
+            "ai_label_macro_full",
         }
         assert builder_labels.issubset(AVAILABLE_DATA_LABELS), (
             f"Builder labels not in registry: {builder_labels - AVAILABLE_DATA_LABELS}"
@@ -127,13 +140,26 @@ class TestInvariant2LabelsSubsetOfRegistry:
             "ai_label_main_business",
             "ai_label_dividend",
             "ai_label_pledge",
+            "ai_label_pledge_detail",
             "ai_label_top_holder",
             "ai_label_holder_count",
+            "ai_label_forecast",
+            # Phase 3D：限售解禁（share_float API，points_5000）
+            "ai_label_share_float",
+            # Phase 3E：股东增减持（stk_holdertrade API，points_2000）
+            "ai_label_holder_trade",
+            # Phase 3F-2：申万行业（index_classify / index_member_all API，points_2000）
+            "ai_label_sw_industry",
+            # Phase 3G §4.3.4：业绩快报（express API，points_2000）
+            "ai_label_express",
             "ai_label_main_flow",
             "ai_label_top_list",
             "ai_label_northbound",
+            # Phase 3C：龙虎榜机构席位（top_inst API，points_2000）
+            "ai_label_top_inst",
             "ai_label_kline",
-            "ai_label_macro",
+            "ai_label_shibor",
+            "ai_label_macro_full",
         }
         uncovered = ast_labels - builder_labels
         assert not uncovered, (
@@ -325,6 +351,12 @@ class TestInvariant3BuilderLabelEquivalence:
                 }
             )
         )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API（无预取时回退到 cache.get_express）
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -373,6 +405,12 @@ class TestInvariant3BuilderLabelEquivalence:
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame())
         mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -423,6 +461,12 @@ class TestInvariant3BuilderLabelEquivalence:
                 }
             )
         )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -432,6 +476,43 @@ class TestInvariant3BuilderLabelEquivalence:
         )
         assert result == ("", False)
         assert labels == []
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_includes_sw_industry_label(self):
+        """Phase 3F-2：prefetched 含 sw_industry 字段时，_build_auxiliary_data_text
+        应注入申万行业段落并注册 ai_label_sw_industry 标签。"""
+        mixin = AIStrategyMixin()
+        mixin.cache = _make_fake_cache()
+        # 仅预取 sw_industry 字段（字符串），其余辅助数据返回空 DataFrame
+        prefetched = {"000001.SZ": {"sw_industry": "半导体Ⅱ"}}
+
+        labels: list[str] = []
+        result_text, is_valid = await mixin._build_auxiliary_data_text(
+            "000001.SZ",
+            mixin.cache,
+            prefetched=prefetched,
+            labels_out=labels,
+        )
+        assert is_valid is True
+        assert "ai_label_sw_industry" in labels
+        assert I18n.get("ai_label_sw_industry") in result_text
+        assert "半导体Ⅱ" in result_text
+
+    @pytest.mark.asyncio
+    async def test_auxiliary_data_sw_industry_empty_no_label(self):
+        """Phase 3F-2：prefetched 含 sw_industry 但为空字符串时，不注册标签。"""
+        mixin = AIStrategyMixin()
+        mixin.cache = _make_fake_cache()
+        prefetched = {"000001.SZ": {"sw_industry": ""}}
+
+        labels: list[str] = []
+        result_text, is_valid = await mixin._build_auxiliary_data_text(
+            "000001.SZ",
+            mixin.cache,
+            prefetched=prefetched,
+            labels_out=labels,
+        )
+        assert "ai_label_sw_industry" not in labels
 
     def test_capital_flow_has_data_registers_labels(self):
         mf_df = pd.DataFrame(
@@ -611,7 +692,7 @@ class TestInvariant3BuilderLabelEquivalence:
 
     @pytest.mark.asyncio
     async def test_macro_context_exception_returns_empty(self):
-        """_build_macro_context 异常路径：catch 后返回空串，不触发 ai_label_macro 注册。"""
+        """_build_macro_context 异常路径：catch 后返回空串，不触发 ai_label_shibor / ai_label_macro_full 注册。"""
         mixin = AIStrategyMixin()
         mixin.cache = type("FakeCache", (), {})()
         mixin.cache.get_macro_economy = _async_raise(RuntimeError("DB error"))
@@ -693,7 +774,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         financial_labels = call_kwargs.get("financial_labels", [])
         assert "ai_label_valuation" in financial_labels
         assert "ai_label_roe_trend" not in financial_labels
-        assert "ai_label_macro" in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" in financial_labels
+        assert "ai_label_macro_full" in financial_labels
 
     @pytest.mark.asyncio
     async def test_auxiliary_sentinel_excludes_labels(self):
@@ -748,7 +831,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         assert "ai_label_valuation" in financial_labels
         assert "ai_label_roe_trend" in financial_labels
         assert "ai_label_audit" not in financial_labels
-        assert "ai_label_macro" not in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" not in financial_labels
+        assert "ai_label_macro_full" not in financial_labels
 
     @pytest.mark.asyncio
     async def test_all_valid_includes_all_labels(self):
@@ -807,6 +892,10 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
                 }
             )
         )
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
             capital={},
@@ -839,7 +928,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         assert "ai_label_valuation" in financial_labels
         assert "ai_label_roe_trend" in financial_labels
         assert "ai_label_audit" in financial_labels
-        assert "ai_label_macro" in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" in financial_labels
+        assert "ai_label_macro_full" in financial_labels
 
     @pytest.mark.asyncio
     async def test_capital_flow_sentinel_excludes_labels(self):
@@ -929,7 +1020,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
 
     @pytest.mark.asyncio
     async def test_macro_empty_excludes_label(self):
-        """macro_context 为空时，ai_label_macro 不应注册。"""
+        """macro_context 为空时，ai_label_shibor / ai_label_macro_full 不应注册。"""
         mixin = AIStrategyMixin()
         mixin.cache = _make_fake_cache()
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
@@ -962,7 +1053,9 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
         )
         call_kwargs = mock_client.analyze_stock.call_args.kwargs
         financial_labels = call_kwargs.get("financial_labels", [])
-        assert "ai_label_macro" not in financial_labels
+        # Phase 2A.1 §4.1：ai_label_macro 拆分为 shibor + macro_full
+        assert "ai_label_shibor" not in financial_labels
+        assert "ai_label_macro_full" not in financial_labels
 
 
 class TestInvariant6AnalyzeStockLabelAssembly:
@@ -1353,6 +1446,12 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [0.0]}))
         mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API（无预取时回退到 cache.get_express）
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1373,6 +1472,12 @@ class TestInvariant7PledgeBoundary:
         mixin.cache.get_pledge_stat = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "pledge_ratio": [None]}))
         mixin.cache.get_top10_holders = _async_return(pd.DataFrame())
         mixin.cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+        mixin.cache.get_fina_forecast = _async_return(pd.DataFrame())
+        mixin.cache.get_pledge_detail = _async_return(pd.DataFrame())
+        mixin.cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+        mixin.cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+        # Phase 3G §4.3.4：express API（无预取时回退到 cache.get_express）
+        mixin.cache.get_express = _async_return(pd.DataFrame())
 
         labels: list[str] = []
         result = await mixin._build_auxiliary_data_text(
@@ -1404,6 +1509,12 @@ def _make_fake_cache():
     cache.get_pledge_stat = _async_return(pd.DataFrame())
     cache.get_top10_holders = _async_return(pd.DataFrame())
     cache.get_stk_holdernumber = _async_return(pd.DataFrame())
+    cache.get_fina_forecast = _async_return(pd.DataFrame())
+    cache.get_pledge_detail = _async_return(pd.DataFrame())
+    cache.get_share_float_upcoming = _async_return(pd.DataFrame())
+    cache.get_stk_holdertrade = _async_return(pd.DataFrame())
+    # Phase 3G §4.3.4：express API
+    cache.get_express = _async_return(pd.DataFrame())
     cache.get_concepts = _async_return({})
     return cache
 
