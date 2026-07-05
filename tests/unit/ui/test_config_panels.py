@@ -2327,6 +2327,71 @@ class TestTushareConfigPanelTierDropdown:
         assert "sys_tier_hint_in_token_panel" in called_keys
         assert "sys_tier_points_120_label" in called_keys
 
+    @pytest.mark.asyncio
+    async def test_on_tier_change_exception_rolls_back_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """_on_tier_change 异常时回滚下拉框并显示失败提示（P2-2 异常路径覆盖）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        # set_tier 成功，但后续 TushareClient 初始化抛异常
+        mock_ch_for_panels.set_tushare_point_tier.return_value = True
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        with (
+            patch(
+                "data.external.tushare_client.TushareClient",
+                side_effect=RuntimeError("client init failed"),
+            ),
+        ):
+            panel.tier_dropdown.value = "points_120"
+            await panel._on_tier_change(MagicMock())
+
+            # 异常时回滚到 ConfigHandler 当前值
+            assert panel.tier_dropdown.value == "points_5000"
+            # 失败提示
+            assert panel.status_text.value == "sys_tier_save_failed"
+
+    def test_set_loading_state_disables_tier_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """verify_token 期间必须禁用 tier_dropdown，避免档位变更与 probe 并发（P1-1）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(
+            mock_ch_for_panels,
+            mock_i18n,
+            mock_page,
+            show_internal_loading=True,
+        )
+
+        # loading=True 时 tier_dropdown 必须被禁用
+        panel._set_loading_state(True)
+        assert panel.tier_dropdown.disabled is True
+
+        # loading=False 时恢复可编辑
+        panel._set_loading_state(False)
+        assert panel.tier_dropdown.disabled is False
+
+    def test_will_unmount_unsubscribes_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """will_unmount 必须取消 i18n 订阅，避免内存泄漏（§5.8 生命周期兜底）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+
+        # did_mount 订阅
+        with patch("ui.components.config_panels.tushare_config_panel.I18n") as mock_i18n_cls:
+            mock_i18n_cls.subscribe.return_value = "sub_id_123"
+            panel.did_mount()
+            mock_i18n_cls.subscribe.assert_called_once()
+
+            # will_unmount 取消订阅
+            panel.will_unmount()
+            mock_i18n_cls.unsubscribe.assert_called_once_with("sub_id_123")
+            assert panel._locale_subscription_id is None
+
+    def test_will_unmount_idempotent_when_no_subscription(self, mock_ch_for_panels, mock_i18n, mock_page):
+        """will_unmount 在未订阅时调用应安全无异常（重复 dispose 容错）。"""
+        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
+        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
+        panel._locale_subscription_id = None
+
+        # 不应抛异常
+        panel.will_unmount()
+
 
 class TestCallbackInjection:
     """验证回调注入机制：Component 通过回调调用 Service，而非直接导入。"""

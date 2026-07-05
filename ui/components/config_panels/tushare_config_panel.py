@@ -298,6 +298,9 @@ class TushareConfigPanel(ft.Container):
             self.verify_button.disabled = loading
             self.token_input.disabled = loading
             self.save_button.disabled = loading
+            # v1.11.0 P1-1：verify_token 期间禁用 tier_dropdown，避免档位变更与 probe 并发
+            # （reload_rate_limiters + clear_capability_cache 与 probe 写入 cache 竞态）
+            self.tier_dropdown.disabled = loading
 
             if loading:
                 self.status_text.value = I18n.get("tushare_verifying")
