@@ -42,8 +42,14 @@ class TestReviewManagerSwIndustryPassThrough:
     @pytest.mark.asyncio
     @patch("data.persistence.review_manager.TushareClient")
     @patch("data.persistence.review_manager.CacheManager")
-    async def test_save_results_preserves_sw_industry(self, mock_cm, mock_tc):
-        """含申万二级行业名的 df 经 save_results 后，industry 字段应原样写入 record。"""
+    async def test_review_manager_uses_sw_industry(self, mock_cm, mock_tc):
+        """Phase 3F-2：含申万二级行业名的 df 经 save_results 后，industry 字段应原样写入 record。
+
+        review_manager L521 路径切换验证：上游 screener_dao SQL 已改为
+        COALESCE(m.sw_l2_name, b.industry) AS industry，review_manager 通过 _s(row, "industry")
+        透传 df.industry 字段（v1.9.0 M-4 修订后实施），无需修改 review_manager 代码即可
+        自动获益于申万行业覆写。
+        """
         mock_cache = MagicMock()
         mock_cm.return_value = mock_cache
         mock_screener_dao = MagicMock()

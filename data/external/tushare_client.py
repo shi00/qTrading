@@ -1041,11 +1041,9 @@ class TushareClient:
         """
         import functools
 
-        import functools as _functools
-
         from utils.thread_pool import ThreadPoolManager
 
-        if isinstance(func, _functools.partial) and func.args:
+        if isinstance(func, functools.partial) and func.args:
             api_name = str(func.args[0])
         else:
             api_name = getattr(func, "__name__", str(func))
