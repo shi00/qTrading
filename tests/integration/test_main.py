@@ -74,6 +74,17 @@ class _DummyPage:
     def run_task(self, coro, *args):
         self.run_task_calls.append((coro, args))
 
+    def show_dialog(self, dialog):
+        self.current_dialog = dialog
+        dialog.open = True
+        self.update()
+
+    def pop_dialog(self):
+        if self.current_dialog is not None:
+            self.current_dialog.open = False
+            self.current_dialog = None
+        self.update()
+
 
 class _FakeCoordinator:
     last = None
