@@ -385,4 +385,7 @@ if __name__ == "__main__":  # pragma: no cover
     install_global_exception_hooks()
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
-    ft.app(target=main, assets_dir=assets)
+    run_kwargs = {"main": main, "assets_dir": assets}
+    if os.environ.get("E2E_TESTING"):
+        run_kwargs["web_renderer"] = ft.WebRenderer.CANVAS_KIT
+    ft.run(**run_kwargs)
