@@ -35,6 +35,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate RENOVATE_TOKEN
+        env:
+          RENOVATE_TOKEN: ${{ secrets.RENOVATE_TOKEN }}
+        run: |
+          if [ -z "$RENOVATE_TOKEN" ]; then
+            echo "::error::RENOVATE_TOKEN secret is empty or not configured. Add it at Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
+            -H "Authorization: Bearer $RENOVATE_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/user)
+          if [ "$http_code" = "000" ]; then
+            echo "::error::Failed to reach api.github.com (network error or timeout). Check runner network connectivity."
+            exit 1
+          fi
+          if [ "$http_code" != "200" ]; then
+            echo "::error::RENOVATE_TOKEN authentication failed (HTTP $http_code). Regenerate a PAT with 'repo' scope at https://github.com/settings/tokens and update the secret."
+            exit 1
+          fi
+          echo "RENOVATE_TOKEN is valid."
+
       - name: Self-hosted Renovate
         uses: renovatebot/github-action@dd5302ec17783b2fc721b19ae7209b57b1587765  # v46.1.17
         with:
