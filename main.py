@@ -66,15 +66,6 @@ async def main(page: ft.Page):
     shutdown_requested = False
     active_dialog = None
     locale_subscription_id = None
-    _scheduled_tasks: set = set()
-
-    def _schedule_async(coro):
-        if hasattr(page, "run_task"):
-            page.run_task(coro)
-            return
-        task = asyncio.create_task(coro())
-        _scheduled_tasks.add(task)
-        task.add_done_callback(_scheduled_tasks.discard)
 
     async def _perform_window_shutdown():
         nonlocal shutdown_requested
@@ -149,7 +140,7 @@ async def main(page: ft.Page):
             return
         shutdown_requested = True
         UILogger.log_action("MainWindow", action="close_confirm")
-        _schedule_async(_perform_window_shutdown)
+        page.run_task(_perform_window_shutdown)
 
     close_confirm_dialog = ft.AlertDialog(
         modal=True,
@@ -314,13 +305,6 @@ async def main(page: ft.Page):
             pass
         coordinator._force_exit(1)
 
-    def _run_task(coro, *args):
-        """Run a coroutine via page.run_task or asyncio fallback."""
-        if hasattr(page, "run_task"):
-            page.run_task(coro, *args)
-        else:
-            _schedule_async(coro)
-
     def _on_show_toast(message_key, toast_type="info"):
         """Wrap show_toast to resolve i18n keys before displaying."""
         show_toast(I18n.get(message_key), toast_type)
@@ -329,7 +313,7 @@ async def main(page: ft.Page):
         cache_manager=cache_manager,
         on_state_change=lambda state, ctx: renderer.on_state_change(state, ctx),
         on_show_toast=_on_show_toast,
-        on_exit=lambda: _schedule_async(_perform_upgrade_exit),
+        on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # run_task returns Task; on_exit callback return ignored
     )
 
     renderer = StartupViewRenderer(
@@ -337,7 +321,7 @@ async def main(page: ft.Page):
         controller=controller,
         show_dialog_fn=_show_dialog_with_tracking,
         hide_dialog_fn=_hide_dialog_with_tracking,
-        run_task_fn=_run_task,
+        run_task_fn=page.run_task,
     )
 
     db_url = ConfigHandler.get_db_url()
