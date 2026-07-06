@@ -47,7 +47,7 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=auto_update_time,
             options=self._build_time_options(),
-            on_change=self.on_schedule_time_change,
+            on_select=self.on_schedule_time_change,
             disabled=not auto_update_enabled,
         )
 
@@ -70,7 +70,7 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=ai_concept_time,
             options=self._build_time_options(),
-            on_change=self.on_ai_concept_time_change,
+            on_select=self.on_ai_concept_time_change,
             disabled=not ai_concept_enabled,
         )
 
@@ -86,7 +86,7 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=ai_concept_search_engine,
             options=self._build_search_engine_options(),
-            on_change=self.on_ai_concept_search_engine_change,
+            on_select=self.on_ai_concept_search_engine_change,
             disabled=not ai_concept_enabled,
         )
 
@@ -475,7 +475,7 @@ class NotificationsTab(ft.Container):
             width=AppStyles.CONTROL_WIDTH_MD,
             value=str(news_interval),
             options=self._build_interval_options(),
-            on_change=self.on_interval_change,
+            on_select=self.on_interval_change,
             disabled=not enable_news,
         )
 

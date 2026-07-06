@@ -1657,7 +1657,7 @@ class TestProviderCredentialDialogLifecycle:
         dialog.refresh_locale()
         assert dialog.title.value == "failover_dialog_title"
         assert dialog.provider_dropdown.label == "failover_select_provider"
-        assert dialog._cancel_btn.text == "common_cancel"
+        assert dialog._cancel_btn.content == "common_cancel"
 
     def test_refresh_locale_exception_logged_as_warning(
         self,

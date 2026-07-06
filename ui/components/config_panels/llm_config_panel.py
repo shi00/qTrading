@@ -102,7 +102,7 @@ class LLMConfigPanel(ft.Container):
             label=I18n.get("llm_select_provider"),
             options=self._build_provider_options(),
             value=self._current_provider,
-            on_change=self._on_provider_change,
+            on_select=self._on_provider_change,
             width=input_width,
         )
 
@@ -160,8 +160,8 @@ class LLMConfigPanel(ft.Container):
             size=12,
         )
 
-        self.test_button = ft.ElevatedButton(
-            text=I18n.get("llm_test_connection"),
+        self.test_button = ft.Button(
+            content=I18n.get("llm_test_connection"),
             on_click=self._on_test_click,
             icon=ft.Icons.CABLE if ft.Icons else None,
             style=AppStyles.secondary_button(),
@@ -173,8 +173,8 @@ class LLMConfigPanel(ft.Container):
             on_click=self._on_refresh_click,
         )
 
-        self.save_button = ft.ElevatedButton(
-            text=I18n.get("settings_save_config"),
+        self.save_button = ft.Button(
+            content=I18n.get("settings_save_config"),
             on_click=self._on_save_click,
             icon=ft.Icons.SAVE if ft.Icons else None,
             visible=self._show_save_button,
@@ -245,7 +245,7 @@ class LLMConfigPanel(ft.Container):
             self.content = ft.Container(
                 content=form_content,
                 width=container_width,
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
             )
         else:
             self.content = form_content
@@ -328,13 +328,13 @@ class LLMConfigPanel(ft.Container):
         links = []
 
         # 仅在向导特供的 compact 模式下采用紧凑内边距，释放高达 70px+ 的占用
-        compact_btn_style = ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=4)) if self._compact else None
+        compact_btn_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=4)) if self._compact else None
 
         console_url = provider.get("console_url")
         if console_url:
             links.append(
                 ft.TextButton(
-                    text=I18n.get("llm_get_api_key"),
+                    content=I18n.get("llm_get_api_key"),
                     url=console_url,
                     icon=ft.Icons.KEY if ft.Icons else None,
                     style=compact_btn_style,
@@ -345,7 +345,7 @@ class LLMConfigPanel(ft.Container):
         if pricing_url:
             links.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_pricing"),
+                    content=I18n.get("llm_view_pricing"),
                     url=pricing_url,
                     icon=ft.Icons.ATTACH_MONEY if ft.Icons else None,
                     style=compact_btn_style,
@@ -356,7 +356,7 @@ class LLMConfigPanel(ft.Container):
         if models_url:
             links.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_models"),
+                    content=I18n.get("llm_view_models"),
                     url=models_url,
                     icon=ft.Icons.LIST if ft.Icons else None,
                     style=compact_btn_style,
@@ -522,13 +522,13 @@ class LLMConfigPanel(ft.Container):
 
         links = []
 
-        compact_btn_style = ft.ButtonStyle(padding=ft.padding.symmetric(horizontal=4)) if self._compact else None
+        compact_btn_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=4)) if self._compact else None
 
         console_url = provider.get("console_url")
         if console_url:
             links.append(
                 ft.TextButton(
-                    text=I18n.get("llm_get_api_key"),
+                    content=I18n.get("llm_get_api_key"),
                     url=console_url,
                     icon=ft.Icons.KEY if ft.Icons else None,
                     style=compact_btn_style,
@@ -539,7 +539,7 @@ class LLMConfigPanel(ft.Container):
         if pricing_url:
             links.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_pricing"),
+                    content=I18n.get("llm_view_pricing"),
                     url=pricing_url,
                     icon=ft.Icons.ATTACH_MONEY if ft.Icons else None,
                     style=compact_btn_style,
@@ -550,7 +550,7 @@ class LLMConfigPanel(ft.Container):
         if models_url:
             links.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_models"),
+                    content=I18n.get("llm_view_models"),
                     url=models_url,
                     icon=ft.Icons.LIST if ft.Icons else None,
                     style=compact_btn_style,
@@ -1180,9 +1180,9 @@ class LLMConfigPanel(ft.Container):
             self.azure_resource_input.label = I18n.get("llm_azure_resource_name")
             self.azure_deployment_input.label = I18n.get("llm_azure_deployment_name")
             self.azure_version_input.label = I18n.get("llm_azure_api_version")
-            self.test_button.text = I18n.get("llm_test_connection")
+            self.test_button.content = I18n.get("llm_test_connection")
             self.refresh_models_button.tooltip = I18n.get("llm_refresh_models")
-            self.save_button.text = I18n.get("settings_save_config")
+            self.save_button.content = I18n.get("settings_save_config")
 
             refresh_dropdown_options(self.provider_dropdown, self._build_provider_options())
 

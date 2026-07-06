@@ -137,7 +137,7 @@ class ScreenerView(ft.Container):
         self.strategy_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get("select_strategy"),  # pragma: no cover
             options=[],  # pragma: no cover
-            on_change=self._on_strategy_change,  # pragma: no cover
+            on_select=self._on_strategy_change,  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
             text_size=14,  # pragma: no cover
             bgcolor=AppColors.INPUT_BG,  # pragma: no cover
@@ -160,16 +160,16 @@ class ScreenerView(ft.Container):
             no_wrap=False,  # pragma: no cover
         )  # pragma: no cover
 
-        self.run_btn = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("run_screening"),  # pragma: no cover
+        self.run_btn = ft.Button(  # pragma: no cover
+            content=I18n.get("run_screening"),  # pragma: no cover
             icon=ft.Icons.PLAY_ARROW,  # pragma: no cover
             on_click=self._on_run_click,  # pragma: no cover
             disabled=True,  # pragma: no cover
             style=AppStyles.primary_button(),  # pragma: no cover
             height=45,  # pragma: no cover
         )  # pragma: no cover
-        self.export_btn = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("screener_export"),  # pragma: no cover
+        self.export_btn = ft.Button(  # pragma: no cover
+            content=I18n.get("screener_export"),  # pragma: no cover
             icon=ft.Icons.DOWNLOAD,  # pragma: no cover
             on_click=self._on_export_click,  # pragma: no cover
             disabled=True,  # pragma: no cover
@@ -241,7 +241,7 @@ class ScreenerView(ft.Container):
             width=120,  # pragma: no cover
             dense=True,  # pragma: no cover
             text_size=13,  # pragma: no cover
-            on_change=self._on_page_size_change,  # pragma: no cover
+            on_select=self._on_page_size_change,  # pragma: no cover
         )  # pragma: no cover
 
         # 6. Detail Dialog
@@ -271,7 +271,7 @@ class ScreenerView(ft.Container):
             spacing=0,  # pragma: no cover
         )  # pragma: no cover
         self.history_load_more_btn = ft.TextButton(  # pragma: no cover
-            text=I18n.get("history_load_more"),  # pragma: no cover
+            content=I18n.get("history_load_more"),  # pragma: no cover
             icon=ft.Icons.EXPAND_MORE,  # pragma: no cover
             on_click=self._on_load_more_history,  # pragma: no cover
             visible=False,  # pragma: no cover
@@ -287,7 +287,7 @@ class ScreenerView(ft.Container):
                 [  # pragma: no cover
                     ft.Container(  # pragma: no cover
                         content=self.history_tree_title_text,  # pragma: no cover
-                        padding=ft.padding.only(left=12, top=10, bottom=5),  # pragma: no cover
+                        padding=ft.Padding.only(left=12, top=10, bottom=5),  # pragma: no cover
                     ),  # pragma: no cover
                     ft.Divider(height=1, color=AppColors.DIVIDER),  # pragma: no cover
                     self.history_tree_list,  # pragma: no cover
@@ -297,7 +297,7 @@ class ScreenerView(ft.Container):
                 expand=True,  # pragma: no cover
             ),  # pragma: no cover
             bgcolor=ft.Colors.SURFACE,  # pragma: no cover
-            border=ft.border.only(right=ft.border.BorderSide(1, AppColors.DIVIDER)),  # pragma: no cover
+            border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),  # pragma: no cover
         )  # pragma: no cover
         self._history_tree_offset = 0  # For pagination
 
@@ -414,8 +414,8 @@ class ScreenerView(ft.Container):
                 self.strategy_desc_text.value = I18n.get("screener_no_strategy_hint")
 
             # 按钮
-            self.run_btn.text = I18n.get("run_screening")
-            self.export_btn.text = I18n.get("screener_export")
+            self.run_btn.content = I18n.get("run_screening")
+            self.export_btn.content = I18n.get("screener_export")
 
             # 分页信息
             self.page_info_text.value = I18n.get("screener_page_info").format(
@@ -440,7 +440,7 @@ class ScreenerView(ft.Container):
                     segments[1].label.value = I18n.get("screener_mode_history")
 
             # 历史加载更多按钮
-            self.history_load_more_btn.text = I18n.get("history_load_more")
+            self.history_load_more_btn.content = I18n.get("history_load_more")
 
             # 历史树标题
             if hasattr(self, "history_tree_title_text"):
@@ -697,7 +697,7 @@ class ScreenerView(ft.Container):
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
             expand=True,  # pragma: no cover
-            padding=ft.padding.only(top=10),  # pragma: no cover
+            padding=ft.Padding.only(top=10),  # pragma: no cover
         )  # pragma: no cover
 
         # ==========================================
@@ -1096,10 +1096,10 @@ class ScreenerView(ft.Container):
                     ],
                     spacing=8,
                 ),
-                padding=ft.padding.all(12),
+                padding=ft.Padding.all(12),
                 bgcolor=AppColors.SURFACE_VARIANT,
                 border_radius=8,
-                margin=ft.margin.only(bottom=8),
+                margin=ft.Margin.only(bottom=8),
             )
             self.params_container.controls.append(group_card)
 
@@ -1212,7 +1212,7 @@ class ScreenerView(ft.Container):
                     border_color=AppColors.DIVIDER,
                     focused_border_color=AppColors.PRIMARY,
                     text_size=13,
-                    content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                     width=200,
                 )
                 ctrl.data = p["name"]
@@ -1228,7 +1228,7 @@ class ScreenerView(ft.Container):
                     border_color=AppColors.DIVIDER,
                     focused_border_color=AppColors.PRIMARY,
                     text_size=13,
-                    content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                     width=200,
                 )
                 ctrl.data = p["name"]
@@ -1254,7 +1254,7 @@ class ScreenerView(ft.Container):
                     border_color=AppColors.DIVIDER,
                     focused_border_color=AppColors.PRIMARY,
                     text_size=12,
-                    content_padding=ft.padding.symmetric(horizontal=10, vertical=10),
+                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
                 )
 
                 reset_btn = None
@@ -1276,7 +1276,7 @@ class ScreenerView(ft.Container):
                         return save_prompt
 
                     reset_btn = ft.TextButton(
-                        text=I18n.get("ai_reset_default"),
+                        content=I18n.get("ai_reset_default"),
                         icon=ft.Icons.RESTORE,
                         style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
                         height=30,
@@ -1284,7 +1284,7 @@ class ScreenerView(ft.Container):
                     )
 
                     save_btn = ft.TextButton(
-                        text=I18n.get("ai_save_prompt"),
+                        content=I18n.get("ai_save_prompt"),
                         icon=ft.Icons.SAVE,
                         style=ft.ButtonStyle(color=AppColors.PRIMARY),
                         height=30,
@@ -1312,13 +1312,13 @@ class ScreenerView(ft.Container):
                             ],
                             spacing=5,
                         ),
-                        margin=ft.margin.only(top=10, bottom=5),
+                        margin=ft.Margin.only(top=10, bottom=5),
                     )
                     controls.append(wrapper)
                 else:
                     wrapper = ft.Container(
                         content=ctrl,
-                        margin=ft.margin.only(top=10, bottom=5),
+                        margin=ft.Margin.only(top=10, bottom=5),
                     )
                     controls.append(wrapper)
 
@@ -1690,7 +1690,7 @@ class ScreenerView(ft.Container):
                 reasoning_tile,  # pragma: no cover
                 ft.Container(  # pragma: no cover
                     content=content_md,  # pragma: no cover
-                    padding=ft.padding.only(left=5, right=5),  # pragma: no cover
+                    padding=ft.Padding.only(left=5, right=5),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
             spacing=10,  # pragma: no cover
@@ -1698,11 +1698,11 @@ class ScreenerView(ft.Container):
 
         card = ft.Container(  # pragma: no cover
             content=card_content,  # pragma: no cover
-            border=ft.border.all(1, AppColors.DIVIDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.DIVIDER),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             padding=15,  # pragma: no cover
             bgcolor=AppColors.SURFACE,  # pragma: no cover
-            margin=ft.margin.only(bottom=10),  # pragma: no cover
+            margin=ft.Margin.only(bottom=10),  # pragma: no cover
         )  # pragma: no cover
 
         async def _add_line_task():
@@ -1784,17 +1784,17 @@ class ScreenerView(ft.Container):
                     ],
                     spacing=8,
                 ),
-                ft.Container(content=content_md, padding=ft.padding.only(left=5, right=5)),
+                ft.Container(content=content_md, padding=ft.Padding.only(left=5, right=5)),
             ],
             spacing=8,
         )
         card = ft.Container(
             content=card_content,
-            border=ft.border.all(1, AppColors.DIVIDER),
+            border=ft.Border.all(1, AppColors.DIVIDER),
             border_radius=8,
             padding=15,
             bgcolor=AppColors.SURFACE,
-            margin=ft.margin.only(bottom=10),
+            margin=ft.Margin.only(bottom=10),
         )
         self._ai_cards[name] = {
             "card": card,

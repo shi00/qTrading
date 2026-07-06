@@ -65,7 +65,7 @@ def generate_kline_png(
 ) -> str:
     """
     Generate a K-line chart PNG and return it as a **base64 encoded string**,
-    ready for ``ft.Image(src_base64=...)``.
+    ready for ``ft.Image(src=...)`` (V1: src 直接支持 base64 字符串).
 
     :param df: DataFrame requiring columns: trade_date, open, high, low, close.
                Optional: vol (volume).

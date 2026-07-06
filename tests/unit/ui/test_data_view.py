@@ -365,7 +365,7 @@ class TestTableViewerTab:
         assert len(tab.data_table.rows) == 1
         containers = [cell.content for cell in tab.data_table.rows[0].cells if isinstance(cell.content, ft.Container)]
         assert all(c.width != 400 for c in containers), "存在 cell 硬编码 width=400"
-        news_containers = [c for c in containers if c.alignment == ft.alignment.top_left]
+        news_containers = [c for c in containers if c.alignment == ft.Alignment.TOP_LEFT]
         assert news_containers, "未找到新闻 cell（top_left 对齐的 Container）"
         assert news_containers[0].expand is True, "新闻 cell 应使用 expand=True"
 

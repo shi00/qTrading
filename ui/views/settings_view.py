@@ -62,7 +62,7 @@ class SettingsView(ft.Container):
                 spacing=10,  # pragma: no cover
                 scroll=ft.ScrollMode.HIDDEN,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.only(bottom=10),  # pragma: no cover
+            padding=ft.Padding.only(bottom=10),  # pragma: no cover
         )  # pragma: no cover
 
         # 4. Tab Body  # pragma: no cover
@@ -111,7 +111,7 @@ class SettingsView(ft.Container):
             for i, (key, _) in enumerate(self.TAB_CONFIG):  # pragma: no cover
                 if i < len(self.tab_buttons):  # pragma: no cover
                     localized = I18n.get(key)  # pragma: no cover
-                    self.tab_buttons[i].text = localized  # pragma: no cover
+                    self.tab_buttons[i].content = localized  # pragma: no cover
                     self.tab_buttons[i].tooltip = localized  # pragma: no cover
             # 级联刷新当前激活的 Tab，避免延迟挂载 Tab 错过 I18n 通知（§5.8 规范 6/7）
             if 0 <= self.current_tab_index < len(self.tab_contents):  # pragma: no cover
@@ -139,12 +139,12 @@ class SettingsView(ft.Container):
             bgcolor=AppColors.PRIMARY if is_selected else ft.Colors.TRANSPARENT,  # pragma: no cover
             elevation=0,  # pragma: no cover
             shape=ft.RoundedRectangleBorder(radius=8),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
         )  # pragma: no cover
 
     def _build_tab_button(self, text, icon, index):  # pragma: no cover
-        btn = ft.ElevatedButton(  # pragma: no cover
-            text=text,  # pragma: no cover
+        btn = ft.Button(  # pragma: no cover
+            content=text,  # pragma: no cover
             icon=icon,  # pragma: no cover
             tooltip=text,  # 为无障碍语义树提供稳定的 aria-label  # pragma: no cover
             data=str(index),  # pragma: no cover

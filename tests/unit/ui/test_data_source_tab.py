@@ -66,7 +66,7 @@ def _make_mock_action_chip():
 def _make_mock_button():
     btn = MagicMock()  # spec omitted: Flet button, complex __init__ with many internal controls
     btn.disabled = False
-    btn.text = ""
+    btn.content = ""
     btn.icon = None
     btn.style = None
     return btn

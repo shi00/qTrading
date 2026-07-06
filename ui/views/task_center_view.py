@@ -86,7 +86,7 @@ class TaskCenterView(ft.Container):
             style=ft.ButtonStyle(
                 shape=ft.RoundedRectangleBorder(radius=6),
                 side=ft.BorderSide(1, AppColors.BORDER),
-                padding=ft.padding.symmetric(horizontal=16, vertical=8),
+                padding=ft.Padding.symmetric(horizontal=16, vertical=8),
             ),
         )
 
@@ -136,16 +136,16 @@ class TaskCenterView(ft.Container):
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=8,
             ),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
             expand=True,
-            padding=ft.padding.only(top=60),
+            padding=ft.Padding.only(top=60),
         )
 
         # --- Scrollable area ---
         self.scroll_area = ft.ListView(
             expand=True,
             spacing=0,
-            padding=ft.padding.only(top=8),
+            padding=ft.Padding.only(top=8),
         )
 
         # --- Pagination footer ---
@@ -181,7 +181,7 @@ class TaskCenterView(ft.Container):
             ],
             expand=True,
         )
-        self.padding = ft.padding.all(20)
+        self.padding = ft.Padding.all(20)
 
     # --- Lifecycle ---
 
@@ -201,7 +201,7 @@ class TaskCenterView(ft.Container):
     def refresh_locale(self):
         """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
         try:
-            self.clear_btn.text = I18n.get("task_clear_finished")
+            self.clear_btn.content = I18n.get("task_clear_finished")
             self.header_title.value = I18n.get("nav_tasks")
             self.empty_title.value = I18n.get("task_empty_title")
             self.empty_subtitle.value = I18n.get("task_empty_subtitle")
@@ -313,9 +313,9 @@ class TaskCenterView(ft.Container):
                 spacing=4,
                 tight=True,
             ),
-            border=ft.border.all(1, status_color),
+            border=ft.Border.all(1, status_color),
             border_radius=12,
-            padding=ft.padding.symmetric(horizontal=10, vertical=3),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=3),
         )
 
         # --- Type chip ---
@@ -323,7 +323,7 @@ class TaskCenterView(ft.Container):
             content=ft.Text(t.task_type, size=11, color=AppColors.TEXT_SECONDARY),
             bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
             border_radius=4,
-            padding=ft.padding.symmetric(horizontal=8, vertical=2),
+            padding=ft.Padding.symmetric(horizontal=8, vertical=2),
         )
 
         # --- Top row: name + badges ---
@@ -424,7 +424,7 @@ class TaskCenterView(ft.Container):
                 icon_color=AppColors.ERROR,
                 style=ft.ButtonStyle(
                     color=AppColors.ERROR,
-                    padding=ft.padding.symmetric(horizontal=12, vertical=4),
+                    padding=ft.Padding.symmetric(horizontal=12, vertical=4),
                     shape=ft.RoundedRectangleBorder(radius=6),
                 ),
                 on_click=lambda e, tid=t.id: self._handle_cancel(tid),
@@ -456,7 +456,7 @@ class TaskCenterView(ft.Container):
                 spacing=6,
             ),
             **AppStyles.card(padding=14, border_radius=8, with_border=False),
-            border=ft.border.only(  # type: ignore[untyped]
+            border=ft.Border.only(  # type: ignore[untyped]
                 left=ft.BorderSide(3, left_border_color),
                 top=ft.BorderSide(1, AppColors.BORDER),
                 right=ft.BorderSide(1, AppColors.BORDER),

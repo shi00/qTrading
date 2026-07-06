@@ -555,7 +555,7 @@ class TestHealthScanDialog:
         dlg.refresh_locale()
 
         assert dlg._title_text.value == "scan_title"
-        assert dlg._close_btn.text == "common_close"
+        assert dlg._close_btn.content == "common_close"
         dlg.update.assert_called_once()
 
     def test_refresh_locale_calls_show_results_when_visible(self, mock_page):

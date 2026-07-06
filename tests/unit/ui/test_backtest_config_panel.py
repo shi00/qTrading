@@ -168,7 +168,7 @@ class TestBacktestConfigPanel:
         panel._on_start_date_change(mock_event)
 
         assert panel.start_date_value == new_date
-        assert panel.start_date_btn.text == "2024-06-01"
+        assert panel.start_date_btn.content == "2024-06-01"
         panel.start_date_btn.update.assert_called_once()
 
     def test_on_start_date_change_none_value(self, panel: BacktestConfigPanel) -> None:
@@ -192,7 +192,7 @@ class TestBacktestConfigPanel:
         panel._on_end_date_change(mock_event)
 
         assert panel.end_date_value == new_date
-        assert panel.end_date_btn.text == "2024-12-31"
+        assert panel.end_date_btn.content == "2024-12-31"
         panel.end_date_btn.update.assert_called_once()
 
     def test_on_end_date_change_none_value(self, panel: BacktestConfigPanel) -> None:

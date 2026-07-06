@@ -147,7 +147,7 @@ class TestLocalModelConfigPanelLocaleChange:
         with patch.object(panel, "_safe_update"):
             panel._on_locale_change()
         assert panel.model_path_input.label == "settings_local_model_path"
-        assert panel.btn_select_file.text == "settings_btn_select_file"
+        assert panel.btn_select_file.content == "settings_btn_select_file"
         assert panel.timeout_input.label == "settings_local_ai_timeout"
         assert panel.gpu_auto_switch.label == "settings_local_gpu_auto"
         assert panel.batch_input.label == "settings_local_batch"
@@ -174,8 +174,8 @@ class TestLocalModelConfigPanelLocaleChange:
         )
         with patch.object(panel, "_safe_update"):
             panel._on_locale_change()
-        assert panel.verify_button.text == "wizard_btn_verify_model"
-        assert panel.save_button.text == "settings_save_config"
+        assert panel.verify_button.content == "wizard_btn_verify_model"
+        assert panel.save_button.content == "settings_save_config"
 
     def test_on_locale_change_preserves_input_values(
         self,

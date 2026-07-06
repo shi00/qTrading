@@ -59,14 +59,14 @@ class NewsFeed(ft.Container):
                 alignment=ft.MainAxisAlignment.CENTER,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             ),
-            alignment=ft.alignment.center,
+            alignment=ft.Alignment.CENTER,
             expand=True,
         )
 
         self.load_more_text = ft.Text(I18n.get("news_load_more"), color=ft.Colors.WHITE)
 
         self.load_more_btn = ft.Container(
-            content=ft.ElevatedButton(
+            content=ft.Button(
                 content=self.load_more_text,
                 style=ft.ButtonStyle(
                     bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
@@ -76,8 +76,8 @@ class NewsFeed(ft.Container):
                 height=40,
                 width=120,
             ),
-            alignment=ft.alignment.center,
-            padding=ft.padding.only(top=10, bottom=10),
+            alignment=ft.Alignment.CENTER,
+            padding=ft.Padding.only(top=10, bottom=10),
         )
 
         # Initial Content
@@ -343,6 +343,6 @@ class NewsFeed(ft.Container):
             ),
             padding=10,
             bgcolor=bg_color,
-            border=ft.border.only(bottom=ft.BorderSide(1, AppColors.DIVIDER)),
+            border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.DIVIDER)),
         )
         return item

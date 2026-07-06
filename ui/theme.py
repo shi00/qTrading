@@ -452,7 +452,7 @@ class AppStyles:
             "padding": padding,
         }
         if with_border:
-            style["border"] = ft.border.all(1, ft.Colors.OUTLINE)
+            style["border"] = ft.Border.all(1, ft.Colors.OUTLINE)
 
         if with_shadow:
             style["shadow"] = ft.BoxShadow(
@@ -470,7 +470,7 @@ class AppStyles:
             "bgcolor": ft.Colors.SURFACE,
             "border_radius": 4,
             "padding": padding,
-            "border": ft.border.all(1, ft.Colors.OUTLINE),
+            "border": ft.Border.all(1, ft.Colors.OUTLINE),
             "shadow": ft.BoxShadow(
                 spread_radius=0,
                 blur_radius=10,
@@ -485,7 +485,7 @@ class AppStyles:
             color=ft.Colors.ON_PRIMARY,
             icon_color=ft.Colors.ON_PRIMARY,
             bgcolor=ft.Colors.PRIMARY,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             elevation=0,
             text_style=ft.TextStyle(weight=ft.FontWeight.BOLD),
@@ -496,7 +496,7 @@ class AppStyles:
         return ft.ButtonStyle(
             color=ft.Colors.PRIMARY,
             bgcolor=ft.Colors.TRANSPARENT,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             side=ft.BorderSide(1, ft.Colors.PRIMARY),
             elevation=0,
@@ -507,7 +507,7 @@ class AppStyles:
         return ft.ButtonStyle(
             color=ft.Colors.ON_SECONDARY,
             bgcolor=ft.Colors.SECONDARY,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             elevation=0,
             text_style=ft.TextStyle(weight=ft.FontWeight.BOLD),
@@ -518,7 +518,7 @@ class AppStyles:
         return ft.ButtonStyle(
             color=ft.Colors.PRIMARY,
             bgcolor=ft.Colors.TRANSPARENT,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             side=ft.BorderSide(1, ft.Colors.PRIMARY),
             overlay_color=ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY),

@@ -80,7 +80,7 @@ class MetricCard(ft.Container):
         self.padding = 15
         self.border_radius = 12
         self.bgcolor = ft.Colors.with_opacity(0.02, ft.Colors.PRIMARY)
-        self.border = ft.border.all(1, ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY))
+        self.border = ft.Border.all(1, ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY))
 
     def _build_status_row(self):
         """Build status row controls (uses custom colors for UP/DOWN)."""
@@ -244,10 +244,10 @@ class StatusBadge(ft.Container):
         self.badge_color = color
         self.badge_icon = icon
         self.content = self._build_content()
-        self.padding = ft.padding.symmetric(horizontal=8, vertical=4)
+        self.padding = ft.Padding.symmetric(horizontal=8, vertical=4)
         self.bgcolor = ft.Colors.with_opacity(0.1, color)
         self.border_radius = 20
-        self.border = ft.border.all(1, ft.Colors.with_opacity(0.2, color))
+        self.border = ft.Border.all(1, ft.Colors.with_opacity(0.2, color))
 
     def _build_content(self):
         content_row: list[ft.Control] = [

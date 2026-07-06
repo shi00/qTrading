@@ -168,8 +168,8 @@ async def main(page: ft.Page):
                 close_confirm_dialog.title.value = I18n.get("exit_confirm_title")
                 close_confirm_dialog.content.value = I18n.get("exit_confirm_content")
                 if len(close_confirm_dialog.actions) >= 2:
-                    close_confirm_dialog.actions[0].text = I18n.get("common_cancel")
-                    close_confirm_dialog.actions[1].text = I18n.get("common_confirm")
+                    close_confirm_dialog.actions[0].content = I18n.get("common_cancel")
+                    close_confirm_dialog.actions[1].content = I18n.get("common_confirm")
                 if close_confirm_visible:
                     close_confirm_dialog.update()
         except Exception as e:

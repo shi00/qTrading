@@ -4,6 +4,7 @@ from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
 import flet as ft
+import flet_charts as fch
 import polars as pl
 import pytest
 
@@ -229,7 +230,7 @@ class TestBacktestResultPanel:
         container = panel._build_nav_chart()
 
         assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.LineChart)
+        assert isinstance(container.content, fch.LineChart)
 
     def test_build_nav_chart_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
         panel._result = empty_result
@@ -277,7 +278,7 @@ class TestBacktestResultPanel:
         container = panel._build_ic_chart()
 
         assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.BarChart)
+        assert isinstance(container.content, fch.BarChart)
 
     def test_build_ic_chart_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
         panel._result = empty_result

@@ -51,8 +51,8 @@ class HealthScoreCard(ft.Container):
     @staticmethod
     def _make_gradient(color: str) -> ft.LinearGradient:  # pragma: no cover
         return ft.LinearGradient(
-            begin=ft.alignment.top_left,
-            end=ft.alignment.bottom_right,
+            begin=ft.Alignment.TOP_LEFT,
+            end=ft.Alignment.BOTTOM_RIGHT,
             colors=[
                 ft.Colors.with_opacity(0.2, color),
                 ft.Colors.with_opacity(0.05, color),
@@ -105,7 +105,7 @@ class HealthScoreCard(ft.Container):
         self.padding = 20
         self.border_radius = 8
         self.gradient = self.bg_gradient
-        self.border = ft.border.all(1, ft.Colors.with_opacity(0.3, self.color))
+        self.border = ft.Border.all(1, ft.Colors.with_opacity(0.3, self.color))
 
 
 class MetricTile(ft.Container):
@@ -242,7 +242,7 @@ class CoverageDetailTable(ft.Column):
 
     def _build_section_header(self, i18n_key):  # pragma: no cover
         return ft.Container(
-            padding=ft.padding.symmetric(vertical=5),
+            padding=ft.Padding.symmetric(vertical=5),
             content=ft.Row(
                 [
                     ft.Icon(ft.Icons.SUBTITLES, size=16, color=AppColors.PRIMARY),
@@ -289,7 +289,7 @@ class CoverageDetailTable(ft.Column):
                 I18n.get("health_global_count", count=f"{cnt:,}") if ratio > 0 else I18n.get("health_global_no_data")
             )
             return ft.Container(
-                padding=ft.padding.symmetric(vertical=5),
+                padding=ft.Padding.symmetric(vertical=5),
                 content=ft.Row(
                     [
                         ft.Row(
@@ -315,10 +315,10 @@ class CoverageDetailTable(ft.Column):
                                 weight=ft.FontWeight.BOLD,
                             ),
                             bgcolor=ft.Colors.with_opacity(0.1, icon_color),
-                            padding=ft.padding.symmetric(horizontal=10, vertical=3),
+                            padding=ft.Padding.symmetric(horizontal=10, vertical=3),
                             border_radius=12,
                             expand=True,
-                            alignment=ft.alignment.center,
+                            alignment=ft.Alignment.CENTER,
                         ),
                         ft.Container(width=10),
                         ft.Text(
@@ -336,7 +336,7 @@ class CoverageDetailTable(ft.Column):
 
         # Stock: Standard coverage bar
         return ft.Container(
-            padding=ft.padding.symmetric(vertical=5),
+            padding=ft.Padding.symmetric(vertical=5),
             content=ft.Row(
                 [
                     # Name & Icon
@@ -557,7 +557,7 @@ class HealthReportDialog(ft.AlertDialog):
                 padding=10,
                 bgcolor=ft.Colors.with_opacity(0.1, AppColors.ERROR),
                 border_radius=4,
-                margin=ft.margin.only(bottom=10),
+                margin=ft.Margin.only(bottom=10),
             )
 
         # Assemble
@@ -576,7 +576,7 @@ class HealthReportDialog(ft.AlertDialog):
                         [
                             ft.Container(
                                 content=coverage,
-                                padding=ft.padding.only(right=15),
+                                padding=ft.Padding.only(right=15),
                             ),
                         ],
                         scroll=ft.ScrollMode.AUTO,
@@ -676,7 +676,7 @@ class HealthScanDialog(ft.AlertDialog):
         """Refresh i18n text on locale change (pure UI)."""
         try:
             self._title_text.value = I18n.get("scan_title")
-            self._close_btn.text = I18n.get("common_close")
+            self._close_btn.content = I18n.get("common_close")
             if self.status_text.visible:
                 self.status_text.value = I18n.get("scan_step_init")
             # 结果区域可见时，用缓存的扫描结果重建以刷新所有 i18n 文案

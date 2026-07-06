@@ -37,7 +37,7 @@ class TableViewerTab(ft.Container):
         self.table_selector = ft.Dropdown(  # pragma: no cover
             width=250,  # pragma: no cover
             label=I18n.get("data_select_table"),  # pragma: no cover
-            on_change=self._on_table_changed,  # pragma: no cover
+            on_select=self._on_table_changed,  # pragma: no cover
             disabled=True,  # pragma: no cover
             bgcolor=AppColors.INPUT_BG,  # pragma: no cover
             color=AppColors.INPUT_TEXT,  # pragma: no cover
@@ -139,12 +139,12 @@ class TableViewerTab(ft.Container):
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
                 spacing=4,  # pragma: no cover
             ),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             expand=True,  # pragma: no cover
             padding=40,  # pragma: no cover
             bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),  # pragma: no cover
             border_radius=12,  # pragma: no cover
-            border=ft.border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),  # pragma: no cover
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),  # pragma: no cover
         )  # pragma: no cover
 
         self.data_table = ft.DataTable(  # pragma: no cover
@@ -163,7 +163,7 @@ class TableViewerTab(ft.Container):
             divider_thickness=0,  # pragma: no cover
             show_checkbox_column=False,  # pragma: no cover
             border_radius=8,  # pragma: no cover
-            border=ft.border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
         )  # pragma: no cover
 
         # Scrollable table wrapper
@@ -213,7 +213,7 @@ class TableViewerTab(ft.Container):
                         spacing=5,  # pragma: no cover
                     ),  # pragma: no cover
                     padding=5,  # pragma: no cover
-                    border=ft.border.all(1, AppColors.BORDER),  # pragma: no cover
+                    border=ft.Border.all(1, AppColors.BORDER),  # pragma: no cover
                     border_radius=8,  # pragma: no cover
                     bgcolor=AppColors.SURFACE,  # pragma: no cover
                 ),  # pragma: no cover
@@ -290,9 +290,9 @@ class TableViewerTab(ft.Container):
                 ],  # pragma: no cover
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.symmetric(horizontal=20, vertical=5),  # pragma: no cover
+            padding=ft.Padding.symmetric(horizontal=20, vertical=5),  # pragma: no cover
             bgcolor=AppColors.SURFACE,  # pragma: no cover
-            border=ft.border.only(top=ft.border.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
+            border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
         )  # pragma: no cover
 
         return ft.Column(  # pragma: no cover
@@ -493,7 +493,7 @@ class TableViewerTab(ft.Container):
                             color=AppColors.TABLE_HEADER_TEXT,
                             text_align=ft.TextAlign.CENTER,
                         ),
-                        alignment=ft.alignment.center,
+                        alignment=ft.Alignment.CENTER,
                         expand=True,
                         on_click=lambda e, i=idx: self.page.run_task(  # type: ignore[untyped]
                             self._on_sort,
@@ -553,14 +553,14 @@ class TableViewerTab(ft.Container):
                 if is_long_text:
                     cell_container = ft.Container(
                         content=cell_text,
-                        alignment=ft.alignment.top_left,
+                        alignment=ft.Alignment.TOP_LEFT,
                         expand=True,  # 自适应宽度确保换行
-                        padding=ft.padding.symmetric(vertical=5),
+                        padding=ft.Padding.symmetric(vertical=5),
                     )
                 else:
                     cell_container = ft.Container(
                         content=cell_text,
-                        alignment=ft.alignment.center,
+                        alignment=ft.Alignment.CENTER,
                         expand=True,
                     )
 
@@ -727,7 +727,7 @@ class TableViewerTab(ft.Container):
         self.data_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
         self.data_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
         self.data_table.heading_row_color = AppColors.TABLE_HEADER_BG
-        self.data_table.border = ft.border.all(1, AppColors.TABLE_BORDER)
+        self.data_table.border = ft.Border.all(1, AppColors.TABLE_BORDER)
 
         for col in self.data_table.columns:
             if isinstance(col.label, ft.Container) and isinstance(
@@ -778,7 +778,7 @@ class SQLConsoleTab(ft.Container):
             ),  # pragma: no cover
         )  # pragma: no cover
 
-        self.btn_run = ft.ElevatedButton(  # pragma: no cover
+        self.btn_run = ft.Button(  # pragma: no cover
             I18n.get("data_sql_execute"),  # pragma: no cover
             icon=ft.Icons.PLAY_ARROW,  # pragma: no cover
             style=AppStyles.primary_button(),  # pragma: no cover
@@ -798,7 +798,7 @@ class SQLConsoleTab(ft.Container):
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
             horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),  # pragma: no cover
             heading_row_color=AppColors.TABLE_HEADER_BG,  # pragma: no cover
-            border=ft.border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
             column_spacing=20,  # pragma: no cover
             visible=False,  # pragma: no cover
         )  # pragma: no cover
@@ -818,7 +818,7 @@ class SQLConsoleTab(ft.Container):
                 alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
             ),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             visible=True,  # pragma: no cover
         )  # pragma: no cover
 
@@ -868,8 +868,8 @@ class SQLConsoleTab(ft.Container):
                     ),  # pragma: no cover
                     padding=10,  # pragma: no cover
                     bgcolor=AppColors.SURFACE,  # pragma: no cover
-                    border=ft.border.only(  # pragma: no cover
-                        bottom=ft.border.BorderSide(1, AppColors.BORDER),  # pragma: no cover
+                    border=ft.Border.only(  # pragma: no cover
+                        bottom=ft.BorderSide(1, AppColors.BORDER),  # pragma: no cover
                     ),  # pragma: no cover
                 ),  # pragma: no cover
                 ft.Container(  # pragma: no cover
@@ -904,10 +904,10 @@ class SQLConsoleTab(ft.Container):
             MetaDataManager.invalidate_cache()
             self.sql_editor.label = I18n.get("data_sql_label")
             self.sql_editor.hint_text = I18n.get("data_sql_hint")
-            self.btn_run.text = I18n.get("data_sql_execute")
+            self.btn_run.content = I18n.get("data_sql_execute")
             self.empty_hint_text.value = I18n.get("data_sql_empty_hint")
             self.date_fmt_hint_text.value = I18n.get("data_date_fmt_hint")
-            self.btn_count.text = I18n.get("data_btn_count")
+            self.btn_count.content = I18n.get("data_btn_count")
             self.result_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_sql_result")))]
             if self.page:
                 self.update()
@@ -1041,7 +1041,7 @@ class SQLConsoleTab(ft.Container):
         self.result_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
         self.result_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
         self.result_table.heading_row_color = AppColors.TABLE_HEADER_BG
-        self.result_table.border = ft.border.all(1, AppColors.TABLE_BORDER)
+        self.result_table.border = ft.Border.all(1, AppColors.TABLE_BORDER)
 
         for col in self.result_table.columns:
             if isinstance(col.label, ft.Text):
@@ -1094,7 +1094,7 @@ class DataExplorerView(ft.Container):
                 alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
             ),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             expand=True,  # pragma: no cover
         )  # pragma: no cover
 
@@ -1136,11 +1136,12 @@ class DataExplorerView(ft.Container):
         try:
             self._loading_text.value = I18n.get("data_loading")
             if hasattr(self, "tabs"):
-                # 刷新 Tabs 标题
-                if len(self.tabs.tabs) >= 1:
-                    self.tabs.tabs[0].text = I18n.get("data_tab_explorer")
-                if len(self.tabs.tabs) >= 2:
-                    self.tabs.tabs[1].text = I18n.get("data_tab_sql")
+                # 刷新 Tabs 标题（V1: 通过 _tab_bar.tabs 访问，label 替代 text）
+                if hasattr(self, "_tab_bar"):
+                    if len(self._tab_bar.tabs) >= 1:
+                        self._tab_bar.tabs[0].label = I18n.get("data_tab_explorer")
+                    if len(self._tab_bar.tabs) >= 2:
+                        self._tab_bar.tabs[1].label = I18n.get("data_tab_sql")
                 # 级联调用子 tab 的 refresh_locale
                 if hasattr(self, "table_tab"):
                     self.table_tab.refresh_locale()
@@ -1200,23 +1201,36 @@ class DataExplorerView(ft.Container):
             self.table_tab = TableViewerTab(self.vm)
             self.sql_tab = SQLConsoleTab(self.vm)
 
-            self.tabs = ft.Tabs(  # pragma: no cover
-                selected_index=0,  # pragma: no cover
-                animation_duration=300,  # pragma: no cover
+            # V1 Tabs 三件套：Tabs + TabBar + TabBarView（R12.b spike 定稿）
+            # 存储 _tab_bar 引用供 refresh_locale 更新 label
+            self._tab_bar = ft.TabBar(  # pragma: no cover
                 tabs=[  # pragma: no cover
                     ft.Tab(  # pragma: no cover
-                        text=I18n.get("data_tab_explorer"),  # pragma: no cover
+                        label=I18n.get("data_tab_explorer"),  # pragma: no cover
                         icon=ft.Icons.TABLE_CHART,  # pragma: no cover
-                        content=self.table_tab,  # pragma: no cover
                     ),  # pragma: no cover
                     ft.Tab(  # pragma: no cover
-                        text=I18n.get("data_tab_sql"),  # pragma: no cover
+                        label=I18n.get("data_tab_sql"),  # pragma: no cover
                         icon=ft.Icons.CODE,  # pragma: no cover
-                        content=self.sql_tab,  # pragma: no cover
                     ),  # pragma: no cover
                 ],  # pragma: no cover
+            )  # pragma: no cover
+            self.tabs = ft.Tabs(  # pragma: no cover
+                length=2,  # pragma: no cover
+                selected_index=0,  # pragma: no cover
+                animation_duration=300,  # pragma: no cover
                 expand=True,  # pragma: no cover
                 on_change=self._on_tab_changed,  # pragma: no cover
+                content=ft.Column(  # pragma: no cover
+                    expand=True,  # pragma: no cover
+                    controls=[  # pragma: no cover
+                        self._tab_bar,  # pragma: no cover
+                        ft.TabBarView(  # pragma: no cover
+                            expand=True,  # pragma: no cover
+                            controls=[self.table_tab, self.sql_tab],  # pragma: no cover
+                        ),  # pragma: no cover
+                    ],  # pragma: no cover
+                ),  # pragma: no cover
             )  # pragma: no cover
 
             # Swap content

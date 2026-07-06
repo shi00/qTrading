@@ -109,7 +109,7 @@ class TestTierApiPanel:
 
         # 验证关键文案已更新
         assert panel.points_hint_text.value == "translated_sys_tier_points_hint"
-        assert panel.probe_button.text == "translated_sys_tier_probe_button"
+        assert panel.probe_button.content == "translated_sys_tier_probe_button"
         assert panel.panel_title.value == "translated_sys_tier_panel_title"
 
     def test_tier_api_panel_dispose_unsubscribes(self, mock_page):

@@ -85,9 +85,9 @@ class OnboardingWizard(ft.Container):
 
         self.navigation_bar = ft.Container(  # pragma: no cover
             content=self._build_navigation_buttons(),  # pragma: no cover
-            padding=ft.padding.symmetric(horizontal=20, vertical=10),  # pragma: no cover
+            padding=ft.Padding.symmetric(horizontal=20, vertical=10),  # pragma: no cover
             bgcolor=AppColors.SURFACE,  # pragma: no cover
-            border=ft.border.only(top=ft.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
+            border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
         )  # pragma: no cover
 
         self.step_content_container = ft.Container(  # pragma: no cover
@@ -120,7 +120,7 @@ class OnboardingWizard(ft.Container):
             bgcolor=ft.Colors.with_opacity(0.7, AppColors.BACKGROUND),  # pragma: no cover
             visible=False,  # pragma: no cover
             expand=True,  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             on_click=lambda e: None,  # pragma: no cover
         )  # pragma: no cover
 
@@ -314,12 +314,12 @@ class OnboardingWizard(ft.Container):
             color=AppColors.TEXT_SECONDARY,  # pragma: no cover
             text_align=ft.TextAlign.CENTER,  # pragma: no cover
         )  # pragma: no cover
-        self.btn_quick_sync = ft.ElevatedButton(  # pragma: no cover
+        self.btn_quick_sync = ft.Button(  # pragma: no cover
             I18n.get("wizard_sync_quick"),  # pragma: no cover
             icon=ft.Icons.FLASH_ON,  # pragma: no cover
             style=AppStyles.accent_button(),  # pragma: no cover
         )  # pragma: no cover
-        self.btn_full_sync = ft.ElevatedButton(  # pragma: no cover
+        self.btn_full_sync = ft.Button(  # pragma: no cover
             I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),  # pragma: no cover
             icon=ft.Icons.CLOUD_SYNC,  # pragma: no cover
             style=AppStyles.primary_button(),  # pragma: no cover
@@ -329,7 +329,7 @@ class OnboardingWizard(ft.Container):
             icon=ft.Icons.SCHEDULE,  # pragma: no cover
             on_click=lambda e: self.app_page.run_task(self.vm.skip_sync),  # pragma: no cover
         )  # pragma: no cover
-        self.btn_cancel_sync = ft.ElevatedButton(  # pragma: no cover
+        self.btn_cancel_sync = ft.Button(  # pragma: no cover
             I18n.get("wizard_btn_cancel"),  # pragma: no cover
             icon=ft.Icons.CANCEL,  # pragma: no cover
             color=AppColors.ERROR,  # pragma: no cover
@@ -432,7 +432,7 @@ class OnboardingWizard(ft.Container):
                     ),
                 ],
             ),
-            padding=ft.padding.only(top=8),
+            padding=ft.Padding.only(top=8),
         )
 
         return [
@@ -451,7 +451,7 @@ class OnboardingWizard(ft.Container):
         if config.show_prev:
             is_sync_step = config.id == "data_sync"
             buttons.append(
-                ft.ElevatedButton(
+                ft.Button(
                     I18n.get("wizard_btn_prev"),
                     icon=ft.Icons.ARROW_BACK,
                     on_click=lambda e: self.app_page.run_task(self._prev_step),
@@ -473,7 +473,7 @@ class OnboardingWizard(ft.Container):
 
         if config.show_next:
             buttons.append(
-                ft.ElevatedButton(
+                ft.Button(
                     I18n.get(config.next_text_key),
                     icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
                     on_click=lambda e: self.app_page.run_task(self._next_step),
@@ -508,12 +508,12 @@ class OnboardingWizard(ft.Container):
                 ft.dropdown.Option(code, name)  # pragma: no cover
                 for code, name in I18n.get_language_options()  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self._on_language_change_wizard,  # pragma: no cover
+            on_select=self._on_language_change_wizard,  # pragma: no cover
         )  # pragma: no cover
 
         language_container = ft.Container(  # pragma: no cover
             content=self.wizard_language_dropdown,  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
         )  # pragma: no cover
 
         rocket_container = ft.Container(  # pragma: no cover
@@ -522,7 +522,7 @@ class OnboardingWizard(ft.Container):
             height=120,  # pragma: no cover
             border_radius=60,  # pragma: no cover
             bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             shadow=ft.BoxShadow(  # pragma: no cover
                 spread_radius=2,  # pragma: no cover
                 blur_radius=24,  # pragma: no cover
@@ -540,8 +540,8 @@ class OnboardingWizard(ft.Container):
         gradient_title = ft.ShaderMask(  # pragma: no cover
             content=self.gradient_guide_text,  # pragma: no cover
             shader=ft.LinearGradient(  # pragma: no cover
-                begin=ft.alignment.center_left,  # pragma: no cover
-                end=ft.alignment.center_right,  # pragma: no cover
+                begin=ft.Alignment.CENTER_LEFT,  # pragma: no cover
+                end=ft.Alignment.CENTER_RIGHT,  # pragma: no cover
                 colors=[AppColors.PRIMARY, AppColors.ACCENT],  # pragma: no cover
             ),  # pragma: no cover
             blend_mode=ft.BlendMode.SRC_IN,  # pragma: no cover
@@ -659,7 +659,7 @@ class OnboardingWizard(ft.Container):
             ),
             bgcolor=badge_bgcolor,
             border_radius=6,
-            padding=ft.padding.symmetric(horizontal=6, vertical=2),
+            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
         )
 
         icon_with_badge = ft.Stack(
@@ -670,7 +670,7 @@ class OnboardingWizard(ft.Container):
                     height=52,
                     border_radius=14,
                     bgcolor=ft.Colors.with_opacity(0.12, color),
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                 ),
                 ft.Container(
                     content=badge,
@@ -687,7 +687,7 @@ class OnboardingWizard(ft.Container):
             padding=20,
             border_radius=16,
             bgcolor=ft.Colors.with_opacity(0.7, AppColors.SURFACE),
-            border=ft.border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY)),
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY)),
             shadow=ft.BoxShadow(
                 spread_radius=0,
                 blur_radius=8,
@@ -727,7 +727,7 @@ class OnboardingWizard(ft.Container):
 
     def _on_card_hover(self, e, color):  # pragma: no cover
         if e.data == "true":
-            e.control.border = ft.border.all(1.5, ft.Colors.with_opacity(0.5, color))
+            e.control.border = ft.Border.all(1.5, ft.Colors.with_opacity(0.5, color))
             e.control.shadow = ft.BoxShadow(
                 spread_radius=1,
                 blur_radius=12,
@@ -735,7 +735,7 @@ class OnboardingWizard(ft.Container):
                 offset=ft.Offset(0, 3),
             )
         else:
-            e.control.border = ft.border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY))
+            e.control.border = ft.Border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY))
             e.control.shadow = ft.BoxShadow(
                 spread_radius=0,
                 blur_radius=8,
@@ -1020,11 +1020,11 @@ class OnboardingWizard(ft.Container):
             if hasattr(self, "gradient_guide_text"):
                 self.gradient_guide_text.value = I18n.get("wizard_welcome_guide")
             self.sync_status.value = I18n.get("wizard_status_ready")
-            self.btn_quick_sync.text = I18n.get("wizard_sync_quick")
-            self.btn_full_sync.text = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
-            self.btn_cancel_sync.text = I18n.get("wizard_btn_cancel")
+            self.btn_quick_sync.content = I18n.get("wizard_sync_quick")
+            self.btn_full_sync.content = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
+            self.btn_cancel_sync.content = I18n.get("wizard_btn_cancel")
             if hasattr(self, "btn_sync_later"):
-                self.btn_sync_later.text = I18n.get("wizard_btn_sync_later")
+                self.btn_sync_later.content = I18n.get("wizard_btn_sync_later")
             self.schedule_enabled.label = I18n.get("wizard_schedule_label")
             self.schedule_time.label = I18n.get("wizard_schedule_time_label")
             self.loading_overlay_text.value = I18n.get("wizard_validating")

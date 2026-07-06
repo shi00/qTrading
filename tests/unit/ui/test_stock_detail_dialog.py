@@ -1088,7 +1088,7 @@ class TestStockDetailDialogLifecycle:
         dlg.update = MagicMock()
 
         # 模拟已加载的 K 线图（ft.Image）
-        original_image = ft.Image(src_base64="loaded_png_data", fit=ft.ImageFit.CONTAIN)
+        original_image = ft.Image(src="loaded_png_data", fit=ft.BoxFit.CONTAIN)
         dlg.chart_container.content = original_image
 
         dlg.refresh_locale()
@@ -1162,7 +1162,7 @@ class TestStockDetailDialogLoadChartSuccess:
 
         # 验证最终设置了 ft.Image
         assert isinstance(dlg.chart_container.content, ft.Image)
-        assert dlg.chart_container.content.src_base64 == "base64pngdata"
+        assert dlg.chart_container.content.src == "base64pngdata"
         # chart_container.update 被调用多次（loading + 最终图片）
         assert dlg.chart_container.update.call_count >= 2
 

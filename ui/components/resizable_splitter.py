@@ -55,7 +55,7 @@ class ResizableSplitter(ft.Container):
 
         # 分隔条：强制使用 on_horizontal_drag_* 避免与左侧面板垂直滚动冲突
         # 使用 on_enter/on_exit 替代 on_hover：Flet HoverEvent.data 是 JSON 字符串
-        # （含 timestamp/kind/global_x 等字段，见 flet/core/gesture_detector.py:847-858），
+        # （含 timestamp/kind/global_x 等字段，见 flet/controls/gesture_detector.py），
         # 不是 "true"/"false"，解析会失效；on_enter/on_exit 语义清晰无需解析 data。
         self._divider = ft.GestureDetector(
             content=ft.Container(
@@ -122,10 +122,15 @@ class ResizableSplitter(ft.Container):
     def _on_drag_update(self, e) -> None:
         """按拖动增量更新左栏宽度。
 
-        宽度计算始终跟随鼠标（不丢弃 delta_x），仅节流 UI update 与回调，
+        宽度计算始终跟随鼠标（不丢弃 primary_delta），仅节流 UI update 与回调，
         避免 Flet 通讯管道被高频事件打满的同时保证拖动跟手。
         """
-        delta_x = getattr(e, "delta_x", 0) or 0
+        # R13: V1 DragUpdateEvent 用 primary_delta（水平拖拽 x 增量）；
+        # local_delta.x 作为回退（兼容 V0 mock 或边界场景，静默回归修复）
+        delta_x = getattr(e, "primary_delta", None)
+        if delta_x is None:
+            local_delta = getattr(e, "local_delta", None)
+            delta_x = getattr(local_delta, "x", 0) if local_delta else 0
         new_width = max(self._min_width, min(self._max_width, self._current_width + delta_x))
         if new_width == self._current_width:
             return
@@ -171,7 +176,7 @@ class ResizableSplitter(ft.Container):
         """鼠标进入分隔条：高亮中线（AppColors.PRIMARY with opacity）。
 
         使用 on_enter 而非 on_hover：Flet ``HoverEvent.data`` 是 JSON 字符串
-        （含 timestamp/kind/global_x/local_x/delta_x 等字段），不是 "true"/"false"，
+        （含 timestamp/kind/global_x/local_x 等字段），不是 "true"/"false"，
         旧实现字符串比较恒为 False 导致 hover 高亮失效。
         """
         line = self._divider.content

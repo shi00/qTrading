@@ -172,14 +172,14 @@ class AppLayout(ft.Container):
                         src="/icon.png",  # pragma: no cover
                         width=48,  # pragma: no cover
                         height=48,  # pragma: no cover
-                        fit=ft.ImageFit.CONTAIN,  # pragma: no cover
+                        fit=ft.BoxFit.CONTAIN,  # pragma: no cover
                     ),  # pragma: no cover
                     self.brand_text,  # pragma: no cover
                 ],  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.only(top=10, bottom=10),  # pragma: no cover
+            padding=ft.Padding.only(top=10, bottom=10),  # pragma: no cover
         )  # pragma: no cover
 
         # 3. Navigation Rail — uses semantic tokens  # pragma: no cover
@@ -197,8 +197,7 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.DASHBOARD_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.DASHBOARD,  # pragma: no cover
-                    label=I18n.get("nav_market"),  # pragma: no cover
-                    label_content=ft.Text(  # pragma: no cover
+                    label=ft.Text(  # pragma: no cover
                         I18n.get("nav_market"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
@@ -207,8 +206,7 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.FILTER_ALT_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.FILTER_ALT,  # pragma: no cover
-                    label=I18n.get("nav_screener"),  # pragma: no cover
-                    label_content=ft.Text(  # pragma: no cover
+                    label=ft.Text(  # pragma: no cover
                         I18n.get("nav_screener"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
@@ -217,8 +215,7 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.ASSESSMENT_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.ASSESSMENT,  # pragma: no cover
-                    label=I18n.get("nav_backtest"),  # pragma: no cover
-                    label_content=ft.Text(  # pragma: no cover
+                    label=ft.Text(  # pragma: no cover
                         I18n.get("nav_backtest"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
@@ -227,8 +224,7 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.STORAGE_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.STORAGE_ROUNDED,  # pragma: no cover
-                    label=I18n.get("nav_data"),  # pragma: no cover
-                    label_content=ft.Text(  # pragma: no cover
+                    label=ft.Text(  # pragma: no cover
                         I18n.get("nav_data"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
@@ -237,8 +233,7 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.FORMAT_LIST_BULLETED_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.FORMAT_LIST_BULLETED,  # pragma: no cover
-                    label=I18n.get("nav_tasks"),  # pragma: no cover
-                    label_content=ft.Text(  # pragma: no cover
+                    label=ft.Text(  # pragma: no cover
                         I18n.get("nav_tasks"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
@@ -247,8 +242,7 @@ class AppLayout(ft.Container):
                 ft.NavigationRailDestination(  # pragma: no cover
                     icon=ft.Icons.SETTINGS_OUTLINED,  # pragma: no cover
                     selected_icon=ft.Icons.SETTINGS,  # pragma: no cover
-                    label=I18n.get("nav_settings"),  # pragma: no cover
-                    label_content=ft.Text(  # pragma: no cover
+                    label=ft.Text(  # pragma: no cover
                         I18n.get("nav_settings"),  # pragma: no cover
                         size=12,  # pragma: no cover
                         weight=ft.FontWeight.BOLD,  # pragma: no cover
@@ -333,8 +327,9 @@ class AppLayout(ft.Container):
                 for i, key in enumerate(nav_keys):
                     if i < len(self.nav_rail.destinations):  # type: ignore[untyped]
                         text = I18n.get(key)
-                        self.nav_rail.destinations[i].label = text  # type: ignore[untyped]
-                        self.nav_rail.destinations[i].label_content.value = text  # type: ignore[untyped]
+                        # V1: label 是 ft.Text 控件（StrOrControl），更新 .value 即可；
+                        # 不再赋字符串以免覆盖控件的 size/weight 样式（R12.b NavRail 双写修复）
+                        self.nav_rail.destinations[i].label.value = text  # type: ignore[union-attr]
                 self.nav_rail.update()
             if self.page:
                 self.page.update()  # type: ignore[untyped]

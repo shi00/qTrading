@@ -730,7 +730,7 @@ class TestPaginatedTable:
         table.set_rows([{"price": "123.45"}])
         row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
-        assert cell_container.content.alignment == ft.alignment.center_right
+        assert cell_container.content.alignment == ft.Alignment.CENTER_RIGHT
 
     def test_set_rows_string_data_left_aligned(self):
         table = PaginatedTable()
@@ -738,7 +738,7 @@ class TestPaginatedTable:
         table.set_rows([{"name": "AAPL"}])
         row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
-        assert cell_container.content.alignment == ft.alignment.center_left
+        assert cell_container.content.alignment == ft.Alignment.CENTER_LEFT
 
     def test_set_rows_pct_chg_positive_uses_up_red_color(self):
         table = PaginatedTable()

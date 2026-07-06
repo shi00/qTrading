@@ -507,8 +507,8 @@ class TestMainLocaleChangeUpdate:
         # Verify initial English texts
         assert dialog.title.value == "Confirm Exit"
         assert dialog.content.value == "Confirm exit?"
-        assert dialog.actions[0].text == "Cancel"
-        assert dialog.actions[1].text == "Confirm"
+        assert dialog.actions[0].content == "Cancel"
+        assert dialog.actions[1].content == "Confirm"
 
         # Simulate changing locale to zh_CN
         app_main.I18n.set_locale("zh_CN")
@@ -516,8 +516,8 @@ class TestMainLocaleChangeUpdate:
         # Verify texts updated to Chinese
         assert dialog.title.value == "确认退出"
         assert dialog.content.value == "确认退出吗？"
-        assert dialog.actions[0].text == "取消"
-        assert dialog.actions[1].text == "确认"
+        assert dialog.actions[0].content == "取消"
+        assert dialog.actions[1].content == "确认"
 
         # Verify unsubscription on disconnect
         on_disconnect = cast(AsyncEventHandler, page.on_disconnect)

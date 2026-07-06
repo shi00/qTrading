@@ -179,15 +179,16 @@ class MockFletPage:
 
 
 class MockDragUpdateEvent:
-    """DragUpdateEvent 测试桩：绕过真实 flet 需 ControlEvent + JSON 解析的构造。
+    """DragUpdateEvent 测试桩 (V1)：绕过真实 flet 需 ControlEvent + JSON 解析的构造。
 
-    真实 ``ft.DragUpdateEvent`` 构造需传入 ControlEvent 且 ``json.loads(e.data)``
-    解析 delta_x；测试中直接构造不便，故提供此轻量桩。
+    V1 ``ft.DragUpdateEvent`` 用 ``primary_delta`` 表示主增量（水平拖拽为 x 增量），
+    ``local_delta.x`` 为回退字段（兼容 V0 mock 或边界场景，R13 静默回归修复）。
+    测试中直接构造不便，故提供此轻量桩。
     """
 
-    def __init__(self, delta_x=0, delta_y=0):
-        self.delta_x = delta_x
-        self.delta_y = delta_y
+    def __init__(self, primary_delta=0, local_delta=None):
+        self.primary_delta = primary_delta
+        self.local_delta = local_delta
 
 
 class MockHoverEvent:

@@ -62,12 +62,12 @@ class BacktestConfigPanel(ft.Container):
         self.end_date_value = today
 
         self.start_date_btn = ft.OutlinedButton(
-            text=one_year_ago.strftime("%Y-%m-%d"),
+            content=one_year_ago.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
             on_click=self._show_start_picker,
         )
         self.end_date_btn = ft.OutlinedButton(
-            text=today.strftime("%Y-%m-%d"),
+            content=today.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
             on_click=self._show_end_picker,
         )
@@ -145,8 +145,8 @@ class BacktestConfigPanel(ft.Container):
         )
         self.slippage_text = ft.Text("5 bps", size=12, color=AppColors.TEXT_SECONDARY)
 
-        self.run_btn = ft.ElevatedButton(
-            text=I18n.get("backtest_run"),
+        self.run_btn = ft.Button(
+            content=I18n.get("backtest_run"),
             icon=ft.Icons.PLAY_ARROW,
             on_click=self._on_run_click,
             style=ft.ButtonStyle(
@@ -187,7 +187,7 @@ class BacktestConfigPanel(ft.Container):
             )
             self.max_position_input.label = I18n.get("backtest_max_positions")
             self.stamp_duty_auto_checkbox.label = I18n.get("backtest_stamp_duty_auto")
-            self.run_btn.text = I18n.get("backtest_run")
+            self.run_btn.content = I18n.get("backtest_run")
             # 重建 content 以刷新所有内联 ft.Text(I18n.get(...)) 文案
             self.content = self._build_content()
             if self.page:
@@ -334,13 +334,13 @@ class BacktestConfigPanel(ft.Container):
     def _on_start_date_change(self, e):
         if e.control.value:
             self.start_date_value = e.control.value
-            self.start_date_btn.text = self.start_date_value.strftime("%Y-%m-%d")
+            self.start_date_btn.content = self.start_date_value.strftime("%Y-%m-%d")
             self.start_date_btn.update()
 
     def _on_end_date_change(self, e):
         if e.control.value:
             self.end_date_value = e.control.value
-            self.end_date_btn.text = self.end_date_value.strftime("%Y-%m-%d")
+            self.end_date_btn.content = self.end_date_value.strftime("%Y-%m-%d")
             self.end_date_btn.update()
 
     def _on_stamp_duty_auto_change(self, e):

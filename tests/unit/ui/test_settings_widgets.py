@@ -20,7 +20,7 @@ def _patch_deps(mock_i18n, mock_app_colors, mock_app_styles):
         "bgcolor": ft.Colors.SURFACE,
         "border_radius": 4,
         "padding": 15,
-        "border": ft.border.all(1, ft.Colors.OUTLINE),
+        "border": ft.Border.all(1, ft.Colors.OUTLINE),
     }
     patches = [
         patch("ui.components.settings_widgets.I18n", mock_i18n),

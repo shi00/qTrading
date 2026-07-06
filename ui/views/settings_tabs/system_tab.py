@@ -41,7 +41,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option(code, name)  # pragma: no cover
                 for code, name in I18n.get_language_options()  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self.on_language_change,  # pragma: no cover
+            on_select=self.on_language_change,  # pragma: no cover
         )  # pragma: no cover
 
         # Theme Selector  # pragma: no cover
@@ -58,7 +58,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option(ThemeName.NAVY, I18n.get("theme_navy")),  # pragma: no cover
                 ft.dropdown.Option(ThemeName.DRACULA, I18n.get("theme_dracula")),  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self.on_theme_change,  # pragma: no cover
+            on_select=self.on_theme_change,  # pragma: no cover
         )  # pragma: no cover
 
         # Concurrency  # pragma: no cover
@@ -88,7 +88,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),  # pragma: no cover
                 ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self.on_log_level_change,  # pragma: no cover
+            on_select=self.on_log_level_change,  # pragma: no cover
         )  # pragma: no cover
 
         # DB Connection Pool Size  # pragma: no cover
@@ -174,8 +174,8 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # System Diagnostics Button  # pragma: no cover
-        self.diagnostics_button = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("settings_diagnostics_btn"),  # pragma: no cover
+        self.diagnostics_button = ft.Button(  # pragma: no cover
+            content=I18n.get("settings_diagnostics_btn"),  # pragma: no cover
             icon=ft.Icons.DOWNLOAD_ROUNDED,  # pragma: no cover
             on_click=lambda e: (
                 self.page.run_task(self.on_export_diagnostics) if self.page else None
@@ -379,7 +379,7 @@ class SystemTab(ft.Container):
                     ),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
-            padding=ft.padding.only(bottom=50),  # pragma: no cover
+            padding=ft.Padding.only(bottom=50),  # pragma: no cover
         )  # pragma: no cover
         self.card_main = self.content.controls[0]  # pragma: no cover
         self._locale_subscription_id = None  # pragma: no cover
@@ -467,7 +467,7 @@ class SystemTab(ft.Container):
             self.cpu_workers_input.label = I18n.get("sys_pool_cpu")
             self.cpu_workers_input.suffix_text = I18n.get("sys_suffix_threads")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
-            self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
+            self.diagnostics_button.content = I18n.get("settings_diagnostics_btn")
 
             # 刷新保存按钮的 tooltip
             save_config_tip = I18n.get("settings_save_config")
@@ -744,7 +744,7 @@ class SystemTab(ft.Container):
         """异步导出系统诊断包"""
         UILogger.log_action("SystemTab", "Click", "export_diagnostics")
         self.diagnostics_button.disabled = True
-        self.diagnostics_button.text = I18n.get("settings_diagnostics_exporting")
+        self.diagnostics_button.content = I18n.get("settings_diagnostics_exporting")
         self._safe_update()
 
         try:
@@ -766,5 +766,5 @@ class SystemTab(ft.Container):
             )
         finally:
             self.diagnostics_button.disabled = False
-            self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
+            self.diagnostics_button.content = I18n.get("settings_diagnostics_btn")
             self._safe_update()

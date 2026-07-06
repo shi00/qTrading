@@ -135,9 +135,9 @@ class StockDetailDialog(ft.AlertDialog):
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
             ),  # pragma: no cover
             height=350,  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             bgcolor=AppColors.BACKGROUND,  # pragma: no cover
-            border=ft.border.all(1, AppColors.BORDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.BORDER),  # pragma: no cover
             border_radius=8,  # pragma: no cover
         )  # pragma: no cover
 
@@ -333,7 +333,7 @@ class StockDetailDialog(ft.AlertDialog):
                                     weight=ft.FontWeight.BOLD,
                                 ),
                                 bgcolor=score_color,
-                                padding=ft.padding.symmetric(horizontal=10, vertical=5),
+                                padding=ft.Padding.symmetric(horizontal=10, vertical=5),
                                 border_radius=12,
                             )
                             if ai_score is not None
@@ -354,7 +354,7 @@ class StockDetailDialog(ft.AlertDialog):
                         padding=10,
                         bgcolor=AppColors.SURFACE_VARIANT,
                         border_radius=8,
-                        border=ft.border.all(1, AppColors.BORDER),
+                        border=ft.Border.all(1, AppColors.BORDER),
                     ),
                     # --- AI Thinking Chain ---
                     ft.ExpansionTile(
@@ -377,7 +377,7 @@ class StockDetailDialog(ft.AlertDialog):
                                 padding=10,
                                 bgcolor=AppColors.SURFACE_VARIANT,
                                 border_radius=8,
-                                border=ft.border.all(1, AppColors.BORDER),
+                                border=ft.Border.all(1, AppColors.BORDER),
                             ),
                         ],
                     )
@@ -418,7 +418,7 @@ class StockDetailDialog(ft.AlertDialog):
                 spacing=2,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.all(8),  # pragma: no cover
+            padding=ft.Padding.all(8),  # pragma: no cover
             bgcolor=AppColors.SURFACE_VARIANT,  # pragma: no cover
             border_radius=8,  # pragma: no cover
             width=120,  # pragma: no cover
@@ -543,8 +543,8 @@ class StockDetailDialog(ft.AlertDialog):
             )
 
             self.chart_container.content = ft.Image(
-                src_base64=b64_png,
-                fit=ft.ImageFit.CONTAIN,
+                src=b64_png,
+                fit=ft.BoxFit.CONTAIN,
                 expand=True,
             )
             self.chart_container.update()

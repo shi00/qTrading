@@ -96,7 +96,7 @@ class StartupViewRenderer:
                     spacing=20,
                 ),
                 expand=True,
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
             )
         )
         self._page.update()
@@ -109,7 +109,7 @@ class StartupViewRenderer:
             title=ft.Text(I18n.get("db_upgrade_needed_title")),
             content=ft.Text(I18n.get("db_upgrade_needed_content")),
             actions=[
-                ft.ElevatedButton(
+                ft.Button(
                     I18n.get("db_upgrade_btn"),
                     on_click=lambda e: self._run_task(self._controller.upgrade),
                 ),
@@ -165,7 +165,7 @@ class StartupViewRenderer:
                         self._controller.upgrade_exit(),
                     ],
                 ),
-                ft.ElevatedButton(
+                ft.Button(
                     I18n.get("retry_upgrade"),
                     on_click=lambda e: [
                         self._hide_dialog(dialog),
@@ -201,7 +201,7 @@ class StartupViewRenderer:
                         ),
                         ft.Row(
                             [
-                                ft.ElevatedButton(
+                                ft.Button(
                                     I18n.get("retry"),
                                     icon=ft.Icons.REFRESH,
                                     on_click=lambda e: self._run_task(self._controller.retry),
@@ -224,7 +224,7 @@ class StartupViewRenderer:
                     spacing=10,
                 ),
                 expand=True,
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
             ),
         )
 

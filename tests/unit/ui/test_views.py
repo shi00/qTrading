@@ -939,7 +939,7 @@ class TestAppLayout:
 
         覆盖 app_layout.py:283-310 的正向路径：
         - page.title / brand_text.value / collapse_btn.tooltip 被刷新
-        - nav_rail.destinations[i].label 与 label_content.value 被刷新
+        - nav_rail.destinations[i].label.value 被刷新（V1: label 是 ft.Text 控件）
         - nav_rail.update 被调用
         mock_i18n.get 返回 key 本身，便于断言。
         """
@@ -954,8 +954,7 @@ class TestAppLayout:
         # 规范 6：nav_rail.destinations 级联刷新
         nav_keys = ["nav_market", "nav_screener", "nav_backtest", "nav_data", "nav_tasks", "nav_settings"]
         for i, key in enumerate(nav_keys):
-            assert layout.nav_rail.destinations[i].label == key
-            assert layout.nav_rail.destinations[i].label_content.value == key
+            assert layout.nav_rail.destinations[i].label.value == key
         # nav_rail.update 被调用一次
         layout.nav_rail.update.assert_called_once()
 
@@ -1117,8 +1116,7 @@ class TestAppLayout:
         # 前 3 个 destinations 被刷新为对应的 nav key
         expected_keys = ["nav_market", "nav_screener", "nav_backtest"]
         for i, expected_key in enumerate(expected_keys):
-            assert layout.nav_rail.destinations[i].label == expected_key
-            assert layout.nav_rail.destinations[i].label_content.value == expected_key
+            assert layout.nav_rail.destinations[i].label.value == expected_key
         layout.nav_rail.update.assert_called_once()
 
     def test_on_locale_change_updates_page_after_nav_rail(self, mock_page):

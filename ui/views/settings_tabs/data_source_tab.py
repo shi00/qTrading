@@ -74,17 +74,17 @@ class DataSourceTab(ft.Container):
         )  # pragma: no cover
         self.health_summary_container = ft.Container(  # pragma: no cover
             content=self.health_summary_text,  # pragma: no cover
-            padding=ft.padding.symmetric(vertical=10, horizontal=15),  # pragma: no cover
+            padding=ft.Padding.symmetric(vertical=10, horizontal=15),  # pragma: no cover
             bgcolor=AppColors.SURFACE_VARIANT,  # pragma: no cover
             border_radius=8,  # pragma: no cover
-            border=ft.border.all(1, AppColors.DIVIDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.DIVIDER),  # pragma: no cover
         )  # pragma: no cover
 
         style_health = AppStyles.primary_button()  # pragma: no cover
-        style_health.padding = ft.padding.symmetric(horizontal=15, vertical=0)  # pragma: no cover
+        style_health.padding = ft.Padding.symmetric(horizontal=15, vertical=0)  # pragma: no cover
 
-        self.btn_check_health = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("settings_check_health"),  # pragma: no cover
+        self.btn_check_health = ft.Button(  # pragma: no cover
+            content=I18n.get("settings_check_health"),  # pragma: no cover
             icon=ft.Icons.REFRESH,  # pragma: no cover
             on_click=lambda e: self.page.run_task(self.on_check_health, e) if self.page else None,  # pragma: no cover
             style=style_health,  # pragma: no cover
@@ -224,10 +224,10 @@ class DataSourceTab(ft.Container):
         self.progress_text = ft.Text("", size=12, color=AppColors.INFO)  # pragma: no cover
 
         style_init = AppStyles.primary_button()  # pragma: no cover
-        style_init.padding = ft.padding.symmetric(horizontal=15, vertical=0)  # pragma: no cover
+        style_init.padding = ft.Padding.symmetric(horizontal=15, vertical=0)  # pragma: no cover
 
-        self.sync_button = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("settings_init_data"),  # pragma: no cover
+        self.sync_button = ft.Button(  # pragma: no cover
+            content=I18n.get("settings_init_data"),  # pragma: no cover
             icon=ft.Icons.CLOUD_DOWNLOAD,  # pragma: no cover
             on_click=lambda e: (
                 self.page.run_task(self.on_init_historical, e) if self.page else None
@@ -251,7 +251,7 @@ class DataSourceTab(ft.Container):
                 ft.dropdown.Option("5", f"5 {I18n.get('unit_years')}".strip()),  # pragma: no cover
             ],  # pragma: no cover
             width=150,  # pragma: no cover
-            on_change=self.on_history_years_change,  # pragma: no cover
+            on_select=self.on_history_years_change,  # pragma: no cover
         )  # pragma: no cover
 
         self.row_init = SettingRow(  # pragma: no cover
@@ -304,7 +304,7 @@ class DataSourceTab(ft.Container):
                 self.historical_card,  # pragma: no cover
             ],  # pragma: no cover
             spacing=15,  # pragma: no cover
-            padding=ft.padding.only(bottom=50),  # pragma: no cover
+            padding=ft.Padding.only(bottom=50),  # pragma: no cover
         )  # pragma: no cover
 
         # Lifecycle hooks
@@ -365,7 +365,7 @@ class DataSourceTab(ft.Container):
     def refresh_locale(self):
         try:
             # Historical Data Card
-            self.sync_button.text = I18n.get("settings_init_data")
+            self.sync_button.content = I18n.get("settings_init_data")
             self.sync_button.tooltip = I18n.get("settings_init_desc")
             self.row_init.title_view.value = I18n.get("settings_init_data")
             self.row_init.subtitle_view.value = I18n.get("settings_hint_first_run")
@@ -388,7 +388,7 @@ class DataSourceTab(ft.Container):
             self.header_init.update_locale()
 
             # Health dashboard
-            self.btn_check_health.text = I18n.get("settings_check_health")
+            self.btn_check_health.content = I18n.get("settings_check_health")
             self.btn_health_report.tooltip = I18n.get("health_report_title")
             self.health_summary_text.value = I18n.get("settings_check_health")
 
@@ -536,7 +536,7 @@ class DataSourceTab(ft.Container):
         if self.vm.is_syncing and self.vm.init_sync_cancellable:
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
             self.page.run_task(self.vm.cancel_init_sync)
-            self.sync_button.text = I18n.get("sys_init_cancel_wait")
+            self.sync_button.content = I18n.get("sys_init_cancel_wait")
             self.sync_button.disabled = True
             self._safe_update()
             return
@@ -732,7 +732,7 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     def _on_vm_init_sync_started(self):
-        self.sync_button.text = I18n.get("settings_cancel_sync")
+        self.sync_button.content = I18n.get("settings_cancel_sync")
         self.sync_button.icon = ft.Icons.STOP_CIRCLE
         self.sync_button.style = ft.ButtonStyle(
             color=AppColors.TEXT_ON_PRIMARY,
@@ -744,7 +744,7 @@ class DataSourceTab(ft.Container):
         self._safe_update()
 
     def _on_vm_init_sync_reset(self, final_status: TaskStatus):
-        self.sync_button.text = I18n.get("settings_init_data")
+        self.sync_button.content = I18n.get("settings_init_data")
         self.sync_button.icon = ft.Icons.CLOUD_DOWNLOAD
         self.sync_button.style = AppStyles.primary_button()
         self.sync_button.disabled = False

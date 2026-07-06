@@ -860,7 +860,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         original_btn = wizard.btn_sync_later
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_btn_sync_later" else key
         wizard._on_locale_change()
-        assert original_btn.text == "en_wizard_btn_sync_later"
+        assert original_btn.content == "en_wizard_btn_sync_later"
         assert wizard.btn_sync_later is original_btn
 
     def test_header_title_is_in_ui_tree(self, mock_page):

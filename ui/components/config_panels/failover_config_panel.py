@@ -80,7 +80,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             label=I18n.get("failover_select_provider"),
             options=provider_options,
             width=400,
-            on_change=self._on_provider_change,
+            on_select=self._on_provider_change,
             disabled=self._is_edit,
         )
 
@@ -88,7 +88,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             label=I18n.get("failover_select_model"),
             options=[],
             width=400,
-            on_change=self._on_model_dropdown_change,
+            on_select=self._on_model_dropdown_change,
         )
 
         self.custom_model_input = ft.TextField(
@@ -128,17 +128,17 @@ class ProviderCredentialDialog(ft.AlertDialog):
             width=440,
         )
         self._cancel_btn = ft.TextButton(
-            text=I18n.get("common_cancel"),
+            content=I18n.get("common_cancel"),
             on_click=self._on_cancel,
         )
         self._test_btn = None
         if self._test_connection_callback:
             self._test_btn = ft.TextButton(
-                text=I18n.get("failover_test_connection"),
+                content=I18n.get("failover_test_connection"),
                 on_click=self._on_test_connection,
             )
-        self._confirm_btn = ft.ElevatedButton(
-            text=I18n.get("common_confirm"),
+        self._confirm_btn = ft.Button(
+            content=I18n.get("common_confirm"),
             on_click=self._on_confirm_click,
             style=AppStyles.primary_button(),
         )
@@ -188,10 +188,10 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self.base_url_input.hint_text = default_url or I18n.get("failover_base_url_hint")
             self.api_key_input.label = I18n.get("llm_api_key")
 
-            self._cancel_btn.text = I18n.get("common_cancel")
+            self._cancel_btn.content = I18n.get("common_cancel")
             if self._test_btn is not None:
-                self._test_btn.text = I18n.get("failover_test_connection")
-            self._confirm_btn.text = I18n.get("common_confirm")
+                self._test_btn.content = I18n.get("failover_test_connection")
+            self._confirm_btn.content = I18n.get("common_confirm")
 
             # 重建链接行（其文案依赖 i18n）
             self._update_links_row(self._provider)
@@ -246,21 +246,21 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if console_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_get_api_key"),
+                    content=I18n.get("llm_get_api_key"),
                     on_click=lambda _: self._open_url(console_url),
                 )
             )
         if pricing_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_pricing"),
+                    content=I18n.get("llm_view_pricing"),
                     on_click=lambda _: self._open_url(pricing_url),
                 )
             )
         if models_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_models"),
+                    content=I18n.get("llm_view_models"),
                     on_click=lambda _: self._open_url(models_url),
                 )
             )
@@ -433,7 +433,7 @@ class FailoverConfigPanel(ft.Container):
                 ft.Icon(ft.Icons.BOLT, size=20, color=AppColors.PRIMARY),
                 ft.Container(expand=True),
                 ft.OutlinedButton(
-                    text=I18n.get("failover_add_provider"),
+                    content=I18n.get("failover_add_provider"),
                     icon=ft.Icons.ADD,
                     on_click=self._on_add_click,
                     style=AppStyles.secondary_button(),
@@ -450,15 +450,15 @@ class FailoverConfigPanel(ft.Container):
         )
 
         self.btn_validate = ft.OutlinedButton(
-            text=I18n.get("failover_validate_all"),
+            content=I18n.get("failover_validate_all"),
             icon=ft.Icons.VERIFIED_USER,
             on_click=self._on_validate_all,
             style=AppStyles.secondary_button(),
             height=36,
         )
 
-        self.btn_save = ft.ElevatedButton(
-            text=I18n.get("settings_save_ai"),
+        self.btn_save = ft.Button(
+            content=I18n.get("settings_save_ai"),
             icon=ft.Icons.SAVE,
             on_click=self._on_save_click,
             style=AppStyles.primary_button(),
@@ -532,7 +532,7 @@ class FailoverConfigPanel(ft.Container):
                         italic=True,
                     ),
                     padding=20,
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                 )
             )
         else:
@@ -612,8 +612,8 @@ class FailoverConfigPanel(ft.Container):
                 ],
                 spacing=2,
             ),
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            border=ft.border.all(1, ft.Colors.OUTLINE),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border=ft.Border.all(1, ft.Colors.OUTLINE),
             border_radius=6,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
         )

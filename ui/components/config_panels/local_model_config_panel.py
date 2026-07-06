@@ -88,7 +88,7 @@ class LocalModelConfigPanel(ft.Container):
         )
 
         self.btn_select_file = ft.OutlinedButton(
-            text=I18n.get("settings_btn_select_file"),
+            content=I18n.get("settings_btn_select_file"),
             icon=ft.Icons.FOLDER_OPEN,
             on_click=self._on_select_file_click,
         )
@@ -138,7 +138,7 @@ class LocalModelConfigPanel(ft.Container):
             value=str(local_cfg.get("n_batch", 512)),
             options=[ft.dropdown.Option(str(x)) for x in [512, 1024, 2048, 4096]],
             width=_INPUT_WIDTH_SMALL,
-            on_change=self._on_input_change,
+            on_select=self._on_input_change,
         )
 
         self.ctx_input = ft.Dropdown(
@@ -146,7 +146,7 @@ class LocalModelConfigPanel(ft.Container):
             value=str(local_cfg.get("n_ctx", 4096)),
             options=[ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]],
             width=_INPUT_WIDTH_SMALL,
-            on_change=self._on_input_change,
+            on_select=self._on_input_change,
         )
 
         self.flash_attn_switch = ft.Switch(
@@ -168,15 +168,15 @@ class LocalModelConfigPanel(ft.Container):
             stroke_width=2,
         )
 
-        self.verify_button = ft.ElevatedButton(
-            text=I18n.get("wizard_btn_verify_model"),
+        self.verify_button = ft.Button(
+            content=I18n.get("wizard_btn_verify_model"),
             on_click=self._on_verify_click,
             icon=ft.Icons.CHECK_CIRCLE,
             style=AppStyles.secondary_button(),
         )
 
-        self.save_button = ft.ElevatedButton(
-            text=I18n.get("settings_save_config"),
+        self.save_button = ft.Button(
+            content=I18n.get("settings_save_config"),
             on_click=self._on_save_click,
             icon=ft.Icons.SAVE,
             visible=self._show_save_button,
@@ -300,7 +300,7 @@ class LocalModelConfigPanel(ft.Container):
             self.content = ft.Container(
                 content=form_content,
                 width=550,
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
             )
         else:
             self.content = form_content
@@ -585,7 +585,7 @@ class LocalModelConfigPanel(ft.Container):
             if hasattr(self, "model_path_input"):
                 self.model_path_input.label = I18n.get("settings_local_model_path")
             if hasattr(self, "btn_select_file"):
-                self.btn_select_file.text = I18n.get("settings_btn_select_file")
+                self.btn_select_file.content = I18n.get("settings_btn_select_file")
             if hasattr(self, "timeout_input"):
                 self.timeout_input.label = I18n.get("settings_local_ai_timeout")
             if hasattr(self, "gpu_auto_switch"):
@@ -597,9 +597,9 @@ class LocalModelConfigPanel(ft.Container):
             if hasattr(self, "flash_attn_switch"):
                 self.flash_attn_switch.label = I18n.get("settings_local_flash_attn")
             if hasattr(self, "verify_button"):
-                self.verify_button.text = I18n.get("wizard_btn_verify_model")
+                self.verify_button.content = I18n.get("wizard_btn_verify_model")
             if hasattr(self, "save_button"):
-                self.save_button.text = I18n.get("settings_save_config")
+                self.save_button.content = I18n.get("settings_save_config")
             if hasattr(self, "_header_text"):
                 self._header_text.update_locale()
             if hasattr(self, "_desc_text"):
