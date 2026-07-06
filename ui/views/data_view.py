@@ -222,7 +222,7 @@ class TableViewerTab(ft.Container):
                     tooltip=I18n.get("common_more_actions"),  # pragma: no cover
                     items=[  # pragma: no cover
                         ft.PopupMenuItem(  # pragma: no cover
-                            text=I18n.get("data_export_current"),  # pragma: no cover
+                            content=I18n.get("data_export_current"),  # pragma: no cover
                             icon=ft.Icons.DOWNLOAD,  # pragma: no cover
                             on_click=lambda e: self.page.run_task(  # type: ignore[union-attr]  # pragma: no cover
                                 self._export_csv,  # pragma: no cover
@@ -230,7 +230,7 @@ class TableViewerTab(ft.Container):
                             ),  # pragma: no cover
                         ),  # pragma: no cover
                         ft.PopupMenuItem(  # pragma: no cover
-                            text=I18n.get("data_export_all"),  # pragma: no cover
+                            content=I18n.get("data_export_all"),  # pragma: no cover
                             icon=ft.Icons.DRIVE_FILE_MOVE,  # pragma: no cover
                             on_click=lambda e: self.page.run_task(  # pragma: no cover
                                 self._export_csv,  # pragma: no cover
