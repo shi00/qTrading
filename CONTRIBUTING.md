@@ -1305,14 +1305,28 @@ def _on_locale_change(self):
 4. 方法挂 `@log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)`。
 5. 若需走代理，使用 `utils/proxy_manager.py`。
 
-### 6. 新增依赖
+### 6. 新增与升级依赖
 
-1. 编辑 `pyproject.toml`：
-   - 运行时依赖加到 `[project] dependencies`
-   - 开发依赖加到 `[project.optional-dependencies] dev`
-   - 可选依赖加到 `[project.optional-dependencies] optional`
-2. `git commit` 时 pre-commit 会自动运行 `uv pip compile --universal` 重新生成对应的 `requirements*.txt`。
-3. 本地安装新依赖: `uv pip install --system -r requirements.txt -r requirements-dev.txt`；如需可选功能，再安装 `requirements-optional.txt`。
+1. **编辑依赖配置**：
+   - 编辑 `pyproject.toml`：
+     - 运行时依赖加到 `[project] dependencies`
+     - 开发依赖加到 `[project.optional-dependencies] dev`
+     - 可选依赖加到 `[project.optional-dependencies] optional`
+   - 若要升级已有依赖，可运行 `uv lock --upgrade` 更新锁文件。
+2. **生成与编译 `requirements*.txt`**：
+   - **自动化生成**：在 `git commit` 时，本地 pre-commit 钩子会自动运行 `uv pip compile` 重新编译所有的 `requirements*.txt`。
+   - **手动即时生成（用于本地即时升级调试）**：若在 commit 前需要使升级或新依赖立即在本地生效，请手动编译：
+     ```bash
+     uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
+     uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
+     uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
+     ```
+3. **本地安装新依赖**：运行以下命令将编译后的依赖同步到本地环境：
+   ```bash
+   uv pip install --system -r requirements.txt -r requirements-dev.txt
+   # 如需可选功能：
+   uv pip install --system -r requirements-optional.txt
+   ```
 
 ### 7. 新增回测配置
 
