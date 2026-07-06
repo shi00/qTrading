@@ -130,7 +130,7 @@ class ScreenerView(ft.Container):
         # Phase 2A.1 Task 2A.1.11：策略显示名缓存，供 refresh_locale 重建 tier_hint 文案
         self._strategy_display_names: dict[str, str] = {}
 
-        self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)  # pragma: no cover
+        self.save_file_picker = ft.FilePicker()  # pragma: no cover
 
         # --- UI Components ---
         # 1. Controls
@@ -309,7 +309,7 @@ class ScreenerView(ft.Container):
             return
         self._mounted = True
         if self.page:
-            self.page.overlay.append(self.save_file_picker)
+            self.page.services.append(self.save_file_picker)
             self.page.update()
 
         # Initialize ViewModel and Bindings
@@ -354,8 +354,8 @@ class ScreenerView(ft.Container):
         self.vm.unsubscribe_task_manager()
         self.vm.dispose()
 
-        if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
-            self.page.overlay.remove(self.save_file_picker)
+        if self.page and getattr(self, "save_file_picker", None) in self.page.services:
+            self.page.services.remove(self.save_file_picker)
             self.page.update()
 
         # Detach Flet Row references inside PaginatedTable to prevent memory leak
@@ -1449,47 +1449,39 @@ class ScreenerView(ft.Container):
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
         default_filename = f"screener_results_{timestamp}.csv"
 
-        self.save_file_picker.save_file(
+        filepath = await self.save_file_picker.save_file(
             dialog_title=I18n.get("data_export_save_title"),
             file_name=default_filename,
             allowed_extensions=["csv"],
         )
-
-    def _on_save_file_result(self, e: ft.FilePickerResultEvent):
-        if not self.page:
-            return
-
-        if not e.path:
+        if not filepath or not self.page:
             return
 
         self.export_btn.disabled = True
         self.export_btn.update()
 
-        async def _do_export(filepath):
-            try:
-                path, error = await self.vm.export_results(filepath)
-                if path:
-                    filename = os.path.basename(filepath)
-                    if hasattr(self.page, "show_toast"):
-                        self.page.show_toast(  # type: ignore[untyped]
-                            I18n.get("data_export_success", file=filename),
-                            "success",
-                        )
-                elif hasattr(self.page, "show_toast"):
+        try:
+            path, error = await self.vm.export_results(filepath)
+            if path:
+                filename = os.path.basename(filepath)
+                if hasattr(self.page, "show_toast"):
                     self.page.show_toast(  # type: ignore[untyped]
-                        I18n.get("data_export_fail"),
-                        "error",
+                        I18n.get("data_export_success", file=filename),
+                        "success",
                     )
-            except Exception as ex:
-                logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
-                logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
-                if self.page and hasattr(self.page, "show_toast"):
-                    self.page.show_toast(I18n.get("data_export_fail"), "error")  # type: ignore[untyped]
-            finally:
-                self.export_btn.disabled = False
-                self.export_btn.update()
-
-        self.page.run_task(_do_export, e.path)  # type: ignore[untyped]
+            elif hasattr(self.page, "show_toast"):
+                self.page.show_toast(  # type: ignore[untyped]
+                    I18n.get("data_export_fail"),
+                    "error",
+                )
+        except Exception as ex:
+            logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
+            logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(I18n.get("data_export_fail"), "error")  # type: ignore[untyped]
+        finally:
+            self.export_btn.disabled = False
+            self.export_btn.update()
 
     def _on_page_size_change(self, e):
         try:

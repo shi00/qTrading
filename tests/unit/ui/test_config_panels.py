@@ -1866,26 +1866,17 @@ class TestLocalModelConfigPanelExtended:
         panel._on_gpu_auto_change(None)
         on_change.assert_called_once()
 
-    def test_on_select_file_click(self, mock_config_handler_local, mock_i18n_local, mock_page):
+    @pytest.mark.asyncio
+    async def test_on_select_file_click(self, mock_config_handler_local, mock_i18n_local, mock_page):
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
         panel.did_mount()
-        with patch.object(panel.file_picker, "pick_files"):
-            panel._on_select_file_click(None)
-            panel.file_picker.pick_files.assert_called_once()
-
-    def test_on_file_picked(self, mock_config_handler_local, mock_i18n_local, mock_page):
-        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
-        mock_event = MagicMock()
-        mock_event.files = [MagicMock(path="/path/to/model.gguf")]
-        panel._on_file_picked(mock_event)
-        assert panel.model_path_input.value == "/path/to/model.gguf"
-
-    def test_on_file_picked_calls_on_change(self, mock_config_handler_local, mock_i18n_local, mock_page):
         on_change = MagicMock()
-        panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, on_change=on_change)
-        mock_event = MagicMock()
-        mock_event.files = [MagicMock(path="/path/to/model.gguf")]
-        panel._on_file_picked(mock_event)
+        panel.on_change = on_change
+        mock_result = MagicMock()
+        mock_result.files = [MagicMock(path="/path/to/model.gguf")]
+        with patch.object(panel.file_picker, "pick_files", AsyncMock(return_value=mock_result)):
+            await panel._on_select_file_click(None)
+        assert panel.model_path_input.value == "/path/to/model.gguf"
         on_change.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1907,7 +1898,7 @@ class TestLocalModelConfigPanelExtended:
     def test_did_mount_adds_file_picker(self, mock_config_handler_local, mock_i18n_local, mock_page):
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)
         panel.did_mount()
-        assert panel.file_picker in mock_page.overlay
+        assert panel.file_picker in mock_page.services
 
     def test_will_unmount_removes_file_picker(self, mock_config_handler_local, mock_i18n_local, mock_page):
         panel = _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page)

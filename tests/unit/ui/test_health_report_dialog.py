@@ -224,14 +224,14 @@ class TestHealthReportDialog:
 
     @pytest.mark.asyncio
     async def test_run_deep_scan_fallback_no_open(self, mock_page):
-        """B6: page_ref 无 open 方法时走回退路径。"""
+        """B6: V1 删除双路径回退，page_ref.show_dialog 为唯一路径。
+
+        原 B6 测试验证无 open 方法时的回退，V1 升级后双路径已删除，
+        此测试改为验证 show_dialog 直接调用（无回退）。
+        """
         dlg = self._make_dialog(mock_page)
         set_page(dlg, mock_page)
         dlg.close_dialog = MagicMock()
-
-        # 替换 page_ref 为无 open 方法的 mock
-        fake_page = MagicMock(spec=["update", "dialog"])
-        dlg.page_ref = fake_page
 
         mock_scan = MagicMock()
         mock_scan.start_scan = AsyncMock()
@@ -244,10 +244,9 @@ class TestHealthReportDialog:
         ):
             await dlg.run_deep_scan(None)
 
-        # 验证回退路径
-        assert fake_page.dialog is mock_scan
-        assert mock_scan.open is True
-        fake_page.update.assert_called_once()
+        # V1: show_dialog 是唯一路径，无回退
+        assert mock_scan in mock_page.overlay
+        mock_scan.start_scan.assert_awaited_once()
 
     def test_init_logs_error_when_summary_fails(self, mock_page, caplog):
         """B7: __init__ 摘要日志异常路径。"""

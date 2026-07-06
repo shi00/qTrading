@@ -285,7 +285,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
     def _on_cancel(self, e):
         self.open = False
         if self.page:
-            self.page.close(self)
+            self.page.pop_dialog()
 
     async def _on_test_connection(self, e):
         provider = self._provider
@@ -326,12 +326,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
-            # 清理旧的 SnackBar 避免累积
-            self.page.overlay[:] = [s for s in self.page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
-            self.page.overlay.append(snack)
-            snack.open = True
-            self.page.update()
+            self.page.show_dialog(snack)
 
     def _on_confirm_click(self, e):
         provider = self._provider
@@ -401,7 +397,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
 
             self.open = False
             if self.page:
-                self.page.close(self)
+                self.page.pop_dialog()
 
             if self._on_confirm:
                 self._on_confirm()
@@ -641,7 +637,7 @@ class FailoverConfigPanel(ft.Container):
                 existing_providers=existing,
             )
             if self.page:
-                self.page.open(dialog)
+                self.page.show_dialog(dialog)
         except Exception as ex:
             logger.error("[FailoverConfigPanel] add click failed: %s", ex, exc_info=True)
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
@@ -665,7 +661,7 @@ class FailoverConfigPanel(ft.Container):
                 edit_credential=cred,
             )
             if self.page:
-                self.page.open(dialog)
+                self.page.show_dialog(dialog)
         except Exception as ex:
             logger.error("[FailoverConfigPanel] edit item failed: %s", ex, exc_info=True)
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
@@ -769,12 +765,8 @@ class FailoverConfigPanel(ft.Container):
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
-            # 清理旧的 SnackBar 避免累积
-            self.page.overlay[:] = [s for s in self.page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
-            self.page.overlay.append(snack)
-            snack.open = True
-            self.page.update()
+            self.page.show_dialog(snack)
 
     def _safe_update(self):
         try:

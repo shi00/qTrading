@@ -44,7 +44,7 @@ class TestScreenerViewCleanup(unittest.TestCase):
     @patch("ui.views.screener_view.ScreenerViewModel")
     def test_will_unmount_clears_overlay_and_table_references(self, mock_vm_cls):
         page = MagicMock()
-        page.overlay = []
+        page.services = []
         page.update = MagicMock()
 
         view = ScreenerView(page)
@@ -54,7 +54,7 @@ class TestScreenerViewCleanup(unittest.TestCase):
         view.result_table.set_rows([{"name": "A"}, {"name": "B"}])
         assert view.result_table.rendered_row_controls  # rows exist before unmount
         view.detail_dialog = MagicMock()
-        page.overlay.extend([view.save_file_picker, view.detail_dialog])
+        page.services.extend([view.save_file_picker, view.detail_dialog])
 
         view.will_unmount()
 
@@ -64,7 +64,7 @@ class TestScreenerViewCleanup(unittest.TestCase):
         assert view.result_table._row_pool == []
         # Key regression: _canvas must remain in list_view.controls for re-mount
         assert view.result_table.list_view.controls == [view.result_table._canvas]
-        self.assertNotIn(view.save_file_picker, page.overlay)
+        self.assertNotIn(view.save_file_picker, page.services)
         self.assertIsNone(view.detail_dialog)
         page.update.assert_called_once()
 

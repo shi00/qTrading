@@ -480,12 +480,7 @@ class HealthReportDialog(ft.AlertDialog):
 
     def close_dialog(self, e=None):  # pragma: no cover
         try:
-            if hasattr(self.page_ref, "close"):
-                self.page_ref.close(self)
-            else:
-                self.open = False
-                if self.page_ref:
-                    self.page_ref.update()
+            self.page_ref.pop_dialog()
         except Exception as ex:
             logger.error("Error closing dialog: %s", ex, exc_info=True)
 
@@ -599,12 +594,7 @@ class HealthReportDialog(ft.AlertDialog):
         self.close_dialog(e)
 
         dialog = HealthScanDialog(self.page_ref, DataProcessor())
-        if hasattr(self.page_ref, "open"):
-            self.page_ref.open(dialog)
-        else:
-            self.page_ref.dialog = dialog
-            dialog.open = True
-            self.page_ref.update()
+        self.page_ref.show_dialog(dialog)
 
         # Run backend scan without blocking UI thread indefinitely.
         await dialog.start_scan()
@@ -668,11 +658,7 @@ class HealthScanDialog(ft.AlertDialog):
         return w, h
 
     def close_dialog(self, e=None):  # pragma: no cover
-        if hasattr(self.page_ref, "close"):
-            self.page_ref.close(self)
-        else:
-            self.open = False
-            self.page_ref.update()
+        self.page_ref.pop_dialog()
 
     def did_mount(self):  # pragma: no cover
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)

@@ -41,6 +41,7 @@ class MockFletPage:
     def __init__(self):
         self.controls = [MagicMock()]
         self.overlay = []
+        self.services = []
         self._client_storage = MockClientStorage()
         self._session = MockSession()
         self._dialog = None
@@ -165,6 +166,16 @@ class MockFletPage:
     def close(self, control):
         if control in self.overlay:
             self.overlay.remove(control)
+
+    def show_dialog(self, control):
+        """V1 dialog 管理：将 dialog 追加到 overlay 列表以支持测试断言。"""
+        if control not in self.overlay:
+            self.overlay.append(control)
+
+    def pop_dialog(self):
+        """V1 dialog 管理：弹出栈顶 dialog。"""
+        if self.overlay:
+            self.overlay.pop()
 
 
 class MockDragUpdateEvent:

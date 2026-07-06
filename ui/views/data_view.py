@@ -31,7 +31,7 @@ class TableViewerTab(ft.Container):
         self.vm = viewmodel
         self._pending_export_df = None  # Temp storage for export data
 
-        self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)  # pragma: no cover
+        self.save_file_picker = ft.FilePicker()  # pragma: no cover
 
         # UI Elements
         self.table_selector = ft.Dropdown(  # pragma: no cover
@@ -306,13 +306,13 @@ class TableViewerTab(ft.Container):
             return
         self._mounted = True
         if self.page:
-            self.page.overlay.append(self.save_file_picker)
+            self.page.services.append(self.save_file_picker)
             self.page.update()
 
     def will_unmount(self):  # pragma: no cover
         self._mounted = False
-        if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
-            self.page.overlay.remove(self.save_file_picker)
+        if self.page and getattr(self, "save_file_picker", None) in self.page.services:
+            self.page.services.remove(self.save_file_picker)
             self.page.update()
 
     def refresh_locale(self):
@@ -673,32 +673,13 @@ class TableViewerTab(ft.Container):
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"{self.vm.current_table}{suffix}_{timestamp}.csv"
 
-            self._pending_export_df = df
-            self.save_file_picker.save_file(
+            filepath = await self.save_file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
                 file_name=default_filename,
                 allowed_extensions=["csv"],
             )
 
-        except Exception as e:
-            logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
-            logger.debug("Export failed traceback", exc_info=True)
-            self.page.show_toast(  # type: ignore[untyped]
-                I18n.get("data_export_fail"),
-                "error",
-            )
-            await self._toggle_loading(False)
-
-    def _on_save_file_result(self, e: ft.FilePickerResultEvent):  # pragma: no cover
-        if not self.page:
-            self._pending_export_df = None
-            return
-
-        if e.path and self._pending_export_df is not None:
-            df = self._pending_export_df
-            self._pending_export_df = None
-
-            async def _do_save(filepath):
+            if filepath:
                 try:
                     await ThreadPoolManager().run_async(
                         TaskType.CPU,
@@ -713,13 +694,17 @@ class TableViewerTab(ft.Container):
                         I18n.get("data_export_fail"),
                         "error",
                     )
-                finally:
-                    await self._toggle_loading(False)
-
-            self.page.run_task(_do_save, e.path)  # type: ignore[untyped]
-        else:
-            self._pending_export_df = None
-            self.page.run_task(self._toggle_loading, False)  # type: ignore[untyped]
+            else:
+                self._pending_export_df = None
+        except Exception as e:
+            logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Export failed traceback", exc_info=True)
+            self.page.show_toast(  # type: ignore[untyped]
+                I18n.get("data_export_fail"),
+                "error",
+            )
+        finally:
+            await self._toggle_loading(False)
 
     def update_theme(self):  # pragma: no cover
         """Update styles on theme change"""

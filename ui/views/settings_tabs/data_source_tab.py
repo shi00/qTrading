@@ -797,13 +797,13 @@ class DataSourceTab(ft.Container):
             def close_dialog(e):
                 self._dialog_open = False
                 if self.page:
-                    self.page.close(dialog)
+                    self.page.pop_dialog()
 
             def confirm_action(e):
                 self._dialog_open = False
                 if not self.page:
                     return
-                self.page.close(dialog)
+                self.page.pop_dialog()
                 if inspect.iscoroutinefunction(on_confirm_callback):
                     self.page.run_task(on_confirm_callback)
                 else:
@@ -828,7 +828,7 @@ class DataSourceTab(ft.Container):
                 actions_alignment=ft.MainAxisAlignment.END,
                 on_dismiss=lambda e: setattr(self, "_dialog_open", False),
             )
-            self.page.open(dialog)
+            self.page.show_dialog(dialog)
         except Exception as ex:
             self._dialog_open = False
             logger.error(
@@ -858,7 +858,7 @@ class DataSourceTab(ft.Container):
             from ui.components.health_report_dialog import HealthReportDialog
 
             dlg = HealthReportDialog(self.page, report)
-            self.page.open(dlg)
+            self.page.show_dialog(dlg)
         except Exception as ex:
             from utils.error_classifier import classify_error, get_error_message
 

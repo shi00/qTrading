@@ -56,7 +56,7 @@ async def main(page: ft.Page):
     cache_manager = CacheManager()
 
     page.title = I18n.get("app_title")
-    page.window_icon = "icon.png"  # type: ignore[attr-defined]
+    page.window.icon = "icon.png"
 
     from utils.shutdown import ShutdownCoordinator
 
@@ -114,26 +114,14 @@ async def main(page: ft.Page):
 
     def _show_dialog(dialog):
         nonlocal active_dialog
-        if hasattr(page, "open"):
-            page.open(dialog)
-            active_dialog = dialog
-            return
-        page.dialog = dialog  # type: ignore[attr-defined]
-        dialog.open = True
+        page.show_dialog(dialog)
         active_dialog = dialog
-        page.update()
 
     def _hide_dialog(dialog):
         nonlocal active_dialog
-        if hasattr(page, "close"):
-            page.close(dialog)
-            if active_dialog is dialog:
-                active_dialog = None
-            return
-        dialog.open = False
+        page.pop_dialog()
         if active_dialog is dialog:
             active_dialog = None
-        page.update()
 
     def _hide_close_confirm_dialog():
         nonlocal close_confirm_visible
@@ -233,7 +221,7 @@ async def main(page: ft.Page):
     async def _on_resize(e):
         """窗口 resize 回调 — 委托给 AppLayout 防抖处理。
 
-        Flet 0.28.3 的正确属性名为 ``on_resized``（带 d），
+        Flet 0.85.3 的正确属性名为 ``on_resize``，
         ``WindowResizeEvent`` 携带实时 width/height。
         注意：``page.width`` / ``page.window.width`` 只在页面连接时更新一次，
         resize 事件中不会刷新，因此必须从事件对象读取实时尺寸。
@@ -249,7 +237,7 @@ async def main(page: ft.Page):
             height = getattr(e, "height", 0) or 0
             layout.schedule_resize(width, height)
 
-    page.on_resized = _on_resize
+    page.on_resize = _on_resize
 
     async def _on_disconnect(e):
         if locale_subscription_id is not None:

@@ -158,14 +158,8 @@ class BacktestConfigPanel(ft.Container):
         self.content = self._build_content()
 
     def did_mount(self):
-        """挂载时：将对话框安全地绑定到全局 overlay"""
+        """挂载时：DatePicker 在 V1 通过 page.show_dialog 打开，无需预挂载 overlay。"""
         super().did_mount()
-        if self.page:
-            if self.start_date_picker not in self.page.overlay:
-                self.page.overlay.append(self.start_date_picker)
-            if self.end_date_picker not in self.page.overlay:
-                self.page.overlay.append(self.end_date_picker)
-            self.page.update()
 
     def refresh_locale(self):
         """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。"""
@@ -202,28 +196,16 @@ class BacktestConfigPanel(ft.Container):
             logger.warning("[BacktestConfigPanel] refresh_locale error: %s", e, exc_info=True)
 
     def will_unmount(self):
-        """卸载时：确保关闭并清理对话框"""
+        """卸载时：DatePicker 不再挂载 overlay，无需清理。"""
         super().will_unmount()
-        if not self.page:
-            return
-
-        needs_update = False
-        for picker in (self.start_date_picker, self.end_date_picker):
-            if getattr(self, "page", None) and picker in self.page.overlay:
-                picker.open = False  # 确保合规关闭，避免前端撕裂
-                self.page.overlay.remove(picker)
-                needs_update = True
-
-        if needs_update:
-            self.page.update()
 
     def _show_start_picker(self, e):
         if getattr(self, "page", None):
-            self.page.open(self.start_date_picker)
+            self.page.show_dialog(self.start_date_picker)
 
     def _show_end_picker(self, e):
         if getattr(self, "page", None):
-            self.page.open(self.end_date_picker)
+            self.page.show_dialog(self.end_date_picker)
 
     def _build_content(self) -> ft.Column:
         return ft.Column(

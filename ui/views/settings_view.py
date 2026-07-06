@@ -203,18 +203,12 @@ class SettingsView(ft.Container):
                 msg_type = "warning"
             self.page.show_toast(message, type=msg_type)  # type: ignore[untyped]
         else:
-            # Clean up old snackbars to prevent overlay bloat
-            self.page.overlay = [  # type: ignore[untyped]
-                o for o in self.page.overlay if not isinstance(o, ft.SnackBar)
-            ]
             snack = ft.SnackBar(
                 content=ft.Text(message),
-                open=True,
                 bgcolor=color,
                 **kwargs,
             )
-            self.page.overlay.append(snack)
-            self.page.update()
+            self.page.show_dialog(snack)
 
     def _safe_update(self):  # pragma: no cover
         try:  # pragma: no cover

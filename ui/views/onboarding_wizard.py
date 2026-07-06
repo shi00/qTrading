@@ -1117,12 +1117,8 @@ class OnboardingWizard(ft.Container):
 
     def _show_snack(self, msg: str, color: str):  # pragma: no cover
         if self.app_page:
-            # 清理旧的 SnackBar 避免累积
-            self.app_page.overlay[:] = [s for s in self.app_page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
-            self.app_page.overlay.append(snack)
-            snack.open = True
-            self.app_page.update()
+            self.app_page.show_dialog(snack)
 
     def _safe_update(self):  # pragma: no cover
         try:

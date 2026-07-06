@@ -183,7 +183,7 @@ class LocalModelConfigPanel(ft.Container):
             style=AppStyles.primary_button(),
         )
 
-        self.file_picker = ft.FilePicker(on_result=self._on_file_picked)
+        self.file_picker = ft.FilePicker()
 
         self._advanced_title = ft.Text(
             I18n.get("ai_advanced_settings"),
@@ -340,16 +340,15 @@ class LocalModelConfigPanel(ft.Container):
         self.flash_attn_switch.value = local_cfg.get("flash_attn", True)
         self._safe_update()
 
-    def _on_select_file_click(self, e):
-        if self.page:
-            self.file_picker.pick_files(
-                allowed_extensions=["gguf"],
-                dialog_title=I18n.get("settings_btn_select_file"),
-            )
-
-    def _on_file_picked(self, e: ft.FilePickerResultEvent):
-        if e.files and len(e.files) > 0:
-            self.model_path_input.value = e.files[0].path
+    async def _on_select_file_click(self, e):
+        if not self.page:
+            return
+        result = await self.file_picker.pick_files(
+            allowed_extensions=["gguf"],
+            dialog_title=I18n.get("settings_btn_select_file"),
+        )
+        if result and result.files and len(result.files) > 0:
+            self.model_path_input.value = result.files[0].path
             self._safe_update()
             if self.on_change:
                 self.on_change()
@@ -560,15 +559,15 @@ class LocalModelConfigPanel(ft.Container):
 
     def did_mount(self):
         if self.page:
-            self.page.overlay.append(self.file_picker)
+            self.page.services.append(self.file_picker)
             self.page.update()
 
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
         logger.debug("[LocalModelConfigPanel] Subscribed to locale changes")
 
     def will_unmount(self):
-        if self.page and getattr(self, "file_picker", None) in self.page.overlay:
-            self.page.overlay.remove(self.file_picker)
+        if self.page and getattr(self, "file_picker", None) in self.page.services:
+            self.page.services.remove(self.file_picker)
             self.page.update()
 
         if self._locale_subscription_id:
