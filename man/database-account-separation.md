@@ -1,4 +1,4 @@
-# Database Account Separation Guide
+﻿# Database Account Separation Guide
 
 This document describes how to separate database accounts for production deployments, following the principle of least privilege.
 
@@ -194,7 +194,3 @@ config.set_main_option(
 - [ ] Database audit logging is enabled for DDL operations
 - [ ] Regular security audit of granted privileges
 
-## Related
-
-- [Database Design Review](../docs/audit2/数据库设计.md#high-5)
-- [Security Review](../docs/audit2/安全.md#high-3)

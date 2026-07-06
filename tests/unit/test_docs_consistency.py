@@ -44,6 +44,22 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _get_coverage_sources() -> list[str]:
+    """从 pyproject.toml 读取 [tool.coverage.run] source 配置。"""
+    with open(PYPROJECT_PATH, "rb") as f:
+        cfg = tomllib.load(f)
+    try:
+        return cfg["tool"]["coverage"]["run"]["source"]
+    except KeyError as e:
+        raise AssertionError(f"pyproject.toml missing [tool.coverage.run] source config (key {e} not found)") from e
+
+
+def _count_business_daos() -> int:
+    """统计 data/persistence/daos/ 下业务 DAO 文件数（排除 base_dao.py）。"""
+    daos_dir = ROOT / "data" / "persistence" / "daos"
+    return sum(1 for f in daos_dir.glob("*_dao.py") if f.name != "base_dao.py")
+
+
 class TestVersionConsistency:
     """Check 1-3: Real file version consistency (mirrors verify_versions.py)."""
 
@@ -186,4 +202,80 @@ class TestStrategyExampleSignature:
         wrong_pattern = r"required_context_keys\s*=\s*\["
         assert not re.search(wrong_pattern, content), (
             "CLAUDE.md or CONTRIBUTING.md should not use list syntax for required_context_keys (should be tuple)"
+        )
+
+
+class TestNoDeadDocsLinks:
+    """审计报告 P0: 被跟踪 markdown 不得引用 docs/ 路径（docs/ 被 .gitignore 排除，不推送）。"""
+
+    # CHANGELOG.md 由 release-please 自动生成，不纳入手动检查
+    TRACKED_MD_FILES = [
+        README_PATH,
+        CONTRIBUTING_PATH,
+        SECURITY_PATH,
+        CLAUDE_PATH,
+        ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
+        ROOT / "man" / "database-account-separation.md",
+        ROOT / "man" / "table-partitioning-strategy.md",
+    ]
+
+    @pytest.mark.parametrize("doc_path", TRACKED_MD_FILES)
+    def test_no_docs_path_reference(self, doc_path):
+        """被跟踪 markdown 不得引用 docs/ 路径（docs/ 被 .gitignore 排除，不推送）。"""
+        content = _read(doc_path)
+        # 覆盖行内链接 (docs/、(./docs/、(../docs/、(/docs/ 与 Windows 反斜杠
+        inline_pattern = r"\((?:\./|\.\./|/)?docs[/\\]"
+        # 覆盖引用式链接 [ref]: docs/ 或 [ref]: ./docs/ 等
+        ref_pattern = r"^\s*\[[^\]]+\]:\s*(?:\./|\.\./|/)?docs[/\\]"
+        for i, line in enumerate(content.splitlines(), 1):
+            assert not re.search(inline_pattern, line), (
+                f"{doc_path.name}:{i} references docs/ path which is gitignored "
+                f"(dead link for external readers): {line.strip()!r}"
+            )
+            assert not re.search(ref_pattern, line), (
+                f"{doc_path.name}:{i} references docs/ path via reference link: {line.strip()!r}"
+            )
+
+
+class TestCoverageSourceConsistency:
+    """审计报告 P1: README/CONTRIBUTING 覆盖率源清单与 pyproject.toml 一致。"""
+
+    def test_readme_coverage_source_matches_pyproject(self):
+        """README.md 覆盖率源模块路径清单与 pyproject.toml source 一致。"""
+        sources = _get_coverage_sources()
+        content = _read(README_PATH)
+        # 每个 source 模块都应以路径形式（如 `core/`）出现在 README 覆盖率维度表
+        for module in sources:
+            assert f"`{module}/`" in content, (
+                f"README.md coverage table missing path `{module}/` (pyproject source: {sources})"
+            )
+        # "X 个核心模块"中的数字应等于 source 数量（要求阿拉伯数字）
+        m = re.search(r"(\d+)\s*个核心模块", content)
+        assert m, f"README.md missing 'X 个核心模块' count declaration (should use Arabic numerals, sources: {sources})"
+        declared = int(m.group(1))
+        assert declared == len(sources), (
+            f"README.md declares {declared} 核心模块 but pyproject.toml has {len(sources)} sources: {sources}"
+        )
+
+    def test_contributing_coverage_source_matches_pyproject(self):
+        """CONTRIBUTING.md 覆盖率源模块名清单与 pyproject.toml source 一致。"""
+        sources = _get_coverage_sources()
+        content = _read(CONTRIBUTING_PATH)
+        # 每个 source 模块都应以反引号包裹的名称形式（如 `core`）出现在 CONTRIBUTING
+        for module in sources:
+            assert f"`{module}`" in content, f"CONTRIBUTING.md missing module `{module}` (pyproject source: {sources})"
+
+
+class TestDaoCountConsistency:
+    """审计报告 P1: README mermaid 图 DAO 数量与实际代码一致。"""
+
+    def test_dao_count_matches_readme(self):
+        """README.md 'X 个业务 DAO + Base' 数量与 data/persistence/daos/ 实际文件数一致。"""
+        actual = _count_business_daos()
+        content = _read(README_PATH)
+        m = re.search(r"(\d+)\s*个业务\s*DAO\s*[+＋]\s*Base", content)
+        assert m, "README.md missing 'X 个业务 DAO + Base' count declaration"
+        declared = int(m.group(1))
+        assert declared == actual, (
+            f"README.md declares {declared} 业务 DAO but data/persistence/daos/ has {actual} (excluding base_dao.py)"
         )

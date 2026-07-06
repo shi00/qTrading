@@ -1,4 +1,4 @@
-# 大表分区策略
+﻿# 大表分区策略
 
 ## 背景
 
@@ -168,6 +168,5 @@ WHERE trade_date = '2026-01-15';
 
 ## 相关文档
 
-- [数据库设计检视报告](../docs/audit2/数据库设计.md#fatal-2)
 - [PostgreSQL 分区文档](https://www.postgresql.org/docs/current/ddl-partitioning.html)
 - [pg_partman 扩展](https://github.com/pgpartman/pg_partman)

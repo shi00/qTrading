@@ -1,4 +1,4 @@
-# AStockScreener (QTrading) - 智能 A 股 AI 量化交易员
+﻿# AStockScreener (QTrading) - 智能 A 股 AI 量化交易员
 
 [![CI/CD](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml/badge.svg)](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://github.com/shi00/qTrading)
@@ -88,7 +88,7 @@
 
 ## 🏗️ 项目架构
 
-采用清晰分层架构（核心/数据/服务/策略/表现 + 横切 utils）：
+采用清晰分层架构（核心/引导/数据/服务/策略/表现 + 横切 utils）：
 
 ```
 astock_screener/
@@ -239,7 +239,7 @@ astock_screener/
 │   ├── sanitizers.py           # 数据脱敏工具
 │   └── time_utils.py           # 时间工具函数
 │
-├── tests/                  # 测试层（170+ 单元测试文件，50+ 集成测试文件）
+├── tests/                  # 测试层（210+ 单元测试文件，53+ 集成测试文件）
 │   ├── conftest.py             # 全局测试配置
 │   ├── unit/                   # 单元测试
 │   │   ├── conftest.py
@@ -323,7 +323,7 @@ graph TB
     subgraph INFRA["<b>基础设施层 Infrastructure</b>"]
         direction LR
         CACHE["🗄️ CacheManager<br/>单例缓存 | DAO 统一入口"]
-        DAOS["📝 DAOs (9 个业务 DAO + Base)<br/>Stock | Quote | Financial<br/>Holder | Macro | Market<br/>Screener | Sync | Backtest | Base"]
+        DAOS["📝 DAOs (16 个业务 DAO + Base)<br/>Stock | Quote | Financial | Holder<br/>Macro | Market | Screener | Sync<br/>Backtest | Express | PledgeDetail<br/>ShareFloat | StkHoldertrade | StkLimit<br/>SwIndustry | TopInst | Base"]
         SYNC["🔄 Sync Strategies<br/>历史行情 | 财务 | 股东 | 宏观<br/>断点续传 | 质量评分"]
         QUALITY["🛡️ Quality Gate<br/>Bronze → Silver → Gold<br/>三级数据质量校验"]
         REVIEW["🔁 ReviewManager<br/>AI 回顾闭环<br/>Alpha 收益 | 经验注入"]
@@ -416,7 +416,7 @@ python main.py
 
 ## 🧪 测试
 
-项目采用双层测试金字塔结构，包含 **170+ 单元测试文件，50+ 集成测试文件**：
+项目采用双层测试金字塔结构，包含 **210+ 单元测试文件，53+ 集成测试文件**：
 
 ```bash
 # 运行所有测试
@@ -441,8 +441,8 @@ python -m pytest tests/integration/test_historical_sync_integrity.py -v
 
 | 层级 | 目录 | 文件数 | 覆盖内容 |
 |------|------|--------|----------|
-| **Unit** | `tests/unit/` | 170+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
-| **Integration** | `tests/integration/` | 50+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度、回测全流程 |
+| **Unit** | `tests/unit/` | 210+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
+| **Integration** | `tests/integration/` | 53+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度、回测全流程 |
 
 ### 关键测试覆盖
 
@@ -468,7 +468,7 @@ python -m pytest tests/ --cov --cov-report=term-missing --cov-fail-under=85
 
 | 覆盖维度 | 说明 |
 |----------|------|
-| **覆盖目标** | `core/` `data/` `services/` `strategies/` `utils/` `ui/` `config/` `main/` 八个核心模块 |
+| **覆盖目标** | `core/` `app/` `data/` `services/` `strategies/` `utils/` `ui/` `config/` `main/` 9 个核心模块 |
 | **门禁阈值** | **85%** — 低于此值 CI 流水线失败 |
 | **排除项** | tiktoken 缓存、离线日历数据、辅助脚本 |
 | **报告格式** | terminal-missing（终端逐行展示）+ XML（CI 解析） |
