@@ -174,7 +174,7 @@ markupsafe==3.0.3
     # via
     #   jinja2
     #   mako
-matplotlib==3.10.9
+matplotlib==3.11.0
     # via
     #   astockscreener (pyproject.toml)
     #   mplfinance
@@ -222,7 +222,7 @@ pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
 pillow==12.2.0
     # via matplotlib
-playwright==1.60.0
+playwright==1.61.0
     # via astockscreener (pyproject.toml)
 polars==1.42.1
     # via astockscreener (pyproject.toml)
@@ -308,7 +308,7 @@ sniffio==1.3.1
     # via openai
 soupsieve==2.8.4
     # via beautifulsoup4
-sqlalchemy==2.0.50
+sqlalchemy==2.0.51
     # via
     #   astockscreener (pyproject.toml)
     #   alembic

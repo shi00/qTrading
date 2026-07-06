@@ -190,7 +190,7 @@ markupsafe==3.0.3
     # via
     #   jinja2
     #   mako
-matplotlib==3.10.9
+matplotlib==3.11.0
     # via
     #   astockscreener (pyproject.toml)
     #   mplfinance
@@ -385,7 +385,7 @@ sortedcontainers==2.4.0
     #   hypothesis
 soupsieve==2.8.4
     # via beautifulsoup4
-sqlalchemy==2.0.50
+sqlalchemy==2.0.51
     # via
     #   astockscreener (pyproject.toml)
     #   alembic
