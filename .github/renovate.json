@@ -4,8 +4,9 @@
     "config:best-practices"
   ],
   "schedule": [
-    "after 10pm and before 5am every weekday",
-    "every weekend"
+    "after 10pm every weekday",
+    "every weekend",
+    "before 5am every weekday"
   ],
   "timezone": "Asia/Shanghai",
   "packageRules": [
@@ -26,8 +27,8 @@
       "dependencyDashboardApproval": true
     },
     {
-      "description": "Group Python type stubs together",
-      "matchPackagePatterns": ["^-types$"],
+      "description": "Group Python type stubs together (PEP 561: types-* prefix or *-stubs suffix)",
+      "matchPackageNames": ["/^(types-.+|.+-stubs)$/"],
       "groupName": "python-type-stubs"
     },
     {
@@ -52,7 +53,7 @@
     "schedule": ["before 5am on Monday"]
   },
   "pip_requirements": {
-    "fileMatch": ["^requirements(-dev|-optional)?\\.txt$"]
+    "managerFilePatterns": ["/^requirements(-dev|-optional)?\\.txt$/"]
   },
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
