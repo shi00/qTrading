@@ -881,9 +881,7 @@ class ScreenerView(ft.Container):
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         controls=subtiles,
-                        initially_expanded=(
-                            self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0
-                        ),
+                        expanded=(self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0),
                         collapsed_icon_color=AppColors.TEXT_SECONDARY,
                     )
                     self.history_tree_list.controls.append(tile)
@@ -1122,7 +1120,7 @@ class ScreenerView(ft.Container):
                     controls=advanced_controls,
                     collapsed_text_color=AppColors.TEXT_PRIMARY,
                     text_color=AppColors.PRIMARY,
-                    initially_expanded=False,
+                    expanded=False,
                 )
                 self.params_container.controls.append(exp_tile)
 
@@ -1680,7 +1678,7 @@ class ScreenerView(ft.Container):
                     border_radius=4,  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
-            initially_expanded=True,  # pragma: no cover
+            expanded=True,  # pragma: no cover
             visible=False,  # pragma: no cover
         )  # pragma: no cover
 

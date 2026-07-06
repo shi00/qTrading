@@ -41,7 +41,9 @@ def _find_button_by_text(root, text: str):
     """Find a button with the given text recursively."""
     buttons = _find_controls(root, (ft.Button, ft.TextButton))
     for btn in buttons:
-        if getattr(btn, "text", "") == text:
+        # V1: ft.Button/ft.TextButton 用 content 存储文本（V0 用 text）
+        btn_text = getattr(btn, "content", "")
+        if btn_text == text:
             return btn
     return None
 

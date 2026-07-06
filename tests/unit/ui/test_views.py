@@ -132,8 +132,9 @@ class TestSettingsView:
 
     def test_show_snack_fallback_snackbar(self):
         view = self._make_view()
-        page = MagicMock(spec=["overlay", "update"])
+        page = MagicMock(spec=["overlay", "update", "show_dialog"])
         page.overlay = []
+        page.show_dialog.side_effect = lambda snack: page.overlay.append(snack)
         set_page(view, page)
         view.show_snack("fallback", color=ft.Colors.RED)
         assert any(isinstance(o, ft.SnackBar) for o in page.overlay)
@@ -361,7 +362,7 @@ class TestTaskCenterView:
 
     def test_refresh_ui_without_page(self, mock_page):
         view = self._make_view(mock_page)
-        view._Control__page = None
+        view._mock_page = None
         tasks = [self._make_task()]
         view._refresh_ui(tasks)
         assert view._all_tasks == tasks
@@ -487,7 +488,7 @@ class TestTaskCenterView:
     def test_on_tasks_updated_no_page(self, mock_page):
         view = self._make_view(mock_page)
         view._mounted = True
-        view._Control__page = None
+        view._mock_page = None
         view._on_tasks_updated([])
 
     @pytest.mark.asyncio

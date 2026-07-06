@@ -964,7 +964,7 @@ class TestSystemTabSafeUpdate:
 
     def test_safe_update_without_page(self, mock_page):
         tab = self._make_tab()
-        tab._Control__page = None
+        tab._mock_page = None
         tab._safe_update()
 
     def test_safe_update_exception_handled(self, mock_page):
@@ -1025,7 +1025,7 @@ class TestSystemTabUpdateTheme:
 
     def test_update_theme_without_page(self, mock_page):
         tab = self._make_tab()
-        tab._Control__page = None
+        tab._mock_page = None
         tab.update_theme()
         assert tab.theme_dropdown.bgcolor == self.mock_ac.INPUT_BG
 

@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import datetime
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pandas as pd
@@ -147,7 +147,7 @@ class TestScreenerView:
             patch("ui.views.screener_view.MetaDataManager"),
             patch("ui.views.screener_view.StockDetailDialog"),
             patch(
-                "flet.core.control.Control.update"
+                "flet.controls.control.Control.update"
             ),  # no-op: Flet update() requires page binding; UI state tested via mock attributes
         ]
         with contextlib.ExitStack() as stack:
@@ -276,24 +276,11 @@ class TestScreenerView:
     async def test_on_export_click_with_data_opens_picker(self, mock_page):
         view = self._make_view(mock_page)
         view.vm.get_export_data.return_value = pd.DataFrame({"a": [1]})
-        view.save_file_picker.save_file = MagicMock()
+        view.save_file_picker.save_file = AsyncMock(return_value=None)
         with patch("ui.views.screener_view.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 1, 1, 12, 0, 0)
             await view._on_export_click(None)
         view.save_file_picker.save_file.assert_called_once()
-
-    def test_on_save_file_result_no_path(self, mock_page):
-        view = self._make_view(mock_page)
-        e = MagicMock()
-        e.path = None
-        view._on_save_file_result(e)
-
-    def test_on_save_file_result_with_path(self, mock_page):
-        view = self._make_view(mock_page)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view._on_save_file_result(e)
-        mock_page.run_task.assert_called_once()
 
     def test_on_mode_change_to_history(self, mock_page):
         view = self._make_view(mock_page)
@@ -391,7 +378,7 @@ class TestScreenerView:
 
     def test_toggle_progress_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._toggle_progress(True)
 
     def test_toggle_progress_with_page(self, mock_page):
@@ -474,7 +461,7 @@ class TestScreenerView:
 
     def test_on_task_unlock_no_action_without_page(self, mock_page):
         view = self._make_view(mock_page)
-        view._Control__page = None  # type: ignore[attr-defined]
+        view._mock_page = None  # type: ignore[attr-defined]
         view._on_task_unlock()
         # Should not raise and should not call run_task
 
@@ -730,7 +717,7 @@ class TestScreenerView:
 
     def test_on_row_click_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._raw_row_lookup = {"000001.SZ": {"ts_code": "000001.SZ"}}
         view._on_row_click({"ts_code": "000001.SZ"})
         assert view.detail_dialog is None
@@ -748,7 +735,7 @@ class TestScreenerView:
 
     def test_update_status_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._update_status("Running...", "blue")
 
     def test_on_load_more_history(self, mock_page):
@@ -758,7 +745,7 @@ class TestScreenerView:
 
     def test_on_load_more_history_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._on_load_more_history(None)
 
     @pytest.mark.asyncio
@@ -856,50 +843,6 @@ class TestScreenerView:
         assert view.run_btn.disabled is False
         assert view.strategy_dropdown.disabled is False
 
-    def test_on_save_file_result_without_page(self):
-        view = self._make_view(MagicMock())
-        view._Control__page = None
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view._on_save_file_result(e)
-        assert view.export_btn.disabled is True
-
-    @pytest.mark.asyncio
-    async def test_on_save_file_result_export_success(self, mock_page):
-        view = self._make_view(mock_page)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view.vm.export_results = MagicMock(return_value=_asyncio_result(("/tmp/test.csv", None)))
-        view._on_save_file_result(e)
-        inner_fn = mock_page.run_task.call_args[0][0]
-        filepath = mock_page.run_task.call_args[0][1]
-        await inner_fn(filepath)
-        assert view.export_btn.disabled is False
-
-    @pytest.mark.asyncio
-    async def test_on_save_file_result_export_fail(self, mock_page):
-        view = self._make_view(mock_page)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view.vm.export_results = MagicMock(return_value=_asyncio_result((None, "disk full")))
-        view._on_save_file_result(e)
-        inner_fn = mock_page.run_task.call_args[0][0]
-        filepath = mock_page.run_task.call_args[0][1]
-        await inner_fn(filepath)
-        assert view.export_btn.disabled is False
-
-    @pytest.mark.asyncio
-    async def test_on_save_file_result_export_exception(self, mock_page):
-        view = self._make_view(mock_page)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view.vm.export_results = MagicMock(side_effect=RuntimeError("boom"))
-        view._on_save_file_result(e)
-        inner_fn = mock_page.run_task.call_args[0][0]
-        filepath = mock_page.run_task.call_args[0][1]
-        await inner_fn(filepath)
-        assert view.export_btn.disabled is False
-
     @pytest.mark.asyncio
     async def test_update_ui_inner_async(self, mock_page):
         view = self._make_view(mock_page)
@@ -950,13 +893,13 @@ class TestScreenerView:
 
     def test_update_ui_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._update_ui()
 
     @pytest.mark.asyncio
     async def test_append_log_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._append_log("test", 90, "thinking text")
 
     @pytest.mark.asyncio
@@ -1002,7 +945,7 @@ class TestScreenerView:
 
     def test_on_log_stream_start_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         result = view._on_log_stream_start("stock_a")
         assert result is None
 
@@ -1041,7 +984,7 @@ class TestScreenerView:
         chunk_fn = view._on_log_stream_start("stock_a")
         add_fn = mock_page.run_task.call_args[0][0]
         await add_fn()
-        view._Control__page = None
+        view._mock_page = None
         chunk_fn("text", is_reasoning=False)  # type: ignore[optional-call]
 
     @pytest.mark.asyncio
@@ -1122,7 +1065,7 @@ class TestScreenerView:
     @pytest.mark.asyncio
     async def test_load_history_tree_without_page(self, mock_page):
         view = self._make_view(mock_page)
-        view._Control__page = None
+        view._mock_page = None
         view.vm.load_history_tree = MagicMock(return_value=_asyncio_result({}))
         await view._load_history_tree(append=False)
 
@@ -1133,7 +1076,7 @@ class TestScreenerView:
 
     def test_on_tree_item_click_without_page(self):
         view = self._make_view(MagicMock())
-        view._Control__page = None
+        view._mock_page = None
         view._on_tree_item_click("20240115")
 
     @pytest.mark.asyncio
@@ -1380,7 +1323,7 @@ class TestScreenerView:
     def test_refresh_locale_no_page(self, mock_page):
         """覆盖 468->exit: page 为 None 时跳过 self.update。"""
         view = self._make_view(mock_page)
-        view._Control__page = None  # type: ignore[attr-defined]
+        view._mock_page = None  # type: ignore[attr-defined]
         view.refresh_locale()  # should not raise
 
     def test_refresh_locale_outer_exception(self, mock_page, caplog):
@@ -1508,7 +1451,7 @@ class TestScreenerView:
         view.result_table.set_columns.assert_called_once()
         assert "000001.SZ" in view._raw_row_lookup
 
-    # --- _on_export_click / _on_save_file_result / _on_row_click branch coverage ---
+    # --- _on_export_click / _on_row_click branch coverage ---
 
     @pytest.mark.asyncio
     async def test_on_export_click_no_show_toast(self, mock_page):
@@ -1518,51 +1461,6 @@ class TestScreenerView:
         set_page(view, no_toast)
         view.vm.get_export_data.return_value = None
         await view._on_export_click(None)  # should not raise
-
-    @pytest.mark.asyncio
-    async def test_on_save_file_result_success_no_show_toast(self, mock_page):
-        """覆盖 1422->1438: export 成功但 page 无 show_toast 时跳过 toast 直达 finally。"""
-        view = self._make_view(mock_page)
-        no_toast = _NoToastPage()
-        set_page(view, no_toast)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view.vm.export_results = MagicMock(return_value=_asyncio_result(("/tmp/test.csv", None)))
-        view._on_save_file_result(e)
-        inner_fn = no_toast.run_task.call_args[0][0]
-        filepath = no_toast.run_task.call_args[0][1]
-        await inner_fn(filepath)
-        assert view.export_btn.disabled is False
-
-    @pytest.mark.asyncio
-    async def test_on_save_file_result_fail_no_show_toast(self, mock_page):
-        """覆盖 1427->1438: export 失败但 page 无 show_toast 时跳过 toast 直达 finally。"""
-        view = self._make_view(mock_page)
-        no_toast = _NoToastPage()
-        set_page(view, no_toast)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view.vm.export_results = MagicMock(return_value=_asyncio_result((None, "disk full")))
-        view._on_save_file_result(e)
-        inner_fn = no_toast.run_task.call_args[0][0]
-        filepath = no_toast.run_task.call_args[0][1]
-        await inner_fn(filepath)
-        assert view.export_btn.disabled is False
-
-    @pytest.mark.asyncio
-    async def test_on_save_file_result_exception_no_show_toast(self, mock_page):
-        """覆盖 1435->1438: export 抛异常且 page 无 show_toast 时跳过 toast 直达 finally。"""
-        view = self._make_view(mock_page)
-        no_toast = _NoToastPage()
-        set_page(view, no_toast)
-        e = MagicMock()
-        e.path = "/tmp/test.csv"
-        view.vm.export_results = MagicMock(side_effect=RuntimeError("boom"))
-        view._on_save_file_result(e)
-        inner_fn = no_toast.run_task.call_args[0][0]
-        filepath = no_toast.run_task.call_args[0][1]
-        await inner_fn(filepath)
-        assert view.export_btn.disabled is False
 
     def test_on_row_click_empty_ts_code(self, mock_page):
         """覆盖 1476->exit: ts_code 为空时不调 run_task。"""
@@ -1636,7 +1534,7 @@ class TestStrategyTierHint:
             patch("ui.views.screener_view.MetaDataManager"),
             patch("ui.views.screener_view.StockDetailDialog"),
             # no-op: Flet update() requires page binding; UI state tested via mock attributes
-            patch("flet.core.control.Control.update"),
+            patch("flet.controls.control.Control.update"),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:

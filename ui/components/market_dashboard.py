@@ -374,8 +374,8 @@ class MarketDashboard(ft.Column):
 
         # Update Icon
         target_icon = ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN
-        if refs["icon"].name != target_icon:
-            refs["icon"].name = target_icon
+        if refs["icon"].icon != target_icon:
+            refs["icon"].icon = target_icon
             refs["icon"].color = color
         elif refs["icon"].color != color:
             refs["icon"].color = color

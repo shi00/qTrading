@@ -372,7 +372,7 @@ class TestTableViewerTab:
     def test_toolbar_row_has_right_padding(self, mock_page):
         """§6.3：工具栏 Row（scroll=AUTO）末端应有 8px 右侧留白防止内容贴边被裁切。
 
-        Flet 0.28.3 的 Row 不支持 padding 参数，以 Row 末端追加 width=8 的
+        Flet 0.85.3 的 Row 不支持 padding 参数，以 Row 末端追加 width=8 的
         Container 间隔实现等价右侧留白（同时覆盖滚动与非滚动两种布局）。
         """
         tab = self._make_tab()

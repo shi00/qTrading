@@ -141,6 +141,8 @@ class TestHealthReportDialog:
         dlg.update = MagicMock()
         original_content = dlg.content
 
+        # 模拟 locale 切换：i18n 返回翻译后的值，使重建产生不同内容（V1 Prop 在值变化时才更新引用）
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
         dlg.refresh_locale()
 
         # content 被重建为新对象（_build_content 返回新树）
@@ -215,7 +217,7 @@ class TestHealthReportDialog:
         dlg = self._make_dialog(mock_page, self._make_report("green"))
         set_page(dlg, mock_page)
         # 模拟无 page 场景
-        dlg._Control__page = None
+        dlg._mock_page = None
         dlg.update = MagicMock()
 
         dlg.refresh_locale()

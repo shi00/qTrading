@@ -155,7 +155,7 @@ class LocalModelConfigPanel(ft.Container):
             on_change=self._on_input_change,
         )
 
-        self.status_icon = ft.Icon(visible=False, size=16)
+        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
         self.status_text = ft.Text(
             value="",
             size=12,
@@ -243,7 +243,7 @@ class LocalModelConfigPanel(ft.Container):
                     run_spacing=15,
                 ),
             ],
-            initially_expanded=False,
+            expanded=False,
         )
 
         self._header_text = SectionHeader(I18n.get("settings_sec_local_ai"), title_key="settings_sec_local_ai")

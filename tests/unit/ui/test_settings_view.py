@@ -403,6 +403,9 @@ class TestSettingsView:
                     def update(self):
                         self._update_count += 1
 
+                    def show_dialog(self, dlg):
+                        self.overlay.append(dlg)
+
                 page = _PageWithoutShowToast()
                 view.page = page
 

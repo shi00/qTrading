@@ -431,7 +431,7 @@ class TestDatabaseTabRefreshLocale:
         return DatabaseTab(show_snack_callback=MagicMock())
 
     def _set_page(self, tab, page):
-        tab._Control__page = page
+        tab._mock_page = page
 
     def test_refresh_locale_updates_title_text(self):
         tab = self._make_tab()

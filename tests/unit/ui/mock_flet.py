@@ -3,6 +3,68 @@ import asyncio
 from unittest.mock import MagicMock
 
 
+def _install_v1_compat_control_page_mock() -> None:
+    """V1 兼容桩：让 ``ft.Control.page`` 可读写、``update()`` 容忍未挂载情况。
+
+    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
+    ``Control.update()`` 要求控件已挂载到 page，否则抛 ``RuntimeError``。
+    本项目测试代码与 4 处源码（``app_layout``/``task_center_view``/
+    ``toast_manager``/``failover_config_panel``）依赖 V0 行为：直接
+    ``self.page = page`` 赋值、未挂载控件调用 ``update()`` 静默返回、
+    ``if self.page:`` 在未挂载时返回 falsy 而非抛异常。
+
+    本函数在测试环境下 monkey-patch ``ft.Control``，保持 V0 兼容行为：
+
+    - ``page`` property：getter 优先返回 ``__dict__['_mock_page']``，
+      未设过则走 V1 原生 ``parent`` 链查找；若原生查找抛 ``RuntimeError``
+      （控件未挂载），返回 ``None``（兼容 ``if self.page:`` 用法，V0 行为）；
+      setter 写入 ``__dict__``。
+    - ``update()``：若 ``_mock_page`` 与原生 ``parent`` 链均无 page，
+      静默返回（不抛 ``RuntimeError``），与 V0 行为兼容。
+
+    幂等：多次调用安全（仅 patch 一次，由 ``_mock_page_patched`` 标志守护）。
+    """
+    import flet as ft
+
+    if getattr(ft.Control, "_mock_page_patched", False):
+        return
+
+    original_page_get = ft.Control.page.fget
+    original_update = ft.Control.update
+
+    @property
+    def page(self):  # type: ignore[no-untyped-def]
+        mock_page = self.__dict__.get("_mock_page", None)
+        if mock_page is not None:
+            return mock_page
+        # V0 兼容：未挂载时返回 None（不抛 RuntimeError），支持 `if self.page:` 用法
+        try:
+            return original_page_get(self)
+        except RuntimeError:
+            return None
+
+    @page.setter
+    def page(self, value):
+        self.__dict__["_mock_page"] = value
+
+    def update(self):  # type: ignore[no-untyped-def]
+        # V0 兼容：未挂载到 page 时静默返回（不抛 RuntimeError）
+        if self.__dict__.get("_mock_page", None) is None:
+            try:
+                original_page_get(self)
+            except RuntimeError:
+                return
+        original_update(self)
+
+    ft.Control.page = page  # type: ignore[method-assign]
+    ft.Control.update = update  # type: ignore[method-assign]
+    ft.Control._mock_page_patched = True  # type: ignore[attr-defined]
+
+
+# 模块导入时一次性应用 V1 兼容桩，确保 UI 测试目录下所有测试均生效。
+_install_v1_compat_control_page_mock()
+
+
 class MockClientStorage:
     def __init__(self):
         self._data = {}
@@ -43,9 +105,8 @@ class MockFletPage:
         self.overlay = []
         self._open_dialogs = []  # R11: 独立 dialog 栈，与 overlay 解耦（overlay 可能混入 ToastManager 等非 dialog 元素）
         self.services = []
-        self._client_storage = MockClientStorage()
+        self._shared_preferences = MockClientStorage()
         self._session = MockSession()
-        self._dialog = None
         self._theme_mode = None
         self._theme = None
         self._dark_theme = None
@@ -68,20 +129,12 @@ class MockFletPage:
         self._tasks = []
 
     @property
-    def client_storage(self):
-        return self._client_storage
+    def shared_preferences(self):
+        return self._shared_preferences
 
     @property
     def session(self):
         return self._session
-
-    @property
-    def dialog(self):
-        return self._dialog
-
-    @dialog.setter
-    def dialog(self, value):
-        self._dialog = value
 
     @property
     def theme_mode(self):
@@ -160,14 +213,6 @@ class MockFletPage:
     def go(self, route):
         pass
 
-    def open(self, control):
-        if control not in self.overlay:
-            self.overlay.append(control)
-
-    def close(self, control):
-        if control in self.overlay:
-            self.overlay.remove(control)
-
     def show_dialog(self, control):
         """V1 dialog 管理：维护独立 dialog 栈并同步 overlay 以支持测试断言。
 
@@ -194,11 +239,14 @@ class MockFletPage:
 
 
 class MockDragUpdateEvent:
-    """DragUpdateEvent 测试桩 (V1)：绕过真实 flet 需 ControlEvent + JSON 解析的构造。
+    """DragUpdateEvent 测试桩 (V1 强类型，R13)。
 
-    V1 ``ft.DragUpdateEvent`` 用 ``primary_delta`` 表示主增量（水平拖拽为 x 增量），
-    ``local_delta.x`` 为回退字段（兼容 V0 mock 或边界场景，R13 静默回归修复）。
-    测试中直接构造不便，故提供此轻量桩。
+    V1 ``ft.DragUpdateEvent`` 已强类型化，dataclass 字段为
+    ``name/data/control/local_position/global_position/local_delta/
+    global_delta/primary_delta/timestamp``——不再有 V0 的 ``delta_x/delta_y``。
+    本桩提供 R13 主路径 ``primary_delta``（水平拖拽为 x 增量）与回退字段
+    ``local_delta.x``（兼容边界场景），覆盖 ``resizable_splitter._on_drag_update``
+    的两条路径。绕过真实 flet 需 ControlEvent + JSON 解析的构造，故提供此轻量桩。
     """
 
     def __init__(self, primary_delta=0, local_delta=None):
@@ -207,11 +255,17 @@ class MockDragUpdateEvent:
 
 
 class MockHoverEvent:
-    """HoverEvent 测试桩：data 为字符串。
+    """HoverEvent 测试桩 (V1 强类型，R13)。
 
-    真实 ``ft.HoverEvent`` 构造时 ``json.loads(e.data)`` 解析时间戳/坐标，
-    若 data 为非 JSON 字符串会因解析后类型无 get 方法崩溃；故测试用此桩。
+    V1 ``ft.HoverEvent`` 已强类型化（继承 ``PointerEvent``），dataclass 字段含
+    ``kind/local_position/global_position/timestamp/local_delta/global_delta/...``
+    ——不再需要 V0 的 ``json.loads(e.data)`` 解析时间戳/坐标。本桩提供
+    ``local_position``/``local_delta`` 等 V1 字段，同时保留 ``data`` 字段以
+    兼容可能存在的 V0 风格引用。绕过真实 flet 需 ControlEvent 构造，故用此桩。
     """
 
-    def __init__(self, data=""):
+    def __init__(self, data="", local_position=None, local_delta=None, timestamp=0.0):
         self.data = data
+        self.local_position = local_position
+        self.local_delta = local_delta
+        self.timestamp = timestamp

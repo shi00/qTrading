@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **flet:** upgrade 0.28.3 → 0.85.3 (architecture-level rewrite)
+  - R1: ft.app(target=) → ft.run(main=, [web_renderer=])
+  - R2: page.on_resized → page.on_resize
+  - R3: page.open/close/dialog → page.show_dialog/pop_dialog
+  - R4: FilePicker 服务化（page.services 挂载）
+  - R5: 样式 helper classmethod 化
+  - R6: 按钮 text= → content=、ElevatedButton → Button
+  - R7: flet-charts 拆包
+  - R8: on_scroll_interval → scroll_interval
+  - R10: client_storage → shared_preferences
+  - R11: mock_flet 契约对齐 V1
+  - R12.a: Dropdown on_change → on_select
+  - R12.b: Tabs 三件套（TabBar + TabBarView）
+  - R13: e.delta_x → e.primary_delta（回退 local_delta.x）
+  - R14: TextField focused_border_color
+  - R15: Image src_base64 → src（直接支持 base64）
+  - window_icon → window.icon
+  - 删除 _schedule_async/_scheduled_tasks/_run_task 兼容垫片
+
 ## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.10...v0.7.0) (2026-06-15)
 
 

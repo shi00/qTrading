@@ -243,10 +243,13 @@ class TestStockDetailDialog:
         original_content = dlg.content
         original_actions = list(dlg.actions)
 
+        # 模拟 locale 切换：i18n 返回翻译后的值，使重建产生不同内容
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
         dlg.refresh_locale()
 
-        # title/content 被重建为新对象
-        assert dlg.title is not original_title
+        # title 不依赖 i18n（仅用 stock_data），V1 Prop 在值相等时跳过赋值，这是 V1 的优化行为
+        assert dlg.title is original_title
+        # content/actions 依赖 i18n，locale 切换后值变化，V1 Prop 会更新引用
         assert dlg.content is not original_content
         # actions 列表被替换为新 TextButton
         assert len(dlg.actions) == 1

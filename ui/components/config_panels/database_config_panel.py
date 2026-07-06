@@ -132,7 +132,7 @@ class DatabaseConfigPanel(ft.Container):
             on_change=self._on_input_change,
         )
 
-        self.status_icon = ft.Icon(visible=False, size=16)
+        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
         self.status_text = ft.Text(
             "",
             size=12,

@@ -100,7 +100,9 @@ def mock_config_handler():
 
 
 def set_page(control, page):
-    control._Control__page = page
+    # V1 兼容：写入 __dict__['_mock_page']，由 mock_flet.py 的 page getter 读取。
+    # V0 用 _Control__page（name-mangled self.__page），V1 的 page property 不再读它。
+    control._mock_page = page
 
 
 def wrap_mock_page(mock_page):

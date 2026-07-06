@@ -83,7 +83,7 @@ class TestMetricCard:
         card = MetricCard(label="price", value="100", icon=ft.Icons.CHECK)
         icons = [c for c in card.status_row_view.controls if isinstance(c, ft.Icon)]
         assert len(icons) == 1
-        assert icons[0].name == ft.Icons.CHECK
+        assert icons[0].icon == ft.Icons.CHECK
 
     def test_init_icon_uses_status_color_when_provided(self):
         card = MetricCard(label="price", value="100", icon=ft.Icons.CHECK, status_color="#FF0000")
@@ -140,7 +140,7 @@ class TestMetricCard:
         card.set_value("200", icon=ft.Icons.ARROW_UPWARD)
         icons = [c for c in card.status_row_view.controls if isinstance(c, ft.Icon)]
         assert len(icons) == 1
-        assert icons[0].name == ft.Icons.ARROW_UPWARD
+        assert icons[0].icon == ft.Icons.ARROW_UPWARD
 
     def test_set_value_with_status_color_updates_icon_color(self):
         card = MetricCard(label="price", value="100", icon=ft.Icons.CHECK)
@@ -237,7 +237,7 @@ class TestActionChip:
         )
         last = chip.content.controls[-1]
         assert isinstance(last, ft.Icon)
-        assert last.name == ft.Icons.CHEVRON_RIGHT
+        assert last.icon == ft.Icons.CHEVRON_RIGHT
 
     def test_init_border_radius_is_12(self):
         chip = ActionChip(
@@ -321,7 +321,7 @@ class TestActionChip:
         chip.set_loading(False)
         last = chip.content.controls[-1]
         assert isinstance(last, ft.Icon)
-        assert last.name == ft.Icons.CHEVRON_RIGHT
+        assert last.icon == ft.Icons.CHEVRON_RIGHT
 
     def test_set_loading_primary_progress_ring_color(self):
         chip = ActionChip(
@@ -380,7 +380,7 @@ class TestStatusBadge:
         row = badge.content
         assert len(row.controls) == 2
         assert isinstance(row.controls[0], ft.Icon)
-        assert row.controls[0].name == ft.Icons.SYNC
+        assert row.controls[0].icon == ft.Icons.SYNC
 
     def test_init_without_icon_has_only_text(self):
         badge = StatusBadge(text="Connected", color=AppColors.SUCCESS)
@@ -933,7 +933,7 @@ class TestToastCard:
         )
         icons = [c for c in card.content.controls if isinstance(c, ft.Icon)]
         assert len(icons) == 1
-        assert icons[0].name == ft.Icons.CHECK_CIRCLE
+        assert icons[0].icon == ft.Icons.CHECK_CIRCLE
 
     def test_init_has_close_button(self):
         card = ToastCard(
@@ -1270,7 +1270,7 @@ class TestCoverageDetailTable:
             for c in table.controls
             if isinstance(c, ft.Container)
             and isinstance(c.content, ft.Row)
-            and any(isinstance(sub, ft.Icon) and sub.name == ft.Icons.SUBTITLES for sub in c.content.controls)
+            and any(isinstance(sub, ft.Icon) and sub.icon == ft.Icons.SUBTITLES for sub in c.content.controls)
         ]
         assert len(section_headers) == 2
 

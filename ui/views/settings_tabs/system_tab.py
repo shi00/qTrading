@@ -70,7 +70,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("sys_suffix_threads"),  # pragma: no cover
+            suffix=I18n.get("sys_suffix_threads"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
         )  # pragma: no cover
 
@@ -99,7 +99,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_items"),  # pragma: no cover
+            suffix=I18n.get("common_items"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("settings_db_pool"),  # pragma: no cover
         )  # pragma: no cover
@@ -112,7 +112,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_items"),  # pragma: no cover
+            suffix=I18n.get("common_items"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("settings_db_overflow"),  # pragma: no cover
         )  # pragma: no cover
@@ -125,7 +125,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_seconds"),  # pragma: no cover
+            suffix=I18n.get("common_seconds"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("settings_db_timeout"),  # pragma: no cover
         )  # pragma: no cover
@@ -138,7 +138,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("sys_suffix_threads"),  # pragma: no cover
+            suffix=I18n.get("sys_suffix_threads"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("sys_pool_io"),  # pragma: no cover
         )  # pragma: no cover
@@ -150,7 +150,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("sys_suffix_threads"),  # pragma: no cover
+            suffix=I18n.get("sys_suffix_threads"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("sys_pool_cpu"),  # pragma: no cover
         )  # pragma: no cover
@@ -455,17 +455,17 @@ class SystemTab(ft.Container):
             )
 
             self.concurrency_input.label = I18n.get("settings_concurrency")
-            self.concurrency_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.concurrency_input.suffix = I18n.get("sys_suffix_threads")
             self.pool_size_input.label = I18n.get("settings_db_pool")
-            self.pool_size_input.suffix_text = I18n.get("common_items")
+            self.pool_size_input.suffix = I18n.get("common_items")
             self.db_overflow_input.label = I18n.get("settings_db_overflow")
-            self.db_overflow_input.suffix_text = I18n.get("common_items")
+            self.db_overflow_input.suffix = I18n.get("common_items")
             self.db_timeout_input.label = I18n.get("settings_db_timeout")
-            self.db_timeout_input.suffix_text = I18n.get("common_seconds")
+            self.db_timeout_input.suffix = I18n.get("common_seconds")
             self.io_workers_input.label = I18n.get("sys_pool_io")
-            self.io_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.io_workers_input.suffix = I18n.get("sys_suffix_threads")
             self.cpu_workers_input.label = I18n.get("sys_pool_cpu")
-            self.cpu_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.cpu_workers_input.suffix = I18n.get("sys_suffix_threads")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
             self.diagnostics_button.content = I18n.get("settings_diagnostics_btn")
 

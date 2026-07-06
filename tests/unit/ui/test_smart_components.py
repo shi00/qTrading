@@ -2,6 +2,7 @@ import asyncio
 import logging
 from unittest.mock import MagicMock, patch
 
+import flet as ft
 import pandas as pd
 import pytest
 
@@ -866,7 +867,7 @@ class TestMarketDashboard:
         card = dashboard.concepts_row.controls[0]
         from ui.theme import AppColors
 
-        assert card.data["icon"].name == "trending_up"
+        assert card.data["icon"].icon == ft.Icons.TRENDING_UP
         assert card.data["change"].color == AppColors.UP
 
     def test_update_data_hot_concepts_down_icon(self):
@@ -882,7 +883,7 @@ class TestMarketDashboard:
         card = dashboard.concepts_row.controls[0]
         from ui.theme import AppColors
 
-        assert card.data["icon"].name == "trending_down"
+        assert card.data["icon"].icon == ft.Icons.TRENDING_DOWN
         assert card.data["change"].color == AppColors.DOWN
 
     def test_update_data_empty_hot_concepts_shows_placeholder(self):

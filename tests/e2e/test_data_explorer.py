@@ -98,7 +98,7 @@ async def test_table_viewer_filter(e2e_page):
 
 # [PITFALL_WARNING] Flet Web CanvasKit 自动化测试黑洞避坑指南
 # 坑点：不要为"SQL 控制台执行非法 SQL"编写 E2E 用例（涉及向多行 TextField 录入文本）。
-# 原因：Flet 0.28.3 CanvasKit 的底层渲染引擎存在严重的 A11y 语义树映射缺陷。
+# 原因：Flet 0.85.3 CanvasKit 的底层渲染引擎存在严重的 A11y 语义树映射缺陷。
 #      多行输入框不会被映射为标准的 'textbox'，它的 label/hint 会被吞噬或错误附着到极远的父容器上，
 #      且开发者显式赋予的 semantics_label 也会被完全忽略。
 # 后果：如果在 Playwright 中使用强制绝对坐标点击（e.g. mouse.click(x,y)）或键盘焦点漫游（Tab），

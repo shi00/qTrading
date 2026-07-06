@@ -239,7 +239,7 @@ class TableViewerTab(ft.Container):
                         ),  # pragma: no cover
                     ],  # pragma: no cover
                 ),  # pragma: no cover
-                # 右侧留白：ft.Row 不支持 padding（Flet 0.28.3），用 Container 间隔器替代
+                # 右侧留白：ft.Row 不支持 padding（Flet 0.85.3），用 Container 间隔器替代
                 ft.Container(width=8),  # pragma: no cover
             ],  # pragma: no cover
             alignment=ft.MainAxisAlignment.START,  # pragma: no cover

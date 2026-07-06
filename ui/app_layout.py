@@ -96,7 +96,7 @@ class AppLayout(ft.Container):
         AppColors.unsubscribe(self.update_theme)
 
     def schedule_resize(self, width: float = 0, height: float = 0):
-        """从 on_resized 回调入口，调度防抖处理。
+        """从 on_resize 回调入口，调度防抖处理。
 
         Args:
             width: 来自 ``WindowResizeEvent.width`` 的实时窗口宽度，0 表示未知

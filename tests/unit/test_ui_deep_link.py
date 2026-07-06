@@ -3,6 +3,7 @@ import inspect
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import tests.unit.ui.mock_flet  # noqa: F401  # activate V1 compat Control.page/update patch
 from ui.views.screener_view import ScreenerView
 import pytest
 
@@ -42,7 +43,7 @@ class TestDeepLinking(unittest.TestCase):
                 mock_vm.run_strategy = AsyncMock()
 
                 view = ScreenerView(self.page)
-                view._Control__page = self.page  # Simulate mounted state  # type: ignore[untyped]
+                view._mock_page = self.page  # Simulate mounted state  # type: ignore[untyped]
                 # Mock update methods to avoid "Control must be added to the page" error
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
@@ -87,7 +88,7 @@ class TestDeepLinking(unittest.TestCase):
                 mock_vm.run_strategy = AsyncMock()
 
                 view = ScreenerView(self.page)
-                view._Control__page = self.page  # Simulate mounted state  # type: ignore[untyped]
+                view._mock_page = self.page  # Simulate mounted state  # type: ignore[untyped]
                 view.strategy_dropdown.update = MagicMock()
                 view.run_btn.update = MagicMock()
                 view.log_view.update = MagicMock()

@@ -130,7 +130,7 @@ def test_drag_update_throttle_ui_and_callback(make_splitter):
     on_resize = MagicMock()
     s = make_splitter(on_resize=on_resize, drag_interval=16)
     # 让 _left_container.page 为真值，使 update 分支可达
-    s._left_container._Control__page = MagicMock()
+    s._left_container._mock_page = MagicMock()
     s._left_container.update = MagicMock()
 
     # 连续 3 次快速拖动（间隔 < 16ms）

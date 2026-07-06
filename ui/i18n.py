@@ -67,7 +67,7 @@ def refresh_dropdown_options(
 ) -> None:
     """重建 Dropdown options 并确保显示文本正确刷新。
 
-    Flet 0.28.3 的 ``_set_attr_internal`` 在批量 ``page.update()`` 中只发送
+    Flet 0.85.3 的 ``_set_attr_internal`` 在批量 ``page.update()`` 中只发送
     属性最终值。``value`` 从 X→None→X 的最终值等于原值，前端 DropdownButton
     不触发 rebuild，闭合态选中项显示文本不刷新。
 

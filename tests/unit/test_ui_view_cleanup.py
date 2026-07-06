@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
+import tests.unit.ui.mock_flet  # noqa: F401  # activate V1 compat Control.page/update patch
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
@@ -25,7 +26,7 @@ class TestHomeViewCleanup(unittest.TestCase):
         view = HomeView()
         page = MagicMock()
         page.pubsub = MagicMock()
-        view._Control__page = page  # type: ignore[attr-defined]
+        view._mock_page = page  # type: ignore[attr-defined]
         view._pubsub_subscribed = True
         view._is_mounted = True
         view._init_task = MagicMock()
@@ -48,7 +49,7 @@ class TestScreenerViewCleanup(unittest.TestCase):
         page.update = MagicMock()
 
         view = ScreenerView(page)
-        view._Control__page = page  # type: ignore[attr-defined]
+        view._mock_page = page  # type: ignore[attr-defined]
         # Populate the virtualized table with real data so clear() has something to release
         view.result_table.set_columns([{"id": "name", "label": "Name", "width": 100}])
         view.result_table.set_rows([{"name": "A"}, {"name": "B"}])
@@ -75,7 +76,7 @@ class TestDataExplorerViewCleanup(unittest.TestCase):
         view = DataExplorerView()
         page = MagicMock()
         page.pubsub = MagicMock()
-        view._Control__page = page  # type: ignore[attr-defined]
+        view._mock_page = page  # type: ignore[attr-defined]
         view._pubsub_subscribed = True
         mock_mount_task = MagicMock()
         view._mount_task = mock_mount_task

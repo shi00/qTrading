@@ -1,4 +1,4 @@
-﻿# Contributing to AStockScreener
+# Contributing to AStockScreener
 
 感谢你考虑为 AStockScreener 做贡献！本文档分为三部分：人类贡献者指南、开发环境与命令参考、实现规范手册。
 
@@ -917,11 +917,11 @@ def _rebuild_steps_after_locale_change(self):
 
 ### 背景与约束
 
-- 项目仅桌面端 (Flet 0.28.3)，`main.py` 设置 `page.window.min_width = 960`、`min_height = 640`、默认 `width = 1280`。
+- 项目仅桌面端 (Flet 0.85.3)，`main.py` 设置 `page.window.min_width = 1280`、`min_height = 640`、默认 `width = 1280`。
 - 内容区净宽 = 窗口宽度 − nav_rail (展开 180 / 折叠 80) − divider (1) − body padding (40)。
-- `AppLayout` 已实现 `page.on_resized` 的 100ms 防抖分发：通过鸭子类型调用 `current_view.handle_resize(width, height)` (见 `ui/app_layout.py` 的 `_handle_resize`)。
-- **Flet 0.28.3 API 关键约束**：
-  - 正确的事件属性名为 `page.on_resized`（带 d），**不是** `on_resize`。
+- `AppLayout` 已实现 `page.on_resize` 的 100ms 防抖分发：通过鸭子类型调用 `current_view.handle_resize(width, height)` (见 `ui/app_layout.py` 的 `_handle_resize`)。
+- **Flet 0.85.3 API 关键约束**：
+  - 正确的事件属性名为 `page.on_resize`（不带 d），**不是** `on_resized`。
   - `WindowResizeEvent` 携带实时 `width` / `height` 属性。
   - `page.width` / `page.window.width` 仅在页面连接时 (`fetch_page_details_async`) 更新一次，**resize 事件中不会刷新**，返回过时值或 0。因此 `handle_resize` 必须通过参数接收实时尺寸，**禁止**在 `handle_resize` 内读取 `self.page.width`。
 - Web 模式 (`_is_web_mode()`) 下跳过窗口约束，但 resize 分发机制仍然生效。
@@ -1108,7 +1108,7 @@ async def _handle_resize(self):
 
 | 操作 | 状态 | 说明 |
 |------|------|------|
-| 窗口拖拽 | ✅ 已修复 | `page.on_resized` → `schedule_resize(width, height)` → 100ms 防抖 → `handle_resize(width, height)` |
+| 窗口拖拽 | ✅ 已修复 | `page.on_resize` → `schedule_resize(width, height)` → 100ms 防抖 → `handle_resize(width, height)` |
 | **nav_rail 折叠/展开** (`_toggle_nav`) | ✅ 已修复 | `_toggle_nav` 末尾调用 `schedule_resize()` (复用缓存尺寸) |
 | **tab 切换挂载新视图** | ✅ 已修复 | `_execute_tab_switch` 中 `refresh_locale` 后追加 `handle_resize` 兜底 |
 | **i18n 语言切换** | ✅ 已修复 | `_on_locale_change` 末尾调用 `schedule_resize()` 重新验证布局 |
@@ -1117,14 +1117,14 @@ async def _handle_resize(self):
 **实现方式** (已完成)：
 
 ```python
-# main.py — on_resized 回调，传递实时尺寸
+# main.py — on_resize 回调，传递实时尺寸
 async def _on_resize(e):
     # ...
     width = getattr(e, "width", 0) or 0
     height = getattr(e, "height", 0) or 0
     layout.schedule_resize(width, height)
 
-page.on_resized = _on_resize  # 注意：是 on_resized (带 d)
+page.on_resize = _on_resize  # 注意：是 on_resize (不带 d)
 
 # ui/app_layout.py — _toggle_nav 末尾
 def _toggle_nav(self, e):
@@ -1246,7 +1246,7 @@ def _on_locale_change(self):
 | `SettingsView` | ⚠️ 部分 | 未实现 `handle_resize` (需补空方法) |
 | `MarketDashboard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，4 张卡退化为纵向堆叠 |
 | `OnboardingWizard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，6 张卡纵向堆叠 |
-| `AppLayout` | ✅ 已修复 | `on_resized` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
+| `AppLayout` | ✅ 已修复 | `on_resize` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
 
 ### 测试要求
 

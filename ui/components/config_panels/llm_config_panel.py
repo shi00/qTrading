@@ -154,7 +154,7 @@ class LLMConfigPanel(ft.Container):
             width=input_width,
         )
 
-        self.status_icon = ft.Icon(visible=False, size=16)
+        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
         self.status_text = ft.Text(
             value="",
             size=12,

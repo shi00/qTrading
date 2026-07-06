@@ -401,7 +401,7 @@ class TestTaskCenterView:
 
     def test_refresh_ui_without_page(self, mock_page):
         view = self._make_view(mock_page)
-        view._Control__page = None
+        view._mock_page = None
         tasks = [_make_task()]
         view._refresh_ui(tasks)
         assert view._all_tasks == tasks
@@ -562,7 +562,7 @@ class TestTaskCenterView:
     def test_on_tasks_updated_no_page(self, mock_page):
         view = self._make_view(mock_page)
         view._mounted = True
-        view._Control__page = None
+        view._mock_page = None
         view._on_tasks_updated([])
         # Should not raise
 
