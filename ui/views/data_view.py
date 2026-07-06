@@ -29,7 +29,6 @@ class TableViewerTab(ft.Container):
     def __init__(self, viewmodel: DataExplorerViewModel):
         super().__init__()
         self.vm = viewmodel
-        self._pending_export_df = None  # Temp storage for export data
 
         self.save_file_picker = ft.FilePicker()  # pragma: no cover
 
@@ -694,8 +693,6 @@ class TableViewerTab(ft.Container):
                         I18n.get("data_export_fail"),
                         "error",
                     )
-            else:
-                self._pending_export_df = None
         except Exception as e:
             logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export failed traceback", exc_info=True)

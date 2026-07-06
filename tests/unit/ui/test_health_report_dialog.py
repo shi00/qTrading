@@ -223,7 +223,7 @@ class TestHealthReportDialog:
         dlg.update.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_run_deep_scan_fallback_no_open(self, mock_page):
+    async def test_run_deep_scan_uses_show_dialog_no_fallback(self, mock_page):
         """B6: V1 删除双路径回退，page_ref.show_dialog 为唯一路径。
 
         原 B6 测试验证无 open 方法时的回退，V1 升级后双路径已删除，

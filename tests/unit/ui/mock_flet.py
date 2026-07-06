@@ -41,6 +41,7 @@ class MockFletPage:
     def __init__(self):
         self.controls = [MagicMock()]
         self.overlay = []
+        self._open_dialogs = []  # R11: 独立 dialog 栈，与 overlay 解耦（overlay 可能混入 ToastManager 等非 dialog 元素）
         self.services = []
         self._client_storage = MockClientStorage()
         self._session = MockSession()
@@ -168,14 +169,28 @@ class MockFletPage:
             self.overlay.remove(control)
 
     def show_dialog(self, control):
-        """V1 dialog 管理：将 dialog 追加到 overlay 列表以支持测试断言。"""
+        """V1 dialog 管理：维护独立 dialog 栈并同步 overlay 以支持测试断言。
+
+        R11: 使用独立 ``_open_dialogs`` 栈而非复用 ``overlay``，因为 overlay
+        可能混入非 dialog 元素（如 ToastManager 的自定义 Container），直接
+        复用会导致栈语义错误。
+        """
+        self._open_dialogs.append(control)
         if control not in self.overlay:
             self.overlay.append(control)
 
     def pop_dialog(self):
-        """V1 dialog 管理：弹出栈顶 dialog。"""
-        if self.overlay:
-            self.overlay.pop()
+        """V1 dialog 管理：弹出栈顶 dialog 并从 overlay 移除。
+
+        R11: 从独立 ``_open_dialogs`` 栈弹出，避免误删 overlay 中的非 dialog
+        元素。返回栈顶 dialog（栈空时返回 None）。
+        """
+        if self._open_dialogs:
+            top = self._open_dialogs.pop()
+            if top in self.overlay:
+                self.overlay.remove(top)
+            return top
+        return None
 
 
 class MockDragUpdateEvent:

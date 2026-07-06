@@ -3,7 +3,7 @@
 捕捉 Flet 0.28.3 升级时 MockFletPage 与真实 Page 的接口漂移：
 - 正向契约：MockFletPage 显式实现的公开成员必须在真实 ft.Page 上存在
   （Flet 删除/重命名属性时立即失败，提醒同步 mock）
-- 排除集校验：项目扩展（show_toast/dialog 由 main.py 动态挂载）不在
+- 排除集校验：项目扩展（show_toast 由 main.py 动态挂载）不在
   ft.Page 原生接口上，需显式排除并验证排除集仍然准确
 """
 
@@ -16,7 +16,8 @@ pytestmark = pytest.mark.unit
 
 # 项目扩展方法/属性：由 main.py 动态挂载到 Page 实例，不在 flet 0.28.3 原生 Page 类上
 # - show_toast: main.py 动态挂载（page.show_toast = show_toast）
-# - dialog: main.py:106 兜底赋值（page.dialog = dialog，仅在 page.open 不存在时触发）
+# - dialog: 待批次 5 R11 配方删除（§5.11 明确 V1 无 page.dialog，mock_flet.py 仍残留 dialog property，
+#   属 C1 问题，批次 5 删除 mock_flet.py 的 dialog/open/close/client_storage 后可从排除集移除）
 _PROJECT_EXTENSIONS = frozenset({"show_toast", "dialog"})
 
 
