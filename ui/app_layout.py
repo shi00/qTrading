@@ -6,6 +6,7 @@ from enum import IntEnum
 import flet as ft
 
 from ui.i18n import I18n
+from ui.v1_compat import PageRefMixin
 from ui.theme import AppColors
 from utils.log_decorators import UILogger
 from ui.views.backtest_view import BacktestView
@@ -31,7 +32,7 @@ class NavTabs(IntEnum):
     SETTINGS = 5
 
 
-class AppLayout(ft.Container):
+class AppLayout(PageRefMixin, ft.Container):
     """
     Main Application Layout Container.
     Manages Navigation Rail, Views, and State Switching.
@@ -44,7 +45,7 @@ class AppLayout(ft.Container):
 
     def __init__(self, page: ft.Page):
         super().__init__()
-        self.page = page
+        self.page = page  # type: ignore[assignment]  # [reason: V1 Control.page read-only, PageRefMixin overrides]
         self.expand = True
 
         # State

@@ -1,0 +1,42 @@
+"""V1 兼容：Control.page 只读 property 的可写覆盖。
+
+Flet 1.0 (0.85.3) 中 ``ft.Control.page`` 改为只读 property（通过 ``parent``
+链查找），``self.page = page`` 赋值会抛 ``AttributeError``。
+
+本项目 3 个控件（``AppLayout``/``TaskCenterView``/``FailoverConfigPanel``）
+依赖 V0 行为：构造时直接 ``self.page = page`` 赋值，以便在未挂载到
+``page.controls`` 前就能引用 page（如注册回调、读取 ``page.theme_mode`` 等）。
+
+本 mixin 覆盖 ``page`` property：
+- getter：优先返回 ``__dict__['_page_ref']``，未设过则走 V1 原生 ``parent``
+  链查找；若控件未挂载（原生查找抛 ``RuntimeError``），返回 ``None``
+  （兼容 ``if self.page:`` 用法）。
+- setter：写入 ``__dict__['_page_ref']``。
+
+测试环境另有 ``mock_flet._install_v1_compat_control_page_mock()`` 全局
+monkey-patch ``ft.Control.page``，二者互不冲突（mixin 优先级更高）。
+"""
+
+import flet as ft
+
+
+class PageRefMixin:
+    """V1 兼容 mixin：使 ``ft.Control`` 子类的 ``page`` 属性可读写。
+
+    用法：``class AppLayout(PageRefMixin, ft.Container):``
+    """
+
+    @property
+    def page(self) -> ft.Page | None:  # type: ignore[override]
+        """V1 兼容：优先返回 ``_page_ref``，回退 V1 原生 parent 链。"""
+        ref = self.__dict__.get("_page_ref")
+        if ref is not None:
+            return ref
+        try:
+            return ft.Control.page.fget(self)  # type: ignore[misc]
+        except RuntimeError:
+            return None
+
+    @page.setter
+    def page(self, value: ft.Page | None) -> None:  # type: ignore[override]
+        self.__dict__["_page_ref"] = value

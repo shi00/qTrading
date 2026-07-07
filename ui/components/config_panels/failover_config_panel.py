@@ -17,6 +17,7 @@ import flet as ft
 from ui.components.settings_widgets import SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+from ui.v1_compat import PageRefMixin
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS, get_display_tag
 from utils.sanitizers import DataSanitizer
@@ -62,7 +63,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
 
         super().__init__()
 
-        self.page = page
+        self.page = page  # type: ignore[assignment]  # [reason: V1 Control.page read-only, PageRefMixin overrides]
         self._build_ui()
         if self._is_edit:
             self._populate_edit_data()
@@ -410,7 +411,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
 
-class FailoverConfigPanel(ft.Container):
+class FailoverConfigPanel(PageRefMixin, ft.Container):
     """Failover configuration panel with list management."""
 
     def __init__(

@@ -5,6 +5,7 @@ import flet as ft
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+from ui.v1_compat import PageRefMixin
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ def _get_status_color(status: TaskStatus) -> str:
     return _STATUS_COLOR_MAP.get(status, AppColors.TEXT_SECONDARY)
 
 
-class TaskCenterView(ft.Container):
+class TaskCenterView(PageRefMixin, ft.Container):
     """
     A polished dashboard showing all background operations.
     Card-based layout with status badges, progress bars, and pagination.
@@ -63,7 +64,7 @@ class TaskCenterView(ft.Container):
 
     def __init__(self, page: ft.Page):
         super().__init__(expand=True)
-        self.page = page
+        self.page = page  # type: ignore[assignment]  # [reason: V1 Control.page read-only, PageRefMixin overrides]
         self.task_manager = TaskManager()
         self._mounted = False
         self._all_tasks: list[AppTask] = []
