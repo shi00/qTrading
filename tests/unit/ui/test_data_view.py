@@ -129,6 +129,27 @@ class TestDataExplorerView:
         assert hasattr(view, "tabs")
 
     @pytest.mark.asyncio
+    async def test_lazy_build_ui_uses_v1_tabs_three_piece_set(self, mock_page):
+        """R12.b V1 三件套验证：_lazy_build_ui 创建的 tabs 是 ft.Tabs + ft.TabBar + ft.TabBarView。"""
+        view = self._make_view()
+        set_page(view, wrap_mock_page(mock_page))
+        await view._lazy_build_ui()
+
+        # view.tabs 是 ft.Tabs（V1 三件套容器）
+        assert isinstance(view.tabs, ft.Tabs)
+        assert view.tabs.length == 2
+        assert view.tabs.selected_index == 0
+        # V1 三件套：content 是 ft.Column，含 ft.TabBar + ft.TabBarView
+        assert isinstance(view.tabs.content, ft.Column)
+        assert len(view.tabs.content.controls) == 2
+        assert isinstance(view.tabs.content.controls[0], ft.TabBar)
+        assert len(view.tabs.content.controls[0].tabs) == 2
+        assert isinstance(view.tabs.content.controls[1], ft.TabBarView)
+        assert len(view.tabs.content.controls[1].controls) == 2
+        # _tab_bar 引用应与 tabs.content.controls[0] 是同一对象（供 refresh_locale 更新 label）
+        assert view._tab_bar is view.tabs.content.controls[0]
+
+    @pytest.mark.asyncio
     async def test_lazy_build_ui_without_page(self):
         view = self._make_view()
         await view._lazy_build_ui()

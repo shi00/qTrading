@@ -1,5 +1,7 @@
 import asyncio
+from typing import Any
 
+import flet as ft
 from unittest.mock import MagicMock
 
 
@@ -8,8 +10,9 @@ def _install_v1_compat_control_page_mock() -> None:
 
     V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
     ``Control.update()`` 要求控件已挂载到 page，否则抛 ``RuntimeError``。
-    本项目测试代码与 4 处源码（``app_layout``/``task_center_view``/
-    ``toast_manager``/``failover_config_panel``）依赖 V0 行为：直接
+    本项目测试代码与 5 处源码（``app_layout``/``task_center_view``/
+    ``failover_config_panel``（含 ``ProviderCredentialDialog``+
+    ``FailoverConfigPanel``）/``resizable_splitter``）依赖 V0 行为：直接
     ``self.page = page`` 赋值、未挂载控件调用 ``update()`` 静默返回、
     ``if self.page:`` 在未挂载时返回 falsy 而非抛异常。
 
@@ -24,16 +27,21 @@ def _install_v1_compat_control_page_mock() -> None:
 
     幂等：多次调用安全（仅 patch 一次，由 ``_mock_page_patched`` 标志守护）。
     """
-    import flet as ft
-
+    # NOTE(lazy): 全局 monkey-patch ft.Control 的测试侧 V0 兼容桩.
+    # ceiling: 测试套件（仅 tests/unit/ui/ 目录导入 mock_flet 时生效）.
+    # upgrade: 5 处源码（app_layout/task_center_view/failover_config_panel 的
+    #     ProviderCredentialDialog+FailoverConfigPanel/resizable_splitter）
+    #     改造为 did_mount() 阶段获取 page 后，移除本桩与 R18 配方；测试代码改用
+    #     PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
     if getattr(ft.Control, "_mock_page_patched", False):
         return
 
-    original_page_get = ft.Control.page.fget
-    original_update = ft.Control.update
+    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
+    original_page_get: Any = ft.Control.page.fget
+    original_update: Any = ft.Control.update
 
     @property
-    def page(self):  # type: ignore[no-untyped-def]
+    def page(self) -> ft.Page | None:
         mock_page = self.__dict__.get("_mock_page", None)
         if mock_page is not None:
             return mock_page
@@ -44,10 +52,10 @@ def _install_v1_compat_control_page_mock() -> None:
             return None
 
     @page.setter
-    def page(self, value):
+    def page(self, value: ft.Page | None) -> None:
         self.__dict__["_mock_page"] = value
 
-    def update(self):  # type: ignore[no-untyped-def]
+    def update(self) -> None:
         # V0 兼容：未挂载到 page 时静默返回（不抛 RuntimeError）
         if self.__dict__.get("_mock_page", None) is None:
             try:
@@ -56,9 +64,9 @@ def _install_v1_compat_control_page_mock() -> None:
                 return
         original_update(self)
 
-    ft.Control.page = page  # type: ignore[method-assign]
-    ft.Control.update = update  # type: ignore[method-assign]
-    ft.Control._mock_page_patched = True  # type: ignore[attr-defined]
+    ft.Control.page = page  # type: ignore[method-assign]  # [reason: V1 Control.page 为只读 property，测试侧 monkey-patch 为可读写以兼容 V0 self.page = page 赋值]
+    ft.Control.update = update  # type: ignore[method-assign]  # [reason: V1 Control.update 未挂载时抛 RuntimeError，测试侧 patch 为静默返回以兼容 V0 行为]
+    ft.Control._mock_page_patched = True  # type: ignore[attr-defined]  # [reason: 幂等守护标志，标记 ft.Control 已被测试侧 monkey-patch，避免重复 patch]
 
 
 # 模块导入时一次性应用 V1 兼容桩，确保 UI 测试目录下所有测试均生效。
@@ -112,9 +120,22 @@ class MockFletPage:
         self._dark_theme = None
         self._scroll = None
         self.title = ""
-        self.window = MagicMock()
+        # R2: page.on_resize 回调字段（V1 替代 V0 on_resized），main.py 赋值用
+        self.on_resize = None
+        # S5: Page.on_close/on_disconnect/on_error/on_connect dataclass 字段，main.py 生命周期挂载
+        self.on_close = None
+        self.on_disconnect = None
+        self.on_error = None
+        self.on_connect = None
+        # window: 用 spec=ft.Window 约束，缺失字段访问会抛 AttributeError，让契约测试可捕获字段漂移
+        self.window = MagicMock(spec=ft.Window)
         self.window.width = 1200
         self.window.height = 800
+        self.window.min_width = 800
+        self.window.min_height = 600
+        self.window.prevent_close = True
+        self.window.on_event = None
+        self.window.icon = None
         self.padding = 0
         self.spacing = 0
         self.bgcolor = None
@@ -249,9 +270,10 @@ class MockDragUpdateEvent:
     的两条路径。绕过真实 flet 需 ControlEvent + JSON 解析的构造，故提供此轻量桩。
     """
 
-    def __init__(self, primary_delta=0, local_delta=None):
+    def __init__(self, primary_delta=0, local_delta=None, global_delta=None):
         self.primary_delta = primary_delta
         self.local_delta = local_delta
+        self.global_delta = global_delta
 
 
 class MockHoverEvent:

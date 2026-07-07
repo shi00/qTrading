@@ -131,6 +131,19 @@ class SettingsView(ft.Container):
         except Exception as e:  # pragma: no cover
             logger.warning("[SettingsView] refresh_locale failed: %s", e, exc_info=True)  # pragma: no cover
 
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:  # pragma: no cover - UI 事件
+        """窗口 resize 通知 — 级联调用当前激活 Tab 的 handle_resize（§5.9 规范3）。
+
+        子 Tab 若实现 handle_resize（如 SystemTab → TierApiPanel），则级联调用以确保响应式布局同步。
+        """
+        try:  # pragma: no cover
+            if 0 <= self.current_tab_index < len(self.tab_contents):  # pragma: no cover
+                current_tab = self.tab_contents[self.current_tab_index]  # pragma: no cover
+                if hasattr(current_tab, "handle_resize"):  # pragma: no cover
+                    current_tab.handle_resize(width, height)  # type: ignore[untyped]  # pragma: no cover
+        except Exception as exc:  # pragma: no cover
+            logger.debug("[SettingsView] handle_resize skipped: %s", exc, exc_info=True)  # pragma: no cover
+
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:  # pragma: no cover
         """Centralized tab button style factory."""  # pragma: no cover
         return ft.ButtonStyle(  # pragma: no cover

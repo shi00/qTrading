@@ -477,6 +477,9 @@ class TableViewerTab(ft.Container):
 
     def _rebuild_table_columns(self):  # pragma: no cover
         """Rebuild DataTable columns from vm.table_columns and vm.numeric_cols."""
+        # 先清除 sort_column_index，避免 columns 被清空后 Dart 端 DataTable
+        # 同步状态时引用已失效的列索引触发 "Null check operator" 异常。
+        self.data_table.sort_column_index = None
         self.data_table.columns = []
         for idx, col in enumerate(self.vm.table_columns):
             is_numeric = col in self.vm.numeric_cols
@@ -1148,6 +1151,22 @@ class DataExplorerView(ft.Container):
                 self.update()
         except Exception as e:
             logger.warning("[DataExplorerView] refresh_locale error: %s", e, exc_info=True)
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:  # pragma: no cover - UI 事件
+        """窗口 resize 通知（§5.9 规范3）。
+
+        本视图布局全部依赖 expand=True 自动适应，无需手动调整尺寸。
+        子 tab 若实现 handle_resize，则级联调用以确保响应式布局同步。
+        """
+        if not self._ui_built:
+            return
+        try:
+            if hasattr(self, "table_tab") and hasattr(self.table_tab, "handle_resize"):
+                self.table_tab.handle_resize(width, height)
+            if hasattr(self, "sql_tab") and hasattr(self.sql_tab, "handle_resize"):
+                self.sql_tab.handle_resize(width, height)
+        except Exception as exc:
+            logger.debug("[DataExplorerView] handle_resize skipped: %s", exc, exc_info=True)
 
     async def did_mount_async(self):  # pragma: no cover
         import time as _time

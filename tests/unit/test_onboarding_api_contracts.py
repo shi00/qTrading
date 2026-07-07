@@ -423,8 +423,8 @@ class TestLocaleChangeSignature:
 
         assert params == ["self"]
 
-    def test_system_tab_locale_change_accepts_optional_new_locale(self):
-        """SystemTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+    def test_system_tab_locale_change_is_zero_arg(self):
+        """SystemTab._on_locale_change 必须零参（§5.8 规范 2）"""
         import inspect
 
         from ui.views.settings_tabs.system_tab import SystemTab
@@ -433,13 +433,10 @@ class TestLocaleChangeSignature:
         sig = inspect.signature(SystemTab._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "self" in params
-        assert "new_locale" in params
-        new_locale_param = sig.parameters["new_locale"]
-        assert new_locale_param.default is not inspect.Parameter.empty
+        assert params == ["self"]
 
-    def test_automation_tab_locale_change_accepts_optional_new_locale(self):
-        """AutomationTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+    def test_automation_tab_locale_change_is_zero_arg(self):
+        """AutomationTab._on_locale_change 必须零参（§5.8 规范 2）"""
         import inspect
 
         from ui.views.settings_tabs.automation_tab import AutomationTab
@@ -448,13 +445,10 @@ class TestLocaleChangeSignature:
         sig = inspect.signature(AutomationTab._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "self" in params
-        assert "new_locale" in params
-        new_locale_param = sig.parameters["new_locale"]
-        assert new_locale_param.default is not inspect.Parameter.empty
+        assert params == ["self"]
 
-    def test_notifications_tab_locale_change_accepts_optional_new_locale(self):
-        """NotificationsTab._on_locale_change 历史遗留签名：带可选 new_locale 参数"""
+    def test_notifications_tab_locale_change_is_zero_arg(self):
+        """NotificationsTab._on_locale_change 必须零参（§5.8 规范 2）"""
         import inspect
 
         from ui.views.settings_tabs.automation_tab import NotificationsTab
@@ -463,10 +457,7 @@ class TestLocaleChangeSignature:
         sig = inspect.signature(NotificationsTab._on_locale_change)
         params = list(sig.parameters.keys())
 
-        assert "self" in params
-        assert "new_locale" in params
-        new_locale_param = sig.parameters["new_locale"]
-        assert new_locale_param.default is not inspect.Parameter.empty
+        assert params == ["self"]
 
 
 class TestLLMProviderSwitch:

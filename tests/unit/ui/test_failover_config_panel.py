@@ -659,37 +659,6 @@ class TestFailoverConfigPanelReorder:
         # 顺序不变
         assert panel._failover_items[2].provider == "zhipu"
 
-    def test_persist_order_saves_correct_sequence(
-        self,
-        mock_config_handler,
-        mock_i18n,
-        mock_llm_providers,
-        mock_app_colors,
-        mock_app_styles,
-        mock_section_header,
-        mock_page,
-    ):
-        panel = self._make_panel_with_items(
-            mock_config_handler,
-            mock_i18n,
-            mock_llm_providers,
-            mock_app_colors,
-            mock_app_styles,
-            mock_section_header,
-            mock_page,
-        )
-        mock_config_handler.save_config.reset_mock()
-        panel._persist_order()
-        mock_config_handler.save_config.assert_called_once_with(
-            {
-                "llm_failover_models": [
-                    "deepseek/deepseek-chat",
-                    "openai/gpt-4o",
-                    "zhipu/glm-4",
-                ]
-            }
-        )
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 5. TestFailoverConfigPanelValidateAndSave

@@ -125,9 +125,10 @@ class PaginatedTable(ft.Column):
 
         if self.page:
             # Best-effort only. `set_rows` must still be valid before mount.
+            # 不调用 list_view.scroll_to：Flet 0.85.3 中该方法是协程，同步调用会触发
+            # RuntimeWarning 且实际未执行；滚动重置交由用户交互触发。
             try:
                 self._canvas.update()
-                self.list_view.scroll_to(offset=0, duration=0)
             except Exception as e:
                 logger.debug("UI render error: %s", e, exc_info=True)
 

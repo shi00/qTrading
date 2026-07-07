@@ -52,7 +52,10 @@ from tests.integration.fixtures.mvd_data import (
     MVD_TRADE_CAL,
 )
 
-# V1 兼容桩：让 ft.Control.page 可读写、update() 容忍未挂载情况。
+# NOTE(lazy): 集成测试侧显式调用 V1 兼容桩，让 ft.Control.page 可读写、update() 容忍未挂载情况.
+# ceiling: 集成测试套件（tests/integration/ 路径）.
+# upgrade: 与 mock_flet._install_v1_compat_control_page_mock 同步移除，
+#     集成测试代码改用 PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
 # 集成测试（如 test_config_panels.py）用 `panel.page = mock_page` 赋值，
 # 但 V1 中 ft.Control.page 是只读 property，需此桩恢复 V0 行为。
 # 导入 mock_flet 模块时已自动应用桩，此处显式调用确保幂等。

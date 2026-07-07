@@ -285,14 +285,14 @@ class TestScreenerView:
     def test_on_mode_change_to_history(self, mock_page):
         view = self._make_view(mock_page)
         e = MagicMock()
-        e.control.selected = {"HISTORY"}
+        e.control.selected = ["HISTORY"]
         view._on_mode_change(e)
         mock_page.run_task.assert_called_once()
 
     def test_on_mode_change_to_realtime(self, mock_page):
         view = self._make_view(mock_page)
         e = MagicMock()
-        e.control.selected = {"REALTIME"}
+        e.control.selected = ["REALTIME"]
         view._on_mode_change(e)
         mock_page.run_task.assert_called_once()
 

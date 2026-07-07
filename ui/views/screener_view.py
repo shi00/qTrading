@@ -261,7 +261,7 @@ class ScreenerView(ft.Container):
                     icon=ft.Icon(ft.Icons.HISTORY),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
-            selected={"REALTIME"},  # pragma: no cover
+            selected=["REALTIME"],  # V1: list[str]（非 set，msgpack 不支持 set 序列化）
             on_change=self._on_mode_change,  # pragma: no cover
         )  # pragma: no cover
 
@@ -365,14 +365,13 @@ class ScreenerView(ft.Container):
         if hasattr(self, "result_table") and self.result_table:
             self.result_table.clear()
 
-        # Cleanup overlay to prevent memory leak
-        # R3: V1 对话框由 show_dialog/pop_dialog 管理 overlay；此处防御性清理
-        # 以防 view 卸载时 dialog 仍开着（pop_dialog 已移除时会抛 ValueError）
+        # Cleanup dialog to prevent memory leak
+        # R3: V1 对话框由 show_dialog/pop_dialog 管理；view 卸载时若 dialog 仍开着，用 pop_dialog 关闭
         if self.detail_dialog and self.page:
             try:
-                self.page.overlay.remove(self.detail_dialog)
-            except ValueError:
-                pass  # Already removed by pop_dialog or never appended
+                self.page.pop_dialog()
+            except Exception as e:
+                logger.debug("[ScreenerView] pop_dialog on unmount skipped: %s", e)
             self.detail_dialog = None
 
         # U-1 fix: Reset mounted state for proper re-mount handling

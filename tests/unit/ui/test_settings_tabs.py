@@ -157,14 +157,14 @@ class TestAutomationTab:
     def test_on_locale_change_updates_labels(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_auto_update")
         self.mock_i18n.get.assert_any_call("settings_update_time")
 
     def test_on_locale_change_rebuilds_content(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
         assert tab.txt_title_main is not None
         assert tab.card_main is not None
 
@@ -172,20 +172,20 @@ class TestAutomationTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.schedule_enabled.value = True
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_status_auto_on")
 
     def test_on_locale_change_updates_ai_concept_status(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         tab.ai_concept_enabled.value = False
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_status_auto_off")
 
     def test_on_locale_change_rebuilds_time_options(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
         expected_keys = [opt.key for opt in tab._build_time_options()]
         actual_keys = [opt.key for opt in (tab.schedule_time.options or [])]
         assert actual_keys == expected_keys
@@ -404,7 +404,7 @@ class TestAutomationTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         self.mock_i18n.get.side_effect = RuntimeError("boom")
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
 
     def test_safe_update_exception_handled(self, mock_page):
         tab = self._make_tab()
@@ -429,7 +429,7 @@ class TestAutomationTab:
     def test_on_locale_change_updates_ai_concept_labels(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("zh_CN")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_ai_concept_update")
 
     def test_schedule_time_initially_disabled_when_off(self, mock_page):
@@ -1114,14 +1114,14 @@ class TestSystemTab:
     def test_on_locale_change_updates_labels(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_called()  # 多次调用预期 (多个标签翻译)
 
     def test_on_locale_change_exception_handled(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         self.mock_i18n.get.side_effect = Exception("locale error")
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
 
     def test_on_locale_change_preserves_dropdown_values(self, mock_page):
         """§5.8 规范 4：_on_locale_change 重建 options 后 3 个 dropdown 的 value 必须保留。
@@ -1134,7 +1134,7 @@ class TestSystemTab:
         tab.language_dropdown.value = "en_US"
         tab.theme_dropdown.value = "dark"
         tab.log_level_dropdown.value = "INFO"
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
         assert tab.language_dropdown.value == "en_US"
         assert tab.theme_dropdown.value == "dark"
         assert tab.log_level_dropdown.value == "INFO"

@@ -67,14 +67,19 @@ def refresh_dropdown_options(
 ) -> None:
     """重建 Dropdown options 并确保显示文本正确刷新。
 
-    Flet 0.85.3 改用 ``Prop`` 描述符（V0 的 ``_set_attr_internal`` 已删除），
-    ``Prop.__set__`` 在 ``old == value`` 时跳过赋值（值相等优化），
-    可能导致批量 ``page.update()`` 中 ``value`` 从 X->None->X 的最终值
-    等于原值时，前端 DropdownButton 不触发 rebuild。
+    本函数为 V1 永久方案（非临时垫片）：Flet 0.85.3 改用 ``Prop`` 描述符（V0 的
+    ``_set_attr_internal`` 已删除），``Prop.__set__`` 在 ``old == value`` 时跳过赋值
+    （值相等优化），导致批量 ``page.update()`` 中 ``value`` 从 X->None->X 的最终值
+    等于原值时，前端 DropdownButton 不触发 rebuild。此行为是 V1 渲染管线的固有特性，
+    非临时 bug，故本函数需长期保留。
 
     通过分两步 ``control.update()`` 解决：
     步骤1: 提交 options + value=None，前端清除选中项显示
     步骤2: 提交 value=saved，前端用新 options 的 text 更新显示
+
+    异常处理说明（R2 合规）：本函数为同步路径（非 async），不会出现 ``CancelledError``；
+    两处 ``except (RuntimeError, AttributeError)`` 仅吞 ``update()`` 在控件未挂载时抛出的
+    ``RuntimeError``（V1 行为）/ ``AttributeError``（V0 兼容），后续 ``page.update()`` 兜底刷新。
 
     参考: CONTRIBUTING.md §5.8 规范 4
     """
@@ -83,11 +88,12 @@ def refresh_dropdown_options(
     dropdown.options = new_options
     try:
         dropdown.update()
-    except Exception:
+    except (RuntimeError, AttributeError):
         # 控件未挂载时跳过，后续 page.update() 兜底
         pass
     dropdown.value = saved_value
     try:
         dropdown.update()
-    except Exception:
+    except (RuntimeError, AttributeError):
+        # 控件未挂载时跳过，后续 page.update() 兜底
         pass

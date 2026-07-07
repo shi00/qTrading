@@ -35,6 +35,8 @@ class BacktestResultPanel(ft.Container):
         self._trades_page_size: int = 50
         self._chart_min_height: int | None = None
         self._chart_containers: list[ft.Container] = []
+        # V1 三件套 Tabs 引用：refresh_locale 时就地更新 label，避免重建 content 丢失选中状态
+        self._tab_bar: ft.TabBar | None = None
         self.content = self._build_empty_content()
 
     def set_result(self, result: BacktestResult):
@@ -62,11 +64,19 @@ class BacktestResultPanel(ft.Container):
     def refresh_locale(self):
         """语言切换时刷新界面（纯 UI 操作）。
 
-        若已有结果，重建 content 以刷新所有 I18n.get() 文案；
+        若已有结果，就地更新 Tab label 与重建图表/表格内容（保留 Tabs 选中状态）；
         若为空状态，重建 empty_content 刷新提示文案。
         """
         try:
-            self.content = self._build_content()
+            if not self._result:
+                # 空状态：重建 empty_content 刷新提示文案
+                self.content = self._build_empty_content()
+            elif self._tab_bar is not None:
+                # 有结果：就地更新 Tab label，避免重建 Tabs 丢失 selected_index
+                self._tab_bar.tabs[0].label = I18n.get("backtest_tab_nav_curve")
+                self._tab_bar.tabs[1].label = I18n.get("backtest_tab_trades")
+                self._tab_bar.tabs[2].label = I18n.get("backtest_tab_ic_series")
+                self._tab_bar.tabs[3].label = I18n.get("backtest_tab_monthly")
             if self.page:
                 self.update()
         except Exception as e:
@@ -107,6 +117,16 @@ class BacktestResultPanel(ft.Container):
         self._chart_containers = []
         metrics = self._result.metrics
 
+        # V1 三件套：存储 _tab_bar 引用供 refresh_locale 就地更新 label
+        self._tab_bar = ft.TabBar(
+            tabs=[
+                ft.Tab(label=I18n.get("backtest_tab_nav_curve")),
+                ft.Tab(label=I18n.get("backtest_tab_trades")),
+                ft.Tab(label=I18n.get("backtest_tab_ic_series")),
+                ft.Tab(label=I18n.get("backtest_tab_monthly")),
+            ],
+        )
+
         return ft.Column(
             [
                 self._build_metrics_section(metrics),
@@ -119,14 +139,7 @@ class BacktestResultPanel(ft.Container):
                     content=ft.Column(
                         expand=True,
                         controls=[
-                            ft.TabBar(
-                                tabs=[
-                                    ft.Tab(label=I18n.get("backtest_tab_nav_curve")),
-                                    ft.Tab(label=I18n.get("backtest_tab_trades")),
-                                    ft.Tab(label=I18n.get("backtest_tab_ic_series")),
-                                    ft.Tab(label=I18n.get("backtest_tab_monthly")),
-                                ],
-                            ),
+                            self._tab_bar,
                             ft.TabBarView(
                                 expand=True,
                                 controls=[

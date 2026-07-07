@@ -20,6 +20,7 @@ from ui.theme import AppColors, AppStyles
 from ui.v1_compat import PageRefMixin
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS, get_display_tag
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -286,6 +287,7 @@ class ProviderCredentialDialog(PageRefMixin, ft.AlertDialog):
         if self.page:
             self.page.pop_dialog()
 
+    @log_async_operation(operation_name="failover_test_connection", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _on_test_connection(self, e):
         provider = self._provider
         model = self.custom_model_input.value or self.model_dropdown.value
@@ -348,6 +350,7 @@ class ProviderCredentialDialog(PageRefMixin, ft.AlertDialog):
         if self.page:
             self.page.run_task(self._do_confirm_click_async, provider, model, base_url, api_key)
 
+    @log_async_operation(operation_name="failover_save_credential", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _do_confirm_click_async(self, provider: str, model: str, base_url: str, api_key: str | None):
         try:
             # 合并 5 次 IO 到单个闭包，减少 run_async 调用次数
@@ -668,6 +671,7 @@ class FailoverConfigPanel(PageRefMixin, ft.Container):
         if self.page:
             self.page.run_task(self._do_delete_item_async, index)
 
+    @log_async_operation(operation_name="failover_delete_item", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _do_delete_item_async(self, index: int):
         try:
             item = self._failover_items[index]
@@ -718,15 +722,11 @@ class FailoverConfigPanel(PageRefMixin, ft.Container):
             logger.error("[FailoverConfigPanel] move item failed: %s", ex, exc_info=True)
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
-    def _persist_order(self):
-        ordered = [item.to_config_string() for item in self._failover_items]
-        ConfigHandler.save_config({"llm_failover_models": ordered})
-        self._render_list()
-
     def _on_validate_all(self, e):
         if self.page:
             self.page.run_task(self._do_validate_all_async)
 
+    @log_async_operation(operation_name="failover_validate_all", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _do_validate_all_async(self):
         try:
             missing = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.validate_failover_credentials)

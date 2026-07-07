@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
@@ -459,7 +459,7 @@ class TushareConfigPanel(ft.Container):
             # §5.8 i18n：tier_dropdown label/hint/options 重建（选项文本含档位说明需翻译）
             self.tier_dropdown.label = I18n.get("sys_tier_label_in_token_panel")
             self.tier_dropdown.hint_text = I18n.get("sys_tier_hint_in_token_panel")
-            self.tier_dropdown.options = self._build_tier_options()
+            refresh_dropdown_options(self.tier_dropdown, self._build_tier_options())
             self._safe_update()
         except Exception as e:
             logger.warning("[TushareConfigPanel] refresh_locale failed: %s", e, exc_info=True)

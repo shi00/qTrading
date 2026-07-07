@@ -830,21 +830,21 @@ class TestSystemTabLocaleChange:
     def test_on_locale_change_updates_dropdown_labels(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_theme")
         self.mock_i18n.get.assert_any_call("settings_log_level")
 
     def test_on_locale_change_updates_input_labels(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_concurrency")
         self.mock_i18n.get.assert_any_call("settings_db_pool")
 
     def test_on_locale_change_calls_row_update_locale(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
         rows = [
             tab.row_language,
             tab.row_theme,
@@ -863,14 +863,14 @@ class TestSystemTabLocaleChange:
     def test_on_locale_change_calls_section_header_update_locale(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
         tab.section_header.update_locale.assert_called_once()
 
     def test_on_locale_change_exception_handled(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
         self.mock_i18n.get.side_effect = RuntimeError("locale error")
-        tab._on_locale_change("en_US")
+        tab._on_locale_change()
 
 
 class TestSystemTabMountUnmount:

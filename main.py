@@ -270,27 +270,14 @@ async def main(page: ft.Page):
     page.padding = 0
     apply_page_theme(page)
 
-    page.toast = ToastManager(page)  # type: ignore[attr-defined]
+    page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
 
     def show_toast(message, type="info"):
-        page.toast.show(message, type)  # type: ignore[attr-defined]
+        page.toast.show(message, type)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
 
-    page.show_toast = show_toast  # type: ignore[attr-defined]
+    page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
 
     # --- Startup flow: delegate to StartupController + StartupViewRenderer ---
-
-    def _show_dialog_with_tracking(dialog):
-        """Wrap _show_dialog to track active dialog for renderer."""
-        nonlocal active_dialog
-        _show_dialog(dialog)
-        active_dialog = dialog
-
-    def _hide_dialog_with_tracking(dialog):
-        """Wrap _hide_dialog to clear active dialog tracking."""
-        nonlocal active_dialog
-        _hide_dialog(dialog)
-        if active_dialog is dialog:
-            active_dialog = None
 
     async def _perform_upgrade_exit():
         """Cleanup and force exit after upgrade failure."""
@@ -313,14 +300,14 @@ async def main(page: ft.Page):
         cache_manager=cache_manager,
         on_state_change=lambda state, ctx: renderer.on_state_change(state, ctx),
         on_show_toast=_on_show_toast,
-        on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # run_task returns Task; on_exit callback return ignored
+        on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
     )
 
     renderer = StartupViewRenderer(
         page=page,
         controller=controller,
-        show_dialog_fn=_show_dialog_with_tracking,
-        hide_dialog_fn=_hide_dialog_with_tracking,
+        show_dialog_fn=_show_dialog,
+        hide_dialog_fn=_hide_dialog,
         run_task_fn=page.run_task,
     )
 

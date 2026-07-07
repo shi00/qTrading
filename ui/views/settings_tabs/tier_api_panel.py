@@ -63,7 +63,7 @@ class TierApiPanel(ft.Column):
 
     def _build_ui(self) -> None:  # pragma: no cover - UI 渲染
         """构建 UI: 档位选择 + 提示文案 + API 列表 + probe 状态 + 触发按钮 + stale 提示。"""
-        # 1. 档位下拉框（与 system_tab 5 档保持一致；on_change 触发档位变更全链路）
+        # 1. 档位下拉框（与 system_tab 5 档保持一致；on_select 触发档位变更全链路）
         self.tier_dropdown = ft.Dropdown(
             label=I18n.get("sys_label_point_tier"),
             value=self._current_tier,

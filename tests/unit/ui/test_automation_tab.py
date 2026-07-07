@@ -323,7 +323,7 @@ class TestAutomationTab:
 
                 tab = AutomationTab(MagicMock())
                 tab.page = _FakePage()
-                tab._on_locale_change("en")
+                tab._on_locale_change()
 
                 assert tab.schedule_enabled.label == "translated_text"
 
@@ -354,7 +354,7 @@ class TestAutomationTab:
                 # 重建 options 期间不应丢失 value
                 original_schedule_value = tab.schedule_time.value
                 original_ai_concept_value = tab.ai_concept_time.value
-                tab._on_locale_change("en")
+                tab._on_locale_change()
 
                 assert tab.schedule_time.value == original_schedule_value
                 assert tab.schedule_time.value == "08:00"
@@ -487,7 +487,7 @@ class TestAutomationTabSearchEngine:
                 tab.page = _FakePage()
                 tab.ai_concept_search_engine.value = "search_pro"
                 original = tab.ai_concept_search_engine.value
-                tab._on_locale_change("en")
+                tab._on_locale_change()
                 assert tab.ai_concept_search_engine.value == original
                 assert tab.ai_concept_search_engine.value == "search_pro"
                 assert tab.ai_concept_search_engine.options is not None
@@ -518,7 +518,7 @@ class TestAutomationTabSearchEngine:
                 tab.page = _FakePage()
                 # Switch 关闭时 search_engine 应禁用
                 assert tab.ai_concept_search_engine.disabled is True
-                tab._on_locale_change("en")
+                tab._on_locale_change()
                 # 语言切换后 disabled 状态必须保留
                 assert tab.ai_concept_search_engine.disabled is True
                 # value 也应保留
@@ -546,7 +546,7 @@ class TestAutomationTabSearchEngine:
                 tab.page = _FakePage()
                 # Switch 开启时 search_engine 应可编辑
                 assert tab.ai_concept_search_engine.disabled is False
-                tab._on_locale_change("en")
+                tab._on_locale_change()
                 # 语言切换后 disabled 状态必须保留
                 assert tab.ai_concept_search_engine.disabled is False
                 assert tab.ai_concept_search_engine.value == "search_pro"
@@ -756,7 +756,7 @@ class TestNotificationsTab:
                 page = _FakePage()
                 tab = NotificationsTab(MagicMock(), page)
                 tab.page = _FakePage()
-                tab._on_locale_change("en")
+                tab._on_locale_change()
 
                 assert tab.news_alerts_enabled.label == "translated_text"
 
@@ -779,7 +779,7 @@ class TestNotificationsTab:
 
                 # 重建 options 期间不应丢失 value
                 original_value = tab.news_interval.value
-                tab._on_locale_change("en")
+                tab._on_locale_change()
 
                 assert tab.news_interval.value == original_value
                 assert tab.news_interval.value == "120"
@@ -938,7 +938,7 @@ class TestAutomationTabErrorPaths:
         with _automation_tab_cxt() as (tab, _, _):
             tab.page = _FakePage()
             with patch.object(tab, "_build_content", side_effect=RuntimeError("build failed")):
-                tab._on_locale_change("en")
+                tab._on_locale_change()
 
     def test_will_unmount_skips_when_no_subscription(self):
         """_locale_subscription_id=None 时跳过 unsubscribe。"""
@@ -1064,7 +1064,7 @@ class TestNotificationsTabErrorPaths:
         with _notifications_tab_cxt(page=page) as (tab, _, _):
             tab.page = _FakePage()
             with patch.object(tab, "_build_content", side_effect=RuntimeError("build failed")):
-                tab._on_locale_change("en")
+                tab._on_locale_change()
 
     def test_will_unmount_skips_when_no_subscription(self):
         """_locale_subscription_id=None 时跳过 unsubscribe。"""

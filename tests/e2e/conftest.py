@@ -258,7 +258,10 @@ def _spawn(tmp_path_factory, config: dict, env_overrides: dict) -> tuple:
     cfg_dir = tmp_path_factory.mktemp("e2e_cfg")
     cfg_file = cfg_dir / "user_settings.json"
     cfg_file.write_text(json.dumps(config), encoding="utf-8")
-    proc, url = start_flet_app(cfg_file, env_overrides)
+    # tushare SDK set_token() 写入 ~/tk.csv，受限环境（TRAE Sandbox）会拒绝。
+    # 将 USERPROFILE 重定向到 session 临时目录，隔离 tushare 文件写入。
+    e2e_home = str(tmp_path_factory.mktemp("e2e_home"))
+    proc, url = start_flet_app(cfg_file, {"USERPROFILE": e2e_home, **env_overrides})
     return proc, url, cfg_file
 
 
