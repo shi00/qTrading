@@ -339,12 +339,12 @@ class BacktestResultPanel(ft.Container):
         end = min(start + self._trades_page_size, total_rows)
 
         columns = [
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_date"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_code"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_action"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_price"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_volume"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_pnl"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_date"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_code"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_action"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_price"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_volume"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_pnl"), color=AppColors.TEXT_PRIMARY)),
         ]
 
         rows = []
@@ -470,10 +470,10 @@ class BacktestResultPanel(ft.Container):
 
         stats_df = self._result.period_stats
         columns = [
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_month"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_return"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_benchmark"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_excess"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_month"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_return"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_benchmark"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_excess"), color=AppColors.TEXT_PRIMARY)),
         ]
 
         rows = []

@@ -133,7 +133,7 @@ def mock_page():
     page.services = []
     page.show_dialog = MagicMock(spec=[])
     page.pop_dialog = MagicMock(spec=[])
-    page.launch_url = MagicMock(spec=[])
+    page.launch_url = AsyncMock(spec=[])
     page.update = MagicMock(spec=[])
 
     def _run_task(coro_func, *args, **kwargs):
@@ -1746,7 +1746,8 @@ class TestProviderCredentialDialogProviderChange:
 class TestProviderCredentialDialogActions:
     """覆盖 _open_url、_on_cancel、_on_test_connection、_show_snack、_on_confirm_click 边界。"""
 
-    def test_open_url_calls_page_launch_url(
+    @pytest.mark.asyncio
+    async def test_open_url_calls_page_launch_url(
         self,
         mock_config_handler,
         mock_i18n,
@@ -1764,7 +1765,7 @@ class TestProviderCredentialDialogActions:
             mock_app_styles,
             mock_page,
         )
-        dialog._open_url("https://example.com")
+        await dialog._open_url("https://example.com")
         mock_page.launch_url.assert_called_once_with("https://example.com")
 
     def test_on_cancel_without_page_does_not_raise(

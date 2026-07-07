@@ -1348,7 +1348,8 @@ class ScreenerView(ft.Container):
                 name = ctrl.data
                 if isinstance(ctrl, ft.Slider):
                     val = ctrl.value
-                    params[name] = int(val) if val == int(val) else round(val, 2)
+                    if val is not None:
+                        params[name] = int(val) if val == int(val) else round(val, 2)
                 elif isinstance(ctrl, ft.TextField):
                     if ctrl.multiline:
                         params[name] = ctrl.value

@@ -78,7 +78,7 @@ async def main(page: ft.Page):
             try:
                 if not _is_web_mode():
                     page.window.prevent_close = False
-                    page.window.destroy()
+                    await page.window.destroy()
             except Exception as e:
                 logger.debug("Window destroy ignored: %s", e)
 
@@ -263,7 +263,7 @@ async def main(page: ft.Page):
             page.window.width = 1280
             page.window.height = 800
         try:
-            page.window.center()
+            await page.window.center()
         except Exception:  # noqa: BLE001
             pass
 
@@ -287,7 +287,7 @@ async def main(page: ft.Page):
         try:
             if not _is_web_mode():
                 page.window.prevent_close = False
-                page.window.destroy()
+                await page.window.destroy()
         except Exception:  # noqa: BLE001
             pass
         coordinator._force_exit(1)

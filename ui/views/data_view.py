@@ -148,7 +148,7 @@ class TableViewerTab(ft.Container):
 
         self.data_table = ft.DataTable(  # pragma: no cover
             columns=[  # pragma: no cover
-                ft.DataColumn(ft.Text(I18n.get("data_loading"))),  # pragma: no cover
+                ft.DataColumn(label=ft.Text(I18n.get("data_loading"))),  # pragma: no cover
             ],  # pragma: no cover
             rows=[],  # pragma: no cover
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
@@ -358,7 +358,7 @@ class TableViewerTab(ft.Container):
                 self._update_pagination_ui()
             else:
                 # 加载占位文案
-                self.data_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_loading")))]
+                self.data_table.columns = [ft.DataColumn(label=ft.Text(I18n.get("data_loading")))]
                 self.data_table.rows = []
 
             if self.page:
@@ -793,7 +793,7 @@ class SQLConsoleTab(ft.Container):
         )  # pragma: no cover
 
         self.result_table = ft.DataTable(  # pragma: no cover
-            columns=[ft.DataColumn(ft.Text(I18n.get("data_sql_result")))],  # pragma: no cover
+            columns=[ft.DataColumn(label=ft.Text(I18n.get("data_sql_result")))],  # pragma: no cover
             rows=[],  # pragma: no cover
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
             horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),  # pragma: no cover
@@ -908,7 +908,7 @@ class SQLConsoleTab(ft.Container):
             self.empty_hint_text.value = I18n.get("data_sql_empty_hint")
             self.date_fmt_hint_text.value = I18n.get("data_date_fmt_hint")
             self.btn_count.content = I18n.get("data_btn_count")
-            self.result_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_sql_result")))]
+            self.result_table.columns = [ft.DataColumn(label=ft.Text(I18n.get("data_sql_result")))]
             if self.page:
                 self.update()
         except Exception as e:
@@ -962,7 +962,7 @@ class SQLConsoleTab(ft.Container):
                 # Rebuild Table on Main Thread
                 self.result_table.columns = [
                     ft.DataColumn(
-                        ft.Text(
+                        label=ft.Text(
                             MetaDataManager.get_column_alias(None, col),
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.TABLE_HEADER_TEXT,

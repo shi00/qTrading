@@ -310,8 +310,9 @@ class LocalModelConfigPanel(ft.Container):
             try:
                 if isinstance(e.control, ft.Slider):
                     val = e.control.value
-                    e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
-                    e.control.update()
+                    if val is not None:
+                        e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
+                        e.control.update()
             except AttributeError:
                 pass
 

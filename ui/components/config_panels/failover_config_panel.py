@@ -266,9 +266,9 @@ class ProviderCredentialDialog(PageRefMixin, ft.AlertDialog):
                 )
             )
 
-    def _open_url(self, url: str):
+    async def _open_url(self, url: str):
         if self.page:
-            self.page.launch_url(url)
+            await self.page.launch_url(url)
 
     @staticmethod
     def _normalize_base_url(url: str) -> str:
