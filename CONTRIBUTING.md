@@ -718,7 +718,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 4. **下拉框 options 同步**：所有 `ft.Dropdown` 的 `options` 中如果包含 `I18n.get()` 翻译文案，`refresh_locale` 必须重建 `options` 列表（**保留当前 `value`**），不能只刷新 `label`。枚举型 options（如主题、日志级别、积分档位）必须重建；语言选择器 options 也需重建以保持一致性。
 
-   **⚠️ 必须使用 `refresh_dropdown_options()` 工具函数（Flet 已知坑）**：`Control._set_attr_internal` 对相等值短路（源码 `flet/core/control.py:189` 的 `orig_val[0] != value` 判断），不标记 dirty。在批量 `page.update()` 中，`value` 从 X→None→X 的最终值等于原值，前端只收到最终值，`DropdownButton` 不触发 rebuild，闭合态选中项显示文本不刷新。
+   **⚠️ 必须使用 `refresh_dropdown_options()` 工具函数（Flet 已知坑）**：V1 改用 `Prop` 描述符（V0 的 `_set_attr_internal` 已删除），`Prop.__set__` 在 `old == value` 时跳过赋值（值相等优化）。在批量 `page.update()` 中，`value` 从 X→None→X 的最终值等于原值，前端只收到最终值，`DropdownButton` 不触发 rebuild，闭合态选中项显示文本不刷新。
 
    必须使用 `ui.i18n.refresh_dropdown_options(dropdown, new_options)` 工具函数，它通过分两步 `control.update()` 解决：
 
@@ -756,7 +756,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - ❌ 在 `refresh_locale` 中调用网络请求 / 数据库查询 / 重型 CPU 计算
 - ❌ 只刷新 `Dropdown.label` 而不重建 `options`
 - ❌ 重建 `options` 时不保留当前 `value`
-- ❌ `dropdown.value = dropdown.value` 自赋值刷新（被 Flet `_set_attr_internal` 短路，无效）
+- ❌ `dropdown.value = dropdown.value` 自赋值刷新（被 V1 `Prop.__set__` 值相等优化短路，无效）
 - ❌ 手动 `value = None; options = [...]; value = saved` 不调用 `control.update()`（批量 `page.update()` 只发送最终值，闭合态选中项文本不刷新）
 - ❌ 不使用 `refresh_dropdown_options()` 工具函数重建含 i18n 文案的 Dropdown options
 - ❌ 重建子 panel 前不调用旧 panel 的 `will_unmount`

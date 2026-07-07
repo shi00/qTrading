@@ -95,7 +95,7 @@ class FletPage:
         await self._click_with_fallback(name, "button", timeout_ms)
 
     async def click_tab(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击 Tab 按钮（Flet 0.85.3 ElevatedButton(icon+text) 兼容）。"""
+        """点击 Tab 按钮（兼容 Flet 0.85.3 Button(content=) 渲染）。"""
         await self._click_with_fallback(text, "button", timeout_ms)
 
     async def click_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
