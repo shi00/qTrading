@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import tests.unit.ui.mock_flet  # noqa: F401  # [reason: 激活 V1 兼容 Control.page monkey-patch, 否则 panel.page = ... 会抛 AttributeError]
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
 pytestmark = pytest.mark.unit

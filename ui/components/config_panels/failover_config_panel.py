@@ -38,7 +38,7 @@ class FailoverItem:
         return f"{self.provider}/{self.model}"
 
 
-class ProviderCredentialDialog(ft.AlertDialog):
+class ProviderCredentialDialog(PageRefMixin, ft.AlertDialog):
     """Dialog for adding/editing a failover provider's credentials."""
 
     def __init__(
@@ -56,7 +56,6 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self._existing_providers = existing_providers or []
         self._provider = edit_item.provider if edit_item else ""
         self._is_edit = edit_item is not None
-        self._page_ref = page
         self._locale_subscription_id: object | None = None
         # 注入的 credential，避免 __init__ 中同步 keyring IO（R16）
         self._edit_credential = edit_credential
@@ -284,7 +283,6 @@ class ProviderCredentialDialog(ft.AlertDialog):
         return url
 
     def _on_cancel(self, e):
-        self.open = False
         if self.page:
             self.page.pop_dialog()
 
@@ -396,7 +394,6 @@ class ProviderCredentialDialog(ft.AlertDialog):
                 self._show_snack(I18n.get("failover_primary_in_list"), AppColors.WARNING)
                 return
 
-            self.open = False
             if self.page:
                 self.page.pop_dialog()
 

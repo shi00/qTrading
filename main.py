@@ -248,7 +248,7 @@ async def main(page: ft.Page):
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
     # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
     # 进程最终通过 proc.terminate() 清理。
-    if not os.environ.get("E2E_TESTING"):
+    if os.environ.get("E2E_TESTING") != "true":
         page.on_disconnect = _on_disconnect
 
     def on_error(e):
@@ -358,6 +358,6 @@ if __name__ == "__main__":  # pragma: no cover
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
     run_kwargs = {"main": main, "assets_dir": assets}
-    if os.environ.get("E2E_TESTING"):
+    if os.environ.get("E2E_TESTING") == "true":
         run_kwargs["web_renderer"] = ft.WebRenderer.CANVAS_KIT
     ft.run(**run_kwargs)

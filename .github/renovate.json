@@ -36,8 +36,8 @@
       "enabled": false
     },
     {
-      "description": "Pin flet and flet-desktop to 0.85.3 - UI framework stability critical",
-      "matchPackageNames": ["flet", "flet-desktop"],
+      "description": "Pin flet, flet-desktop and flet-charts to 0.85.3 - UI framework stability critical",
+      "matchPackageNames": ["flet", "flet-desktop", "flet-charts"],
       "enabled": false
     },
     {

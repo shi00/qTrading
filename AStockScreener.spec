@@ -14,7 +14,7 @@ datas = [
 
 hiddenimports = [
     "flet",
-    "flet_core",
+    "flet_desktop",
     "flet_charts",
     "pandas",
     "polars",

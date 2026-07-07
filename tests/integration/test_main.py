@@ -43,7 +43,6 @@ class _DummyPage:
         self.on_disconnect: AsyncEventHandler | None = None
         self.on_error: Callable[[Any], None] | None = None
         self.title = ""
-        self.window_icon = ""
         self.padding = 0
         self.toast = None
         self.controls = []
@@ -56,17 +55,6 @@ class _DummyPage:
 
     def update(self):
         self.updated_count += 1
-
-    def open(self, dialog):
-        self.current_dialog = dialog
-        dialog.open = True
-        self.update()
-
-    def close(self, dialog):
-        if self.current_dialog is dialog:
-            self.current_dialog = None
-        dialog.open = False
-        self.update()
 
     def clean(self):
         self.controls = []
@@ -232,9 +220,9 @@ class TestMainWindowDestroyError:
         assert any("destroy ignored" in msg.lower() or "Window destroy" in msg for msg in logger_spy.debugs)
 
 
-class TestMainScheduleAsync:
+class TestMainRunTask:
     @pytest.mark.asyncio
-    async def test_schedule_async_with_run_task(self, monkeypatch):
+    async def test_run_task_direct_call(self, monkeypatch):
         _prepare_main(monkeypatch)
 
         class _PageWithRunTask(_DummyPage):

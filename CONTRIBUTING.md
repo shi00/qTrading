@@ -913,11 +913,11 @@ def _rebuild_steps_after_locale_change(self):
 
 > 对应 [CLAUDE.md §5.9](./CLAUDE.md#59-响应式布局规范-responsive-layout)。
 
-本规范确保应用在 960px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 7 条规范。
+本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 7 条规范。
 
 ### 背景与约束
 
-- 项目仅桌面端 (Flet 0.85.3)，`main.py` 设置 `page.window.min_width = 1280`、`min_height = 640`、默认 `width = 1280`。
+- 项目仅桌面端 (Flet 0.85.3)，`main.py` 设置 `page.window.min_width = 1280`、`min_height = 720`、默认 `width = 1280`。
 - 内容区净宽 = 窗口宽度 − nav_rail (展开 180 / 折叠 80) − divider (1) − body padding (40)。
 - `AppLayout` 已实现 `page.on_resize` 的 100ms 防抖分发：通过鸭子类型调用 `current_view.handle_resize(width, height)` (见 `ui/app_layout.py` 的 `_handle_resize`)。
 - **Flet 0.85.3 API 关键约束**：
@@ -932,12 +932,14 @@ def _rebuild_steps_after_locale_change(self):
 
 | 断点常量 | 阈值 (px) | 典型场景 | 内容区净宽 (nav 展开) |
 |---------|-----------|---------|---------------------|
-| `BREAKPOINT_COMPACT` | `< 1200` | 最小窗口 960，笔记本竖屏 | 739 ~ 979 |
-| `BREAKPOINT_STANDARD` | `1200 ~ 1599` | 默认窗口 1280，1080p | 979 ~ 1379 |
+| `BREAKPOINT_COMPACT` | `< 1200` | ⚠️ `min_width=1280` 下不可达 | 979 ~ 1059 |
+| `BREAKPOINT_STANDARD` | `1200 ~ 1599` | 默认窗口 1280，1080p | 1059 ~ 1379 |
 | `BREAKPOINT_WIDE` | `1600 ~ 2399` | 2K 显示器 | 1379 ~ 2179 |
 | `BREAKPOINT_ULTRA_WIDE` | `≥ 2400` | 4K / 带鱼屏 | ≥ 2179 |
 
-> **注意**：Flet 内置 `ResponsiveRow` 断点 (xs<576, sm≥576, md≥768, lg≥992, xl≥1200) 在 `min_width=960` 约束下，xs/sm 基本触发不到，实际有效的是 md/lg/xl。本项目断点常量用于 `handle_resize()` 中的条件判断，与 `ResponsiveRow` 的 col 配置互补。
+> **注意**：Flet 内置 `ResponsiveRow` 断点 (xs<576, sm≥576, md≥768, lg≥992, xl≥1200) 在 `min_width=1280` 约束下，xs/sm/md 基本触发不到，实际有效的是 lg/xl。本项目断点常量用于 `handle_resize()` 中的条件判断，与 `ResponsiveRow` 的 col 配置互补。
+>
+> # NOTE(lazy): BREAKPOINT_COMPACT (< 1200) 在 min_width=1280 下不可达. ceiling: 窗口宽度恒 ≥ 1280. upgrade: 调整断点阈值或合并 compact 到 standard 时需同步更新测试边界值.
 >
 > **设计选择**：断点基于 `WindowResizeEvent.width`（窗口总宽度）而非内容区净宽，这是有意的设计。同一窗口宽度下 nav 折叠/展开会改变内容区净宽，但断点保持稳定，避免 nav 切换导致侧栏宽度跳变。nav 折叠带来的额外空间由 `expand=True` 的主内容区自然吸收。
 
@@ -971,7 +973,7 @@ def get_breakpoint(page_width: int | None) -> str:
 
 | 断点 | 侧栏宽度 | 理由 |
 |------|---------|------|
-| compact (<1200) | 280px | 内容区仅 739px，侧栏 280px 后主区保留 449px |
+| compact (<1200) | 280px | ⚠️ 不可达（min_width=1280）；参考：979px 内容区，侧栏 280px 后主区 699px |
 | standard (1200~1599) | 340px | 内容区 ~1059px，主区保留 707px |
 | wide/ultra_wide (≥1600) | 380px | 内容区充足，侧栏可放宽 |
 
@@ -1070,7 +1072,7 @@ ft.ResponsiveRow([ft.Column([control])])
 
 - 工具栏等横向密集区域应在 `ft.Row` 上设置 `scroll=ft.ScrollMode.AUTO` 作为兜底。
 - 但 **scroll 不得作为掩盖布局缺陷的手段**：若控件累计宽度经常超过容器宽度，应优先改用 `ResponsiveRow` 或 `wrap=True`。
-- `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.padding.only(right=8)` 避免内容与滚动条重叠。
+- `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.Padding.only(right=8)` 避免内容与滚动条重叠。
 
 #### 规范 7：max_width 约束 — 防止超宽屏内容过度拉伸
 
@@ -1141,7 +1143,7 @@ self.schedule_resize()  # 语言切换后重新验证布局
 
 #### 规范 9：高度维度 — 对高度敏感的视图必须响应 `page.height`
 
-规范 1-8 仅关注宽度，但 `min_height=640` 下多个视图存在高度维度问题：
+规范 1-8 仅关注宽度，但 `min_height=720` 下多个视图存在高度维度问题：
 
 - `BacktestView` 配置面板内容溢出 (scroll 兜底，但用户需大量滚动)
 - `DataExplorerView` 表格每页行数固定，低高度下只能看到 3-4 行
@@ -1206,7 +1208,7 @@ def _on_locale_change(self):
 ├─ 有硬编码 width=数字 的控件吗？
 │   └─ 是 → 改为 expand=True 或 AppStyles 常量 (规范 4)
 ├─ 有 scroll=ft.ScrollMode.AUTO 的 Column 吗？
-│   └─ 是 → 设置 padding=ft.padding.only(right=8) (规范 6)
+│   └─ 是 → 设置 padding=ft.Padding.only(right=8) (规范 6)
 ├─ 有改变内容区宽度的操作 (nav 折叠、tab 切换) 吗？
 │   └─ 是 → 规范 8 (触发时机完整性)
 ├─ 含表格/图表/长表单等高度敏感元素吗？
@@ -1221,7 +1223,7 @@ def _on_locale_change(self):
 
 新增/修改视图时，对照此清单逐项确认：
 
-- [ ] 视图在 960×640 最小窗口下无横向溢出、无纵向截断 (内容区净宽 ~739px)
+- [ ] 视图在 1280×720 最小窗口下无横向溢出、无纵向截断 (内容区净宽 ~1059px)
 - [ ] 视图在 1280×800 默认窗口下布局合理 (内容区净宽 ~1059px)
 - [ ] 视图在 1920×1080 宽屏下不出现内容过度拉伸
 - [ ] 视图已实现 `handle_resize()` (含分栏布局的须有实际逻辑，纯纵向的须有空方法)
@@ -1252,12 +1254,12 @@ def _on_locale_change(self):
 
 新增/修改视图的响应式布局时，必须编写以下测试：
 
-1. **断点函数单元测试**：`AppStyles.get_breakpoint()` 和 `get_sidebar_width()` 的边界值覆盖 (959/960/1199/1200/1599/1600/2399/2400/None)。
-2. **handle_resize 单元测试**：调用 `handle_resize(width, height)` 传入各断点值 (959/960/1199/1200/1599/1600/2399/2400)，断言侧栏 Container 的 `width` 属性变化正确；断言相同参数多次调用结果不变 (幂等性)；断言 `width=0` 时提前返回不修改布局。
+1. **断点函数单元测试**：`AppStyles.get_breakpoint()` 和 `get_sidebar_width()` 的边界值覆盖 (1279/1280/1199/1200/1599/1600/2399/2400/None)。
+2. **handle_resize 单元测试**：调用 `handle_resize(width, height)` 传入各断点值 (1279/1280/1199/1200/1599/1600/2399/2400)，断言侧栏 Container 的 `width` 属性变化正确；断言相同参数多次调用结果不变 (幂等性)；断言 `width=0` 时提前返回不修改布局。
 3. **handle_resize 性能约束测试**：mock 后断言 `handle_resize` 内未调用 `self.content = ...` (重建 content)、未调用数据库/文件 IO 方法。
 4. **handle_resize 异常降级测试**：mock 控件引用为 None 或抛异常，断言 `handle_resize` 不抛出 (降级为 `logger.debug`)。
 5. **空方法验证**：纯纵向视图 (HomeView 等) 必须断言 `hasattr(view, "handle_resize")` 为 True，即使为空方法。
-6. **960×640 最小窗口布局验证** (手工或 E2E)：确认无横向溢出、无控件截断、无滚动条与控件重叠。
+6. **1280×720 最小窗口布局验证** (手工或 E2E)：确认无横向溢出、无控件截断、无滚动条与控件重叠。
 
 ## 标准开发工作流 (How-To)
 

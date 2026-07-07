@@ -366,11 +366,13 @@ class ScreenerView(ft.Container):
             self.result_table.clear()
 
         # Cleanup overlay to prevent memory leak
+        # R3: V1 对话框由 show_dialog/pop_dialog 管理 overlay；此处防御性清理
+        # 以防 view 卸载时 dialog 仍开着（pop_dialog 已移除时会抛 ValueError）
         if self.detail_dialog and self.page:
             try:
                 self.page.overlay.remove(self.detail_dialog)
             except ValueError:
-                pass  # Already removed
+                pass  # Already removed by pop_dialog or never appended
             self.detail_dialog = None
 
         # U-1 fix: Reset mounted state for proper re-mount handling
@@ -1506,12 +1508,11 @@ class ScreenerView(ft.Container):
                 data_processor=self.vm.data_processor,
                 page=self.page,
             )
-            self.page.overlay.append(self.detail_dialog)
         else:
             self.detail_dialog.update_data(raw_data)
 
-        self.detail_dialog.open = True
-        self.page.update()
+        # R3: V1 对话框通过 show_dialog 打开（pop_dialog 时自动从 overlay 移除）
+        self.page.show_dialog(self.detail_dialog)
 
         # Trigger async chart load
         if ts_code:

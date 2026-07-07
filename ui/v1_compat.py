@@ -3,7 +3,7 @@
 Flet 1.0 (0.85.3) 中 ``ft.Control.page`` 改为只读 property（通过 ``parent``
 链查找），``self.page = page`` 赋值会抛 ``AttributeError``。
 
-本项目 3 个控件（``AppLayout``/``TaskCenterView``/``FailoverConfigPanel``）
+本项目 4 个控件（``AppLayout``/``TaskCenterView``/``FailoverConfigPanel``/``ProviderCredentialDialog``）
 依赖 V0 行为：构造时直接 ``self.page = page`` 赋值，以便在未挂载到
 ``page.controls`` 前就能引用 page（如注册回调、读取 ``page.theme_mode`` 等）。
 
@@ -33,10 +33,10 @@ class PageRefMixin:
         if ref is not None:
             return ref
         try:
-            return ft.Control.page.fget(self)  # type: ignore[misc]
+            return ft.Control.page.fget(self)  # type: ignore[misc]  # [reason: 调用父类 property fget 绕过子类覆盖]
         except RuntimeError:
             return None
 
     @page.setter
-    def page(self, value: ft.Page | None) -> None:  # type: ignore[override]
+    def page(self, value: ft.Page | None) -> None:  # type: ignore[override]  # [reason: 同 getter, 写入 __dict__ 绕过只读 property]
         self.__dict__["_page_ref"] = value

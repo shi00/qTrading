@@ -447,9 +447,9 @@ class StockDetailDialog(ft.AlertDialog):
         return format_amount(self.stock_data.get(key))
 
     def _close(self, e):
-        self.open = False
+        # R3: V1 关闭对话框用 pop_dialog（自动从 overlay 移除）
         if self.page:
-            self.page.update()
+            self.page.pop_dialog()
 
     def update_data(self, stock_data: dict):
         """Update the dialog with new stock data"""
