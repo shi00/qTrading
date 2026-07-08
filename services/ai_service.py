@@ -773,6 +773,7 @@ class AIService:
         del_loop_local("ai_analysis_semaphore")
         del_loop_local("ai_news_semaphore")
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion_litellm(
         self,
         messages: list,
@@ -924,6 +925,7 @@ class AIService:
 
                 return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion(
         self,
         messages: list,
@@ -1025,6 +1027,7 @@ class AIService:
 
         return {"content": response_content}
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE, log_args=False)
     async def _chat_completion_with_failover(
         self,
         messages: list,
@@ -1521,6 +1524,7 @@ class AIService:
 
         return get_loop_local("ai_setup_lock", _factory)
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def _setup_local_model(self):
         """
         Ensure local model is initialized via Manager.

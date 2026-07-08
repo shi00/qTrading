@@ -160,6 +160,7 @@ class MacroSyncStrategy(ISyncStrategy):
         super().__init__(context)
         self.dao = MacroDao(context.cache.engine)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync windows."""
         try:
@@ -231,6 +232,7 @@ class MacroSyncStrategy(ISyncStrategy):
             )
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_macro_monthly(self, result: typing.Any):
         """
         Fetch M2, CPI, PPI, GDP and merge into a single DataFrame before save.
@@ -411,6 +413,7 @@ class MacroSyncStrategy(ISyncStrategy):
             return merged.merge(indicator, on="period", how="outer")
         return indicator
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_shibor_daily(self, result: typing.Any):
         try:
             latest = await self.dao.get_shibor_latest_date()
@@ -508,6 +511,7 @@ class MacroSyncStrategy(ISyncStrategy):
             logger.warning("[MacroSync] Shibor | ⚠️ Error: %s", e, exc_info=True)
             result.errors.append(f"Shibor: {e}")
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_index_weights(self, result: typing.Any):
         try:
             market_dao = self.context.cache.market_dao

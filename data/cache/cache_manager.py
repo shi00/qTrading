@@ -270,6 +270,7 @@ class CacheManager:
         }
 
     # Backward compatibility for direct SQL usage if any
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def write_db(self, sql: str, params: tuple | list | None = None, is_many: bool = False):
         if is_many:
             import warnings
@@ -597,6 +598,7 @@ class CacheManager:
     async def get_sync_status(self, table_name: str | None = None) -> pd.DataFrame | dict | None:
         return await self.sync_dao.get_sync_status(table_name)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def check_comprehensive_health(self):
         """Check coverage and freshness of all HEALTH_CHECK_TABLES."""
         await self.wait_for_maintenance()

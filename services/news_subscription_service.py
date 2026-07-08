@@ -10,6 +10,7 @@ from collections import OrderedDict
 
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
@@ -256,6 +257,7 @@ class NewsSubscriptionService:
 
         logger.info("[NewsService] Stopped news polling service")
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _poll_loop(self):
         """Main polling loop"""
 
@@ -274,6 +276,7 @@ class NewsSubscriptionService:
             except asyncio.CancelledError:
                 raise
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _safe_fetch_task(self):
         """Wrapper to handle errors within the independent task"""
         if not self._running:
@@ -293,6 +296,7 @@ class NewsSubscriptionService:
             # Optional: Implement retry logic here if needed, but for periodic polling,
             # just failing and waiting for next interval is often cleaner.
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def _generate_tags(self, content: typing.Any):
         """Generate tags for news content using AI or Rule-based fallback"""
         clean_content = content.strip()
@@ -319,6 +323,7 @@ class NewsSubscriptionService:
 
         return tag
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _processing_loop(self):
         """
         Background loop to process news items from queue.
@@ -445,6 +450,7 @@ class NewsSubscriptionService:
                 else:
                     logger.warning("[NewsService] Listener error (%s/3): %s", count, DataSanitizer.sanitize_error(e))
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_and_notify(self):
         """Fetch latest news and trigger alert if new"""
         from utils.correlation import correlation_scope

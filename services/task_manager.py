@@ -16,6 +16,7 @@ from typing import Any, cast
 from core.i18n import I18n
 from utils.async_utils import gather_for_shutdown_cleanup
 from utils.error_classifier import classify_error, classify_severity
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.config_handler import ConfigHandler
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.singleton_registry import register_singleton
@@ -412,6 +413,7 @@ class TaskManager:
             self._schedule_coro(self._clear_finished_db(all_clear_ids))
         self._notify_subscribers()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def cancel_all_running_async(self, join_timeout: float = 3.0):
         """Async version: cancel all running tasks with guaranteed DB writes.
         Called from main.py cleanup to ensure persistence before loop closes.
@@ -609,6 +611,7 @@ class TaskManager:
             logger.debug("[TaskManager] _safe_dt parse failed for value=%r: %s", val, e, exc_info=True)
             return None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def init_db(self):
         """Initialize persistence layer. Called once from main.py after CacheManager.init_db()."""
         from data.cache.cache_manager import CacheManager
@@ -765,6 +768,7 @@ class TaskManager:
                 raise TimeoutError(f"Task persistence flush timed out with {pending} pending write(s)")
             await asyncio.sleep(0.02)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_snapshot(self, params: tuple):
         """Write a pre-captured snapshot tuple to DB."""
         try:
@@ -790,6 +794,7 @@ class TaskManager:
         except Exception as e:
             logger.debug("[TaskManager] Persist failed (non-critical): %s", e, exc_info=True)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_task_async(self, task: AppTask):
         """Upsert task record (reads current state — use for await-based callers only)."""
         params = (
@@ -807,6 +812,7 @@ class TaskManager:
         )
         await self._persist_snapshot(params)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _clear_finished_db(self, task_ids: list):
         """Delete specific tasks from DB using SQLAlchemy Core."""
         if not task_ids:

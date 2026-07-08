@@ -106,6 +106,7 @@ class TradeCalendarService:
             return None
         return date_obj.strftime("%Y%m%d")
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _ensure_data_persisted(self, df: pd.DataFrame) -> bool:
         """
         确保数据持久化到数据库。
@@ -129,6 +130,7 @@ class TradeCalendarService:
             logger.warning("[TradeCalendarService] Failed to persist calendar data: %s", e)
             return False
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_from_api_and_persist(self, start_date, end_date) -> pd.DataFrame | None:
         """
         从 Tushare API 获取数据并持久化。
@@ -164,6 +166,7 @@ class TradeCalendarService:
             )
             return None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def ensure_calendar_range(self, start_date, end_date) -> bool:
         """
         确保 trade_cal 表覆盖 [start_date, end_date] 的完整日历。
@@ -233,6 +236,7 @@ class TradeCalendarService:
             )
             return False
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def is_trading_day(self, date) -> bool:
         """
         判断是否为交易日。
@@ -360,6 +364,7 @@ class TradeCalendarService:
                 return [parse_date(d).date() for d in offline_dates]
             return []
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def count_trade_days(self, start_date, end_date) -> int:
         """
         计算日期范围内的交易日数量。
@@ -390,6 +395,7 @@ class TradeCalendarService:
             dates = await self.get_trade_dates(start_obj, end_obj)
             return len(dates)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_start_date_by_trade_days(self, end_date, trade_days: int) -> datetime.date | None:
         """
         根据交易日数量计算起始日期。
@@ -429,6 +435,7 @@ class TradeCalendarService:
             rough_start = end_obj - datetime.timedelta(days=int(trade_days * 1.5) + 30)
             return rough_start
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_prev_trade_date(self, date) -> datetime.date | None:
         """
         获取指定日期的上一个交易日。
@@ -467,6 +474,7 @@ class TradeCalendarService:
 
         return None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_next_trade_date(self, date) -> datetime.date | None:
         """
         获取指定日期的下一个交易日。
@@ -594,6 +602,7 @@ class TradeCalendarService:
             )
             return None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_trade_dates_batch(self, ranges: list[tuple[datetime.date, datetime.date]]) -> dict:
         """
         批量获取多个日期范围的交易日。
@@ -640,6 +649,7 @@ class TradeCalendarService:
         self._latest_trade_date_cache = {"ts": 0, "val": None}
         logger.debug("[TradeCalendarService] Memory cache cleared")
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_trade_cal_df(self, start_date=None, end_date=None, is_open=None) -> pd.DataFrame:
         """
         获取原始交易日历 DataFrame。

@@ -111,6 +111,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_classify(self, result: SyncResult) -> pd.DataFrame:
         """同步 L1/L2/L3 三级行业分类，返回拼接后的 DataFrame（供 _sync_members 复用 index_code 列表）。"""
         try:
@@ -151,6 +152,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             result.errors.append(f"SwIndustry Classify: {e}")
             return pd.DataFrame()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_members(self, result: SyncResult, classify_df: pd.DataFrame) -> None:
         """按 index_code 循环同步成分股映射，每 200 个检查取消信号。"""
         if classify_df is None or classify_df.empty or "index_code" not in classify_df.columns:
@@ -233,6 +235,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             logger.warning("[SwIndustrySync] Members | ⚠️ Error: %s", e, exc_info=True)
             result.errors.append(f"SwIndustry Members: {e}")
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _record_skipped_permission(self, table_name: str) -> None:
         """记录 skipped_permission 状态到 sync_status 表，便于 UI 展示降级提示。"""
         try:

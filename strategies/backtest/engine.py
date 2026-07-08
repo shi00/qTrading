@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
@@ -50,6 +51,7 @@ class VectorBacktestEngine:
         self.data_provider = BacktestDataProvider(cache, data_processor, preload_max_days=config.preload_max_days)
         self.strategy_adapter = BacktestStrategyAdapter()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run(
         self,
         strategy: BaseStrategy,
@@ -160,6 +162,7 @@ class VectorBacktestEngine:
             failed_signal_dates=tuple(failed_signal_dates),
         )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_trade_dates(self) -> list[date]:
         cal_df = await self.cache.get_trade_cal(
             start_date=self.config.start_date.strftime("%Y%m%d"),
@@ -180,6 +183,7 @@ class VectorBacktestEngine:
                 trade_dates.append(datetime.datetime.strptime(d_str, "%Y%m%d").date())
         return sorted(trade_dates)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _load_quotes(self, trade_dates: list[date]) -> tuple[pl.DataFrame, list[DataWarning]]:
         start_str = trade_dates[0].strftime("%Y%m%d")
         end_str = trade_dates[-1].strftime("%Y%m%d")
@@ -209,6 +213,7 @@ class VectorBacktestEngine:
 
         return quotes_df.sort(["ts_code", "trade_date"]), data_warnings
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _enrich_suspend_status(
         self,
         quotes_df: pl.DataFrame,
@@ -273,6 +278,7 @@ class VectorBacktestEngine:
             # 停牌股票可能在撮合时因无成交价被自然跳过
             return quotes_df.with_columns(pl.lit(True).alias("is_tradable")), warning
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _enrich_limit_status(
         self,
         quotes_df: pl.DataFrame,
@@ -404,6 +410,7 @@ class VectorBacktestEngine:
 
         return quotes_df.with_columns(avg_vol_expr)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _load_benchmark(self, trade_dates: list[date]) -> pl.DataFrame:
         start_str = trade_dates[0].strftime("%Y%m%d")
         end_str = trade_dates[-1].strftime("%Y%m%d")
@@ -419,6 +426,7 @@ class VectorBacktestEngine:
 
         return pl.from_pandas(benchmark_pd)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _generate_signals(
         self,
         strategy: BaseStrategy,

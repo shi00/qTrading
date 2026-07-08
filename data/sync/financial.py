@@ -90,6 +90,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync windows."""
         try:
@@ -174,6 +175,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_full_sync(
         self,
         periods,
@@ -432,6 +434,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         await self._sync_corporate_actions_by_date(all_dates, batch_progress)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_incremental_sync(
         self,
         progress_callback,
@@ -601,6 +604,7 @@ class FinancialSyncStrategy(ISyncStrategy):
 
         result_accumulator.added = total_saved
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_corporate_actions_by_date(
         self,
         dates: list[str],
@@ -713,6 +717,7 @@ class FinancialSyncStrategy(ISyncStrategy):
         if progress_callback:
             progress_callback(total, total, I18n.get("status_ready"))
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _fetch_comprehensive_financial_data(
         self,
         ts_code,
@@ -871,6 +876,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             logger.warning("[FinancialSync] Fetch | ⚠️ Comprehensive data failed for %s: %s", ts_code, e, exc_info=True)
             return None, {"mainbz": 0, "audit": 0}
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def repair_financial_data(self, ts_codes, progress_callback=None) -> int:
         """
         Targeted repair for specific stocks.

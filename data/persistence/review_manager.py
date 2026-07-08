@@ -220,6 +220,7 @@ class ReviewManager:
 
         logger.info("[Review] Completed. Updated %s records.", len(updates))
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_pending_predictions(self):
         """
         Get predictions from last 10 trade days that have no result yet.
@@ -252,6 +253,7 @@ class ReviewManager:
             logger.error("[Review] Error fetching pending predictions: %s", e)
             return pd.DataFrame()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_learning_context(self, limit: int | None = 3, as_of: datetime.date | datetime.datetime | None = None):
         """
         Extract 'Best Wins' and 'Worst Losses' for Prompt Injection.
@@ -346,6 +348,7 @@ class ReviewManager:
         xml += "</history_context>"
         return xml
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _batch_update_results(self, updates: list[dict]):
         """Update all review results within a single transaction."""
         dao = self.cache.screener_dao
@@ -385,6 +388,7 @@ class ReviewManager:
                 except Exception as inner_e:
                     logger.error("[Review] Individual update also failed for record %s: %s", u["record_id"], inner_e)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _update_result(
         self,
         record_id: typing.Any,
@@ -415,6 +419,7 @@ class ReviewManager:
         """Normalize supported trade_date input types to datetime.date."""
         return to_date(value)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def save_results(
         self,
         strategy_name: str | None,

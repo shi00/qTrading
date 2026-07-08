@@ -90,6 +90,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 if not task.done():
                     task.cancel()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default sync operations."""
         try:
@@ -176,6 +177,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _run_historical_sync(
         self,
         days: typing.Any,
@@ -489,6 +491,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 len(failed_dates),
             )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def sync_daily_market_snapshot(
         self,
         trade_date: datetime.date | str | None,
@@ -890,6 +893,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         )
         return True
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def sync_moneyflow(self, trade_date: datetime.date | None = None):
         """Sync money flow for a specific date (Standalone)."""
         if trade_date is None:
@@ -915,6 +919,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             logger.warning("[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed: %s", e, exc_info=True)
         return 0
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def sync_northbound(self, trade_date: datetime.date | None = None):
         """Sync northbound holding for a specific date (Standalone)."""
         if trade_date is None:
