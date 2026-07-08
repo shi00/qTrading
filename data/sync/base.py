@@ -227,7 +227,6 @@ class ISyncStrategy(ABC):
 
     def __init__(self, context: SyncContext):
         self.context = context
-        self.logger = logging.getLogger(self.__class__.__name__)
         self._cancelled = False
 
     def cancel(self):

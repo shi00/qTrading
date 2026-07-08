@@ -420,7 +420,7 @@ class ConfigHandler:
             except Exception as e:
                 logger.debug(
                     "Keyring ts_token deletion skipped (not stored or keyring unavailable): %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
             return ConfigHandler.save_config({"ts_token": ""})
@@ -617,7 +617,11 @@ class ConfigHandler:
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "db_password")
             except Exception as e:
-                logger.debug("Keyring db_password deletion skipped: %s", e, exc_info=True)
+                logger.debug(
+                    "Keyring db_password deletion skipped: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
             try:
                 encrypted = SecurityManager.encrypt_data(password)
                 ConfigHandler.save_config({"db_password_encrypted": encrypted})
@@ -840,7 +844,11 @@ class ConfigHandler:
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
                 except Exception as e:
-                    logger.debug("Keyring ai_api_key deletion skipped: %s", e, exc_info=True)
+                    logger.debug(
+                        "Keyring ai_api_key deletion skipped: %s",
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
                 ConfigHandler.save_config({"ai_api_key": ""})
 
         return True

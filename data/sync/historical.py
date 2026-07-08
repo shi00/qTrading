@@ -341,7 +341,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
         abort_sync = False
         processed_count = 0
         BATCH_SIZE = ConfigHandler.get_sync_batch_size()
-        counter_lock = asyncio.Lock()
+        counter_lock = get_loop_local("hist_counter_lock", asyncio.Lock)
 
         async def sync_one_day(date: datetime.date | str):
             nonlocal abort_sync, processed_count, consecutive_failures

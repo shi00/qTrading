@@ -37,7 +37,8 @@ class HolderDao(BaseDao):
             sql_template = """
                 UPDATE stk_holdernumber h
                 SET holder_num_change = sub.holder_num_change,
-                    holder_num_ratio = sub.holder_num_ratio
+                    holder_num_ratio = sub.holder_num_ratio,
+                    updated_at = now()
                 FROM (
                     SELECT ts_code, end_date,
                         holder_num - LAG(holder_num) OVER (

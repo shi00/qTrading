@@ -226,6 +226,7 @@ class TestHolderDataQuality:
             df = await holder_dao.get_stk_holdernumber("000001.SZ")
 
             if len(df) >= 2:
+                df = df.sort_values("end_date", ascending=False).reset_index(drop=True)
                 curr_num = df.iloc[0]["holder_num"]
                 prev_num = df.iloc[1]["holder_num"]
                 change_pct = (curr_num - prev_num) / prev_num * 100

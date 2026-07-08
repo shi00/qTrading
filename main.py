@@ -117,11 +117,9 @@ async def main(page: ft.Page):
     def _hide_close_confirm_dialog():
         nonlocal close_confirm_visible
         logger.debug(
-            "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, dialog_open=%s, "
-            "page_dialog_is_close_confirm=%s",
+            "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
             close_confirm_dialog is not None,
-            getattr(close_confirm_dialog, "open", None),
             _page_dialog_matches_close_confirm(),
         )
         if close_confirm_dialog is None:
@@ -172,11 +170,10 @@ async def main(page: ft.Page):
         nonlocal close_confirm_visible
         logger.debug(
             "[Main] Request to show close confirm dialog. visible=%s, shutdown_requested=%s, "
-            "dialog_exists=%s, dialog_open=%s, page_dialog_is_close_confirm=%s",
+            "dialog_exists=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
             shutdown_requested,
             close_confirm_dialog is not None,
-            getattr(close_confirm_dialog, "open", None),
             _page_dialog_matches_close_confirm(),
         )
         if close_confirm_visible or shutdown_requested:
