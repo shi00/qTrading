@@ -90,15 +90,15 @@
 | 新增/修改策略 | CONTRIBUTING.md「策略模式实现模板」、`strategies/base_strategy.py`；工作流见 CONTRIBUTING.md「新增一个策略」 |
 | 新增/修改 DAO 或数据表 | CONTRIBUTING.md「DAO 模式」、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 CONTRIBUTING.md「新增一张数据表」/「新增一个 DAO」 |
 | 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
-| 新增/修改 UI 视图 | CONTRIBUTING.md「语言切换响应」、`ui/app_layout.py`、对应 ViewModel；工作流见 CONTRIBUTING.md「新增一个 UI 视图」 |
+| 新增/修改 UI 视图 | CONTRIBUTING.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；工作流见 CONTRIBUTING.md「新增一个 UI 视图」 |
 | 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
 | 修改单例 / 资源生命周期 | §4.3、CONTRIBUTING.md「单例模式实现模板」、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
 | 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
-| 修改 UI 布局/响应式 | CONTRIBUTING.md「响应式布局规范 (Responsive Layout)」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py` (`handle_resize`)；新增视图必须实现 `handle_resize()` |
+| 修改 UI 布局/响应式 | CONTRIBUTING.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py`；命令式存量见附录 |
 | 新增/修改 ViewModel | CONTRIBUTING.md「MVVM 表现层」、`ui/viewmodels/` |
-| 修改 i18n 文案 | `core/i18n.py`、`locales/`、CONTRIBUTING.md「语言切换响应」 |
+| 修改 i18n 文案 | `core/i18n.py`、`locales/`、CONTRIBUTING.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则 |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/` |
@@ -160,8 +160,7 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别；涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
-- **UI 语言切换响应**：新增/修改 UI 视图或组件必须遵守 [CONTRIBUTING.md「语言切换响应 (I18n Hot Reload)」](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload) 的 9 条规范（订阅机制、回调命名、纯 UI 操作、options 重建、实例属性提取、子组件级联、生命周期兜底、MetaDataManager 缓存失效、异常降级）。
-- **UI 响应式布局**：新增/修改 UI 视图或组件必须遵守 [CONTRIBUTING.md「响应式布局规范 (Responsive Layout)」](./CONTRIBUTING.md#响应式布局规范-responsive-layout) 的 10 条规范（断点分级、侧栏动态宽度、handle_resize 实现、控件宽度策略、ResponsiveRow 强制配置、scroll 兜底、max_width 约束、触发时机完整性、高度维度、i18n 与响应式交互）。
+- **UI 模型（强制）**：所有 UI 必须采用 Flet 主推的声明式 `@ft.component` + 官方 hooks（`use_state`/`use_effect`），状态驱动、框架自动 diff，i18n 热切换与响应式布局均由状态驱动自动重渲染。**禁止**命令式类控件 + 手动 `self.update()` + `did_mount`/`will_unmount`，**禁止** `UserControl`。新代码必须遵守 [CONTRIBUTING.md「V1 声明式 UI 开发规范」](./CONTRIBUTING.md#v1-声明式-ui-开发规范)；不合规的存量 UI 属技术债，旧命令式 i18n 九规范 / 响应式九规范降级为附录（[语言切换响应](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload)、[响应式布局规范](./CONTRIBUTING.md#响应式布局规范-responsive-layout)），仅供改造期查阅，不作为新代码依据。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
@@ -210,7 +209,7 @@ app → 编排所有层，仅被 main.py 调用
 |------|---------------------|
 | Python 风格 / 类型标注 / 导入顺序 / 日志规范 | 「实现规范手册」各小节 |
 | 异步编程规范 / 数据库操作规范 / 错误处理标准模式 | 对应小节 |
-| 语言切换响应 (I18n Hot Reload 9 规范) / 响应式布局 (10 规范) | 对应小节 |
+| 语言切换响应 (I18n Hot Reload 9 规范) / 响应式布局 (9 规范) / V1 声明式 UI 开发规范 / 命令式存量整改对照 | 对应小节 |
 | 策略模式 / Polars 向量化基类 / AI 策略混入 / DAO 模式 / 数据同步 / TaskManager | 对应小节 |
 | MVVM 表现层 (View / ViewModel / Component) / 配置管理 / 质量门控 / 性能监控 / 单例模式实现模板 | 对应小节 |
 | 测试规范 / CI/CD 流水线与门禁 | 对应小节 |

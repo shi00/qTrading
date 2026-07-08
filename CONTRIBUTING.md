@@ -38,8 +38,8 @@
   - [错误处理标准模式](#错误处理标准模式)
   - [测试规范](#测试规范)
   - [CI/CD 流水线与门禁](#cicd-流水线与门禁)
-  - [语言切换响应 (I18n Hot Reload)](#语言切换响应-i18n-hot-reload)
-  - [响应式布局规范 (Responsive Layout)](#响应式布局规范-responsive-layout)
+  - [语言切换响应 (I18n Hot Reload) — 附录 A 命令式存量整改对照](#语言切换响应-i18n-hot-reload)
+  - [响应式布局规范 (Responsive Layout) — 附录 B 命令式存量整改对照](#响应式布局规范-responsive-layout)
   - [标准开发工作流 (How-To)](#标准开发工作流-how-to)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
@@ -647,18 +647,72 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 > 每项垫片均遵循 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations) `# NOTE(lazy):` 标记规范。
 
-### V1 新模式控件开发约定（命令式 @ft.control 路径）
+### V1 声明式 UI 开发规范
 
-切到 Flet 0.85.3 后，新增 View/Panel/Component 采用 V1 命令式新写法：
+> 宪法 [CLAUDE.md §3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 的唯一实现细则。
+> 命令式存量（`class X(ft.Container)` + `did_mount`/`will_unmount` + 手动 `self.update()`）一律视为技术债，整改对照见 [语言切换响应（附录 A 命令式存量整改对照）](#语言切换响应-i18n-hot-reload) 与 [响应式布局规范（附录 B 命令式存量整改对照）](#响应式布局规范-responsive-layout)。
 
-- 用 `@ft.control` 或 `@dataclass`（二者等价）+ 字段声明定义控件，替代旧式 `class X(ft.Container): def __init__(self): super().__init__()`。
-- 生命周期钩子沿用公开名 `did_mount()` / `will_unmount()` / `before_update()`；`before_update()` 内**禁止**调用 `update()`（会无限循环）。
-- **契约不变**：i18n 订阅仍在 `did_mount`、退订在 `will_unmount`（§5.8 九规范不变）；响应式仍实现 `handle_resize(width, height)`、禁止读 `self.page.width`（§5.9 十规范不变）；刷新仍手动 `self.update()`。
-- 凡在自身方法内调用 `self.update()` 的控件，设 `is_isolated=True`（官方最佳实践，避免父级 update 时子改动被漏掉或多刷）。
-- **不采用** `@ft.component` 声明式（`use_state`/`use_effect`）：它与本项目手动 update + 类生命周期 + i18n/响应式契约冲突，如需引入必须另立独立架构任务评估。
+切到 Flet 0.85.3 后，新增 View/Panel/Component 必须采用声明式 `@ft.component` + 官方 hooks 写法。API 已对 `flet==0.85.3` 实测可用（见下方签名核实）。
+
+#### 1. 关注点对照（命令式作废 → 声明式要求）
+
+| 关注点 | 命令式旧写法（作废） | 声明式要求（宪法标准） |
+|--------|------|------|
+| 组件定义 | `class X(ft.Container): __init__/super()` | `@ft.component` 函数返回控件树 |
+| 状态 | 实例属性 + 手动 `self.update()` | `use_state` 状态变更自动重渲染 |
+| 生命周期/副作用 | `did_mount`/`will_unmount` | `use_effect(setup, dependencies, cleanup)` |
+| i18n 热切换 | `I18n.subscribe`/`unsubscribe` + `refresh_locale` + 手动刷新 | locale 作为声明式状态源，切换自动重渲染（不再手动订阅/刷新） |
+| 下拉刷新 | `refresh_dropdown_options` 两步 update 绕过 | 状态驱动重建 options，绕过随之删除 |
+| 响应式 | `handle_resize` 鸭子分发 + 断点手算 | 窗口尺寸作为 state/observable + `ResponsiveRow`，状态驱动布局 |
+| page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片删除 |
+
+#### 2. `@ft.component` 标准模板
+
+```python
+import flet as ft
+from core.i18n import I18n
+
+@ft.component
+def MetricCard(label_key: str):
+    # 声明式状态：值变更自动重渲染，无需手动 update()
+    value, set_value = ft.use_state(0)
+
+    # 副作用：挂载/卸载/依赖变更时执行；返回值作为 cleanup（卸载时自动调用）
+    def setup():
+        # 订阅 locale，切换时调用 set_value 触发重渲染
+        sub_id = I18n.subscribe(lambda: set_value(lambda v: v + 0))  # 触发重渲染
+        return lambda: I18n.unsubscribe(sub_id)  # 卸载时自动退订
+    ft.use_effect(setup, dependencies=[label_key])
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Text(I18n.get(label_key)),
+            ft.Text(str(value)),
+        ]),
+    )
+```
+
+#### 3. `use_state` / `use_effect` API（已对 `flet==0.85.3` 实测）
+
+- `ft.use_state(initial) -> (value, setter)`：类似 React `useState`。`setter` 接受新值，或接受接收前值返回新值的函数。
+- `ft.use_effect(setup, dependencies=None, cleanup=None)`：
+  - `setup` 为普通函数，可返回 cleanup 函数，或通过 `cleanup` 参数单独提供。
+  - `dependencies` 缺省时只在初次渲染运行；指定时按依赖变化重跑；cleanup 在重跑前与卸载时执行。
+  - hooks 必须在 `@ft.component` 渲染上下文内调用，独立调用抛 `RuntimeError: No current renderer`。
+- `ft.component(fn)` 装饰器：把函数标记为组件，返回值即控件树根节点。
+
+#### 4. i18n / 响应式声明式实现
+
+- **i18n**：locale 作为声明式状态源。组件通过 `use_state` 订阅 `I18n` 的 locale 变化（或在父组件统一管理 locale state，子组件经 props 接收），切换时自动重渲染。**不再**手动 `subscribe`/`refresh_locale`。
+- **响应式**：窗口尺寸作为 `use_state`（由根组件订阅 `page.on_resize` 更新），通过 props 下发；视图内用 `ResponsiveRow` + `col` 配置，状态驱动布局。**不再**实现 `handle_resize` 鸭子分发。
+- **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数在声明式下不再需要，存量命令式控件改造后随之删除。
+
+#### 5. 迁移约束
+
+- 旧控件**不做机械批量迁移**（§1.4 微创）；仅在因功能改动已触及某控件时，可顺带迁到声明式。
+- `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
 - async 窗口/控件方法必须 `await`。
-
-> **迁移策略**：旧控件**不做机械批量迁移**（§1.4 微创）；仅在因功能改动已触及某控件时，可顺带迁到新写法。`ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
+- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法属存量技术债，不再用于新代码。
 
 ### 依赖管理
 
@@ -877,6 +931,9 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 ## 语言切换响应 (I18n Hot Reload)
 
 > 对应 [CLAUDE.md §5.8](./CLAUDE.md#58-语言切换响应规范-i18n-hot-reload)。
+
+> ⚠️ **本节为附录 A：命令式存量整改对照，仅供改造期查阅，不作为新代码依据。**
+> 新 UI 必须采用声明式 `@ft.component` + `use_state`/`use_effect`（locale 作为状态源自动重渲染），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `I18n.subscribe`/`refresh_locale`/手动 `update()` 等命令式写法属技术债，存量改造后随之删除。
 
 程序运行后动态切换语言时，所有 UI 控件必须正确刷新。新增/修改 UI 视图或组件时，必须遵守以下 9 条规范。
 
@@ -1120,7 +1177,10 @@ def _rebuild_steps_after_locale_change(self):
 
 > 对应 [CLAUDE.md §5.9](./CLAUDE.md#59-响应式布局规范-responsive-layout)。
 
-本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 10 条规范。
+> ⚠️ **本节为附录 B：命令式存量整改对照，仅供改造期查阅，不作为新代码依据。**
+> 新 UI 必须采用声明式 `@ft.component` + `use_state`（窗口尺寸作为 state + `ResponsiveRow` 状态驱动布局），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `handle_resize` 鸭子分发/手动 `update()` 等命令式写法属技术债，存量改造后随之删除。
+
+本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 9 条规范。
 
 ### 背景与约束
 
@@ -1150,7 +1210,7 @@ def _rebuild_steps_after_locale_change(self):
 >
 > **设计选择**：断点基于 `WindowResizeEvent.width`（窗口总宽度）而非内容区净宽，这是有意的设计。同一窗口宽度下 nav 折叠/展开会改变内容区净宽，但断点保持稳定，避免 nav 切换导致侧栏宽度跳变。nav 折叠带来的额外空间由 `expand=True` 的主内容区自然吸收。
 
-### 10 条规范
+### 9 条规范
 
 #### 规范 1：断点分级 — 视图必须感知当前窗口尺寸
 
@@ -1281,35 +1341,7 @@ ft.ResponsiveRow([ft.Column([control])])
 - 但 **scroll 不得作为掩盖布局缺陷的手段**：若控件累计宽度经常超过容器宽度，应优先改用 `ResponsiveRow` 或 `wrap=True`。
 - `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.Padding.only(right=8)` 避免内容与滚动条重叠。
 
-#### 规范 7：max_width 约束 — 防止超宽屏内容过度拉伸
-
-在 `ui/app_layout.py` 的 `body` Container 上设置最大宽度，防止 4K 屏内容全宽铺开导致阅读困难。
-
-**实现方式**：在 `AppLayout._handle_resize()` 中统一处理 (而非每个视图各自处理)。注意 Flet 的 `Container.alignment` 控制的是**内容在 Container 内的对齐**，不是 Container 自身在父容器中的对齐。因此 `body` 设置 `width` 后需要用外层 Row 的 `alignment` 来实现居中：
-
-```python
-# ui/app_layout.py — 常量
-MAX_CONTENT_WIDTH = 2200  # 4K 屏内容区最大宽度
-
-# ui/app_layout.py — _init_ui 中，main_layout Row 包裹 body
-# main_layout = ft.Row([nav_rail, divider, body_wrapper], expand=True)
-# body_wrapper = ft.Row([body], alignment=ft.MainAxisAlignment.CENTER)  # 居中容器
-
-async def _handle_resize(self):
-    # ... 现有防抖逻辑 ...
-    if self.page:
-        nav_width = 80 if self._nav_collapsed else 180
-        available = self._current_width - nav_width - 1  # 用缓存的实时尺寸，禁止 self.page.width
-        body_width = min(available, MAX_CONTENT_WIDTH)
-        if self.body.width != body_width:
-            self.body.width = body_width
-            self.body.update()
-    # ... 现有 handle_resize 分发 ...
-```
-
-> **关键**：`body` 的父容器 (main_layout Row) 需通过 `alignment=ft.MainAxisAlignment.CENTER` 实现居中。若 `body.width < available`，Row 会将 body 居中显示；若 `body.width == available`，Row 铺满。
-
-#### 规范 8：触发时机完整性 — 任何改变内容区宽度的操作都必须分发 resize
+#### 规范 7：触发时机完整性 — 任何改变内容区宽度的操作都必须分发 resize
 
 `AppLayout._handle_resize()` 是 resize 事件的唯一分发入口。**任何改变内容区可用宽度的操作**，不仅是窗口拖拽，都必须触发 `schedule_resize()` 分发，否则视图会基于过时的 `page.width` 渲染。
 
@@ -1348,9 +1380,9 @@ if hasattr(new_view, "handle_resize"):
 self.schedule_resize()  # 语言切换后重新验证布局
 ```
 
-#### 规范 9：高度维度 — 对高度敏感的视图必须响应 `page.height`
+#### 规范 8：高度维度 — 对高度敏感的视图必须响应 `page.height`
 
-规范 1-8 仅关注宽度，但 `min_height=720` 下多个视图存在高度维度问题：
+规范 1-7 仅关注宽度，但 `min_height=720` 下多个视图存在高度维度问题：
 
 - `BacktestView` 配置面板内容溢出 (scroll 兜底，但用户需大量滚动)
 - `DataExplorerView` 表格每页行数固定，低高度下只能看到 3-4 行
@@ -1382,7 +1414,7 @@ def handle_resize(self, width: float = 0, height: float = 0) -> None:
 - 图表组件 (最小可读高度)
 - 超过 5 个表单项的长表单 (低高度下需折叠或分页)
 
-#### 规范 10：i18n 与响应式交互 — 语言切换后必须重新验证布局
+#### 规范 9：i18n 与响应式交互 — 语言切换后必须重新验证布局
 
 语言切换后文案长度变化 (中文"调仓频率"4 字 vs 英文"Rebalance Frequency"18 字符)，可能导致之前不溢出的布局突然溢出。
 
@@ -1417,11 +1449,11 @@ def _on_locale_change(self):
 ├─ 有 scroll=ft.ScrollMode.AUTO 的 Column 吗？
 │   └─ 是 → 设置 padding=ft.Padding.only(right=8) (规范 6)
 ├─ 有改变内容区宽度的操作 (nav 折叠、tab 切换) 吗？
-│   └─ 是 → 规范 8 (触发时机完整性)
+│   └─ 是 → 规范 7 (触发时机完整性)
 ├─ 含表格/图表/长表单等高度敏感元素吗？
-│   └─ 是 → 规范 9 (高度维度)
+│   └─ 是 → 规范 8 (高度维度)
 ├─ 视图展示 i18n 文案吗？
-│   └─ 是 → 规范 10 (i18n 与响应式交互)
+│   └─ 是 → 规范 9 (i18n 与响应式交互)
 └─ 视图在 960×640 最小窗口下验证过吗？
     └─ 是 → 确认无溢出、无截断、无重叠 (规范 1 断点验证)
 ```
@@ -1455,7 +1487,7 @@ def _on_locale_change(self):
 | `SettingsView` | ⚠️ 部分 | 未实现 `handle_resize` (需补空方法) |
 | `MarketDashboard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，4 张卡退化为纵向堆叠 |
 | `OnboardingWizard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，6 张卡纵向堆叠 |
-| `AppLayout` | ✅ 已修复 | `on_resize` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
+| `AppLayout` | ✅ 已修复 | `on_resize` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize |
 
 ### 测试要求
 
@@ -1574,7 +1606,8 @@ def _on_locale_change(self):
 | 级别 | 问题描述 | 产生背景与现状 | 期望的最终解法 |
 |------|---------|---------------|--------------|
 | **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
-| **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（§5.9）前瞻性落地为强制规范，示例已修正为使用 `self._current_width`，但 `ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
+| **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
+| **P3** | **命令式 UI 存量需整改为声明式** | 现有 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型，命令式视为技术债。 | 独立重构主线：按视图切分逐个改造为 `@ft.component` + `use_state`/`use_effect`；i18n 九规范、响应式九规范、`PageRefMixin`、`refresh_dropdown_options` 等命令式绕过随改造删除。整改工作量大，作为独立任务排期。当前状态：独立重构任务。 |
 | **P3** | **doc-lint 自动化未实现** | F3/F4 类数字/一致性漂移靠人工检视才发现，缺自动化校验。 | 新增 `scripts/check_docs_consistency.py` pre-commit/CI 脚本，覆盖 markdown 锚点死链校验、"N 条规范"数字一致性、红线自动化声明与 `.pre-commit-config.yaml`/`pyproject.toml` 交叉校验。当前状态：待实现，独立任务。 |
 
 ---
