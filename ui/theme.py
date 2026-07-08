@@ -11,6 +11,7 @@ A-Share Quantitative Screener - Unified Theme Configuration
 
 import logging
 import threading
+from dataclasses import dataclass
 from typing import TypedDict
 
 import flet as ft
@@ -290,6 +291,26 @@ THEME_MODE_MAP = {
 }
 
 
+@ft.observable
+@dataclass
+class AppColorsState(ft.Observable):
+    """AppColors Observable 状态源。
+
+    声明式组件通过 ``ft.use_state(AppColors.get_observable_state)`` 订阅，
+    ``load_theme`` 更新 ``state.theme_name`` 触发 Observable 通知，
+    框架自动重渲染订阅该 state 的组件。组件重渲染时通过 ``AppColors.UP_RED``
+    等类变量读取最新颜色（``load_theme`` 已先行更新类变量）。
+
+    显式继承 ``ft.Observable`` 使 pyright 能识别 ``subscribe`` 等方法；
+    ``@ft.observable`` 装饰器检测到 ``Observable in __mro__`` 后直接返回原类（no-op）。
+
+    旧接口 ``AppColors._listeners``/``subscribe``/``unsubscribe`` 保留供命令式 View
+    使用（阶段 4 删除）。
+    """
+
+    theme_name: str = ThemeName.DARK
+
+
 class AppColors:
     """
     双层主题色管理器 (Dual-Layer Theme Color Manager)
@@ -301,6 +322,14 @@ class AppColors:
     第二层 (Layer 2) - 业务自定义色 (手动更新):
         涨跌色、表格色等 Material Design 没有定义的颜色。
         这些颜色仍然是 Hex 值，切换主题时需要手动更新相关组件。
+
+    Observable 状态源（声明式组件自动重渲染）：
+        声明式组件通过 ``ft.use_state(AppColors.get_observable_state)`` 订阅，
+        ``load_theme`` 同步更新 ``state.theme_name`` 触发 Observable 通知，
+        框架自动重渲染订阅该 state 的组件。组件重渲染时通过 ``AppColors.UP_RED``
+        等类变量读取最新颜色（``load_theme`` 已先行更新类变量）。
+
+    旧接口 ``_listeners``/``subscribe``/``unsubscribe`` 保留供命令式 View 使用（阶段 4 删除）。
     """
 
     # ====================================================================
@@ -357,6 +386,18 @@ class AppColors:
     _CURRENT_THEME_NAME = ThemeName.DARK
     _listeners = []
     _listeners_lock = threading.Lock()  # Thread-safe lock for _listeners list
+    _state: AppColorsState | None = None
+
+    @classmethod
+    def get_observable_state(cls) -> AppColorsState:
+        """获取 AppColors Observable 状态源单例。
+
+        声明式组件通过 ``ft.use_state(AppColors.get_observable_state)`` 订阅，
+        ``load_theme`` 同步更新 ``state.theme_name`` 触发自动重渲染。
+        """
+        if cls._state is None:
+            cls._state = AppColorsState()
+        return cls._state
 
     @classmethod
     def subscribe(cls, listener):
@@ -413,6 +454,11 @@ class AppColors:
                 listener()
             except Exception as e:
                 logger.error("Error notifying theme listener: %s", e, exc_info=True)
+
+        # 同步 Observable state：state.theme_name 赋值触发 __setattr__ → _notify
+        # → 订阅该 state 的声明式组件自动重渲染。
+        # 必须在类变量更新之后执行，确保组件重渲染时 AppColors.UP_RED 等已是新值。
+        cls.get_observable_state().theme_name = theme_name
 
 
 class AppStyles:
