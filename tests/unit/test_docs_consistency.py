@@ -279,3 +279,59 @@ class TestDaoCountConsistency:
         assert declared == actual, (
             f"README.md declares {declared} 业务 DAO but data/persistence/daos/ has {actual} (excluding base_dao.py)"
         )
+
+
+class TestDocsConsistencyScript:
+    """C5: scripts/check_docs_consistency.py 契约测试。
+
+    验证 doc-lint 第一阶段三项检查（锚点死链 / 版本一致 / pre-commit hook 数量）正确工作。
+    """
+
+    def test_github_anchor_emoji_heading(self):
+        """带 emoji 的标题应生成双连字符锚点（GitHub 行为：不折叠连续空格）。"""
+        from check_docs_consistency import github_anchor
+
+        # "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" → "31  绝对禁止" → "31--绝对禁止"
+        assert github_anchor("3.1 ❌ 绝对禁止") == "31--绝对禁止"
+        assert github_anchor("3.2 ✅ 强制要求") == "32--强制要求"
+
+    def test_github_anchor_cjk_and_punctuation(self):
+        """CJK 保留，标点/括号移除。"""
+        from check_docs_consistency import github_anchor
+
+        assert github_anchor("语言切换响应 (I18n Hot Reload)") == "语言切换响应-i18n-hot-reload"
+        assert github_anchor("V1 声明式 UI 开发规范") == "v1-声明式-ui-开发规范"
+
+    def test_check_anchor_dead_links_passes(self):
+        """CLAUDE.md 与 CONTRIBUTING.md 不含死锚点。"""
+        from check_docs_consistency import check_anchor_dead_links
+
+        errors = check_anchor_dead_links()
+        assert errors == [], "Dead anchor links found:\n  " + "\n  ".join(errors)
+
+    def test_check_version_consistency_passes(self):
+        """CLAUDE.md 顶部版本与 pyproject.toml 一致。"""
+        from check_docs_consistency import check_version_consistency
+
+        errors = check_version_consistency()
+        assert errors == [], "Version mismatch:\n  " + "\n  ".join(errors)
+
+    def test_check_precommit_hook_count_passes(self):
+        """文档中 pre-commit hook 数量与 .pre-commit-config.yaml 一致。"""
+        from check_docs_consistency import check_precommit_hook_count
+
+        errors = check_precommit_hook_count()
+        assert errors == [], "Hook count mismatch:\n  " + "\n  ".join(errors)
+
+    def test_main_returns_zero(self):
+        """脚本 main() 在当前文档状态下应返回 0（全部通过）。"""
+        from check_docs_consistency import main
+
+        assert main() == 0, "check_docs_consistency.py main() should return 0 when all checks pass"
+
+    def test_count_local_hooks_matches_config(self):
+        """_count_local_hooks 返回 .pre-commit-config.yaml 实际 hook 数量。"""
+        from check_docs_consistency import _count_local_hooks
+
+        count = _count_local_hooks()
+        assert count >= 8, f"Expected at least 8 local hooks, got {count}"

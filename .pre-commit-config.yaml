@@ -57,3 +57,10 @@ repos:
         language: system
         files: ^(pyproject\.toml|installer\.iss|\.release-please-manifest\.json|README\.md|CONTRIBUTING\.md|SECURITY\.md|CLAUDE\.md)$
         pass_filenames: false
+
+      - id: docs-consistency
+        name: Check docs consistency
+        entry: python scripts/check_docs_consistency.py
+        language: system
+        files: ^(CLAUDE\.md|CONTRIBUTING\.md|pyproject\.toml|\.pre-commit-config\.yaml|scripts/check_docs_consistency\.py)$
+        pass_filenames: false

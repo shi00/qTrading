@@ -106,7 +106,11 @@
 
 ### 1.9 关键验证命令
 
-修改代码后按顺序自检（完整命令见 CONTRIBUTING.md「常用开发与测试命令」）：`ruff check .` → `ruff format --check .` → `pyright` → `python -m pytest tests/unit/ -v -m "not slow"` → `pre-commit run --all-files`。
+修改代码后按顺序自检（完整命令见 CONTRIBUTING.md「常用开发与测试命令」）：
+
+- **默认完整门禁**：`ruff check .` → `ruff format --check .` → `pyright` → `python -m pytest tests/unit/ -v -m "not slow"` → `pre-commit run --all-files`。
+- **实际开发中**按变更范围优先运行 CONTRIBUTING.md「变更类型 → 最小验证子集」；提交、PR 或跨层修改时运行完整门禁。
+- **不得声称未运行项已通过**；无法运行的验证需说明原因，不得跳过不报。
 
 ### 1.10 反幻觉护栏（AI 特有红线）
 
@@ -154,6 +158,7 @@
 ### 3.2 ✅ 强制要求
 
 - 所有异步操作的 CPU/IO 任务必须通过 `ThreadPoolManager` 提交到对应线程池 (`TaskType.IO` / `TaskType.CPU`)。
+  - **澄清**：本条针对同步阻塞段（如同步 HTTP 客户端、文件 IO、CPU 密集计算）。async-native IO（`httpx.AsyncClient`、SQLAlchemy async、asyncpg 等）按其原生 `await` 模型执行，不额外包线程池，除非调用链中存在同步阻塞段。R16 聚焦于 Flet 事件处理器中的同步阻塞场景，与本条适用范围一致（均针对同步阻塞段，不要求把 async-native IO 包线程池）。
 - `BaseDao` 的批量写入必须使用 `_save_upsert()`，分块大小见 `base_dao.py` 的 `_UPSERT_CHUNK_SIZE`。
 - **数据质量门控**：业务逻辑前必须经过 `@require_quality` 指定所需质量等级（普通策略使用该装饰器；而向量化 `PolarsBaseStrategy` 必须且只能通过类属性 `required_quality_tier` 覆盖默认等级）。
 - Pre-commit hooks 必须在提交前执行并保持通过；新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。

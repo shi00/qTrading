@@ -1,0 +1,198 @@
+"""文档一致性检查（C5 第一阶段）。
+
+检查项：
+1. Markdown 锚点死链校验：扫描 CLAUDE.md、CONTRIBUTING.md 中带 `#anchor` 的 markdown 链接，
+   确认目标标题存在（支持同文件 `#anchor` 与跨文件 `./file.md#anchor`）。
+2. CLAUDE.md 顶部版本与 pyproject.toml `[project].version` 一致。
+3. 文档中"项目使用 N 个 pre-commit hook"的数量与 `.pre-commit-config.yaml` 本地 hook 数量一致。
+
+退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
+
+第二阶段扩展（未实现，登记于 CONTRIBUTING.md 已知技术债）：
+- 红线 R1~R17 编号 append-only 检查。
+- `NOTE(lazy):` 三要素格式检查。
+- "强制状态"与实际 hook / CI job 的映射检查。
+"""
+
+from __future__ import annotations
+
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+CLAUDE_PATH = ROOT / "CLAUDE.md"
+CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
+PYPROJECT_PATH = ROOT / "pyproject.toml"
+PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
+
+# 受检 markdown 文件清单（锚点死链校验范围）
+CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH]
+
+
+def github_anchor(heading_text: str) -> str:
+    """生成 GitHub 风格 markdown 锚点。
+
+    规则：转小写 → 移除非 word/空格/连字符字符 → 每个空格独立转连字符（不折叠）。
+    与 GitHub 渲染器行为一致（CJK 保留，标点/emoji/括号移除，连续空格 → 连续连字符）。
+    例如 "3.1 ❌ 绝对禁止" → 移除 "." 和 "❌" 后得 "31  绝对禁止" → "31--绝对禁止"。
+    """
+    s = heading_text.lower()
+    # \w 含字母数字下划线与 Unicode 字母（CJK）；re.UNICODE 默认开启
+    s = re.sub(r"[^\w\s-]", "", s)
+    # GitHub 不折叠连续空格，每个空格独立替换为连字符
+    s = s.replace(" ", "-")
+    return s
+
+
+def extract_headings(content: str) -> set[str]:
+    """提取 markdown 文件所有标题对应的锚点集合。"""
+    anchors: set[str] = set()
+    for line in content.splitlines():
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if m:
+            anchors.add(github_anchor(m.group(2)))
+    return anchors
+
+
+def _resolve_target_doc(link_url: str, source_doc: Path) -> Path | None:
+    """解析 markdown 链接 url 的目标文件路径。
+
+    返回 None 表示非受检文件（外部链接或不在 CHECKED_DOCS 中的目标）。
+    """
+    if "#" in link_url:
+        target_path_part = link_url.split("#", 1)[0]
+    else:
+        target_path_part = link_url
+
+    # 同文件锚点
+    if not target_path_part:
+        return source_doc
+
+    # 跨文件链接：归一化为 ROOT 下的文件名
+    target_name = Path(target_path_part).name
+    target_doc = ROOT / target_name
+    if target_doc in CHECKED_DOCS:
+        return target_doc
+    return None
+
+
+def check_anchor_dead_links() -> list[str]:
+    """检查项 1：markdown 锚点死链。
+
+    跳过 fenced code block（```...```）内的链接，避免代码示例被误判。
+    """
+    errors: list[str] = []
+    # 预加载所有受检文件的标题集合
+    doc_headings: dict[Path, set[str]] = {}
+    for doc in CHECKED_DOCS:
+        doc_headings[doc] = extract_headings(doc.read_text(encoding="utf-8"))
+
+    # 匹配 markdown 链接 [text](url)，url 含 #anchor
+    link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+
+    for doc in CHECKED_DOCS:
+        content = doc.read_text(encoding="utf-8")
+        in_code_block = False
+        for line_no, line in enumerate(content.splitlines(), 1):
+            # 跟踪 fenced code block 状态
+            if line.lstrip().startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+            for m in link_pattern.finditer(line):
+                url = m.group(2).strip()
+                # 忽略外部链接
+                if url.startswith(("http://", "https://", "mailto:")):
+                    continue
+                # 只检查带锚点的链接
+                if "#" not in url:
+                    continue
+                anchor = url.split("#", 1)[1]
+                # 锚点为空（如 `[text](./file.md#)`）跳过
+                if not anchor:
+                    continue
+
+                target_doc = _resolve_target_doc(url, doc)
+                if target_doc is None:
+                    # 目标不在受检范围（如 README.md、pyproject.toml 等），跳过
+                    continue
+
+                if anchor not in doc_headings.get(target_doc, set()):
+                    errors.append(
+                        f"{doc.name}:{line_no}: 锚点死链 '{url}' (锚点 '{anchor}' 在 {target_doc.name} 中不存在)"
+                    )
+    return errors
+
+
+def check_version_consistency() -> list[str]:
+    """检查项 2：CLAUDE.md 顶部版本与 pyproject.toml 一致。"""
+    errors: list[str] = []
+    claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
+    m = re.search(r"\*\*对应版本\*\*[：:]\s*([0-9]+\.[0-9]+\.[0-9]+)", claude_content)
+    if not m:
+        errors.append("CLAUDE.md: 未找到 '**对应版本**' 字段")
+        return errors
+    claude_ver = m.group(1)
+
+    with open(PYPROJECT_PATH, "rb") as f:
+        cfg = tomllib.load(f)
+    pyproject_ver = cfg["project"]["version"]
+
+    if claude_ver != pyproject_ver:
+        errors.append(f"CLAUDE.md 版本 {claude_ver} != pyproject.toml 版本 {pyproject_ver}")
+    return errors
+
+
+def _count_local_hooks() -> int:
+    """计数 .pre-commit-config.yaml 中 local repo 下的 hook 数量。
+
+    采用正则匹配 `^      - id:` 行（6 空格缩进 + dash + id:），
+    与现有 verify_versions.py 风格一致，避免引入 yaml 依赖。
+    """
+    content = PRECOMMIT_PATH.read_text(encoding="utf-8")
+    return len(re.findall(r"^ {6}- id: \S+", content, re.MULTILINE))
+
+
+def check_precommit_hook_count() -> list[str]:
+    """检查项 3：文档中 pre-commit hook 数量与配置一致。"""
+    errors: list[str] = []
+    actual_count = _count_local_hooks()
+
+    for doc in CHECKED_DOCS:
+        content = doc.read_text(encoding="utf-8")
+        # 匹配"项目使用 N 个 pre-commit hook"或"使用 N 个 pre-commit hook"
+        for m in re.finditer(r"(\d+)\s*个\s*pre-commit\s*hook", content):
+            declared = int(m.group(1))
+            if declared != actual_count:
+                # 定位行号便于报错
+                line_no = content[: m.start()].count("\n") + 1
+                errors.append(
+                    f"{doc.name}:{line_no}: 声明 {declared} 个 pre-commit hook，"
+                    f"实际 .pre-commit-config.yaml 有 {actual_count} 个"
+                )
+    return errors
+
+
+def main() -> int:
+    """运行全部检查，返回退出码。"""
+    all_errors: list[str] = []
+    all_errors.extend(check_anchor_dead_links())
+    all_errors.extend(check_version_consistency())
+    all_errors.extend(check_precommit_hook_count())
+
+    if all_errors:
+        print("❌ 文档一致性检查失败：", file=sys.stderr)
+        for err in all_errors:
+            print(f"  - {err}", file=sys.stderr)
+        return 1
+
+    print("✅ 文档一致性检查通过（锚点死链 / 版本一致 / pre-commit hook 数量一致）")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
