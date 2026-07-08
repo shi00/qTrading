@@ -218,6 +218,10 @@ class TaskCenterView(PageRefMixin, ft.Container):
         except Exception as e:
             logger.warning("[TaskCenterView] refresh_locale error: %s", e, exc_info=True)
 
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口尺寸变化时调整布局。TaskCenterView 内容自适应，无需响应式调整。"""
+        # No responsive adjustment needed — 任务卡片列表使用 expand 自适应
+
     def _on_tasks_updated(self, current_tasks):
         if not self._mounted:
             return

@@ -438,6 +438,12 @@ class AppStyles:
     COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
     COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
 
+    # --- Responsive Breakpoints (响应式断点，见 CONTRIBUTING.md §5.9 规范 1) ---
+    # 基于 handle_resize 接收的 width 参数的 4 级断点（min_width=1280 约束下）
+    BREAKPOINT_COMPACT = 1200  # < 此值视为紧凑模式（min_width=1280 下不可达）
+    BREAKPOINT_STANDARD = 1600  # < 此值视为标准模式
+    BREAKPOINT_ULTRA_WIDE = 2400  # ≥ 此值视为超宽屏
+
     @staticmethod
     def card(
         padding: int = 15,
