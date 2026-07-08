@@ -160,11 +160,13 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别；涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
-- **UI 模型（强制）**：所有 UI 必须采用 Flet 主推的声明式 `@ft.component` + 官方 hooks（`use_state`/`use_effect`），状态驱动、框架自动 diff，i18n 热切换与响应式布局均由状态驱动自动重渲染。**禁止**命令式类控件 + 手动 `self.update()` + `did_mount`/`will_unmount`，**禁止** `UserControl`。新代码必须遵守 [CONTRIBUTING.md「V1 声明式 UI 开发规范」](./CONTRIBUTING.md#v1-声明式-ui-开发规范)；不合规的存量 UI 属技术债，旧命令式 i18n 九规范 / 响应式九规范降级为附录（[语言切换响应](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload)、[响应式布局规范](./CONTRIBUTING.md#响应式布局规范-responsive-layout)），仅供改造期查阅，不作为新代码依据。
+- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。新代码必须遵守 [CONTRIBUTING.md「V1 声明式 UI 开发规范」](./CONTRIBUTING.md#v1-声明式-ui-开发规范)；不合规的存量 UI 属技术债（见 §3.3），旧命令式 i18n 九规范 / 响应式九规范降级为附录（[语言切换响应](./CONTRIBUTING.md#语言切换响应-i18n-hot-reload)、[响应式布局规范](./CONTRIBUTING.md#响应式布局规范-responsive-layout)），仅供改造期查阅，不作为新代码依据。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
 - **Windows 测试泄漏 (P1-2)**: 测试环境下由于 Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 被妥协为 `session` 级，会导致 loop-local 缓存（如 `asyncio.Event`）跨测试泄漏。目前通过 autouse fixture 维持隔离，排查多线程并发测试问题时需格外关注。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
+- **`use_viewmodel` hook 实现待建（阻塞新 UI 开发）**: C 桥接模式基础设施，契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)。未实现前，新增声明式 View 必须先实现/扩展本 hook 再写 View；不得用 `use_state`+`use_effect` 内联订阅 `_notify` 的退路绕过，不得继续沿用 `on_update`/`on_log` 回调注入范式写新代码。
+- **7 个现有 ViewModel + 命令式 View 迁移**: [ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 使用 `on_update`/`on_log` 回调注入（见 [screener_view_model.py](./ui/viewmodels/screener_view_model.py)），命令式 View 用 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`；触及时迁到 state snapshot + commands + `use_viewmodel` 目标范式。
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 

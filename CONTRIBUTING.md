@@ -581,13 +581,103 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 ## MVVM 表现层
 
-> 对应 [CLAUDE.md §6.8](./CLAUDE.md#6-设计模式索引)。
+> 对应 [CLAUDE.md §3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求)；声明式渲染细则见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。
 
-- **View** (`ui/views/`): 仅负责构建 Flet 控件树和绑定事件，不持有业务状态。事件回调将 (用户意图, 参数) 转发给 ViewModel。
-- **ViewModel** (`ui/viewmodels/`): 持有业务状态 (DataFrame、筛选结果、加载标记)，调用 services/strategies/data 层，通过回调通知 View 刷新。
-- **Component** (`ui/components/`): 可复用控件 (图表、对话框、虚拟表格、Toast)，不耦合具体业务。
-- **Theme** (`ui/theme.py`): 亮/暗主题切换，颜色/字体 token 集中管理。
-- **i18n** (`ui/i18n.py`): 对 `core.i18n` 的 UI 层薄封装，提供 Flet 文本绑定。
+采用 MVVM + 声明式渲染复合范式：MVVM 负责架构分层，声明式负责 UI 渲染模型。`View = f(ViewModel.state)`，用户事件调 `ViewModel.command()`，VM 更新 state 后 View 自动重渲染。
+
+### 三层职责
+
+| 层 | 职责 | 禁止 |
+|----|------|------|
+| **View** (`ui/views/`, `@ft.component`) | 读 state 渲染控件树、事件调 commands | 持有业务状态、`did_mount`/`will_unmount`、`self.update()`、`UserControl`、`PageRefMixin` |
+| **ViewModel** (`ui/viewmodels/`) | 持有业务状态、调 services/strategies/data；暴露不可变 `state` snapshot + `commands` 方法 | import flet、持有 Flet 控件、`page.update()`/`control.update()`、感知 locale |
+| **Component** (`ui/components/`) | 可复用无状态控件（图表、对话框、虚拟表格、Toast） | 耦合具体业务 |
+| **Theme** (`ui/theme.py`) | 亮/暗主题切换，颜色/字体 token 集中管理 | — |
+| **i18n** (`ui/i18n.py`) | 对 `core.i18n` 的 UI 层薄封装，提供 Flet 文本绑定 | — |
+
+### ViewModel 形态契约
+
+```python
+from collections.abc import Callable
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True)
+class Message:
+    """带参数的 i18n 消息：VM 产出 (key, params)，View 按当前 locale 渲染。"""
+    key: str
+    params: dict[str, object] = field(default_factory=dict)
+
+@dataclass(frozen=True)
+class Row:
+    """行数据 frozen dataclass；tuple[Row, ...] 保证 state 不可变。"""
+    code: str
+    name: str
+    score: float
+
+@dataclass(frozen=True)
+class ScreenerState:
+    rows: tuple[Row, ...]       # 不可变；DataFrame 转 tuple[Row, ...]，禁止 tuple[dict, ...]
+    status: Message             # 带 params 的 i18n 消息
+    loading: bool
+
+class ScreenerViewModel:
+    @property
+    def state(self) -> ScreenerState:
+        return ScreenerState(rows=tuple(...), status=Message(...), loading=...)
+
+    async def run(self) -> None: ...                  # command（异步）
+    def select_strategy(self, key: str) -> None: ...  # command（同步）
+
+    def subscribe(self, callback: Callable[[ScreenerState], None]) -> Callable[[], None]:
+        """订阅 state 变更；返回退订函数。hook 用此注册，_notify 调用时触发。"""
+        ...
+
+    def _notify(self) -> None:
+        """内部状态变更后调用；遍历订阅者 callback(self.state)。不持有 View 引用。"""
+        ...
+
+    def dispose(self) -> None: ...   # 可选：卸载时清理资源
+```
+
+- `state` 必须不可变（frozen dataclass / NamedTuple / tuple）；内部状态变更后返回新 snapshot
+- `state` 字段不得用 `dict` / `list` / `DataFrame` 等可变类型；行数据用 `tuple[Row, ...]`（Row 为 frozen dataclass），DataFrame 在 VM 内部转换为 Row tuple
+- i18n 消息用 `Message(key, params)`，View 渲染时 `I18n.get(msg.key, **msg.params)`；VM 只产出 key+params，不感知当前 locale
+- `commands` 即 VM 实例方法，稳定引用；异步 command 在 View 事件处理器 `await`
+- VM 通过 `subscribe(callback) -> unsub` 暴露可观察性；`_notify()` 调用所有注册 callback，传入新 state snapshot；VM 不持有 View 引用，订阅关系由 `use_viewmodel` hook 建立
+
+### 桥接 hook 契约
+
+View 通过 `use_viewmodel(factory) -> (state, commands)` 消费 ViewModel：
+
+```python
+import flet as ft
+from core.i18n import I18n
+from ui.hooks import use_viewmodel          # 待建基础设施，见 CLAUDE.md §3.3
+from ui.viewmodels.screener_view_model import ScreenerViewModel
+
+@ft.component
+def ScreenerView():
+    state, vm = use_viewmodel(ScreenerViewModel)   # 首次渲染实例化 + 订阅 _notify
+
+    async def on_run(e):
+        await vm.run()    # command -> _notify -> state 更新 -> 自动重渲染
+
+    return ft.Column([
+        ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
+        ft.Button(I18n.get("run"), on_click=on_run),
+    ])
+```
+
+`use_viewmodel` 契约（实现为待建基础设施，登记于 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：
+
+- 首次渲染：调 `factory()` 实例化 VM，调 `vm.subscribe(set_state)` 注册（保存返回的 unsub），返回 `(vm.state, vm)`
+- `_notify` 触发：VM 遍历订阅者调 `callback(self.state)`，hook 注册的 callback 即 `set_state(vm.state)`，触发重渲染
+- 卸载：调 unsub 退订 + `vm.dispose()`（若 VM 实现）
+- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: ScreenerViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](./CLAUDE.md#43-单例模式) DI 原则）
+
+### 存量技术债
+
+[ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 使用 `on_update`/`on_log` 回调注入（见 [screener_view_model.py](./ui/viewmodels/screener_view_model.py)），属过渡形态；命令式 View 用 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`。两者触及时迁到 state snapshot + commands + `use_viewmodel` 目标范式（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）。新代码不得沿用回调注入范式。
 
 ## Flet 0.85.3 (V1) API 关键约束
 
@@ -665,6 +755,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 下拉刷新 | `refresh_dropdown_options` 两步 update 绕过 | 状态驱动重建 options，绕过随之删除 |
 | 响应式 | `handle_resize` 鸭子分发 + 断点手算 | 窗口尺寸作为 state/observable + `ResponsiveRow`，状态驱动布局 |
 | page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片删除 |
+| ViewModel 消费 | `on_update`/`on_log` 回调注入 + View 持有 VM | `use_viewmodel(factory) -> (state, commands)`，View 只读 state + 调 commands（见 [MVVM 表现层](#mvvm-表现层)） |
 
 #### 2. `@ft.component` 标准模板
 
@@ -703,11 +794,42 @@ def MetricCard(label_key: str):
 
 #### 4. i18n / 响应式声明式实现
 
-- **i18n**：locale 作为声明式状态源。组件通过 `use_state` 订阅 `I18n` 的 locale 变化（或在父组件统一管理 locale state，子组件经 props 接收），切换时自动重渲染。**不再**手动 `subscribe`/`refresh_locale`。
+- **i18n**：locale 作为声明式状态源。组件通过 `use_state` 订阅 `I18n` 的 locale 变化（或在父组件统一管理 locale state，子组件经 props 接收），切换时自动重渲染。**不再**手动 `subscribe`/`refresh_locale`。**ViewModel state 不含 locale**——VM 只产出 i18n key（如 `"screener.run"`），View 渲染时按当前 locale 解析；locale 切换由 View 层独立状态源驱动重渲染，不需要 VM 参与或通知。
 - **响应式**：窗口尺寸作为 `use_state`（由根组件订阅 `page.on_resize` 更新），通过 props 下发；视图内用 `ResponsiveRow` + `col` 配置，状态驱动布局。**不再**实现 `handle_resize` 鸭子分发。
 - **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数在声明式下不再需要，存量命令式控件改造后随之删除。
 
-#### 5. 迁移约束
+#### 5. ViewModel 消费（MVVM 桥接）
+
+View 消费 ViewModel 必须经 `use_viewmodel(factory) -> (state, commands)` hook，**不得**直接 `vm = SomeViewModel()` 实例化或注入回调。完整契约与形态见 [MVVM 表现层](#mvvm-表现层)。
+
+```python
+import flet as ft
+from core.i18n import I18n
+from ui.hooks import use_viewmodel          # 待建基础设施，见 CLAUDE.md §3.3
+from ui.viewmodels.screener_view_model import ScreenerViewModel
+
+@ft.component
+def ScreenerView():
+    state, vm = use_viewmodel(ScreenerViewModel)   # state 不可变 snapshot；vm 即 commands
+
+    async def on_run(e):
+        await vm.run()    # command -> _notify -> state 更新 -> 自动重渲染
+
+    # View 只做两件事：读 state 渲染、事件调 commands
+    return ft.Column([
+        ft.Text(I18n.get(state.status.key, **state.status.params)),  # Message 渲染
+        ft.Button(I18n.get("run"), on_click=on_run),
+    ])
+```
+
+要点：
+
+- View 只做两件事：读 `state` 渲染控件树、事件调 `vm.command()`
+- VM 不得出现在 View 的 `use_state`/`use_effect` 之外的任何地方；不持有 VM 引用做副作用
+- `use_viewmodel` 未实现前，新 UI 开发被阻塞——必须先实现/扩展本 hook 再写 View（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）
+- 现有 7 个 ViewModel 的 `on_update`/`on_log` 回调注入属待迁移技术债，新代码不得沿用
+
+#### 6. 迁移约束
 
 - 旧控件**不做机械批量迁移**（§1.4 微创）；仅在因功能改动已触及某控件时，可顺带迁到声明式。
 - `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
