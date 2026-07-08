@@ -79,7 +79,7 @@ class FinancialDao(BaseDao):
         return set(df["trade_date"])
 
     # --- Extra Savers (Boilerplate) ---
-    async def save_fina_forecast(self, df: pd.DataFrame):
+    async def save_fina_forecast(self, df: pd.DataFrame) -> int:
         cols = get_model_columns(FinaForecast)
         pk_columns = get_model_pk_columns(FinaForecast)
         return await self._save_upsert(
@@ -109,7 +109,7 @@ class FinancialDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def save_pledge_stat(self, df: pd.DataFrame):
+    async def save_pledge_stat(self, df: pd.DataFrame) -> int:
         # ann_date excluded: Tushare pledge_stat API does not return ann_date (MD-001).
         # If Tushare ever starts returning it, remove this exclude to persist it.
         cols = get_model_columns(PledgeStat, exclude={"ann_date"})
@@ -131,7 +131,7 @@ class FinancialDao(BaseDao):
             pk_columns=pk_columns,
         )
 
-    async def save_dividend(self, df: pd.DataFrame):
+    async def save_dividend(self, df: pd.DataFrame) -> int:
         cols = get_model_columns(Dividend)
         pk_columns = get_model_pk_columns(Dividend)
         return await self._save_upsert(
