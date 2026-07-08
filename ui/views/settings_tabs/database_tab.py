@@ -99,3 +99,7 @@ class DatabaseTab(ft.Container):
                 self.update()
         except Exception as e:
             logger.warning("[DatabaseTab] refresh_locale error: %s", e, exc_info=True)
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed

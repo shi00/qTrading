@@ -749,6 +749,10 @@ class TableViewerTab(ft.Container):
         if self.page:
             self.update()
 
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed
+
 
 class SQLConsoleTab(ft.Container):
     """
@@ -1062,6 +1066,10 @@ class SQLConsoleTab(ft.Container):
 
         if self.page:
             self.update()
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed
 
 
 class DataExplorerView(ft.Container):

@@ -790,3 +790,7 @@ class AIBrainTab(ft.Container):
         self.ai_prompt_input.value = DEFAULT_AI_PROMPT
         self._safe_update()
         self.show_snack(I18n.get("settings_snack_prompt_reset"))
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed

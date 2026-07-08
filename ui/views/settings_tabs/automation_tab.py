@@ -450,6 +450,10 @@ class AutomationTab(ft.Container):
             if self.show_snack:
                 self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed
+
 
 class NotificationsTab(ft.Container):
     """通知设置标签页"""
@@ -648,3 +652,7 @@ class NotificationsTab(ft.Container):
             logger.error("[NotificationsTab] interval save failed: %s", ex, exc_info=True)
             if self.show_snack:
                 self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed
