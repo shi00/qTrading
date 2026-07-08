@@ -14,7 +14,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
@@ -97,19 +97,19 @@ class TushareConfigPanel(ft.Container):
             value=ConfigHandler.get_tushare_point_tier(),
             width=AppStyles.CONTROL_WIDTH_MD,
             options=self._build_tier_options(),
-            on_change=self._on_tier_change,
+            on_select=self._on_tier_change,
             hint_text=I18n.get("sys_tier_hint_in_token_panel"),
         )
 
-        self.verify_button = ft.ElevatedButton(
-            text=I18n.get("tushare_verify"),
+        self.verify_button = ft.Button(
+            content=I18n.get("tushare_verify"),
             icon=ft.Icons.VERIFIED_USER_OUTLINED,
             on_click=self._on_verify_click,
             style=AppStyles.secondary_button(),
         )
 
-        self.save_button = ft.ElevatedButton(
-            text=I18n.get("tushare_save"),
+        self.save_button = ft.Button(
+            content=I18n.get("tushare_save"),
             icon=ft.Icons.SAVE_OUTLINED,
             on_click=self._on_save_click,
             style=AppStyles.secondary_button(),
@@ -130,7 +130,7 @@ class TushareConfigPanel(ft.Container):
         )
 
         self.register_link = ft.TextButton(
-            text=I18n.get("tushare_register"),
+            content=I18n.get("tushare_register"),
             icon=ft.Icons.OPEN_IN_NEW,
             on_click=self._on_register_click,
             style=ft.ButtonStyle(
@@ -452,14 +452,14 @@ class TushareConfigPanel(ft.Container):
             self.token_input.label = I18n.get("tushare_token_label")
             if self._compact:
                 self.token_input.hint_text = I18n.get("tushare_token_hint")
-            self.verify_button.text = I18n.get("tushare_verify")
-            self.save_button.text = I18n.get("tushare_save")
-            self.register_link.text = I18n.get("tushare_register")
+            self.verify_button.content = I18n.get("tushare_verify")
+            self.save_button.content = I18n.get("tushare_save")
+            self.register_link.content = I18n.get("tushare_register")
             self.no_token_text.value = I18n.get("tushare_no_token")
             # §5.8 i18n：tier_dropdown label/hint/options 重建（选项文本含档位说明需翻译）
             self.tier_dropdown.label = I18n.get("sys_tier_label_in_token_panel")
             self.tier_dropdown.hint_text = I18n.get("sys_tier_hint_in_token_panel")
-            self.tier_dropdown.options = self._build_tier_options()
+            refresh_dropdown_options(self.tier_dropdown, self._build_tier_options())
             self._safe_update()
         except Exception as e:
             logger.warning("[TushareConfigPanel] refresh_locale failed: %s", e, exc_info=True)

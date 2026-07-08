@@ -598,9 +598,9 @@ class TestTushareConfigPanel:
             panel.refresh_locale()
 
         assert panel.token_input.label == "Test Label"
-        assert panel.verify_button.text == "Test Label"
-        assert panel.save_button.text == "Test Label"
-        assert panel.register_link.text == "Test Label"
+        assert panel.verify_button.content == "Test Label"
+        assert panel.save_button.content == "Test Label"
+        assert panel.register_link.content == "Test Label"
 
 
 class TestDatabaseConfigServiceMigrations:

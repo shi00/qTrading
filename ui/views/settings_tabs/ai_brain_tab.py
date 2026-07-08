@@ -112,7 +112,7 @@ class AIBrainTab(ft.Container):
             hint_text=I18n.get("settings_ai_prompt_hint"),  # pragma: no cover
         )  # pragma: no cover
         self.btn_reset_prompt = ft.TextButton(  # pragma: no cover
-            text=I18n.get("settings_reset_prompt"),  # pragma: no cover
+            content=I18n.get("settings_reset_prompt"),  # pragma: no cover
             icon=ft.Icons.RESTORE,  # pragma: no cover
             on_click=self._reset_ai_prompt,  # pragma: no cover
         )  # pragma: no cover
@@ -129,13 +129,13 @@ class AIBrainTab(ft.Container):
             hint_text=I18n.get("settings_news_prompt_hint"),  # pragma: no cover
         )  # pragma: no cover
         self.btn_reset_news_prompt = ft.TextButton(  # pragma: no cover
-            text=I18n.get("settings_reset_prompt"),  # pragma: no cover
+            content=I18n.get("settings_reset_prompt"),  # pragma: no cover
             icon=ft.Icons.RESTORE,  # pragma: no cover
             on_click=self._reset_news_prompt,  # pragma: no cover
         )  # pragma: no cover
 
-        self.btn_save_ai = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("settings_save_ai"),  # pragma: no cover
+        self.btn_save_ai = ft.Button(  # pragma: no cover
+            content=I18n.get("settings_save_ai"),  # pragma: no cover
             icon=ft.Icons.SAVE,  # pragma: no cover
             on_click=lambda e: self.page.run_task(self._save_ai_settings, e) if self.page else None,  # pragma: no cover
             style=AppStyles.primary_button(),  # pragma: no cover
@@ -309,7 +309,7 @@ class AIBrainTab(ft.Container):
                     ),  # pragma: no cover
                     ft.Container(  # pragma: no cover
                         content=self.ai_prompt_input,  # pragma: no cover
-                        border=ft.border.all(1, AppColors.BORDER),  # pragma: no cover
+                        border=ft.Border.all(1, AppColors.BORDER),  # pragma: no cover
                         border_radius=8,  # pragma: no cover
                         bgcolor=ft.Colors.with_opacity(0.02, AppColors.BORDER),  # pragma: no cover
                     ),  # pragma: no cover
@@ -324,7 +324,7 @@ class AIBrainTab(ft.Container):
                     ),  # pragma: no cover
                     ft.Container(  # pragma: no cover
                         content=self.ai_news_prompt_input,  # pragma: no cover
-                        border=ft.border.all(1, AppColors.BORDER),  # pragma: no cover
+                        border=ft.Border.all(1, AppColors.BORDER),  # pragma: no cover
                         border_radius=8,  # pragma: no cover
                         bgcolor=ft.Colors.with_opacity(0.02, AppColors.BORDER),  # pragma: no cover
                     ),  # pragma: no cover
@@ -346,7 +346,7 @@ class AIBrainTab(ft.Container):
                         [self.btn_save_ai],  # pragma: no cover
                         alignment=ft.MainAxisAlignment.END,  # pragma: no cover
                     ),  # pragma: no cover
-                    padding=ft.padding.only(top=10, bottom=30, right=20),  # pragma: no cover
+                    padding=ft.Padding.only(top=10, bottom=30, right=20),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
             spacing=15,  # pragma: no cover
@@ -434,11 +434,11 @@ class AIBrainTab(ft.Container):
                 self.ai_news_prompt_input.label = I18n.get("settings_news_prompt")
                 self.ai_news_prompt_input.hint_text = I18n.get("settings_news_prompt_hint")
             if hasattr(self, "btn_reset_prompt"):
-                self.btn_reset_prompt.text = I18n.get("settings_reset_prompt")
+                self.btn_reset_prompt.content = I18n.get("settings_reset_prompt")
             if hasattr(self, "btn_reset_news_prompt"):
-                self.btn_reset_news_prompt.text = I18n.get("settings_reset_prompt")
+                self.btn_reset_news_prompt.content = I18n.get("settings_reset_prompt")
             if hasattr(self, "btn_save_ai"):
-                self.btn_save_ai.text = I18n.get("settings_save_ai")
+                self.btn_save_ai.content = I18n.get("settings_save_ai")
 
             # 更新 _build_content() 中创建的布局控件 i18n 文本（不重建控件，避免触发同步 IO）
             if hasattr(self, "txt_tuning_desc"):

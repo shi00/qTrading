@@ -17,8 +17,10 @@ import flet as ft
 from ui.components.settings_widgets import SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
+from ui.v1_compat import PageRefMixin
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS, get_display_tag
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -37,7 +39,7 @@ class FailoverItem:
         return f"{self.provider}/{self.model}"
 
 
-class ProviderCredentialDialog(ft.AlertDialog):
+class ProviderCredentialDialog(PageRefMixin, ft.AlertDialog):
     """Dialog for adding/editing a failover provider's credentials."""
 
     def __init__(
@@ -55,14 +57,13 @@ class ProviderCredentialDialog(ft.AlertDialog):
         self._existing_providers = existing_providers or []
         self._provider = edit_item.provider if edit_item else ""
         self._is_edit = edit_item is not None
-        self._page_ref = page
         self._locale_subscription_id: object | None = None
         # 注入的 credential，避免 __init__ 中同步 keyring IO（R16）
         self._edit_credential = edit_credential
 
         super().__init__()
 
-        self.page = page
+        self.page = page  # type: ignore[assignment]  # [reason: V1 Control.page read-only, PageRefMixin overrides]
         self._build_ui()
         if self._is_edit:
             self._populate_edit_data()
@@ -80,7 +81,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             label=I18n.get("failover_select_provider"),
             options=provider_options,
             width=400,
-            on_change=self._on_provider_change,
+            on_select=self._on_provider_change,
             disabled=self._is_edit,
         )
 
@@ -88,7 +89,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             label=I18n.get("failover_select_model"),
             options=[],
             width=400,
-            on_change=self._on_model_dropdown_change,
+            on_select=self._on_model_dropdown_change,
         )
 
         self.custom_model_input = ft.TextField(
@@ -128,17 +129,17 @@ class ProviderCredentialDialog(ft.AlertDialog):
             width=440,
         )
         self._cancel_btn = ft.TextButton(
-            text=I18n.get("common_cancel"),
+            content=I18n.get("common_cancel"),
             on_click=self._on_cancel,
         )
         self._test_btn = None
         if self._test_connection_callback:
             self._test_btn = ft.TextButton(
-                text=I18n.get("failover_test_connection"),
+                content=I18n.get("failover_test_connection"),
                 on_click=self._on_test_connection,
             )
-        self._confirm_btn = ft.ElevatedButton(
-            text=I18n.get("common_confirm"),
+        self._confirm_btn = ft.Button(
+            content=I18n.get("common_confirm"),
             on_click=self._on_confirm_click,
             style=AppStyles.primary_button(),
         )
@@ -188,10 +189,10 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self.base_url_input.hint_text = default_url or I18n.get("failover_base_url_hint")
             self.api_key_input.label = I18n.get("llm_api_key")
 
-            self._cancel_btn.text = I18n.get("common_cancel")
+            self._cancel_btn.content = I18n.get("common_cancel")
             if self._test_btn is not None:
-                self._test_btn.text = I18n.get("failover_test_connection")
-            self._confirm_btn.text = I18n.get("common_confirm")
+                self._test_btn.content = I18n.get("failover_test_connection")
+            self._confirm_btn.content = I18n.get("common_confirm")
 
             # 重建链接行（其文案依赖 i18n）
             self._update_links_row(self._provider)
@@ -246,28 +247,28 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if console_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_get_api_key"),
+                    content=I18n.get("llm_get_api_key"),
                     on_click=lambda _: self._open_url(console_url),
                 )
             )
         if pricing_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_pricing"),
+                    content=I18n.get("llm_view_pricing"),
                     on_click=lambda _: self._open_url(pricing_url),
                 )
             )
         if models_url:
             self.links_row.controls.append(
                 ft.TextButton(
-                    text=I18n.get("llm_view_models"),
+                    content=I18n.get("llm_view_models"),
                     on_click=lambda _: self._open_url(models_url),
                 )
             )
 
-    def _open_url(self, url: str):
+    async def _open_url(self, url: str):
         if self.page:
-            self.page.launch_url(url)
+            await self.page.launch_url(url)
 
     @staticmethod
     def _normalize_base_url(url: str) -> str:
@@ -283,10 +284,10 @@ class ProviderCredentialDialog(ft.AlertDialog):
         return url
 
     def _on_cancel(self, e):
-        self.open = False
         if self.page:
-            self.page.close(self)
+            self.page.pop_dialog()
 
+    @log_async_operation(operation_name="failover_test_connection", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _on_test_connection(self, e):
         provider = self._provider
         model = self.custom_model_input.value or self.model_dropdown.value
@@ -326,12 +327,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
-            # 清理旧的 SnackBar 避免累积
-            self.page.overlay[:] = [s for s in self.page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
-            self.page.overlay.append(snack)
-            snack.open = True
-            self.page.update()
+            self.page.show_dialog(snack)
 
     def _on_confirm_click(self, e):
         provider = self._provider
@@ -353,6 +350,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
         if self.page:
             self.page.run_task(self._do_confirm_click_async, provider, model, base_url, api_key)
 
+    @log_async_operation(operation_name="failover_save_credential", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _do_confirm_click_async(self, provider: str, model: str, base_url: str, api_key: str | None):
         try:
             # 合并 5 次 IO 到单个闭包，减少 run_async 调用次数
@@ -399,9 +397,8 @@ class ProviderCredentialDialog(ft.AlertDialog):
                 self._show_snack(I18n.get("failover_primary_in_list"), AppColors.WARNING)
                 return
 
-            self.open = False
             if self.page:
-                self.page.close(self)
+                self.page.pop_dialog()
 
             if self._on_confirm:
                 self._on_confirm()
@@ -414,7 +411,7 @@ class ProviderCredentialDialog(ft.AlertDialog):
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
 
-class FailoverConfigPanel(ft.Container):
+class FailoverConfigPanel(PageRefMixin, ft.Container):
     """Failover configuration panel with list management."""
 
     def __init__(
@@ -437,7 +434,7 @@ class FailoverConfigPanel(ft.Container):
                 ft.Icon(ft.Icons.BOLT, size=20, color=AppColors.PRIMARY),
                 ft.Container(expand=True),
                 ft.OutlinedButton(
-                    text=I18n.get("failover_add_provider"),
+                    content=I18n.get("failover_add_provider"),
                     icon=ft.Icons.ADD,
                     on_click=self._on_add_click,
                     style=AppStyles.secondary_button(),
@@ -454,15 +451,15 @@ class FailoverConfigPanel(ft.Container):
         )
 
         self.btn_validate = ft.OutlinedButton(
-            text=I18n.get("failover_validate_all"),
+            content=I18n.get("failover_validate_all"),
             icon=ft.Icons.VERIFIED_USER,
             on_click=self._on_validate_all,
             style=AppStyles.secondary_button(),
             height=36,
         )
 
-        self.btn_save = ft.ElevatedButton(
-            text=I18n.get("settings_save_ai"),
+        self.btn_save = ft.Button(
+            content=I18n.get("settings_save_ai"),
             icon=ft.Icons.SAVE,
             on_click=self._on_save_click,
             style=AppStyles.primary_button(),
@@ -536,7 +533,7 @@ class FailoverConfigPanel(ft.Container):
                         italic=True,
                     ),
                     padding=20,
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                 )
             )
         else:
@@ -616,8 +613,8 @@ class FailoverConfigPanel(ft.Container):
                 ],
                 spacing=2,
             ),
-            padding=ft.padding.symmetric(horizontal=12, vertical=8),
-            border=ft.border.all(1, ft.Colors.OUTLINE),
+            padding=ft.Padding.symmetric(horizontal=12, vertical=8),
+            border=ft.Border.all(1, ft.Colors.OUTLINE),
             border_radius=6,
             bgcolor=ft.Colors.SURFACE_CONTAINER_HIGHEST,
         )
@@ -641,7 +638,7 @@ class FailoverConfigPanel(ft.Container):
                 existing_providers=existing,
             )
             if self.page:
-                self.page.open(dialog)
+                self.page.show_dialog(dialog)
         except Exception as ex:
             logger.error("[FailoverConfigPanel] add click failed: %s", ex, exc_info=True)
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
@@ -665,7 +662,7 @@ class FailoverConfigPanel(ft.Container):
                 edit_credential=cred,
             )
             if self.page:
-                self.page.open(dialog)
+                self.page.show_dialog(dialog)
         except Exception as ex:
             logger.error("[FailoverConfigPanel] edit item failed: %s", ex, exc_info=True)
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
@@ -674,6 +671,7 @@ class FailoverConfigPanel(ft.Container):
         if self.page:
             self.page.run_task(self._do_delete_item_async, index)
 
+    @log_async_operation(operation_name="failover_delete_item", threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _do_delete_item_async(self, index: int):
         try:
             item = self._failover_items[index]
@@ -724,15 +722,11 @@ class FailoverConfigPanel(ft.Container):
             logger.error("[FailoverConfigPanel] move item failed: %s", ex, exc_info=True)
             self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
-    def _persist_order(self):
-        ordered = [item.to_config_string() for item in self._failover_items]
-        ConfigHandler.save_config({"llm_failover_models": ordered})
-        self._render_list()
-
     def _on_validate_all(self, e):
         if self.page:
             self.page.run_task(self._do_validate_all_async)
 
+    @log_async_operation(operation_name="failover_validate_all", threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _do_validate_all_async(self):
         try:
             missing = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.validate_failover_credentials)
@@ -769,12 +763,8 @@ class FailoverConfigPanel(ft.Container):
 
     def _show_snack(self, msg: str, color: str):
         if self.page:
-            # 清理旧的 SnackBar 避免累积
-            self.page.overlay[:] = [s for s in self.page.overlay if not isinstance(s, ft.SnackBar)]
             snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
-            self.page.overlay.append(snack)
-            snack.open = True
-            self.page.update()
+            self.page.show_dialog(snack)
 
     def _safe_update(self):
         try:

@@ -47,7 +47,7 @@ class BacktestView(ft.Container):
         self.strategy_dropdown = ft.Dropdown(
             label=I18n.get("backtest_select_strategy"),
             options=[],
-            on_change=self._on_strategy_change,
+            on_select=self._on_strategy_change,
             width=AppStyles.CONTROL_WIDTH_LG,
             bgcolor=AppColors.INPUT_BG,
             border_color=AppColors.INPUT_BORDER,
@@ -58,8 +58,8 @@ class BacktestView(ft.Container):
         self.progress_bar = ft.ProgressBar(visible=False, expand=True)
         self.progress_text = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
 
-        self.cancel_button = ft.ElevatedButton(
-            text=I18n.get("common_cancel"),
+        self.cancel_button = ft.Button(
+            content=I18n.get("common_cancel"),
             on_click=self._on_cancel_backtest,
             visible=False,
             bgcolor=AppColors.ERROR,
@@ -103,7 +103,7 @@ class BacktestView(ft.Container):
                 self.strategy_dropdown,
                 [ft.dropdown.Option(key, name) for key, name in strategies.items()],
             )
-            self.cancel_button.text = I18n.get("common_cancel")
+            self.cancel_button.content = I18n.get("common_cancel")
             if hasattr(self.config_panel, "refresh_locale"):
                 self.config_panel.refresh_locale()
             if hasattr(self.result_panel, "refresh_locale"):

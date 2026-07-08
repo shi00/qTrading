@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING
 
 import flet as ft
+import flet_charts as fch
 
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
@@ -34,6 +35,8 @@ class BacktestResultPanel(ft.Container):
         self._trades_page_size: int = 50
         self._chart_min_height: int | None = None
         self._chart_containers: list[ft.Container] = []
+        # V1 三件套 Tabs 引用：refresh_locale 时就地更新 label，避免重建 content 丢失选中状态
+        self._tab_bar: ft.TabBar | None = None
         self.content = self._build_empty_content()
 
     def set_result(self, result: BacktestResult):
@@ -61,11 +64,19 @@ class BacktestResultPanel(ft.Container):
     def refresh_locale(self):
         """语言切换时刷新界面（纯 UI 操作）。
 
-        若已有结果，重建 content 以刷新所有 I18n.get() 文案；
+        若已有结果，就地更新 Tab label 与重建图表/表格内容（保留 Tabs 选中状态）；
         若为空状态，重建 empty_content 刷新提示文案。
         """
         try:
-            self.content = self._build_content()
+            if not self._result:
+                # 空状态：重建 empty_content 刷新提示文案
+                self.content = self._build_empty_content()
+            elif self._tab_bar is not None:
+                # 有结果：就地更新 Tab label，避免重建 Tabs 丢失 selected_index
+                self._tab_bar.tabs[0].label = I18n.get("backtest_tab_nav_curve")
+                self._tab_bar.tabs[1].label = I18n.get("backtest_tab_trades")
+                self._tab_bar.tabs[2].label = I18n.get("backtest_tab_ic_series")
+                self._tab_bar.tabs[3].label = I18n.get("backtest_tab_monthly")
             if self.page:
                 self.update()
         except Exception as e:
@@ -93,7 +104,7 @@ class BacktestResultPanel(ft.Container):
                         spacing=16,
                     ),
                     expand=True,
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                 ),
             ],
             expand=True,
@@ -106,32 +117,40 @@ class BacktestResultPanel(ft.Container):
         self._chart_containers = []
         metrics = self._result.metrics
 
+        # V1 三件套：存储 _tab_bar 引用供 refresh_locale 就地更新 label
+        self._tab_bar = ft.TabBar(
+            tabs=[
+                ft.Tab(label=I18n.get("backtest_tab_nav_curve")),
+                ft.Tab(label=I18n.get("backtest_tab_trades")),
+                ft.Tab(label=I18n.get("backtest_tab_ic_series")),
+                ft.Tab(label=I18n.get("backtest_tab_monthly")),
+            ],
+        )
+
         return ft.Column(
             [
                 self._build_metrics_section(metrics),
                 ft.Divider(color=AppColors.DIVIDER),
                 ft.Tabs(
+                    length=4,
                     selected_index=0,
                     animation_duration=300,
-                    tabs=[
-                        ft.Tab(
-                            text=I18n.get("backtest_tab_nav_curve"),
-                            content=self._build_nav_chart(),
-                        ),
-                        ft.Tab(
-                            text=I18n.get("backtest_tab_trades"),
-                            content=self._build_trades_table(),
-                        ),
-                        ft.Tab(
-                            text=I18n.get("backtest_tab_ic_series"),
-                            content=self._build_ic_chart(),
-                        ),
-                        ft.Tab(
-                            text=I18n.get("backtest_tab_monthly"),
-                            content=self._build_monthly_table(),
-                        ),
-                    ],
                     expand=True,
+                    content=ft.Column(
+                        expand=True,
+                        controls=[
+                            self._tab_bar,
+                            ft.TabBarView(
+                                expand=True,
+                                controls=[
+                                    self._build_nav_chart(),
+                                    self._build_trades_table(),
+                                    self._build_ic_chart(),
+                                    self._build_monthly_table(),
+                                ],
+                            ),
+                        ],
+                    ),
                 ),
             ],
             spacing=12,
@@ -270,7 +289,7 @@ class BacktestResultPanel(ft.Container):
         if not self._result or self._result.nav_curve.is_empty():
             return ft.Container(
                 content=ft.Text(I18n.get("backtest_no_nav_data"), color=AppColors.TEXT_SECONDARY),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
                 expand=True,
             )
 
@@ -278,22 +297,22 @@ class BacktestResultPanel(ft.Container):
         nav_values = nav_df["nav"].to_list()
 
         chart_data = [
-            ft.LineChartData(
-                data_points=[ft.LineChartDataPoint(x=i, y=float(v)) for i, v in enumerate(nav_values)],
+            fch.LineChartData(
+                points=[fch.LineChartDataPoint(x=i, y=float(v)) for i, v in enumerate(nav_values)],
                 color=AppColors.PRIMARY,
                 stroke_width=2,
             )
         ]
 
         container = ft.Container(
-            content=ft.LineChart(
+            content=fch.LineChart(
                 data_series=chart_data,
-                border=ft.border.all(1, AppColors.DIVIDER),
-                left_axis=ft.ChartAxis(
-                    labels_size=50,
+                border=ft.Border.all(1, AppColors.DIVIDER),
+                left_axis=fch.ChartAxis(
+                    label_size=50,
                 ),
-                bottom_axis=ft.ChartAxis(
-                    labels_size=40,
+                bottom_axis=fch.ChartAxis(
+                    label_size=40,
                 ),
                 expand=True,
             ),
@@ -309,7 +328,7 @@ class BacktestResultPanel(ft.Container):
         if not self._result or self._result.trades.is_empty():
             return ft.Container(
                 content=ft.Text(I18n.get("backtest_no_trades"), color=AppColors.TEXT_SECONDARY),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
                 expand=True,
             )
 
@@ -320,12 +339,12 @@ class BacktestResultPanel(ft.Container):
         end = min(start + self._trades_page_size, total_rows)
 
         columns = [
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_date"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_code"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_action"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_price"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_volume"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_pnl"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_date"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_code"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_action"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_price"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_volume"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_pnl"), color=AppColors.TEXT_PRIMARY)),
         ]
 
         rows = []
@@ -386,7 +405,7 @@ class BacktestResultPanel(ft.Container):
                         rows=rows,
                         heading_row_color=AppColors.TABLE_HEADER_BG,
                         data_row_color={"hovered": AppColors.TABLE_ROW_HOVER},
-                        border=ft.border.all(1, AppColors.DIVIDER),
+                        border=ft.Border.all(1, AppColors.DIVIDER),
                         vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
                     ),
                     pagination,
@@ -402,7 +421,7 @@ class BacktestResultPanel(ft.Container):
         if not self._result or len(self._result.ic_series) == 0:
             return ft.Container(
                 content=ft.Text(I18n.get("backtest_no_ic_data"), color=AppColors.TEXT_SECONDARY),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
                 expand=True,
             )
 
@@ -412,10 +431,10 @@ class BacktestResultPanel(ft.Container):
         for i, ic in enumerate(ic_values):
             color = AppColors.SUCCESS if ic > 0 else AppColors.ERROR if ic < 0 else AppColors.TEXT_SECONDARY
             bars.append(
-                ft.BarChartGroup(
+                fch.BarChartGroup(
                     x=i,
-                    bar_rods=[
-                        ft.BarChartRod(
+                    rods=[
+                        fch.BarChartRod(
                             from_y=0,
                             to_y=float(ic),
                             color=color,
@@ -426,11 +445,11 @@ class BacktestResultPanel(ft.Container):
             )
 
         container = ft.Container(
-            content=ft.BarChart(
-                bar_groups=bars,
-                border=ft.border.all(1, AppColors.DIVIDER),
-                left_axis=ft.ChartAxis(labels_size=50),
-                bottom_axis=ft.ChartAxis(labels_size=40),
+            content=fch.BarChart(
+                groups=bars,
+                border=ft.Border.all(1, AppColors.DIVIDER),
+                left_axis=fch.ChartAxis(label_size=50),
+                bottom_axis=fch.ChartAxis(label_size=40),
                 expand=True,
             ),
             padding=16,
@@ -445,16 +464,16 @@ class BacktestResultPanel(ft.Container):
         if not self._result or self._result.period_stats.is_empty():
             return ft.Container(
                 content=ft.Text(I18n.get("backtest_no_monthly_data"), color=AppColors.TEXT_SECONDARY),
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
                 expand=True,
             )
 
         stats_df = self._result.period_stats
         columns = [
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_month"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_return"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_benchmark"), color=AppColors.TEXT_PRIMARY)),
-            ft.DataColumn(ft.Text(I18n.get("backtest_col_excess"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_month"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_return"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_benchmark"), color=AppColors.TEXT_PRIMARY)),
+            ft.DataColumn(label=ft.Text(I18n.get("backtest_col_excess"), color=AppColors.TEXT_PRIMARY)),
         ]
 
         rows = []
@@ -487,7 +506,7 @@ class BacktestResultPanel(ft.Container):
                 rows=rows,
                 heading_row_color=AppColors.TABLE_HEADER_BG,
                 data_row_color={"hovered": AppColors.TABLE_ROW_HOVER},
-                border=ft.border.all(1, AppColors.DIVIDER),
+                border=ft.Border.all(1, AppColors.DIVIDER),
                 vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
             ),
             padding=16,

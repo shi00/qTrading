@@ -14,6 +14,7 @@ from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
 import flet as ft
+import flet_charts as fch
 import polars as pl
 import pytest
 
@@ -152,7 +153,7 @@ class TestBacktestViewSplitter:
         chart_containers_before = [
             c
             for c in _walk_controls(panel.content)
-            if isinstance(c, ft.Container) and isinstance(getattr(c, "content", None), (ft.LineChart, ft.BarChart))
+            if isinstance(c, ft.Container) and isinstance(getattr(c, "content", None), (fch.LineChart, fch.BarChart))
         ]
         assert chart_containers_before, "set_result 后应构建出图表容器"
         for c in chart_containers_before:
@@ -163,7 +164,7 @@ class TestBacktestViewSplitter:
         chart_containers_after = [
             c
             for c in _walk_controls(panel.content)
-            if isinstance(c, ft.Container) and isinstance(getattr(c, "content", None), (ft.LineChart, ft.BarChart))
+            if isinstance(c, ft.Container) and isinstance(getattr(c, "content", None), (fch.LineChart, fch.BarChart))
         ]
         assert chart_containers_after, "调用后仍应存在图表容器"
         for c in chart_containers_after:

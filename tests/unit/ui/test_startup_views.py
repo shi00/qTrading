@@ -39,9 +39,11 @@ def _find_controls(control, control_type):
 
 def _find_button_by_text(root, text: str):
     """Find a button with the given text recursively."""
-    buttons = _find_controls(root, (ft.ElevatedButton, ft.TextButton))
+    buttons = _find_controls(root, (ft.Button, ft.TextButton))
     for btn in buttons:
-        if getattr(btn, "text", "") == text:
+        # V1: ft.Button/ft.TextButton 用 content 存储文本（V0 用 text）
+        btn_text = getattr(btn, "content", "")
+        if btn_text == text:
             return btn
     return None
 
@@ -158,7 +160,7 @@ def test_render_upgrade_dialog(mock_page, mock_controller, mock_i18n):
 
     # Test button click
     button = dialog.actions[0]
-    assert isinstance(button, ft.ElevatedButton)
+    assert isinstance(button, ft.Button)
     _trigger_click(button)
     run_task.assert_called_once_with(mock_controller.upgrade)
 

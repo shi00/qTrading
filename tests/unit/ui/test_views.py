@@ -132,8 +132,9 @@ class TestSettingsView:
 
     def test_show_snack_fallback_snackbar(self):
         view = self._make_view()
-        page = MagicMock(spec=["overlay", "update"])
+        page = MagicMock(spec=["overlay", "update", "show_dialog"])
         page.overlay = []
+        page.show_dialog.side_effect = lambda snack: page.overlay.append(snack)
         set_page(view, page)
         view.show_snack("fallback", color=ft.Colors.RED)
         assert any(isinstance(o, ft.SnackBar) for o in page.overlay)
@@ -361,7 +362,7 @@ class TestTaskCenterView:
 
     def test_refresh_ui_without_page(self, mock_page):
         view = self._make_view(mock_page)
-        view._Control__page = None
+        view._mock_page = None
         tasks = [self._make_task()]
         view._refresh_ui(tasks)
         assert view._all_tasks == tasks
@@ -487,7 +488,7 @@ class TestTaskCenterView:
     def test_on_tasks_updated_no_page(self, mock_page):
         view = self._make_view(mock_page)
         view._mounted = True
-        view._Control__page = None
+        view._mock_page = None
         view._on_tasks_updated([])
 
     @pytest.mark.asyncio
@@ -939,7 +940,7 @@ class TestAppLayout:
 
         覆盖 app_layout.py:283-310 的正向路径：
         - page.title / brand_text.value / collapse_btn.tooltip 被刷新
-        - nav_rail.destinations[i].label 与 label_content.value 被刷新
+        - nav_rail.destinations[i].label.value 被刷新（V1: label 是 ft.Text 控件）
         - nav_rail.update 被调用
         mock_i18n.get 返回 key 本身，便于断言。
         """
@@ -954,8 +955,7 @@ class TestAppLayout:
         # 规范 6：nav_rail.destinations 级联刷新
         nav_keys = ["nav_market", "nav_screener", "nav_backtest", "nav_data", "nav_tasks", "nav_settings"]
         for i, key in enumerate(nav_keys):
-            assert layout.nav_rail.destinations[i].label == key
-            assert layout.nav_rail.destinations[i].label_content.value == key
+            assert layout.nav_rail.destinations[i].label.value == key
         # nav_rail.update 被调用一次
         layout.nav_rail.update.assert_called_once()
 
@@ -1117,8 +1117,7 @@ class TestAppLayout:
         # 前 3 个 destinations 被刷新为对应的 nav key
         expected_keys = ["nav_market", "nav_screener", "nav_backtest"]
         for i, expected_key in enumerate(expected_keys):
-            assert layout.nav_rail.destinations[i].label == expected_key
-            assert layout.nav_rail.destinations[i].label_content.value == expected_key
+            assert layout.nav_rail.destinations[i].label.value == expected_key
         layout.nav_rail.update.assert_called_once()
 
     def test_on_locale_change_updates_page_after_nav_rail(self, mock_page):

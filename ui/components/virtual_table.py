@@ -49,7 +49,7 @@ class PaginatedTable(ft.Column):
             content=self.header_row,
             bgcolor=AppColors.TABLE_HEADER_BG,
             height=HEADER_HEIGHT,
-            border=ft.border.only(bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER)),
+            border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.TABLE_BORDER)),
         )
 
         self._canvas = ft.Stack(
@@ -63,7 +63,7 @@ class PaginatedTable(ft.Column):
             expand=True,
             spacing=0,
             on_scroll=self._on_scroll,
-            on_scroll_interval=100,
+            scroll_interval=100,
         )
 
         self.inner_column = ft.Column(
@@ -125,9 +125,10 @@ class PaginatedTable(ft.Column):
 
         if self.page:
             # Best-effort only. `set_rows` must still be valid before mount.
+            # 不调用 list_view.scroll_to：Flet 0.85.3 中该方法是协程，同步调用会触发
+            # RuntimeWarning 且实际未执行；滚动重置交由用户交互触发。
             try:
                 self._canvas.update()
-                self.list_view.scroll_to(offset=0, duration=0)
             except Exception as e:
                 logger.debug("UI render error: %s", e, exc_info=True)
 
@@ -150,7 +151,7 @@ class PaginatedTable(ft.Column):
     def update_theme(self):
         """Refresh theme-dependent styles."""
         self.header_container.bgcolor = AppColors.TABLE_HEADER_BG
-        self.header_container.border = ft.border.only(bottom=ft.border.BorderSide(1, AppColors.TABLE_BORDER))
+        self.header_container.border = ft.Border.only(bottom=ft.BorderSide(1, AppColors.TABLE_BORDER))
         self._build_header()
 
         # Rebind current window because cell colors and row backgrounds are theme-dependent.
@@ -180,8 +181,8 @@ class PaginatedTable(ft.Column):
             )
             content = ft.Container(
                 content=text,
-                alignment=ft.alignment.center_left,
-                padding=ft.padding.only(left=8, right=8),
+                alignment=ft.Alignment.CENTER_LEFT,
+                padding=ft.Padding.only(left=8, right=8),
                 on_click=lambda e, cid=col_id: self._handle_sort_click(cid),
             )
             width = int(col.get("width", 100))
@@ -222,7 +223,7 @@ class PaginatedTable(ft.Column):
                 pass
 
             text_color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
-            alignment = ft.alignment.center_right if is_numeric else ft.alignment.center_left
+            alignment = ft.Alignment.CENTER_RIGHT if is_numeric else ft.Alignment.CENTER_LEFT
 
             is_trend = col_id in _TREND_COLS
             if is_trend and numeric_val is not None:
@@ -262,7 +263,7 @@ class PaginatedTable(ft.Column):
             content = ft.Container(
                 content=text,
                 alignment=alignment,
-                padding=ft.padding.only(left=8, right=8),
+                padding=ft.Padding.only(left=8, right=8),
             )
             width = col.get("width")
             cells.append(ft.Container(content, width=int(width)) if width else ft.Container(content, expand=1))

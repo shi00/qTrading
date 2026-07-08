@@ -14,9 +14,8 @@ pytestmark = pytest.mark.unit
 @pytest.fixture
 def mock_page() -> MagicMock:
     page = MagicMock()
-    page.open_dialog = MagicMock()
-    page.open = MagicMock()
-    page.overlay = []
+    page.show_dialog = MagicMock()
+    page.services = []
     return page
 
 
@@ -169,7 +168,7 @@ class TestBacktestConfigPanel:
         panel._on_start_date_change(mock_event)
 
         assert panel.start_date_value == new_date
-        assert panel.start_date_btn.text == "2024-06-01"
+        assert panel.start_date_btn.content == "2024-06-01"
         panel.start_date_btn.update.assert_called_once()
 
     def test_on_start_date_change_none_value(self, panel: BacktestConfigPanel) -> None:
@@ -193,7 +192,7 @@ class TestBacktestConfigPanel:
         panel._on_end_date_change(mock_event)
 
         assert panel.end_date_value == new_date
-        assert panel.end_date_btn.text == "2024-12-31"
+        assert panel.end_date_btn.content == "2024-12-31"
         panel.end_date_btn.update.assert_called_once()
 
     def test_on_end_date_change_none_value(self, panel: BacktestConfigPanel) -> None:
@@ -334,20 +333,9 @@ class TestBacktestConfigPanel:
     def test_did_mount_and_unmount(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
         panel.page = mock_page
 
-        # Test did_mount mounts pickers
+        # V1: DatePicker 通过 page.show_dialog 打开，did_mount/will_unmount 不再管理 overlay
         panel.did_mount()
-        assert panel.start_date_picker in mock_page.overlay
-        assert panel.end_date_picker in mock_page.overlay
-        mock_page.update.assert_called_once()
-        mock_page.update.reset_mock()
-
-        # Test will_unmount unmounts pickers
-        panel.start_date_picker.open = True
         panel.will_unmount()
-        assert not panel.start_date_picker.open
-        assert panel.start_date_picker not in mock_page.overlay
-        assert panel.end_date_picker not in mock_page.overlay
-        mock_page.update.assert_called_once()
 
     def test_show_start_picker(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
         panel.page = mock_page
@@ -355,7 +343,7 @@ class TestBacktestConfigPanel:
 
         panel._show_start_picker(mock_event)
 
-        mock_page.open.assert_called_once_with(panel.start_date_picker)
+        mock_page.show_dialog.assert_called_once_with(panel.start_date_picker)
 
     def test_show_end_picker(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
         panel.page = mock_page
@@ -363,7 +351,7 @@ class TestBacktestConfigPanel:
 
         panel._show_end_picker(mock_event)
 
-        mock_page.open.assert_called_once_with(panel.end_date_picker)
+        mock_page.show_dialog.assert_called_once_with(panel.end_date_picker)
 
     def test_refresh_locale_preserves_dropdown_value(self, panel: BacktestConfigPanel) -> None:
         """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""

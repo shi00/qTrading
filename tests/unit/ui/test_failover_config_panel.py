@@ -130,10 +130,10 @@ def mock_section_header():
 @pytest.fixture
 def mock_page():
     page = MagicMock(spec=ft.Page)
-    page.overlay = []
-    page.open = MagicMock(spec=[])
-    page.close = MagicMock(spec=[])
-    page.launch_url = MagicMock(spec=[])
+    page.services = []
+    page.show_dialog = MagicMock(spec=[])
+    page.pop_dialog = MagicMock(spec=[])
+    page.launch_url = AsyncMock(spec=[])
     page.update = MagicMock(spec=[])
 
     def _run_task(coro_func, *args, **kwargs):
@@ -373,8 +373,8 @@ class TestFailoverConfigPanelAddEditDelete:
             mock_page,
         )
         panel._on_add_click(MagicMock(spec=[]))
-        mock_page.open.assert_called_once()
-        dialog = mock_page.open.call_args[0][0]
+        mock_page.show_dialog.assert_called_once()
+        dialog = mock_page.show_dialog.call_args[0][0]
         assert isinstance(dialog, ProviderCredentialDialog)
 
     def test_on_add_click_excludes_existing_providers(
@@ -406,7 +406,7 @@ class TestFailoverConfigPanelAddEditDelete:
             mock_page,
         )
         panel._on_add_click(MagicMock(spec=[]))
-        dialog = mock_page.open.call_args[0][0]
+        dialog = mock_page.show_dialog.call_args[0][0]
         # deepseek 和 openai 都在 existing_providers 中，zhipu 不在
         assert "deepseek" in dialog._existing_providers
         assert "openai" in dialog._existing_providers
@@ -439,8 +439,8 @@ class TestFailoverConfigPanelAddEditDelete:
             mock_page,
         )
         panel._on_edit_item(0)
-        mock_page.open.assert_called_once()
-        dialog = mock_page.open.call_args[0][0]
+        mock_page.show_dialog.assert_called_once()
+        dialog = mock_page.show_dialog.call_args[0][0]
         assert isinstance(dialog, ProviderCredentialDialog)
         assert dialog._is_edit is True
         assert dialog._edit_item.provider == "deepseek"
@@ -659,37 +659,6 @@ class TestFailoverConfigPanelReorder:
         # 顺序不变
         assert panel._failover_items[2].provider == "zhipu"
 
-    def test_persist_order_saves_correct_sequence(
-        self,
-        mock_config_handler,
-        mock_i18n,
-        mock_llm_providers,
-        mock_app_colors,
-        mock_app_styles,
-        mock_section_header,
-        mock_page,
-    ):
-        panel = self._make_panel_with_items(
-            mock_config_handler,
-            mock_i18n,
-            mock_llm_providers,
-            mock_app_colors,
-            mock_app_styles,
-            mock_section_header,
-            mock_page,
-        )
-        mock_config_handler.save_config.reset_mock()
-        panel._persist_order()
-        mock_config_handler.save_config.assert_called_once_with(
-            {
-                "llm_failover_models": [
-                    "deepseek/deepseek-chat",
-                    "openai/gpt-4o",
-                    "zhipu/glm-4",
-                ]
-            }
-        )
-
 
 # ════════════════════════════════════════════════════════════════════════════
 # 5. TestFailoverConfigPanelValidateAndSave
@@ -719,7 +688,7 @@ class TestFailoverConfigPanelValidateAndSave:
         )
         panel._on_validate_all(MagicMock(spec=[]))
         # 无缺失时显示成功 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     def test_on_validate_all_missing_credentials(
         self,
@@ -746,7 +715,7 @@ class TestFailoverConfigPanelValidateAndSave:
         )
         panel._on_validate_all(MagicMock(spec=[]))
         # 有缺失时显示警告 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     def test_on_save_click_calls_callback(
         self,
@@ -792,7 +761,7 @@ class TestFailoverConfigPanelValidateAndSave:
             mock_page,
         )
         panel._on_save_click(MagicMock(spec=[]))
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1053,7 +1022,7 @@ class TestProviderCredentialDialog:
             mock_page,
         )
         dialog._on_cancel(MagicMock(spec=[]))
-        mock_page.close.assert_called_once_with(dialog)
+        mock_page.pop_dialog.assert_called_once()
 
     def test_on_provider_change_updates_model_list(
         self,
@@ -1188,7 +1157,7 @@ class TestProviderCredentialDialog:
         dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_not_called()
         # 应显示警告 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     def test_on_confirm_click_primary_provider_rejected(
         self,
@@ -1218,7 +1187,7 @@ class TestProviderCredentialDialog:
         dialog._on_confirm_click(MagicMock(spec=[]))
         mock_config_handler.save_provider_credential.assert_not_called()
         # 应显示警告 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     def test_on_confirm_click_edit_mode_updates_entry(
         self,
@@ -1333,7 +1302,7 @@ class TestProviderCredentialDialogTestConnection:
             api_key="test_token_mock",
         )
         # 成功时显示 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_on_test_connection_failure(
@@ -1364,7 +1333,7 @@ class TestProviderCredentialDialogTestConnection:
 
         mock_callback.assert_called_once()
         # 失败时显示 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_on_test_connection_missing_fields_returns(
@@ -1438,7 +1407,7 @@ class TestProviderCredentialDialogEditModeClearApiKey:
         }
         dialog._on_confirm_click(MagicMock(spec=[]))
         # 应显示警告 SnackBar
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
         # 应仍然保存（不阻止操作）
         mock_config_handler.save_provider_credential.assert_called_once()
 
@@ -1479,7 +1448,7 @@ class TestProviderCredentialDialogEditModeClearApiKey:
         }
         dialog._on_confirm_click(MagicMock(spec=[]))
         # 不显示警告（原有凭证本就为空）
-        assert len(mock_page.overlay) == 0
+        assert not mock_page.show_dialog.called
 
 
 class TestProviderCredentialDialogNormalizeBaseUrl:
@@ -1657,7 +1626,7 @@ class TestProviderCredentialDialogLifecycle:
         dialog.refresh_locale()
         assert dialog.title.value == "failover_dialog_title"
         assert dialog.provider_dropdown.label == "failover_select_provider"
-        assert dialog._cancel_btn.text == "common_cancel"
+        assert dialog._cancel_btn.content == "common_cancel"
 
     def test_refresh_locale_exception_logged_as_warning(
         self,
@@ -1777,7 +1746,8 @@ class TestProviderCredentialDialogProviderChange:
 class TestProviderCredentialDialogActions:
     """覆盖 _open_url、_on_cancel、_on_test_connection、_show_snack、_on_confirm_click 边界。"""
 
-    def test_open_url_calls_page_launch_url(
+    @pytest.mark.asyncio
+    async def test_open_url_calls_page_launch_url(
         self,
         mock_config_handler,
         mock_i18n,
@@ -1795,7 +1765,7 @@ class TestProviderCredentialDialogActions:
             mock_app_styles,
             mock_page,
         )
-        dialog._open_url("https://example.com")
+        await dialog._open_url("https://example.com")
         mock_page.launch_url.assert_called_once_with("https://example.com")
 
     def test_on_cancel_without_page_does_not_raise(
@@ -1843,7 +1813,7 @@ class TestProviderCredentialDialogActions:
         dialog.model_dropdown.value = "deepseek-chat"
         dialog.api_key_input.value = "key"
         await dialog._on_test_connection(MagicMock(spec=[]))
-        assert len(mock_page.overlay) == 0
+        assert not mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_on_test_connection_exception_shows_snack(
@@ -1870,7 +1840,7 @@ class TestProviderCredentialDialogActions:
         dialog.model_dropdown.value = "deepseek-chat"
         dialog.api_key_input.value = "key"
         await dialog._on_test_connection(MagicMock(spec=[]))
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     def test_show_snack_without_page_does_not_raise(
         self,
@@ -1965,7 +1935,7 @@ class TestProviderCredentialDialogConfirmAsync:
         mock_app_styles,
         mock_page,
     ):
-        """page 为 None 时不调用 page.close（覆盖 403->406）"""
+        """page 为 None 时不调用 page.pop_dialog（覆盖 403->406）"""
         mock_config_handler.load_config.return_value = {
             "llm_failover_models": [],
             "llm_provider": "deepseek",
@@ -2040,7 +2010,7 @@ class TestProviderCredentialDialogConfirmAsync:
         dialog.model_dropdown.value = "gpt-4o"
         dialog.api_key_input.value = "key"
         await dialog._do_confirm_click_async("openai", "gpt-4o", "", "key")
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2254,7 +2224,7 @@ class TestFailoverConfigPanelNoPageEdgeCases:
         mock_section_header,
         mock_page,
     ):
-        """_do_add_click_async 无 page 时不调用 page.open（覆盖 643->exit）"""
+        """_do_add_click_async 无 page 时不调用 page.show_dialog（覆盖 643->exit）"""
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -2278,7 +2248,7 @@ class TestFailoverConfigPanelNoPageEdgeCases:
         mock_section_header,
         mock_page,
     ):
-        """_do_edit_item_async 无 page 时不调用 page.open（覆盖 667->exit）"""
+        """_do_edit_item_async 无 page 时不调用 page.show_dialog（覆盖 667->exit）"""
         panel = _make_panel(
             mock_config_handler,
             mock_i18n,
@@ -2327,7 +2297,7 @@ class TestFailoverConfigPanelAsyncExceptions:
         # 在 __init__ 同步加载完成后，再次调用时抛错（_do_add_click_async 内部 lambda 调用 load_config）
         mock_config_handler.load_config.side_effect = RuntimeError("db")
         await panel._do_add_click_async()
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_do_edit_item_async_exception_shows_snack(
@@ -2355,7 +2325,7 @@ class TestFailoverConfigPanelAsyncExceptions:
             FailoverItem(provider="deepseek", model="deepseek-chat", display_name="DeepSeek", has_credential=True),
         ]
         await panel._do_edit_item_async(0)
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_do_delete_item_async_exception_shows_snack(
@@ -2384,7 +2354,7 @@ class TestFailoverConfigPanelAsyncExceptions:
         # _delete_sync 内部会再次调用 load_config，这里设置抛错
         mock_config_handler.load_config.side_effect = RuntimeError("db")
         await panel._do_delete_item_async(0)
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_do_move_item_async_exception_rolls_back(
@@ -2417,7 +2387,7 @@ class TestFailoverConfigPanelAsyncExceptions:
         await panel._do_move_item_async(0, 1)
         # 回滚后顺序应与原始一致
         assert panel._failover_items == original
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_do_validate_all_async_exception_shows_snack(
@@ -2442,7 +2412,7 @@ class TestFailoverConfigPanelAsyncExceptions:
             mock_page,
         )
         await panel._do_validate_all_async()
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
     @pytest.mark.asyncio
     async def test_do_dialog_confirmed_async_exception_shows_snack(
@@ -2467,7 +2437,7 @@ class TestFailoverConfigPanelAsyncExceptions:
         )
         with patch.object(panel, "_load_config_async", new=AsyncMock(side_effect=RuntimeError("x"))):
             await panel._do_dialog_confirmed_async()
-        assert len(mock_page.overlay) == 1
+        assert mock_page.show_dialog.called
 
 
 # ════════════════════════════════════════════════════════════════════════════

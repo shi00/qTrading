@@ -291,7 +291,7 @@ class TestSetRows:
         table.set_rows([{"vol": "1,234,567"}])
         row = table.rendered_row_controls[0]
         cell_container = row.content.controls[0]
-        assert cell_container.content.alignment == ft.alignment.center_right
+        assert cell_container.content.alignment == ft.Alignment.CENTER_RIGHT
 
     def test_set_rows_zero_pct_chg_is_not_trend_colored(self):
         """Zero value in trend col should not get UP_RED or DOWN_GREEN."""

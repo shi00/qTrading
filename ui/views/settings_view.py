@@ -62,7 +62,7 @@ class SettingsView(ft.Container):
                 spacing=10,  # pragma: no cover
                 scroll=ft.ScrollMode.HIDDEN,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.only(bottom=10),  # pragma: no cover
+            padding=ft.Padding.only(bottom=10),  # pragma: no cover
         )  # pragma: no cover
 
         # 4. Tab Body  # pragma: no cover
@@ -111,7 +111,7 @@ class SettingsView(ft.Container):
             for i, (key, _) in enumerate(self.TAB_CONFIG):  # pragma: no cover
                 if i < len(self.tab_buttons):  # pragma: no cover
                     localized = I18n.get(key)  # pragma: no cover
-                    self.tab_buttons[i].text = localized  # pragma: no cover
+                    self.tab_buttons[i].content = localized  # pragma: no cover
                     self.tab_buttons[i].tooltip = localized  # pragma: no cover
             # 级联刷新当前激活的 Tab，避免延迟挂载 Tab 错过 I18n 通知（§5.8 规范 6/7）
             if 0 <= self.current_tab_index < len(self.tab_contents):  # pragma: no cover
@@ -131,6 +131,19 @@ class SettingsView(ft.Container):
         except Exception as e:  # pragma: no cover
             logger.warning("[SettingsView] refresh_locale failed: %s", e, exc_info=True)  # pragma: no cover
 
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:  # pragma: no cover - UI 事件
+        """窗口 resize 通知 — 级联调用当前激活 Tab 的 handle_resize（§5.9 规范3）。
+
+        子 Tab 若实现 handle_resize（如 SystemTab → TierApiPanel），则级联调用以确保响应式布局同步。
+        """
+        try:  # pragma: no cover
+            if 0 <= self.current_tab_index < len(self.tab_contents):  # pragma: no cover
+                current_tab = self.tab_contents[self.current_tab_index]  # pragma: no cover
+                if hasattr(current_tab, "handle_resize"):  # pragma: no cover
+                    current_tab.handle_resize(width, height)  # type: ignore[untyped]  # pragma: no cover
+        except Exception as exc:  # pragma: no cover
+            logger.debug("[SettingsView] handle_resize skipped: %s", exc, exc_info=True)  # pragma: no cover
+
     def _get_tab_button_style(self, is_selected: bool) -> ft.ButtonStyle:  # pragma: no cover
         """Centralized tab button style factory."""  # pragma: no cover
         return ft.ButtonStyle(  # pragma: no cover
@@ -139,12 +152,12 @@ class SettingsView(ft.Container):
             bgcolor=AppColors.PRIMARY if is_selected else ft.Colors.TRANSPARENT,  # pragma: no cover
             elevation=0,  # pragma: no cover
             shape=ft.RoundedRectangleBorder(radius=8),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
         )  # pragma: no cover
 
     def _build_tab_button(self, text, icon, index):  # pragma: no cover
-        btn = ft.ElevatedButton(  # pragma: no cover
-            text=text,  # pragma: no cover
+        btn = ft.Button(  # pragma: no cover
+            content=text,  # pragma: no cover
             icon=icon,  # pragma: no cover
             tooltip=text,  # 为无障碍语义树提供稳定的 aria-label  # pragma: no cover
             data=str(index),  # pragma: no cover
@@ -203,18 +216,12 @@ class SettingsView(ft.Container):
                 msg_type = "warning"
             self.page.show_toast(message, type=msg_type)  # type: ignore[untyped]
         else:
-            # Clean up old snackbars to prevent overlay bloat
-            self.page.overlay = [  # type: ignore[untyped]
-                o for o in self.page.overlay if not isinstance(o, ft.SnackBar)
-            ]
             snack = ft.SnackBar(
                 content=ft.Text(message),
-                open=True,
                 bgcolor=color,
                 **kwargs,
             )
-            self.page.overlay.append(snack)
-            self.page.update()
+            self.page.show_dialog(snack)
 
     def _safe_update(self):  # pragma: no cover
         try:  # pragma: no cover

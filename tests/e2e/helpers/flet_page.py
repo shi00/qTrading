@@ -43,6 +43,14 @@ class FletPage:
 
     async def _click_with_fallback(self, name: str, role: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         scaled = self._tm(timeout_ms)
+        # V1 M3 优先：flt-tappable 标记真正可点击的叶子按钮，:not([aria-current]) 排除
+        # SegmentedButton 选中 segment 和 nav 当前激活项（两者都有 aria-current 属性）。
+        # 文本合并特性导致 get_by_role("button", name=...) 会匹配到容器/nav 节点；
+        # 当 i18n 文案冲突时（如 screener_mode_run 与 run_screening 都是"执行选股"），
+        # .first 会命中最先出现的 SegmentedButton segment 而非目标 Button。
+        tappable_btn = self.page.locator(f'flt-semantics[role="{role}"][flt-tappable]:not([aria-current])').filter(
+            has_text=name
+        )
         btn = self.page.get_by_role(role, name=name)
         by_label = self.page.locator(
             f'[aria-label="{name}"], [aria-label*="{name}"]:not([role="tabpanel"]):not([role="group"]):not([role="region"])'
@@ -50,22 +58,30 @@ class FletPage:
         text_loc = self.page.get_by_text(name, exact=False)
 
         # Combine all candidates using .or_() so that we wait for whichever appears first!
-        loc_combined = btn.or_(by_label).or_(text_loc).first
+        loc_combined = tappable_btn.or_(btn).or_(by_label).or_(text_loc).first
         try:
             await loc_combined.wait_for(state="attached", timeout=scaled)
         except Exception as e:  # noqa: BLE001
             logger.debug("Combined click target not found for '%s' (role: %s): %s", name, role, e)
 
+        # V1 M3 优先点击：flt-tappable 标记的真正可点击按钮，避免命中文本合并的容器节点
+        if await tappable_btn.count() > 0:
+            try:
+                await tappable_btn.first.click(force=True, timeout=self._tm(3000))
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("tappable_btn.click('%s') failed, trying next fallback: %s", name, exc)
+
         if await btn.count() > 0:
             try:
-                await btn.first.click(timeout=self._tm(3000))
+                await btn.first.click(force=True, timeout=self._tm(3000))
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.debug("btn.click('%s') failed, trying next fallback: %s", name, exc)
 
         if await by_label.count() > 0:
             try:
-                await by_label.first.click(timeout=self._tm(3000))
+                await by_label.first.click(force=True, timeout=self._tm(3000))
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.debug("by_label.click('%s') failed, trying next fallback: %s", name, exc)
@@ -89,13 +105,13 @@ class FletPage:
                 logger.debug("force click('%s') failed: %s", name, exc)
 
         # If everything fails, try clicking the combined locator to trigger standard playwright error
-        await loc_combined.click(timeout=self._tm(3000))
+        await loc_combined.click(force=True, timeout=self._tm(3000))
 
     async def click_button(self, name: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         await self._click_with_fallback(name, "button", timeout_ms)
 
     async def click_tab(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击 Tab 按钮（Flet 0.28.3 ElevatedButton(icon+text) 兼容）。"""
+        """点击 Tab 按钮（兼容 Flet 0.85.3 Button(content=) 渲染）。"""
         await self._click_with_fallback(text, "button", timeout_ms)
 
     async def click_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
@@ -144,15 +160,22 @@ class FletPage:
 
             await el.click(timeout=scaled)
             try:
-                await el.fill(value, timeout=scaled)
+                # CanvasKit/flutter-view a11y 模式下，el.clear() 会触发 Flutter 同步把
+                # TextEditingController 清空，但 el.type() 不触发反向同步，导致有默认值
+                # 的 TextField（如 wizard 的 host=localhost）控制器变为空。
+                # 改用 Control+A 全选 + page.keyboard.type 替换，避免触发清空同步：
+                # Control+A 选中已有文本，keyboard.type 直接替换选中文本，Flutter 会
+                # 通过 selection 替换机制正确更新 TextEditingController。
+                await self.page.keyboard.press("Control+A")
+                await self.page.keyboard.type(value, delay=30)
+                await self.page.wait_for_timeout(50)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
-                    "fill_textbox: el.fill failed for '%s', falling back to clear+type: %s",
+                    "fill_textbox: keyboard.type failed for '%s', falling back to fill(): %s",
                     label,
                     exc,
                 )
-                await el.clear()
-                await el.type(value, delay=30)
+                await el.fill(value, timeout=scaled)
         except Exception as e:  # noqa: BLE001
             try:
                 # [PITFALL_WARNING] Flet TextField 元素定位黑洞
@@ -230,17 +253,30 @@ class FletPage:
         opt_match_key = option_text
 
         def get_option_locators():
+            # V1 M3 Dropdown 选项：flt-semantics[role="button"]:not([aria-expanded]) + has_text
+            # aria-expanded 是 Dropdown 触发器独有属性，选项不带此属性。
+            # 用 :not([aria-expanded]) 排除触发器，避免菜单未弹出时误匹配触发器/nav 按钮
+            # 导致 initial_visible 误判为 True。
             return [
+                # V1 M3 优先：选项是 flt-semantics[role="button"] 无 aria-expanded，无 aria-label
+                self.page.locator('flt-semantics[role="button"]:not([aria-expanded])')
+                .filter(has_text=option_text)
+                .first,
+                self.page.locator('flt-semantics[role="button"]:not([aria-expanded])')
+                .filter(has_text=opt_match_key)
+                .first,
+                # 兜底：role="option"（非 V1 M3 或其他控件）
                 self.page.locator(f'[role="option"][aria-label*="{option_text}" i]').first,
                 self.page.locator(f'[role="option"][aria-label*="{opt_match_key}" i]').first,
                 self.page.locator('[role="option"]').filter(has_text=option_text).first,
                 self.page.locator('[role="option"]').filter(has_text=opt_match_key).first,
-                self.page.locator('[role="button"]').filter(has_text=option_text).first,
-                self.page.locator('[role="button"]').filter(has_text=opt_match_key).first,
                 self.page.locator('[role="menuitem"]').filter(has_text=option_text).first,
                 self.page.locator('[role="menuitem"]').filter(has_text=opt_match_key).first,
                 self.page.locator(f'[aria-label="{option_text}"]').first,
                 self.page.locator(f'[aria-label="{opt_match_key}"]').first,
+                # 最后兜底：role="button"（排除 aria-expanded 避免误匹配 Dropdown 触发器）
+                self.page.locator('[role="button"]:not([aria-expanded])').filter(has_text=option_text).first,
+                self.page.locator('[role="button"]:not([aria-expanded])').filter(has_text=opt_match_key).first,
                 self.page.locator(f'[role="button"][aria-label*="{option_text}" i]').first,
                 self.page.locator(f'[role="button"][aria-label*="{opt_match_key}" i]').first,
                 self.page.locator(f'[role="menuitem"][aria-label*="{option_text}" i]').first,
@@ -290,6 +326,24 @@ class FletPage:
         if not initial_visible:
             trigger_targets = []
 
+            # V1 M3 优先：Dropdown 触发器是 flt-semantics[role="button"][aria-expanded]
+            # 无 aria-label，文本内容是当前选中值。aria-expanded 是触发器强特征（其他按钮无此属性）。
+            # 策略 1：在 group 内查找触发器（label 在 group 的 aria-label 中合并）
+            for key in match_keys:
+                trigger_targets.append(
+                    self.page.locator(f'flt-semantics[role="group"][aria-label*="{key}" i]')
+                    .locator('flt-semantics[role="button"][aria-expanded]')
+                    .first
+                )
+            # 策略 2：所有带 aria-expanded 的 button 中，文本匹配 match_keys（当前选中值）
+            for key in match_keys:
+                trigger_targets.append(
+                    self.page.locator('flt-semantics[role="button"][aria-expanded]').filter(has_text=key).first
+                )
+            # 策略 3：所有带 aria-expanded 的 button（兜底，无文本匹配）
+            trigger_targets.append(self.page.locator('flt-semantics[role="button"][aria-expanded]').first)
+
+            # 旧兜底（保留兼容）：input / combobox / button with aria-label
             # Prioritize inputs across all keys
             for key in match_keys:
                 trigger_targets.append(self.page.locator(f'input[aria-label*="{key}" i]').first)
@@ -361,6 +415,38 @@ class FletPage:
             await self.page.wait_for_timeout(200)
 
         if not option_ready:
+            # V1 M3: Dropdown 触发器在未获得焦点时文本为空，文本匹配可能失败。
+            # 进入暴力搜索模式：依次点击每个 aria-expanded 触发器，检查弹出的选项是否匹配。
+            # 这避免了依赖触发器文本定位 Dropdown，适配 V1 M3 的渲染特性。
+            all_triggers = self.page.locator('flt-semantics[role="button"][aria-expanded]')
+            trigger_count = await all_triggers.count()
+            logger.debug("select_dropdown: 暴力搜索模式，共 %d 个触发器", trigger_count)
+            for idx in range(trigger_count):
+                try:
+                    trigger = all_triggers.nth(idx)
+                    if await trigger.count() == 0:
+                        continue
+                    await trigger.click(timeout=self._tm(3000), force=True)
+                    logger.debug("暴力搜索: 点击触发器[%d]", idx)
+                    for _ in range(10):
+                        await self.page.wait_for_timeout(300)
+                        if await check_option_visible():
+                            option_ready = True
+                            break
+                    if option_ready:
+                        break
+                    # 选项不匹配，关闭菜单（按 Escape）后尝试下一个触发器
+                    await self.page.keyboard.press("Escape")
+                    await self.page.wait_for_timeout(300)
+                except Exception as ex:  # noqa: BLE001
+                    logger.debug("暴力搜索: 触发器[%d] 失败: %s", idx, ex)
+                    try:
+                        await self.page.keyboard.press("Escape")
+                        await self.page.wait_for_timeout(300)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        if not option_ready:
             if logger.isEnabledFor(logging.DEBUG):
                 self._dump_semantics_debug()
             raise RuntimeError(f"Timeout waiting for option '{option_text}' (key: '{opt_match_key}') to appear")
@@ -374,9 +460,10 @@ class FletPage:
     async def expect_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         scaled = self._tm(timeout_ms)
         loc_text = self.page.get_by_text(text, exact=False)
-        loc_aria = self.page.locator(
-            f'[aria-label*="{text}"]:not([role="tabpanel"]):not([role="group"]):not([role="region"])'
-        )
+        # V1 M3：多个 label 被合并到 <flt-semantics role="group" aria-label="...label1\nlabel2...">
+        # 的 aria-label 中（用 \n 分隔）。旧代码 :not([role="group"]) 会排除这些节点导致匹配失败。
+        # 保留 :not([role="tabpanel"]) 和 :not([role="region"]) 排除大容器，但移除 group 排除。
+        loc_aria = self.page.locator(f'[aria-label*="{text}"]:not([role="tabpanel"]):not([role="region"])')
         loc_combined = loc_text.or_(loc_aria).first
         try:
             await loc_combined.wait_for(state="attached", timeout=scaled)

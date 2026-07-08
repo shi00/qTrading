@@ -41,7 +41,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option(code, name)  # pragma: no cover
                 for code, name in I18n.get_language_options()  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self.on_language_change,  # pragma: no cover
+            on_select=self.on_language_change,  # pragma: no cover
         )  # pragma: no cover
 
         # Theme Selector  # pragma: no cover
@@ -58,7 +58,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option(ThemeName.NAVY, I18n.get("theme_navy")),  # pragma: no cover
                 ft.dropdown.Option(ThemeName.DRACULA, I18n.get("theme_dracula")),  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self.on_theme_change,  # pragma: no cover
+            on_select=self.on_theme_change,  # pragma: no cover
         )  # pragma: no cover
 
         # Concurrency  # pragma: no cover
@@ -70,7 +70,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("sys_suffix_threads"),  # pragma: no cover
+            suffix=I18n.get("sys_suffix_threads"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
         )  # pragma: no cover
 
@@ -88,7 +88,7 @@ class SystemTab(ft.Container):
                 ft.dropdown.Option("WARNING", I18n.get("sys_opt_warn")),  # pragma: no cover
                 ft.dropdown.Option("ERROR", I18n.get("sys_opt_error")),  # pragma: no cover
             ],  # pragma: no cover
-            on_change=self.on_log_level_change,  # pragma: no cover
+            on_select=self.on_log_level_change,  # pragma: no cover
         )  # pragma: no cover
 
         # DB Connection Pool Size  # pragma: no cover
@@ -99,7 +99,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_items"),  # pragma: no cover
+            suffix=I18n.get("common_items"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("settings_db_pool"),  # pragma: no cover
         )  # pragma: no cover
@@ -112,7 +112,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_items"),  # pragma: no cover
+            suffix=I18n.get("common_items"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("settings_db_overflow"),  # pragma: no cover
         )  # pragma: no cover
@@ -125,7 +125,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("common_seconds"),  # pragma: no cover
+            suffix=I18n.get("common_seconds"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("settings_db_timeout"),  # pragma: no cover
         )  # pragma: no cover
@@ -138,7 +138,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("sys_suffix_threads"),  # pragma: no cover
+            suffix=I18n.get("sys_suffix_threads"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("sys_pool_io"),  # pragma: no cover
         )  # pragma: no cover
@@ -150,7 +150,7 @@ class SystemTab(ft.Container):
             content_padding=10,  # pragma: no cover
             keyboard_type=ft.KeyboardType.NUMBER,  # pragma: no cover
             input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),  # pragma: no cover
-            suffix_text=I18n.get("sys_suffix_threads"),  # pragma: no cover
+            suffix=I18n.get("sys_suffix_threads"),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             label=I18n.get("sys_pool_cpu"),  # pragma: no cover
         )  # pragma: no cover
@@ -174,8 +174,8 @@ class SystemTab(ft.Container):
         )  # pragma: no cover
 
         # System Diagnostics Button  # pragma: no cover
-        self.diagnostics_button = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("settings_diagnostics_btn"),  # pragma: no cover
+        self.diagnostics_button = ft.Button(  # pragma: no cover
+            content=I18n.get("settings_diagnostics_btn"),  # pragma: no cover
             icon=ft.Icons.DOWNLOAD_ROUNDED,  # pragma: no cover
             on_click=lambda e: (
                 self.page.run_task(self.on_export_diagnostics) if self.page else None
@@ -379,7 +379,7 @@ class SystemTab(ft.Container):
                     ),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
-            padding=ft.padding.only(bottom=50),  # pragma: no cover
+            padding=ft.Padding.only(bottom=50),  # pragma: no cover
         )  # pragma: no cover
         self.card_main = self.content.controls[0]  # pragma: no cover
         self._locale_subscription_id = None  # pragma: no cover
@@ -417,13 +417,8 @@ class SystemTab(ft.Container):
             logger.debug("[SystemTab] Language | Change failed traceback", exc_info=True)
             self.show_snack(DataSanitizer.sanitize_error(ex), color=AppColors.ERROR)
 
-    def _on_locale_change(self, new_locale: str | None = None):
-        """语言变更回调 - 更新 Settings UI 文本
-
-        Args:
-            new_locale: 可选 locale 代码（用于测试显式注入）；I18n.subscribe
-                调用时不会传参，依赖默认值 None。
-        """
+    def _on_locale_change(self):
+        """语言变更回调 - 更新 Settings UI 文本（§5.8 规范2：零参签名）"""
         try:
             self.language_dropdown.label = I18n.get_language_label()
             self.language_dropdown.tooltip = I18n.get_language_label()
@@ -455,19 +450,19 @@ class SystemTab(ft.Container):
             )
 
             self.concurrency_input.label = I18n.get("settings_concurrency")
-            self.concurrency_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.concurrency_input.suffix = I18n.get("sys_suffix_threads")
             self.pool_size_input.label = I18n.get("settings_db_pool")
-            self.pool_size_input.suffix_text = I18n.get("common_items")
+            self.pool_size_input.suffix = I18n.get("common_items")
             self.db_overflow_input.label = I18n.get("settings_db_overflow")
-            self.db_overflow_input.suffix_text = I18n.get("common_items")
+            self.db_overflow_input.suffix = I18n.get("common_items")
             self.db_timeout_input.label = I18n.get("settings_db_timeout")
-            self.db_timeout_input.suffix_text = I18n.get("common_seconds")
+            self.db_timeout_input.suffix = I18n.get("common_seconds")
             self.io_workers_input.label = I18n.get("sys_pool_io")
-            self.io_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.io_workers_input.suffix = I18n.get("sys_suffix_threads")
             self.cpu_workers_input.label = I18n.get("sys_pool_cpu")
-            self.cpu_workers_input.suffix_text = I18n.get("sys_suffix_threads")
+            self.cpu_workers_input.suffix = I18n.get("sys_suffix_threads")
             self.no_proxy_input.hint_text = I18n.get("settings_no_proxy_hint")
-            self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
+            self.diagnostics_button.content = I18n.get("settings_diagnostics_btn")
 
             # 刷新保存按钮的 tooltip
             save_config_tip = I18n.get("settings_save_config")
@@ -744,7 +739,7 @@ class SystemTab(ft.Container):
         """异步导出系统诊断包"""
         UILogger.log_action("SystemTab", "Click", "export_diagnostics")
         self.diagnostics_button.disabled = True
-        self.diagnostics_button.text = I18n.get("settings_diagnostics_exporting")
+        self.diagnostics_button.content = I18n.get("settings_diagnostics_exporting")
         self._safe_update()
 
         try:
@@ -766,5 +761,5 @@ class SystemTab(ft.Container):
             )
         finally:
             self.diagnostics_button.disabled = False
-            self.diagnostics_button.text = I18n.get("settings_diagnostics_btn")
+            self.diagnostics_button.content = I18n.get("settings_diagnostics_btn")
             self._safe_update()

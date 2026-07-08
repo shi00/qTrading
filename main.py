@@ -56,7 +56,7 @@ async def main(page: ft.Page):
     cache_manager = CacheManager()
 
     page.title = I18n.get("app_title")
-    page.window_icon = "icon.png"  # type: ignore[attr-defined]
+    page.window.icon = "icon.png"
 
     from utils.shutdown import ShutdownCoordinator
 
@@ -66,15 +66,6 @@ async def main(page: ft.Page):
     shutdown_requested = False
     active_dialog = None
     locale_subscription_id = None
-    _scheduled_tasks: set = set()
-
-    def _schedule_async(coro):
-        if hasattr(page, "run_task"):
-            page.run_task(coro)
-            return
-        task = asyncio.create_task(coro())
-        _scheduled_tasks.add(task)
-        task.add_done_callback(_scheduled_tasks.discard)
 
     async def _perform_window_shutdown():
         nonlocal shutdown_requested
@@ -87,7 +78,7 @@ async def main(page: ft.Page):
             try:
                 if not _is_web_mode():
                     page.window.prevent_close = False
-                    page.window.destroy()
+                    await page.window.destroy()
             except Exception as e:
                 logger.debug("Window destroy ignored: %s", e)
 
@@ -114,35 +105,21 @@ async def main(page: ft.Page):
 
     def _show_dialog(dialog):
         nonlocal active_dialog
-        if hasattr(page, "open"):
-            page.open(dialog)
-            active_dialog = dialog
-            return
-        page.dialog = dialog  # type: ignore[attr-defined]
-        dialog.open = True
+        page.show_dialog(dialog)
         active_dialog = dialog
-        page.update()
 
     def _hide_dialog(dialog):
         nonlocal active_dialog
-        if hasattr(page, "close"):
-            page.close(dialog)
-            if active_dialog is dialog:
-                active_dialog = None
-            return
-        dialog.open = False
+        page.pop_dialog()
         if active_dialog is dialog:
             active_dialog = None
-        page.update()
 
     def _hide_close_confirm_dialog():
         nonlocal close_confirm_visible
         logger.debug(
-            "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, dialog_open=%s, "
-            "page_dialog_is_close_confirm=%s",
+            "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
             close_confirm_dialog is not None,
-            getattr(close_confirm_dialog, "open", None),
             _page_dialog_matches_close_confirm(),
         )
         if close_confirm_dialog is None:
@@ -161,7 +138,7 @@ async def main(page: ft.Page):
             return
         shutdown_requested = True
         UILogger.log_action("MainWindow", action="close_confirm")
-        _schedule_async(_perform_window_shutdown)
+        page.run_task(_perform_window_shutdown)
 
     close_confirm_dialog = ft.AlertDialog(
         modal=True,
@@ -180,8 +157,8 @@ async def main(page: ft.Page):
                 close_confirm_dialog.title.value = I18n.get("exit_confirm_title")
                 close_confirm_dialog.content.value = I18n.get("exit_confirm_content")
                 if len(close_confirm_dialog.actions) >= 2:
-                    close_confirm_dialog.actions[0].text = I18n.get("common_cancel")
-                    close_confirm_dialog.actions[1].text = I18n.get("common_confirm")
+                    close_confirm_dialog.actions[0].content = I18n.get("common_cancel")
+                    close_confirm_dialog.actions[1].content = I18n.get("common_confirm")
                 if close_confirm_visible:
                     close_confirm_dialog.update()
         except Exception as e:
@@ -193,11 +170,10 @@ async def main(page: ft.Page):
         nonlocal close_confirm_visible
         logger.debug(
             "[Main] Request to show close confirm dialog. visible=%s, shutdown_requested=%s, "
-            "dialog_exists=%s, dialog_open=%s, page_dialog_is_close_confirm=%s",
+            "dialog_exists=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
             shutdown_requested,
             close_confirm_dialog is not None,
-            getattr(close_confirm_dialog, "open", None),
             _page_dialog_matches_close_confirm(),
         )
         if close_confirm_visible or shutdown_requested:
@@ -233,7 +209,7 @@ async def main(page: ft.Page):
     async def _on_resize(e):
         """窗口 resize 回调 — 委托给 AppLayout 防抖处理。
 
-        Flet 0.28.3 的正确属性名为 ``on_resized``（带 d），
+        Flet 0.85.3 的正确属性名为 ``on_resize``，
         ``WindowResizeEvent`` 携带实时 width/height。
         注意：``page.width`` / ``page.window.width`` 只在页面连接时更新一次，
         resize 事件中不会刷新，因此必须从事件对象读取实时尺寸。
@@ -249,7 +225,7 @@ async def main(page: ft.Page):
             height = getattr(e, "height", 0) or 0
             layout.schedule_resize(width, height)
 
-    page.on_resized = _on_resize
+    page.on_resize = _on_resize
 
     async def _on_disconnect(e):
         if locale_subscription_id is not None:
@@ -269,7 +245,7 @@ async def main(page: ft.Page):
     # E2E web 模式下多个浏览器 session 共享一个 Flet server 进程。
     # session 断开不应触发 shutdown cleanup（会销毁不可恢复的共享资源如 ThreadPool）。
     # 进程最终通过 proc.terminate() 清理。
-    if not os.environ.get("E2E_TESTING"):
+    if os.environ.get("E2E_TESTING") != "true":
         page.on_disconnect = _on_disconnect
 
     def on_error(e):
@@ -284,34 +260,21 @@ async def main(page: ft.Page):
             page.window.width = 1280
             page.window.height = 800
         try:
-            page.window.center()
+            await page.window.center()
         except Exception:  # noqa: BLE001
             pass
 
     page.padding = 0
     apply_page_theme(page)
 
-    page.toast = ToastManager(page)  # type: ignore[attr-defined]
+    page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
 
     def show_toast(message, type="info"):
-        page.toast.show(message, type)  # type: ignore[attr-defined]
+        page.toast.show(message, type)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
 
-    page.show_toast = show_toast  # type: ignore[attr-defined]
+    page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
 
     # --- Startup flow: delegate to StartupController + StartupViewRenderer ---
-
-    def _show_dialog_with_tracking(dialog):
-        """Wrap _show_dialog to track active dialog for renderer."""
-        nonlocal active_dialog
-        _show_dialog(dialog)
-        active_dialog = dialog
-
-    def _hide_dialog_with_tracking(dialog):
-        """Wrap _hide_dialog to clear active dialog tracking."""
-        nonlocal active_dialog
-        _hide_dialog(dialog)
-        if active_dialog is dialog:
-            active_dialog = None
 
     async def _perform_upgrade_exit():
         """Cleanup and force exit after upgrade failure."""
@@ -321,17 +284,10 @@ async def main(page: ft.Page):
         try:
             if not _is_web_mode():
                 page.window.prevent_close = False
-                page.window.destroy()
+                await page.window.destroy()
         except Exception:  # noqa: BLE001
             pass
         coordinator._force_exit(1)
-
-    def _run_task(coro, *args):
-        """Run a coroutine via page.run_task or asyncio fallback."""
-        if hasattr(page, "run_task"):
-            page.run_task(coro, *args)
-        else:
-            _schedule_async(coro)
 
     def _on_show_toast(message_key, toast_type="info"):
         """Wrap show_toast to resolve i18n keys before displaying."""
@@ -341,15 +297,15 @@ async def main(page: ft.Page):
         cache_manager=cache_manager,
         on_state_change=lambda state, ctx: renderer.on_state_change(state, ctx),
         on_show_toast=_on_show_toast,
-        on_exit=lambda: _schedule_async(_perform_upgrade_exit),
+        on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
     )
 
     renderer = StartupViewRenderer(
         page=page,
         controller=controller,
-        show_dialog_fn=_show_dialog_with_tracking,
-        hide_dialog_fn=_hide_dialog_with_tracking,
-        run_task_fn=_run_task,
+        show_dialog_fn=_show_dialog,
+        hide_dialog_fn=_hide_dialog,
+        run_task_fn=page.run_task,
     )
 
     db_url = ConfigHandler.get_db_url()
@@ -385,4 +341,7 @@ if __name__ == "__main__":  # pragma: no cover
     install_global_exception_hooks()
 
     assets = os.path.join(os.path.dirname(__file__), "assets")
-    ft.app(target=main, assets_dir=assets)
+    run_kwargs = {"main": main, "assets_dir": assets}
+    if os.environ.get("E2E_TESTING") == "true":
+        run_kwargs["web_renderer"] = ft.WebRenderer.CANVAS_KIT
+    ft.run(**run_kwargs)

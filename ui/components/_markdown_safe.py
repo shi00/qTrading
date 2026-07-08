@@ -29,19 +29,11 @@ def _is_allowed_domain(url: str) -> bool:
 
 
 def _show_blocked_snack_bar(page) -> None:
-    """在给定 page 上显示"链接已拦截"提示条。
-
-    与项目其他 SnackBar 用法一致（见 failover_config_panel._show_snack）：
-    先清理旧 SnackBar 避免累积，再追加新的并触发更新。
-    """
+    """在给定 page 上显示"链接已拦截"提示条。"""
     import flet as ft
 
-    # 清理旧的 SnackBar 避免累积
-    page.overlay[:] = [s for s in page.overlay if not isinstance(s, ft.SnackBar)]
     snack = ft.SnackBar(ft.Text("链接已拦截"), bgcolor="#d32f2f")
-    page.overlay.append(snack)
-    snack.open = True
-    page.update()
+    page.show_dialog(snack)
 
 
 def safe_open_url(e) -> None:

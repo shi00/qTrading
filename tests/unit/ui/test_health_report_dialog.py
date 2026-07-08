@@ -141,6 +141,8 @@ class TestHealthReportDialog:
         dlg.update = MagicMock()
         original_content = dlg.content
 
+        # 模拟 locale 切换：i18n 返回翻译后的值，使重建产生不同内容（V1 Prop 在值变化时才更新引用）
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
         dlg.refresh_locale()
 
         # content 被重建为新对象（_build_content 返回新树）
@@ -215,7 +217,7 @@ class TestHealthReportDialog:
         dlg = self._make_dialog(mock_page, self._make_report("green"))
         set_page(dlg, mock_page)
         # 模拟无 page 场景
-        dlg._Control__page = None
+        dlg._mock_page = None
         dlg.update = MagicMock()
 
         dlg.refresh_locale()
@@ -223,15 +225,15 @@ class TestHealthReportDialog:
         dlg.update.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_run_deep_scan_fallback_no_open(self, mock_page):
-        """B6: page_ref 无 open 方法时走回退路径。"""
+    async def test_run_deep_scan_uses_show_dialog_no_fallback(self, mock_page):
+        """B6: V1 删除双路径回退，page_ref.show_dialog 为唯一路径。
+
+        原 B6 测试验证无 open 方法时的回退，V1 升级后双路径已删除，
+        此测试改为验证 show_dialog 直接调用（无回退）。
+        """
         dlg = self._make_dialog(mock_page)
         set_page(dlg, mock_page)
         dlg.close_dialog = MagicMock()
-
-        # 替换 page_ref 为无 open 方法的 mock
-        fake_page = MagicMock(spec=["update", "dialog"])
-        dlg.page_ref = fake_page
 
         mock_scan = MagicMock()
         mock_scan.start_scan = AsyncMock()
@@ -244,10 +246,9 @@ class TestHealthReportDialog:
         ):
             await dlg.run_deep_scan(None)
 
-        # 验证回退路径
-        assert fake_page.dialog is mock_scan
-        assert mock_scan.open is True
-        fake_page.update.assert_called_once()
+        # V1: show_dialog 是唯一路径，无回退
+        assert mock_scan in mock_page.overlay
+        mock_scan.start_scan.assert_awaited_once()
 
     def test_init_logs_error_when_summary_fails(self, mock_page, caplog):
         """B7: __init__ 摘要日志异常路径。"""
@@ -556,7 +557,7 @@ class TestHealthScanDialog:
         dlg.refresh_locale()
 
         assert dlg._title_text.value == "scan_title"
-        assert dlg._close_btn.text == "common_close"
+        assert dlg._close_btn.content == "common_close"
         dlg.update.assert_called_once()
 
     def test_refresh_locale_calls_show_results_when_visible(self, mock_page):

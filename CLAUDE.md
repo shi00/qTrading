@@ -128,7 +128,7 @@ pre-commit run --all-files  # 全量 hook 检查
 
 | 维度 | 技术选型 |
 |------|---------|
-| **UI 框架** | Flet 0.28.3 (Flutter 驱动桌面应用) |
+| **UI 框架** | Flet 0.85.3 / Flet 1.0 (Flutter 驱动桌面应用，dataclass 控件 + 单线程 async UI 模型) |
 | **计算引擎** | Polars (策略层向量化) + Pandas (DAO 层 / 数据同步层) |
 | **数据库** | PostgreSQL 16 + SQLAlchemy 2.0 (asyncpg) |
 | **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → downgrade → upgrade) |

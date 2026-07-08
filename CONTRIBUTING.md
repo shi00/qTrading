@@ -1,4 +1,4 @@
-﻿# Contributing to AStockScreener
+# Contributing to AStockScreener
 
 感谢你考虑为 AStockScreener 做贡献！本文档分为三部分：人类贡献者指南、开发环境与命令参考、实现规范手册。
 
@@ -28,6 +28,7 @@
   - [TaskManager 任务生命周期](#taskmanager-任务生命周期)
   - [配置管理、质量门控、性能监控](#配置管理质量门控性能监控)
   - [MVVM 表现层](#mvvm-表现层)
+  - [Flet 0.85.3 (V1) API 关键约束](#flet-0853-v1-api-关键约束)
   - [类型标注与 Pyright 规则](#类型标注与-pyright-规则)
   - [日志规范](#日志规范)
   - [异步编程规范](#异步编程规范)
@@ -479,6 +480,74 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 - **Theme** (`ui/theme.py`): 亮/暗主题切换，颜色/字体 token 集中管理。
 - **i18n** (`ui/i18n.py`): 对 `core.i18n` 的 UI 层薄封装，提供 Flet 文本绑定。
 
+## Flet 0.85.3 (V1) API 关键约束
+
+> 相关：[CLAUDE.md §2](./CLAUDE.md#2-项目概览) 技术栈表（Flet 0.85.3）、[CLAUDE.md §3.1 R16](./CLAUDE.md#31-绝对禁止)（V1 单线程 async 模型对 UI 阻塞更敏感）。
+
+### 演进方向
+
+项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 RC)。当前代码库保留少量 V0→V1 兼容垫片与 V1 渲染管线永久方案（见下文「兼容垫片使用规则」），**新开发的 UI 代码必须朝原生 V1 方式演进**，遵循以下原则：
+
+- **不得引入新的 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）
+- **新控件优先用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非直接 `self.page = page` 赋值
+- **新代码使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`、`page.on_close` 而非 `window.on_event + CLOSE` 子事件（新代码优先选用语义更清晰的 V1 入口）
+- **历史代码不强制重写**（§1.4 微创），仅在功能改动时顺带迁移
+
+### 强制 API 约束（Breaking Changes）
+
+V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/AttributeError 兜底，但部分项为**静默回归**（无异常），开发时必须主动遵守：
+
+| # | 类别 | V0（禁止） | V1（必须） | 检测方式 |
+|---|------|----------|----------|---------|
+| 1 | 应用入口 | `ft.app(target=main)` | `ft.run(main=main)` | 运行期 |
+| 2 | 窗口 resize | `page.on_resized = ...` | `page.on_resize = ...` | 运行期（静默失效） |
+| 3 | 对话框显示 | `page.open(x)` / `page.dialog = x` | `page.show_dialog(x)` | AttributeError |
+| 4 | 对话框关闭 | `page.close(x)` | `page.pop_dialog()` | AttributeError |
+| 5 | FilePicker | `FilePicker(on_result=...)` + `overlay.append` | `page.services.append(picker)` + `await picker.pick_files()` | 运行期 |
+| 6 | 图表控件 | `ft.LineChart(...)` | `import flet_charts as fch` → `fch.LineChart(...)` | ImportError |
+| 7 | 图像 fit 枚举 | `ft.ImageFit.CONTAIN` | `ft.BoxFit.CONTAIN` | AttributeError |
+| 8 | 图像 src | `ft.Image(src_base64=...)` | `ft.Image(src=b64_str)`（直接 base64） | TypeError |
+| 9 | 按钮文本 | `Button(text="x")` / `btn.text = ...` | `Button(content="x")` / `btn.content = ...`（位置参数仍可） | TypeError |
+| 10 | 弃用按钮 | `ft.ElevatedButton(...)` | `ft.Button(...)`（无警告但仍建议迁移） | 无（静默） |
+| 11 | 滚动间隔 | `on_scroll_interval=100` | `scroll_interval=100` | 运行期（静默失效） |
+| 12 | 样式 helper | `ft.padding.only(...)` / `ft.alignment.center` | `ft.Padding.only(...)` / `ft.Alignment.CENTER` | AttributeError |
+| 13 | Dropdown 事件 | `Dropdown(on_change=...)` | `Dropdown(on_select=...)` | TypeError |
+| 14 | TextField 字段 | `focus_border_color=...` | `focused_border_color=...` | TypeError |
+| 15 | Tabs 构造 | `ft.Tabs(tabs=[ft.Tab(text=..., content=...)])` | `ft.Tabs(length=N, content=ft.Column([ft.TabBar(tabs=[ft.Tab(label=...)]), ft.TabBarView(controls=[...])]))` | TypeError |
+| 16 | 拖拽增量 | `e.delta_x` | `e.primary_delta`（主路径），`e.local_delta.x`（回退） | **静默回归**（恒 0） |
+| 17 | 窗口图标 | `page.window_icon` | `page.window.icon` | AttributeError |
+| 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；若必须在挂载前引用 page，继承 [`PageRefMixin`](./ui/v1_compat.py) | AttributeError |
+| 19 | 本地存储 | `page.client_storage` | `page.shared_preferences` | AttributeError |
+| 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `mock_flet._install_v1_compat_control_page_mock()` 全局桩兼容） | RuntimeError |
+
+### 兼容垫片使用规则
+
+以下 V0→V1 兼容垫片为本次升级新增，**仅限历史代码使用**。新代码应优先采用 V1 原生方式，避免依赖垫片。
+
+| 垫片 | 位置 | 用途 | 新代码策略 |
+|------|------|------|----------|
+| `PageRefMixin` | [`ui/v1_compat.py`](./ui/v1_compat.py) | 覆盖 `ft.Control.page` 只读 property，使 5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）可读写 `control.page` | 新控件应通过挂载到 `page.controls` 后由 V1 原生 `parent` 链访问 `page`；若必须在挂载前引用 page（如注册回调、读取 `page.theme_mode`），才允许继承 `PageRefMixin` |
+| `_install_v1_compat_control_page_mock()` | [`tests/unit/ui/mock_flet.py`](./tests/unit/ui/mock_flet.py) | 全局 monkey-patch `ft.Control.page`/`update`，使测试代码可注入 mock_page 且未挂载 `update()` 静默返回 | 新测试代码沿用现有桩；待测试基础设施整体重构为 V1 原生模式后再移除 |
+
+> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py)（[`ui/i18n.py`](./ui/i18n.py) L64）不是兼容垫片，而是 V1 渲染管线的永久解决方案。V1 `Prop` 描述符的值相等优化导致 `DropdownButton` 在批量 `page.update()` 中不触发 rebuild，此行为是 V1 固有特性而非临时 bug，故该函数需长期保留。i18n 热重载场景的 Dropdown 必须使用本函数。
+
+> 每项垫片均遵循 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations) `# NOTE(lazy):` 标记规范。
+
+### 依赖管理
+
+- `flet` / `flet-desktop` / `flet-charts` 三个独立包，均锁定 `==0.85.3`（见 [`pyproject.toml`](./pyproject.toml) L24-26）
+- `flet-charts` 是 V1 拆分出的图表控件独立包，新增图表控件必须 `import flet_charts as fch`
+- 版本锁定策略：`==` 精确锁定，避免 minor 版本间的 API 漂移（V1 处于 Beta/RC 阶段）
+- 升级 Flet 版本时，三个包必须同步升级
+
+### PyInstaller 打包
+
+[`AStockScreener.spec`](./AStockScreener.spec) 的 `hiddenimports` 必须含 `flet` / `flet_desktop` / `flet_charts` 三项（L15-44）：
+
+- `flet_charts` 是 V1 新增的独立模块，遗漏会导致打包产物 `import flet_charts` 报 ImportError
+- `flet_core` / `flet_desktop` 在 V1 已合并入 `flet`，但保守保留 `flet_desktop` 以兼容桌面打包路径
+- 新增 flet 相关 import 时，同步检查 spec 文件的 `hiddenimports` 是否覆盖
+
 ## 类型标注与 Pyright 规则
 
 > 对应 [CLAUDE.md §5.2](./CLAUDE.md#52-类型标注)。
@@ -718,7 +787,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 4. **下拉框 options 同步**：所有 `ft.Dropdown` 的 `options` 中如果包含 `I18n.get()` 翻译文案，`refresh_locale` 必须重建 `options` 列表（**保留当前 `value`**），不能只刷新 `label`。枚举型 options（如主题、日志级别、积分档位）必须重建；语言选择器 options 也需重建以保持一致性。
 
-   **⚠️ 必须使用 `refresh_dropdown_options()` 工具函数（Flet 已知坑）**：`Control._set_attr_internal` 对相等值短路（源码 `flet/core/control.py:189` 的 `orig_val[0] != value` 判断），不标记 dirty。在批量 `page.update()` 中，`value` 从 X→None→X 的最终值等于原值，前端只收到最终值，`DropdownButton` 不触发 rebuild，闭合态选中项显示文本不刷新。
+   **⚠️ 必须使用 `refresh_dropdown_options()` 工具函数（Flet 已知坑）**：V1 改用 `Prop` 描述符（V0 的 `_set_attr_internal` 已删除），`Prop.__set__` 在 `old == value` 时跳过赋值（值相等优化）。在批量 `page.update()` 中，`value` 从 X→None→X 的最终值等于原值，前端只收到最终值，`DropdownButton` 不触发 rebuild，闭合态选中项显示文本不刷新。
 
    必须使用 `ui.i18n.refresh_dropdown_options(dropdown, new_options)` 工具函数，它通过分两步 `control.update()` 解决：
 
@@ -756,7 +825,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 - ❌ 在 `refresh_locale` 中调用网络请求 / 数据库查询 / 重型 CPU 计算
 - ❌ 只刷新 `Dropdown.label` 而不重建 `options`
 - ❌ 重建 `options` 时不保留当前 `value`
-- ❌ `dropdown.value = dropdown.value` 自赋值刷新（被 Flet `_set_attr_internal` 短路，无效）
+- ❌ `dropdown.value = dropdown.value` 自赋值刷新（被 V1 `Prop.__set__` 值相等优化短路，无效）
 - ❌ 手动 `value = None; options = [...]; value = saved` 不调用 `control.update()`（批量 `page.update()` 只发送最终值，闭合态选中项文本不刷新）
 - ❌ 不使用 `refresh_dropdown_options()` 工具函数重建含 i18n 文案的 Dropdown options
 - ❌ 重建子 panel 前不调用旧 panel 的 `will_unmount`
@@ -913,15 +982,15 @@ def _rebuild_steps_after_locale_change(self):
 
 > 对应 [CLAUDE.md §5.9](./CLAUDE.md#59-响应式布局规范-responsive-layout)。
 
-本规范确保应用在 960px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 7 条规范。
+本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 7 条规范。
 
 ### 背景与约束
 
-- 项目仅桌面端 (Flet 0.28.3)，`main.py` 设置 `page.window.min_width = 960`、`min_height = 640`、默认 `width = 1280`。
+- 项目仅桌面端 (Flet 0.85.3)，`main.py` 设置 `page.window.min_width = 1280`、`min_height = 720`、默认 `width = 1280`。
 - 内容区净宽 = 窗口宽度 − nav_rail (展开 180 / 折叠 80) − divider (1) − body padding (40)。
-- `AppLayout` 已实现 `page.on_resized` 的 100ms 防抖分发：通过鸭子类型调用 `current_view.handle_resize(width, height)` (见 `ui/app_layout.py` 的 `_handle_resize`)。
-- **Flet 0.28.3 API 关键约束**：
-  - 正确的事件属性名为 `page.on_resized`（带 d），**不是** `on_resize`。
+- `AppLayout` 已实现 `page.on_resize` 的 100ms 防抖分发：通过鸭子类型调用 `current_view.handle_resize(width, height)` (见 `ui/app_layout.py` 的 `_handle_resize`)。
+- **Flet 0.85.3 API 关键约束**：
+  - 正确的事件属性名为 `page.on_resize`（不带 d），**不是** `on_resized`。
   - `WindowResizeEvent` 携带实时 `width` / `height` 属性。
   - `page.width` / `page.window.width` 仅在页面连接时 (`fetch_page_details_async`) 更新一次，**resize 事件中不会刷新**，返回过时值或 0。因此 `handle_resize` 必须通过参数接收实时尺寸，**禁止**在 `handle_resize` 内读取 `self.page.width`。
 - Web 模式 (`_is_web_mode()`) 下跳过窗口约束，但 resize 分发机制仍然生效。
@@ -932,12 +1001,14 @@ def _rebuild_steps_after_locale_change(self):
 
 | 断点常量 | 阈值 (px) | 典型场景 | 内容区净宽 (nav 展开) |
 |---------|-----------|---------|---------------------|
-| `BREAKPOINT_COMPACT` | `< 1200` | 最小窗口 960，笔记本竖屏 | 739 ~ 979 |
-| `BREAKPOINT_STANDARD` | `1200 ~ 1599` | 默认窗口 1280，1080p | 979 ~ 1379 |
+| `BREAKPOINT_COMPACT` | `< 1200` | ⚠️ `min_width=1280` 下不可达 | 979 ~ 1059 |
+| `BREAKPOINT_STANDARD` | `1200 ~ 1599` | 默认窗口 1280，1080p | 1059 ~ 1379 |
 | `BREAKPOINT_WIDE` | `1600 ~ 2399` | 2K 显示器 | 1379 ~ 2179 |
 | `BREAKPOINT_ULTRA_WIDE` | `≥ 2400` | 4K / 带鱼屏 | ≥ 2179 |
 
-> **注意**：Flet 内置 `ResponsiveRow` 断点 (xs<576, sm≥576, md≥768, lg≥992, xl≥1200) 在 `min_width=960` 约束下，xs/sm 基本触发不到，实际有效的是 md/lg/xl。本项目断点常量用于 `handle_resize()` 中的条件判断，与 `ResponsiveRow` 的 col 配置互补。
+> **注意**：Flet 内置 `ResponsiveRow` 断点 (xs<576, sm≥576, md≥768, lg≥992, xl≥1200) 在 `min_width=1280` 约束下，xs/sm/md 基本触发不到，实际有效的是 lg/xl。本项目断点常量用于 `handle_resize()` 中的条件判断，与 `ResponsiveRow` 的 col 配置互补。
+>
+> # NOTE(lazy): BREAKPOINT_COMPACT (< 1200) 在 min_width=1280 下不可达. ceiling: 窗口宽度恒 ≥ 1280. upgrade: 调整断点阈值或合并 compact 到 standard 时需同步更新测试边界值.
 >
 > **设计选择**：断点基于 `WindowResizeEvent.width`（窗口总宽度）而非内容区净宽，这是有意的设计。同一窗口宽度下 nav 折叠/展开会改变内容区净宽，但断点保持稳定，避免 nav 切换导致侧栏宽度跳变。nav 折叠带来的额外空间由 `expand=True` 的主内容区自然吸收。
 
@@ -971,7 +1042,7 @@ def get_breakpoint(page_width: int | None) -> str:
 
 | 断点 | 侧栏宽度 | 理由 |
 |------|---------|------|
-| compact (<1200) | 280px | 内容区仅 739px，侧栏 280px 后主区保留 449px |
+| compact (<1200) | 280px | ⚠️ 不可达（min_width=1280）；参考：979px 内容区，侧栏 280px 后主区 699px |
 | standard (1200~1599) | 340px | 内容区 ~1059px，主区保留 707px |
 | wide/ultra_wide (≥1600) | 380px | 内容区充足，侧栏可放宽 |
 
@@ -1070,7 +1141,7 @@ ft.ResponsiveRow([ft.Column([control])])
 
 - 工具栏等横向密集区域应在 `ft.Row` 上设置 `scroll=ft.ScrollMode.AUTO` 作为兜底。
 - 但 **scroll 不得作为掩盖布局缺陷的手段**：若控件累计宽度经常超过容器宽度，应优先改用 `ResponsiveRow` 或 `wrap=True`。
-- `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.padding.only(right=8)` 避免内容与滚动条重叠。
+- `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.Padding.only(right=8)` 避免内容与滚动条重叠。
 
 #### 规范 7：max_width 约束 — 防止超宽屏内容过度拉伸
 
@@ -1108,7 +1179,7 @@ async def _handle_resize(self):
 
 | 操作 | 状态 | 说明 |
 |------|------|------|
-| 窗口拖拽 | ✅ 已修复 | `page.on_resized` → `schedule_resize(width, height)` → 100ms 防抖 → `handle_resize(width, height)` |
+| 窗口拖拽 | ✅ 已修复 | `page.on_resize` → `schedule_resize(width, height)` → 100ms 防抖 → `handle_resize(width, height)` |
 | **nav_rail 折叠/展开** (`_toggle_nav`) | ✅ 已修复 | `_toggle_nav` 末尾调用 `schedule_resize()` (复用缓存尺寸) |
 | **tab 切换挂载新视图** | ✅ 已修复 | `_execute_tab_switch` 中 `refresh_locale` 后追加 `handle_resize` 兜底 |
 | **i18n 语言切换** | ✅ 已修复 | `_on_locale_change` 末尾调用 `schedule_resize()` 重新验证布局 |
@@ -1117,14 +1188,14 @@ async def _handle_resize(self):
 **实现方式** (已完成)：
 
 ```python
-# main.py — on_resized 回调，传递实时尺寸
+# main.py — on_resize 回调，传递实时尺寸
 async def _on_resize(e):
     # ...
     width = getattr(e, "width", 0) or 0
     height = getattr(e, "height", 0) or 0
     layout.schedule_resize(width, height)
 
-page.on_resized = _on_resize  # 注意：是 on_resized (带 d)
+page.on_resize = _on_resize  # 注意：是 on_resize (不带 d)
 
 # ui/app_layout.py — _toggle_nav 末尾
 def _toggle_nav(self, e):
@@ -1141,7 +1212,7 @@ self.schedule_resize()  # 语言切换后重新验证布局
 
 #### 规范 9：高度维度 — 对高度敏感的视图必须响应 `page.height`
 
-规范 1-8 仅关注宽度，但 `min_height=640` 下多个视图存在高度维度问题：
+规范 1-8 仅关注宽度，但 `min_height=720` 下多个视图存在高度维度问题：
 
 - `BacktestView` 配置面板内容溢出 (scroll 兜底，但用户需大量滚动)
 - `DataExplorerView` 表格每页行数固定，低高度下只能看到 3-4 行
@@ -1206,7 +1277,7 @@ def _on_locale_change(self):
 ├─ 有硬编码 width=数字 的控件吗？
 │   └─ 是 → 改为 expand=True 或 AppStyles 常量 (规范 4)
 ├─ 有 scroll=ft.ScrollMode.AUTO 的 Column 吗？
-│   └─ 是 → 设置 padding=ft.padding.only(right=8) (规范 6)
+│   └─ 是 → 设置 padding=ft.Padding.only(right=8) (规范 6)
 ├─ 有改变内容区宽度的操作 (nav 折叠、tab 切换) 吗？
 │   └─ 是 → 规范 8 (触发时机完整性)
 ├─ 含表格/图表/长表单等高度敏感元素吗？
@@ -1221,7 +1292,7 @@ def _on_locale_change(self):
 
 新增/修改视图时，对照此清单逐项确认：
 
-- [ ] 视图在 960×640 最小窗口下无横向溢出、无纵向截断 (内容区净宽 ~739px)
+- [ ] 视图在 1280×720 最小窗口下无横向溢出、无纵向截断 (内容区净宽 ~1059px)
 - [ ] 视图在 1280×800 默认窗口下布局合理 (内容区净宽 ~1059px)
 - [ ] 视图在 1920×1080 宽屏下不出现内容过度拉伸
 - [ ] 视图已实现 `handle_resize()` (含分栏布局的须有实际逻辑，纯纵向的须有空方法)
@@ -1246,18 +1317,18 @@ def _on_locale_change(self):
 | `SettingsView` | ⚠️ 部分 | 未实现 `handle_resize` (需补空方法) |
 | `MarketDashboard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，4 张卡退化为纵向堆叠 |
 | `OnboardingWizard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，6 张卡纵向堆叠 |
-| `AppLayout` | ✅ 已修复 | `on_resized` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
+| `AppLayout` | ✅ 已修复 | `on_resize` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
 
 ### 测试要求
 
 新增/修改视图的响应式布局时，必须编写以下测试：
 
-1. **断点函数单元测试**：`AppStyles.get_breakpoint()` 和 `get_sidebar_width()` 的边界值覆盖 (959/960/1199/1200/1599/1600/2399/2400/None)。
-2. **handle_resize 单元测试**：调用 `handle_resize(width, height)` 传入各断点值 (959/960/1199/1200/1599/1600/2399/2400)，断言侧栏 Container 的 `width` 属性变化正确；断言相同参数多次调用结果不变 (幂等性)；断言 `width=0` 时提前返回不修改布局。
+1. **断点函数单元测试**：`AppStyles.get_breakpoint()` 和 `get_sidebar_width()` 的边界值覆盖 (1279/1280/1199/1200/1599/1600/2399/2400/None)。
+2. **handle_resize 单元测试**：调用 `handle_resize(width, height)` 传入各断点值 (1279/1280/1199/1200/1599/1600/2399/2400)，断言侧栏 Container 的 `width` 属性变化正确；断言相同参数多次调用结果不变 (幂等性)；断言 `width=0` 时提前返回不修改布局。
 3. **handle_resize 性能约束测试**：mock 后断言 `handle_resize` 内未调用 `self.content = ...` (重建 content)、未调用数据库/文件 IO 方法。
 4. **handle_resize 异常降级测试**：mock 控件引用为 None 或抛异常，断言 `handle_resize` 不抛出 (降级为 `logger.debug`)。
 5. **空方法验证**：纯纵向视图 (HomeView 等) 必须断言 `hasattr(view, "handle_resize")` 为 True，即使为空方法。
-6. **960×640 最小窗口布局验证** (手工或 E2E)：确认无横向溢出、无控件截断、无滚动条与控件重叠。
+6. **1280×720 最小窗口布局验证** (手工或 E2E)：确认无横向溢出、无控件截断、无滚动条与控件重叠。
 
 ## 标准开发工作流 (How-To)
 

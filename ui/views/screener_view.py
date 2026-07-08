@@ -130,14 +130,14 @@ class ScreenerView(ft.Container):
         # Phase 2A.1 Task 2A.1.11：策略显示名缓存，供 refresh_locale 重建 tier_hint 文案
         self._strategy_display_names: dict[str, str] = {}
 
-        self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)  # pragma: no cover
+        self.save_file_picker = ft.FilePicker()  # pragma: no cover
 
         # --- UI Components ---
         # 1. Controls
         self.strategy_dropdown = ft.Dropdown(  # pragma: no cover
             label=I18n.get("select_strategy"),  # pragma: no cover
             options=[],  # pragma: no cover
-            on_change=self._on_strategy_change,  # pragma: no cover
+            on_select=self._on_strategy_change,  # pragma: no cover
             width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
             text_size=14,  # pragma: no cover
             bgcolor=AppColors.INPUT_BG,  # pragma: no cover
@@ -160,16 +160,16 @@ class ScreenerView(ft.Container):
             no_wrap=False,  # pragma: no cover
         )  # pragma: no cover
 
-        self.run_btn = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("run_screening"),  # pragma: no cover
+        self.run_btn = ft.Button(  # pragma: no cover
+            content=I18n.get("run_screening"),  # pragma: no cover
             icon=ft.Icons.PLAY_ARROW,  # pragma: no cover
             on_click=self._on_run_click,  # pragma: no cover
             disabled=True,  # pragma: no cover
             style=AppStyles.primary_button(),  # pragma: no cover
             height=45,  # pragma: no cover
         )  # pragma: no cover
-        self.export_btn = ft.ElevatedButton(  # pragma: no cover
-            text=I18n.get("screener_export"),  # pragma: no cover
+        self.export_btn = ft.Button(  # pragma: no cover
+            content=I18n.get("screener_export"),  # pragma: no cover
             icon=ft.Icons.DOWNLOAD,  # pragma: no cover
             on_click=self._on_export_click,  # pragma: no cover
             disabled=True,  # pragma: no cover
@@ -241,7 +241,7 @@ class ScreenerView(ft.Container):
             width=120,  # pragma: no cover
             dense=True,  # pragma: no cover
             text_size=13,  # pragma: no cover
-            on_change=self._on_page_size_change,  # pragma: no cover
+            on_select=self._on_page_size_change,  # pragma: no cover
         )  # pragma: no cover
 
         # 6. Detail Dialog
@@ -261,7 +261,7 @@ class ScreenerView(ft.Container):
                     icon=ft.Icon(ft.Icons.HISTORY),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
-            selected={"REALTIME"},  # pragma: no cover
+            selected=["REALTIME"],  # V1: list[str]（非 set，msgpack 不支持 set 序列化）
             on_change=self._on_mode_change,  # pragma: no cover
         )  # pragma: no cover
 
@@ -271,7 +271,7 @@ class ScreenerView(ft.Container):
             spacing=0,  # pragma: no cover
         )  # pragma: no cover
         self.history_load_more_btn = ft.TextButton(  # pragma: no cover
-            text=I18n.get("history_load_more"),  # pragma: no cover
+            content=I18n.get("history_load_more"),  # pragma: no cover
             icon=ft.Icons.EXPAND_MORE,  # pragma: no cover
             on_click=self._on_load_more_history,  # pragma: no cover
             visible=False,  # pragma: no cover
@@ -287,7 +287,7 @@ class ScreenerView(ft.Container):
                 [  # pragma: no cover
                     ft.Container(  # pragma: no cover
                         content=self.history_tree_title_text,  # pragma: no cover
-                        padding=ft.padding.only(left=12, top=10, bottom=5),  # pragma: no cover
+                        padding=ft.Padding.only(left=12, top=10, bottom=5),  # pragma: no cover
                     ),  # pragma: no cover
                     ft.Divider(height=1, color=AppColors.DIVIDER),  # pragma: no cover
                     self.history_tree_list,  # pragma: no cover
@@ -297,7 +297,7 @@ class ScreenerView(ft.Container):
                 expand=True,  # pragma: no cover
             ),  # pragma: no cover
             bgcolor=ft.Colors.SURFACE,  # pragma: no cover
-            border=ft.border.only(right=ft.border.BorderSide(1, AppColors.DIVIDER)),  # pragma: no cover
+            border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),  # pragma: no cover
         )  # pragma: no cover
         self._history_tree_offset = 0  # For pagination
 
@@ -309,7 +309,7 @@ class ScreenerView(ft.Container):
             return
         self._mounted = True
         if self.page:
-            self.page.overlay.append(self.save_file_picker)
+            self.page.services.append(self.save_file_picker)
             self.page.update()
 
         # Initialize ViewModel and Bindings
@@ -354,8 +354,8 @@ class ScreenerView(ft.Container):
         self.vm.unsubscribe_task_manager()
         self.vm.dispose()
 
-        if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
-            self.page.overlay.remove(self.save_file_picker)
+        if self.page and getattr(self, "save_file_picker", None) in self.page.services:
+            self.page.services.remove(self.save_file_picker)
             self.page.update()
 
         # Detach Flet Row references inside PaginatedTable to prevent memory leak
@@ -365,12 +365,13 @@ class ScreenerView(ft.Container):
         if hasattr(self, "result_table") and self.result_table:
             self.result_table.clear()
 
-        # Cleanup overlay to prevent memory leak
+        # Cleanup dialog to prevent memory leak
+        # R3: V1 对话框由 show_dialog/pop_dialog 管理；view 卸载时若 dialog 仍开着，用 pop_dialog 关闭
         if self.detail_dialog and self.page:
             try:
-                self.page.overlay.remove(self.detail_dialog)
-            except ValueError:
-                pass  # Already removed
+                self.page.pop_dialog()
+            except Exception as e:
+                logger.debug("[ScreenerView] pop_dialog on unmount skipped: %s", e)
             self.detail_dialog = None
 
         # U-1 fix: Reset mounted state for proper re-mount handling
@@ -414,8 +415,8 @@ class ScreenerView(ft.Container):
                 self.strategy_desc_text.value = I18n.get("screener_no_strategy_hint")
 
             # 按钮
-            self.run_btn.text = I18n.get("run_screening")
-            self.export_btn.text = I18n.get("screener_export")
+            self.run_btn.content = I18n.get("run_screening")
+            self.export_btn.content = I18n.get("screener_export")
 
             # 分页信息
             self.page_info_text.value = I18n.get("screener_page_info").format(
@@ -440,7 +441,7 @@ class ScreenerView(ft.Container):
                     segments[1].label.value = I18n.get("screener_mode_history")
 
             # 历史加载更多按钮
-            self.history_load_more_btn.text = I18n.get("history_load_more")
+            self.history_load_more_btn.content = I18n.get("history_load_more")
 
             # 历史树标题
             if hasattr(self, "history_tree_title_text"):
@@ -697,7 +698,7 @@ class ScreenerView(ft.Container):
                 spacing=5,  # pragma: no cover
             ),  # pragma: no cover
             expand=True,  # pragma: no cover
-            padding=ft.padding.only(top=10),  # pragma: no cover
+            padding=ft.Padding.only(top=10),  # pragma: no cover
         )  # pragma: no cover
 
         # ==========================================
@@ -881,9 +882,7 @@ class ScreenerView(ft.Container):
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         controls=subtiles,
-                        initially_expanded=(
-                            self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0
-                        ),
+                        expanded=(self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0),
                         collapsed_icon_color=AppColors.TEXT_SECONDARY,
                     )
                     self.history_tree_list.controls.append(tile)
@@ -1096,10 +1095,10 @@ class ScreenerView(ft.Container):
                     ],
                     spacing=8,
                 ),
-                padding=ft.padding.all(12),
+                padding=ft.Padding.all(12),
                 bgcolor=AppColors.SURFACE_VARIANT,
                 border_radius=8,
-                margin=ft.margin.only(bottom=8),
+                margin=ft.Margin.only(bottom=8),
             )
             self.params_container.controls.append(group_card)
 
@@ -1122,7 +1121,7 @@ class ScreenerView(ft.Container):
                     controls=advanced_controls,
                     collapsed_text_color=AppColors.TEXT_PRIMARY,
                     text_color=AppColors.PRIMARY,
-                    initially_expanded=False,
+                    expanded=False,
                 )
                 self.params_container.controls.append(exp_tile)
 
@@ -1212,7 +1211,7 @@ class ScreenerView(ft.Container):
                     border_color=AppColors.DIVIDER,
                     focused_border_color=AppColors.PRIMARY,
                     text_size=13,
-                    content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                     width=200,
                 )
                 ctrl.data = p["name"]
@@ -1228,7 +1227,7 @@ class ScreenerView(ft.Container):
                     border_color=AppColors.DIVIDER,
                     focused_border_color=AppColors.PRIMARY,
                     text_size=13,
-                    content_padding=ft.padding.symmetric(horizontal=10, vertical=8),
+                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                     width=200,
                 )
                 ctrl.data = p["name"]
@@ -1254,7 +1253,7 @@ class ScreenerView(ft.Container):
                     border_color=AppColors.DIVIDER,
                     focused_border_color=AppColors.PRIMARY,
                     text_size=12,
-                    content_padding=ft.padding.symmetric(horizontal=10, vertical=10),
+                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
                 )
 
                 reset_btn = None
@@ -1276,7 +1275,7 @@ class ScreenerView(ft.Container):
                         return save_prompt
 
                     reset_btn = ft.TextButton(
-                        text=I18n.get("ai_reset_default"),
+                        content=I18n.get("ai_reset_default"),
                         icon=ft.Icons.RESTORE,
                         style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
                         height=30,
@@ -1284,7 +1283,7 @@ class ScreenerView(ft.Container):
                     )
 
                     save_btn = ft.TextButton(
-                        text=I18n.get("ai_save_prompt"),
+                        content=I18n.get("ai_save_prompt"),
                         icon=ft.Icons.SAVE,
                         style=ft.ButtonStyle(color=AppColors.PRIMARY),
                         height=30,
@@ -1312,13 +1311,13 @@ class ScreenerView(ft.Container):
                             ],
                             spacing=5,
                         ),
-                        margin=ft.margin.only(top=10, bottom=5),
+                        margin=ft.Margin.only(top=10, bottom=5),
                     )
                     controls.append(wrapper)
                 else:
                     wrapper = ft.Container(
                         content=ctrl,
-                        margin=ft.margin.only(top=10, bottom=5),
+                        margin=ft.Margin.only(top=10, bottom=5),
                     )
                     controls.append(wrapper)
 
@@ -1349,7 +1348,8 @@ class ScreenerView(ft.Container):
                 name = ctrl.data
                 if isinstance(ctrl, ft.Slider):
                     val = ctrl.value
-                    params[name] = int(val) if val == int(val) else round(val, 2)
+                    if val is not None:
+                        params[name] = int(val) if val == int(val) else round(val, 2)
                 elif isinstance(ctrl, ft.TextField):
                     if ctrl.multiline:
                         params[name] = ctrl.value
@@ -1449,47 +1449,39 @@ class ScreenerView(ft.Container):
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
         default_filename = f"screener_results_{timestamp}.csv"
 
-        self.save_file_picker.save_file(
+        filepath = await self.save_file_picker.save_file(
             dialog_title=I18n.get("data_export_save_title"),
             file_name=default_filename,
             allowed_extensions=["csv"],
         )
-
-    def _on_save_file_result(self, e: ft.FilePickerResultEvent):
-        if not self.page:
-            return
-
-        if not e.path:
+        if not filepath or not self.page:
             return
 
         self.export_btn.disabled = True
         self.export_btn.update()
 
-        async def _do_export(filepath):
-            try:
-                path, error = await self.vm.export_results(filepath)
-                if path:
-                    filename = os.path.basename(filepath)
-                    if hasattr(self.page, "show_toast"):
-                        self.page.show_toast(  # type: ignore[untyped]
-                            I18n.get("data_export_success", file=filename),
-                            "success",
-                        )
-                elif hasattr(self.page, "show_toast"):
+        try:
+            path, error = await self.vm.export_results(filepath)
+            if path:
+                filename = os.path.basename(filepath)
+                if hasattr(self.page, "show_toast"):
                     self.page.show_toast(  # type: ignore[untyped]
-                        I18n.get("data_export_fail"),
-                        "error",
+                        I18n.get("data_export_success", file=filename),
+                        "success",
                     )
-            except Exception as ex:
-                logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
-                logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
-                if self.page and hasattr(self.page, "show_toast"):
-                    self.page.show_toast(I18n.get("data_export_fail"), "error")  # type: ignore[untyped]
-            finally:
-                self.export_btn.disabled = False
-                self.export_btn.update()
-
-        self.page.run_task(_do_export, e.path)  # type: ignore[untyped]
+            elif hasattr(self.page, "show_toast"):
+                self.page.show_toast(  # type: ignore[untyped]
+                    I18n.get("data_export_fail"),
+                    "error",
+                )
+        except Exception as ex:
+            logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
+            logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
+            if self.page and hasattr(self.page, "show_toast"):
+                self.page.show_toast(I18n.get("data_export_fail"), "error")  # type: ignore[untyped]
+        finally:
+            self.export_btn.disabled = False
+            self.export_btn.update()
 
     def _on_page_size_change(self, e):
         try:
@@ -1516,12 +1508,11 @@ class ScreenerView(ft.Container):
                 data_processor=self.vm.data_processor,
                 page=self.page,
             )
-            self.page.overlay.append(self.detail_dialog)
         else:
             self.detail_dialog.update_data(raw_data)
 
-        self.detail_dialog.open = True
-        self.page.update()
+        # R3: V1 对话框通过 show_dialog 打开（pop_dialog 时自动从 overlay 移除）
+        self.page.show_dialog(self.detail_dialog)
 
         # Trigger async chart load
         if ts_code:
@@ -1688,7 +1679,7 @@ class ScreenerView(ft.Container):
                     border_radius=4,  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
-            initially_expanded=True,  # pragma: no cover
+            expanded=True,  # pragma: no cover
             visible=False,  # pragma: no cover
         )  # pragma: no cover
 
@@ -1698,7 +1689,7 @@ class ScreenerView(ft.Container):
                 reasoning_tile,  # pragma: no cover
                 ft.Container(  # pragma: no cover
                     content=content_md,  # pragma: no cover
-                    padding=ft.padding.only(left=5, right=5),  # pragma: no cover
+                    padding=ft.Padding.only(left=5, right=5),  # pragma: no cover
                 ),  # pragma: no cover
             ],  # pragma: no cover
             spacing=10,  # pragma: no cover
@@ -1706,11 +1697,11 @@ class ScreenerView(ft.Container):
 
         card = ft.Container(  # pragma: no cover
             content=card_content,  # pragma: no cover
-            border=ft.border.all(1, AppColors.DIVIDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.DIVIDER),  # pragma: no cover
             border_radius=8,  # pragma: no cover
             padding=15,  # pragma: no cover
             bgcolor=AppColors.SURFACE,  # pragma: no cover
-            margin=ft.margin.only(bottom=10),  # pragma: no cover
+            margin=ft.Margin.only(bottom=10),  # pragma: no cover
         )  # pragma: no cover
 
         async def _add_line_task():
@@ -1792,17 +1783,17 @@ class ScreenerView(ft.Container):
                     ],
                     spacing=8,
                 ),
-                ft.Container(content=content_md, padding=ft.padding.only(left=5, right=5)),
+                ft.Container(content=content_md, padding=ft.Padding.only(left=5, right=5)),
             ],
             spacing=8,
         )
         card = ft.Container(
             content=card_content,
-            border=ft.border.all(1, AppColors.DIVIDER),
+            border=ft.Border.all(1, AppColors.DIVIDER),
             border_radius=8,
             padding=15,
             bgcolor=AppColors.SURFACE,
-            margin=ft.margin.only(bottom=10),
+            margin=ft.Margin.only(bottom=10),
         )
         self._ai_cards[name] = {
             "card": card,

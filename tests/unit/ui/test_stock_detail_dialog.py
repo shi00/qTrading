@@ -222,11 +222,13 @@ class TestStockDetailDialog:
         dlg = self._make_dialog(data)
         assert dlg.stock_data["ts_code"] == "000001.SZ"
 
-    def test_close_sets_open_false(self, mock_page):
+    def test_close_calls_pop_dialog(self, mock_page):
+        # R3: V1 _close 通过 page.pop_dialog() 关闭对话框（不再设置 self.open）
         dlg = self._make_dialog()
         set_page(dlg, mock_page)
+        mock_page.pop_dialog = MagicMock()
         dlg._close(None)
-        assert dlg.open is False
+        mock_page.pop_dialog.assert_called_once()
 
     def test_update_data_replaces_stock_data(self):
         dlg = self._make_dialog({"ts_code": "000001.SZ"})
@@ -243,10 +245,13 @@ class TestStockDetailDialog:
         original_content = dlg.content
         original_actions = list(dlg.actions)
 
+        # 模拟 locale 切换：i18n 返回翻译后的值，使重建产生不同内容
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
         dlg.refresh_locale()
 
-        # title/content 被重建为新对象
-        assert dlg.title is not original_title
+        # title 不依赖 i18n（仅用 stock_data），V1 Prop 在值相等时跳过赋值，这是 V1 的优化行为
+        assert dlg.title is original_title
+        # content/actions 依赖 i18n，locale 切换后值变化，V1 Prop 会更新引用
         assert dlg.content is not original_content
         # actions 列表被替换为新 TextButton
         assert len(dlg.actions) == 1
@@ -1045,11 +1050,11 @@ class TestStockDetailDialogLifecycle:
 
         return StockDetailDialog(stock_data=data or {})
 
-    def test_close_without_page_no_update(self):
-        # page 未设置，_close 不应抛出异常（不调用 page.update）
+    def test_close_without_page_no_exception(self):
+        # R3: V1 _close 在 page 未设置时不抛异常（不调用 pop_dialog）
         dlg = self._make_dialog()
         dlg._close(None)
-        assert dlg.open is False
+        # 无断言：仅验证不抛异常
 
     def test_did_mount_subscribes_locale(self):
         dlg = self._make_dialog()
@@ -1088,7 +1093,7 @@ class TestStockDetailDialogLifecycle:
         dlg.update = MagicMock()
 
         # 模拟已加载的 K 线图（ft.Image）
-        original_image = ft.Image(src_base64="loaded_png_data", fit=ft.ImageFit.CONTAIN)
+        original_image = ft.Image(src="loaded_png_data", fit=ft.BoxFit.CONTAIN)
         dlg.chart_container.content = original_image
 
         dlg.refresh_locale()
@@ -1162,7 +1167,7 @@ class TestStockDetailDialogLoadChartSuccess:
 
         # 验证最终设置了 ft.Image
         assert isinstance(dlg.chart_container.content, ft.Image)
-        assert dlg.chart_container.content.src_base64 == "base64pngdata"
+        assert dlg.chart_container.content.src == "base64pngdata"
         # chart_container.update 被调用多次（loading + 最终图片）
         assert dlg.chart_container.update.call_count >= 2
 

@@ -66,7 +66,7 @@ def _make_mock_action_chip():
 def _make_mock_button():
     btn = MagicMock()  # spec omitted: Flet button, complex __init__ with many internal controls
     btn.disabled = False
-    btn.text = ""
+    btn.content = ""
     btn.icon = None
     btn.style = None
     return btn
@@ -85,6 +85,7 @@ def _make_tab() -> DataSourceTab:
 
     # Mock required attributes
     tab.show_snack = MagicMock()  # spec omitted: callback function
+    tab._i = 0  # V1 兼容：ft.Control.page getter 在 _mock_page 为 None 时回退到原生查找，需要 _i 存在以抛 RuntimeError（被 mock_flet 捕获）而非 AttributeError
     tab.page = MagicMock()  # spec omitted: Flet Page, complex __init__
     tab.vm = MagicMock(spec=DataSourceViewModel)
     tab._tm = MagicMock(spec=TaskManager)

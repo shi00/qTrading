@@ -43,7 +43,6 @@ class _DummyPage:
         self.on_disconnect: AsyncEventHandler | None = None
         self.on_error: Callable[[Any], None] | None = None
         self.title = ""
-        self.window_icon = ""
         self.padding = 0
         self.toast = None
         self.controls = []
@@ -57,22 +56,22 @@ class _DummyPage:
     def update(self):
         self.updated_count += 1
 
-    def open(self, dialog):
-        self.current_dialog = dialog
-        dialog.open = True
-        self.update()
-
-    def close(self, dialog):
-        if self.current_dialog is dialog:
-            self.current_dialog = None
-        dialog.open = False
-        self.update()
-
     def clean(self):
         self.controls = []
 
     def run_task(self, coro, *args):
         self.run_task_calls.append((coro, args))
+
+    def show_dialog(self, dialog):
+        self.current_dialog = dialog
+        dialog.open = True
+        self.update()
+
+    def pop_dialog(self):
+        if self.current_dialog is not None:
+            self.current_dialog.open = False
+            self.current_dialog = None
+        self.update()
 
 
 class _FakeCoordinator:
@@ -221,9 +220,9 @@ class TestMainWindowDestroyError:
         assert any("destroy ignored" in msg.lower() or "Window destroy" in msg for msg in logger_spy.debugs)
 
 
-class TestMainScheduleAsync:
+class TestMainRunTask:
     @pytest.mark.asyncio
-    async def test_schedule_async_with_run_task(self, monkeypatch):
+    async def test_run_task_direct_call(self, monkeypatch):
         _prepare_main(monkeypatch)
 
         class _PageWithRunTask(_DummyPage):
@@ -507,8 +506,8 @@ class TestMainLocaleChangeUpdate:
         # Verify initial English texts
         assert dialog.title.value == "Confirm Exit"
         assert dialog.content.value == "Confirm exit?"
-        assert dialog.actions[0].text == "Cancel"
-        assert dialog.actions[1].text == "Confirm"
+        assert dialog.actions[0].content == "Cancel"
+        assert dialog.actions[1].content == "Confirm"
 
         # Simulate changing locale to zh_CN
         app_main.I18n.set_locale("zh_CN")
@@ -516,8 +515,8 @@ class TestMainLocaleChangeUpdate:
         # Verify texts updated to Chinese
         assert dialog.title.value == "确认退出"
         assert dialog.content.value == "确认退出吗？"
-        assert dialog.actions[0].text == "取消"
-        assert dialog.actions[1].text == "确认"
+        assert dialog.actions[0].content == "取消"
+        assert dialog.actions[1].content == "确认"
 
         # Verify unsubscription on disconnect
         on_disconnect = cast(AsyncEventHandler, page.on_disconnect)

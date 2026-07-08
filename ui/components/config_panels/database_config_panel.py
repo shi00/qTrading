@@ -132,7 +132,7 @@ class DatabaseConfigPanel(ft.Container):
             on_change=self._on_input_change,
         )
 
-        self.status_icon = ft.Icon(visible=False, size=16)
+        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
         self.status_text = ft.Text(
             "",
             size=12,
@@ -146,14 +146,14 @@ class DatabaseConfigPanel(ft.Container):
             text_align=ft.TextAlign.CENTER,
         )
 
-        self.btn_test = ft.ElevatedButton(
+        self.btn_test = ft.Button(
             I18n.get("db_test_connection"),
             icon=ft.Icons.POWER,
             on_click=self._on_test_click,
             style=AppStyles.secondary_button(),
         )
 
-        self.btn_save = ft.ElevatedButton(
+        self.btn_save = ft.Button(
             I18n.get("common_save"),
             icon=ft.Icons.SAVE,
             on_click=self._on_save_click,

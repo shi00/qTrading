@@ -1,9 +1,9 @@
-﻿# AStockScreener (QTrading) - 智能 A 股 AI 量化交易员
+# AStockScreener (QTrading) - 智能 A 股 AI 量化交易员
 
 [![CI/CD](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml/badge.svg)](https://github.com/shi00/qTrading/actions/workflows/ci_cd.yml)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)](https://github.com/shi00/qTrading)
 [![Coverage](https://img.shields.io/badge/coverage-85%25%2B-brightgreen)](https://github.com/shi00/qTrading)
-[![UI](https://img.shields.io/badge/UI-Flet-00d2b4)](https://github.com/shi00/qTrading)
+[![UI](https://img.shields.io/badge/UI-Flet%200.85.3-00d2b4)](https://github.com/shi00/qTrading)
 [![Data Engine](https://img.shields.io/badge/Data-Polars-orange)](https://github.com/shi00/qTrading)
 [![AI Engine](https://img.shields.io/badge/AI-Local%20%2B%20Cloud-blueviolet)](https://github.com/shi00/qTrading)
 

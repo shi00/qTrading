@@ -491,56 +491,53 @@ class TestShutdownCoordinatorContinuesOnCriticalFailure:
         assert len(coordinator.step_results) == 8
 
 
-class TestScheduleAsyncGcProtection:
-    """P1-2: Verify _schedule_async holds strong reference to prevent GC.
+class TestPageRunTaskWiring:
+    """P5-7: Verify page.run_task direct wiring (replaces _schedule_async shim).
 
-    The fix adds a module-level _scheduled_tasks set that holds strong
-    references to tasks created via asyncio.create_task, preventing them
-    from being garbage-collected before completion.
+    The _schedule_async shim and _scheduled_tasks set were removed in batch 4
+    (§13.A item 1). page.run_task is now called directly. These tests verify
+    the MockFletPage.run_task stub semantics that production code relies on:
+    1. Returns a Task-like object with .cancel() method
+    2. Closes the coroutine without awaiting (mock semantics, see mock_flet.py)
+    3. Tracks tasks in page._tasks list
     """
 
-    @pytest.mark.asyncio
-    async def test_scheduled_task_held_in_set(self):
-        completed = False
+    def test_run_task_returns_cancellable_task(self):
+        from tests.unit.ui.mock_flet import MockFletPage
+
+        page = MockFletPage()
 
         async def _coro():
-            nonlocal completed
-            completed = True
+            pass
 
-        _scheduled_tasks: set = set()
+        task = page.run_task(_coro)
+        assert hasattr(task, "cancel")
+        assert callable(task.cancel)
 
-        def _schedule_async(coro):
-            task = asyncio.create_task(coro())
-            _scheduled_tasks.add(task)
-            task.add_done_callback(_scheduled_tasks.discard)
-            return task
+    def test_run_task_closes_coroutine_without_awaiting(self):
+        from tests.unit.ui.mock_flet import MockFletPage
 
-        task = _schedule_async(_coro)
-        assert task in _scheduled_tasks
-
-        await asyncio.sleep(0.05)
-        assert completed
-        assert task not in _scheduled_tasks
-
-    @pytest.mark.asyncio
-    async def test_multiple_tasks_tracked(self):
-        count = 0
+        page = MockFletPage()
+        body_executed = False
 
         async def _coro():
-            nonlocal count
-            count += 1
+            nonlocal body_executed
+            body_executed = True
 
-        _scheduled_tasks: set = set()
+        page.run_task(_coro)
+        # MockFletPage.run_task closes the coroutine without awaiting,
+        # so the body never executes. This is intentional (see mock_flet.py).
+        assert body_executed is False
 
-        def _schedule_async(coro):
-            task = asyncio.create_task(coro())
-            _scheduled_tasks.add(task)
-            task.add_done_callback(_scheduled_tasks.discard)
-            return task
+    def test_run_task_tracks_multiple_tasks(self):
+        from tests.unit.ui.mock_flet import MockFletPage
 
-        [_schedule_async(_coro) for _ in range(5)]
-        assert len(_scheduled_tasks) == 5
+        page = MockFletPage()
 
-        await asyncio.sleep(0.05)
-        assert count == 5
-        assert len(_scheduled_tasks) == 0
+        async def _coro():
+            pass
+
+        tasks = [page.run_task(_coro) for _ in range(5)]
+        assert len(page._tasks) == 5
+        for t in tasks:
+            assert hasattr(t, "cancel")

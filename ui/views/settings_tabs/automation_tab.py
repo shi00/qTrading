@@ -47,7 +47,7 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=auto_update_time,
             options=self._build_time_options(),
-            on_change=self.on_schedule_time_change,
+            on_select=self.on_schedule_time_change,
             disabled=not auto_update_enabled,
         )
 
@@ -70,7 +70,7 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=ai_concept_time,
             options=self._build_time_options(),
-            on_change=self.on_ai_concept_time_change,
+            on_select=self.on_ai_concept_time_change,
             disabled=not ai_concept_enabled,
         )
 
@@ -86,7 +86,7 @@ class AutomationTab(ft.Container):
             width=_DROPDOWN_WIDTH,
             value=ai_concept_search_engine,
             options=self._build_search_engine_options(),
-            on_change=self.on_ai_concept_search_engine_change,
+            on_select=self.on_ai_concept_search_engine_change,
             disabled=not ai_concept_enabled,
         )
 
@@ -282,7 +282,7 @@ class AutomationTab(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[AutomationTab] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str | None = None):
+    def _on_locale_change(self):
         """语言变更回调
 
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
@@ -475,7 +475,7 @@ class NotificationsTab(ft.Container):
             width=AppStyles.CONTROL_WIDTH_MD,
             value=str(news_interval),
             options=self._build_interval_options(),
-            on_change=self.on_interval_change,
+            on_select=self.on_interval_change,
             disabled=not enable_news,
         )
 
@@ -575,7 +575,7 @@ class NotificationsTab(ft.Container):
             self._locale_subscription_id = None
             logger.debug("[NotificationsTab] Unsubscribed from locale changes")
 
-    def _on_locale_change(self, new_locale: str | None = None):
+    def _on_locale_change(self):
         """语言变更回调
 
         Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全

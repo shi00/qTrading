@@ -167,7 +167,7 @@ class MarketDashboard(ft.Column):
         for container in self.concepts_row.controls:
             if isinstance(container, ft.Container) and container.data is not None:
                 container.bgcolor = AppColors.SURFACE
-                container.border = ft.border.all(1, AppColors.BORDER)
+                container.border = ft.Border.all(1, AppColors.BORDER)
                 # Text inside might need update too...
                 # Ideally update_data handles everything if we clear controls?
                 # actually update_data rebuilds concept controls if data exists.
@@ -340,7 +340,7 @@ class MarketDashboard(ft.Column):
             padding=15,
             bgcolor=AppColors.SURFACE,
             border_radius=4,
-            border=ft.border.all(1, AppColors.BORDER),
+            border=ft.Border.all(1, AppColors.BORDER),
             col={"xs": 6, "sm": 4, "md": 3, "lg": 2},
             data={
                 "name": name_txt,
@@ -374,8 +374,8 @@ class MarketDashboard(ft.Column):
 
         # Update Icon
         target_icon = ft.Icons.TRENDING_UP if is_up else ft.Icons.TRENDING_DOWN
-        if refs["icon"].name != target_icon:
-            refs["icon"].name = target_icon
+        if refs["icon"].icon != target_icon:
+            refs["icon"].icon = target_icon
             refs["icon"].color = color
         elif refs["icon"].color != color:
             refs["icon"].color = color

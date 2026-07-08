@@ -88,7 +88,7 @@ class LocalModelConfigPanel(ft.Container):
         )
 
         self.btn_select_file = ft.OutlinedButton(
-            text=I18n.get("settings_btn_select_file"),
+            content=I18n.get("settings_btn_select_file"),
             icon=ft.Icons.FOLDER_OPEN,
             on_click=self._on_select_file_click,
         )
@@ -138,7 +138,7 @@ class LocalModelConfigPanel(ft.Container):
             value=str(local_cfg.get("n_batch", 512)),
             options=[ft.dropdown.Option(str(x)) for x in [512, 1024, 2048, 4096]],
             width=_INPUT_WIDTH_SMALL,
-            on_change=self._on_input_change,
+            on_select=self._on_input_change,
         )
 
         self.ctx_input = ft.Dropdown(
@@ -146,7 +146,7 @@ class LocalModelConfigPanel(ft.Container):
             value=str(local_cfg.get("n_ctx", 4096)),
             options=[ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]],
             width=_INPUT_WIDTH_SMALL,
-            on_change=self._on_input_change,
+            on_select=self._on_input_change,
         )
 
         self.flash_attn_switch = ft.Switch(
@@ -155,7 +155,7 @@ class LocalModelConfigPanel(ft.Container):
             on_change=self._on_input_change,
         )
 
-        self.status_icon = ft.Icon(visible=False, size=16)
+        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
         self.status_text = ft.Text(
             value="",
             size=12,
@@ -168,22 +168,22 @@ class LocalModelConfigPanel(ft.Container):
             stroke_width=2,
         )
 
-        self.verify_button = ft.ElevatedButton(
-            text=I18n.get("wizard_btn_verify_model"),
+        self.verify_button = ft.Button(
+            content=I18n.get("wizard_btn_verify_model"),
             on_click=self._on_verify_click,
             icon=ft.Icons.CHECK_CIRCLE,
             style=AppStyles.secondary_button(),
         )
 
-        self.save_button = ft.ElevatedButton(
-            text=I18n.get("settings_save_config"),
+        self.save_button = ft.Button(
+            content=I18n.get("settings_save_config"),
             on_click=self._on_save_click,
             icon=ft.Icons.SAVE,
             visible=self._show_save_button,
             style=AppStyles.primary_button(),
         )
 
-        self.file_picker = ft.FilePicker(on_result=self._on_file_picked)
+        self.file_picker = ft.FilePicker()
 
         self._advanced_title = ft.Text(
             I18n.get("ai_advanced_settings"),
@@ -243,7 +243,7 @@ class LocalModelConfigPanel(ft.Container):
                     run_spacing=15,
                 ),
             ],
-            initially_expanded=False,
+            expanded=False,
         )
 
         self._header_text = SectionHeader(I18n.get("settings_sec_local_ai"), title_key="settings_sec_local_ai")
@@ -300,7 +300,7 @@ class LocalModelConfigPanel(ft.Container):
             self.content = ft.Container(
                 content=form_content,
                 width=550,
-                alignment=ft.alignment.center,
+                alignment=ft.Alignment.CENTER,
             )
         else:
             self.content = form_content
@@ -310,8 +310,9 @@ class LocalModelConfigPanel(ft.Container):
             try:
                 if isinstance(e.control, ft.Slider):
                     val = e.control.value
-                    e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
-                    e.control.update()
+                    if val is not None:
+                        e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
+                        e.control.update()
             except AttributeError:
                 pass
 
@@ -340,16 +341,15 @@ class LocalModelConfigPanel(ft.Container):
         self.flash_attn_switch.value = local_cfg.get("flash_attn", True)
         self._safe_update()
 
-    def _on_select_file_click(self, e):
-        if self.page:
-            self.file_picker.pick_files(
-                allowed_extensions=["gguf"],
-                dialog_title=I18n.get("settings_btn_select_file"),
-            )
-
-    def _on_file_picked(self, e: ft.FilePickerResultEvent):
-        if e.files and len(e.files) > 0:
-            self.model_path_input.value = e.files[0].path
+    async def _on_select_file_click(self, e):
+        if not self.page:
+            return
+        result = await self.file_picker.pick_files(
+            allowed_extensions=["gguf"],
+            dialog_title=I18n.get("settings_btn_select_file"),
+        )
+        if result and result.files and len(result.files) > 0:
+            self.model_path_input.value = result.files[0].path
             self._safe_update()
             if self.on_change:
                 self.on_change()
@@ -560,15 +560,15 @@ class LocalModelConfigPanel(ft.Container):
 
     def did_mount(self):
         if self.page:
-            self.page.overlay.append(self.file_picker)
+            self.page.services.append(self.file_picker)
             self.page.update()
 
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
         logger.debug("[LocalModelConfigPanel] Subscribed to locale changes")
 
     def will_unmount(self):
-        if self.page and getattr(self, "file_picker", None) in self.page.overlay:
-            self.page.overlay.remove(self.file_picker)
+        if self.page and getattr(self, "file_picker", None) in self.page.services:
+            self.page.services.remove(self.file_picker)
             self.page.update()
 
         if self._locale_subscription_id:
@@ -586,7 +586,7 @@ class LocalModelConfigPanel(ft.Container):
             if hasattr(self, "model_path_input"):
                 self.model_path_input.label = I18n.get("settings_local_model_path")
             if hasattr(self, "btn_select_file"):
-                self.btn_select_file.text = I18n.get("settings_btn_select_file")
+                self.btn_select_file.content = I18n.get("settings_btn_select_file")
             if hasattr(self, "timeout_input"):
                 self.timeout_input.label = I18n.get("settings_local_ai_timeout")
             if hasattr(self, "gpu_auto_switch"):
@@ -598,9 +598,9 @@ class LocalModelConfigPanel(ft.Container):
             if hasattr(self, "flash_attn_switch"):
                 self.flash_attn_switch.label = I18n.get("settings_local_flash_attn")
             if hasattr(self, "verify_button"):
-                self.verify_button.text = I18n.get("wizard_btn_verify_model")
+                self.verify_button.content = I18n.get("wizard_btn_verify_model")
             if hasattr(self, "save_button"):
-                self.save_button.text = I18n.get("settings_save_config")
+                self.save_button.content = I18n.get("settings_save_config")
             if hasattr(self, "_header_text"):
                 self._header_text.update_locale()
             if hasattr(self, "_desc_text"):

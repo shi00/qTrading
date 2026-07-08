@@ -109,7 +109,6 @@ class TestSafeOpenUrlSnackBar:
         e.data = url
         e.control = MagicMock()
         e.control.page = MagicMock()
-        e.control.page.overlay = []
         return e
 
     @patch("ui.components._markdown_safe.webbrowser.open")
@@ -117,10 +116,8 @@ class TestSafeOpenUrlSnackBar:
         e = self._make_event_with_page("https://evil.com/phish")
         safe_open_url(e)
         mock_open.assert_not_called()
-        # SnackBar 应被添加到 page.overlay
-        assert len(e.control.page.overlay) == 1
-        # page.update 应被调用以渲染 SnackBar
-        e.control.page.update.assert_called_once()
+        # SnackBar 应通过 page.show_dialog 显示
+        assert e.control.page.show_dialog.called
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_whitelisted_url_does_not_show_snack_bar(self, mock_open):
@@ -128,8 +125,7 @@ class TestSafeOpenUrlSnackBar:
         safe_open_url(e)
         mock_open.assert_called_once_with("https://eastmoney.com/stock")
         # 白名单链接不应触发 SnackBar
-        assert len(e.control.page.overlay) == 0
-        e.control.page.update.assert_not_called()
+        assert not e.control.page.show_dialog.called
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_non_whitelisted_url_without_page_falls_back_to_log(self, mock_open):
@@ -143,6 +139,6 @@ class TestSafeOpenUrlSnackBar:
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_snack_bar_exception_falls_back_to_log(self, mock_open):
         e = self._make_event_with_page("https://evil.com/phish")
-        e.control.page.update.side_effect = RuntimeError("page closed")
+        e.control.page.show_dialog.side_effect = RuntimeError("page closed")
         safe_open_url(e)
         mock_open.assert_not_called()

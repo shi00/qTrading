@@ -99,8 +99,14 @@ def mock_config_handler():
     return m
 
 
-def set_page(control, page):
-    control._Control__page = page
+def set_page(control: ft.Control, page: ft.Page | MockFletPage) -> None:
+    # NOTE(lazy): 测试侧 set_page helper，写入 _mock_page 由 mock_flet 桩读取.
+    # ceiling: 测试套件（仅 tests/unit/ui/ 与 tests/integration/ 路径导入 mock_flet 时生效）.
+    # upgrade: 与 mock_flet._install_v1_compat_control_page_mock 同步移除，
+    #     测试代码改用 PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
+    # V1 兼容：写入 __dict__['_mock_page']，由 mock_flet.py 的 page getter 读取。
+    # V0 用 _Control__page（name-mangled self.__page），V1 的 page property 不再读它。
+    control._mock_page = page
 
 
 def wrap_mock_page(mock_page):

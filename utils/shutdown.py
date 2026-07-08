@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from collections.abc import Callable
 
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -290,10 +292,15 @@ class ShutdownCoordinator:
                 ok=False,
                 timed_out=True,
                 elapsed_ms=elapsed_ms,
-                error=str(ex),
+                error=DataSanitizer.sanitize_error(ex),
             )
         except Exception as ex:
-            logger.error("[Shutdown] %s failed: %s", name, ex, exc_info=True)
+            logger.warning(
+                "[Shutdown] %s failed (likely shutdown-related): %s",
+                name,
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             elapsed_ms = (time.perf_counter() - start) * 1000
             return StepResult(
                 name=name,
@@ -301,7 +308,7 @@ class ShutdownCoordinator:
                 ok=False,
                 timed_out=False,
                 elapsed_ms=elapsed_ms,
-                error=str(ex),
+                error=DataSanitizer.sanitize_error(ex),
             )
 
     async def _step0_cancel_tasks(self):

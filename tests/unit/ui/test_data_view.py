@@ -129,6 +129,27 @@ class TestDataExplorerView:
         assert hasattr(view, "tabs")
 
     @pytest.mark.asyncio
+    async def test_lazy_build_ui_uses_v1_tabs_three_piece_set(self, mock_page):
+        """R12.b V1 三件套验证：_lazy_build_ui 创建的 tabs 是 ft.Tabs + ft.TabBar + ft.TabBarView。"""
+        view = self._make_view()
+        set_page(view, wrap_mock_page(mock_page))
+        await view._lazy_build_ui()
+
+        # view.tabs 是 ft.Tabs（V1 三件套容器）
+        assert isinstance(view.tabs, ft.Tabs)
+        assert view.tabs.length == 2
+        assert view.tabs.selected_index == 0
+        # V1 三件套：content 是 ft.Column，含 ft.TabBar + ft.TabBarView
+        assert isinstance(view.tabs.content, ft.Column)
+        assert len(view.tabs.content.controls) == 2
+        assert isinstance(view.tabs.content.controls[0], ft.TabBar)
+        assert len(view.tabs.content.controls[0].tabs) == 2
+        assert isinstance(view.tabs.content.controls[1], ft.TabBarView)
+        assert len(view.tabs.content.controls[1].controls) == 2
+        # _tab_bar 引用应与 tabs.content.controls[0] 是同一对象（供 refresh_locale 更新 label）
+        assert view._tab_bar is view.tabs.content.controls[0]
+
+    @pytest.mark.asyncio
     async def test_lazy_build_ui_without_page(self):
         view = self._make_view()
         await view._lazy_build_ui()
@@ -365,14 +386,14 @@ class TestTableViewerTab:
         assert len(tab.data_table.rows) == 1
         containers = [cell.content for cell in tab.data_table.rows[0].cells if isinstance(cell.content, ft.Container)]
         assert all(c.width != 400 for c in containers), "存在 cell 硬编码 width=400"
-        news_containers = [c for c in containers if c.alignment == ft.alignment.top_left]
+        news_containers = [c for c in containers if c.alignment == ft.Alignment.TOP_LEFT]
         assert news_containers, "未找到新闻 cell（top_left 对齐的 Container）"
         assert news_containers[0].expand is True, "新闻 cell 应使用 expand=True"
 
     def test_toolbar_row_has_right_padding(self, mock_page):
         """§6.3：工具栏 Row（scroll=AUTO）末端应有 8px 右侧留白防止内容贴边被裁切。
 
-        Flet 0.28.3 的 Row 不支持 padding 参数，以 Row 末端追加 width=8 的
+        Flet 0.85.3 的 Row 不支持 padding 参数，以 Row 末端追加 width=8 的
         Container 间隔实现等价右侧留白（同时覆盖滚动与非滚动两种布局）。
         """
         tab = self._make_tab()

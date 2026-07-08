@@ -63,7 +63,7 @@ class TierApiPanel(ft.Column):
 
     def _build_ui(self) -> None:  # pragma: no cover - UI 渲染
         """构建 UI: 档位选择 + 提示文案 + API 列表 + probe 状态 + 触发按钮 + stale 提示。"""
-        # 1. 档位下拉框（与 system_tab 5 档保持一致；on_change 触发档位变更全链路）
+        # 1. 档位下拉框（与 system_tab 5 档保持一致；on_select 触发档位变更全链路）
         self.tier_dropdown = ft.Dropdown(
             label=I18n.get("sys_label_point_tier"),
             value=self._current_tier,
@@ -72,7 +72,7 @@ class TierApiPanel(ft.Column):
             border_radius=8,
             content_padding=10,
             options=self._build_tier_options(),
-            on_change=self._on_tier_dropdown_change,
+            on_select=self._on_tier_dropdown_change,
         )
 
         # 2. 提示文案
@@ -84,8 +84,8 @@ class TierApiPanel(ft.Column):
         )
 
         # 3. 触发探测按钮
-        self.probe_button = ft.ElevatedButton(
-            text=I18n.get("sys_tier_probe_button"),
+        self.probe_button = ft.Button(
+            content=I18n.get("sys_tier_probe_button"),
             icon=ft.Icons.SYNC_ROUNDED,
             on_click=self.on_probe_button_clicked,
             style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
@@ -337,7 +337,7 @@ class TierApiPanel(ft.Column):
             refresh_dropdown_options(self.tier_dropdown, self._build_tier_options())
             self.tier_dropdown.label = I18n.get("sys_label_point_tier")
             self.points_hint_text.value = I18n.get("sys_tier_points_hint")
-            self.probe_button.text = I18n.get("sys_tier_probe_button")
+            self.probe_button.content = I18n.get("sys_tier_probe_button")
             self.last_probe_text.value = self._format_last_probe_text()
             self.stale_hint_text.value = self._format_stale_hint_text()
             self.panel_title.value = I18n.get("sys_tier_panel_title")

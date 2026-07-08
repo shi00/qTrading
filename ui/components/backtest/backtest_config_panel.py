@@ -62,12 +62,12 @@ class BacktestConfigPanel(ft.Container):
         self.end_date_value = today
 
         self.start_date_btn = ft.OutlinedButton(
-            text=one_year_ago.strftime("%Y-%m-%d"),
+            content=one_year_ago.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
             on_click=self._show_start_picker,
         )
         self.end_date_btn = ft.OutlinedButton(
-            text=today.strftime("%Y-%m-%d"),
+            content=today.strftime("%Y-%m-%d"),
             icon=ft.Icons.CALENDAR_TODAY,
             on_click=self._show_end_picker,
         )
@@ -145,8 +145,8 @@ class BacktestConfigPanel(ft.Container):
         )
         self.slippage_text = ft.Text("5 bps", size=12, color=AppColors.TEXT_SECONDARY)
 
-        self.run_btn = ft.ElevatedButton(
-            text=I18n.get("backtest_run"),
+        self.run_btn = ft.Button(
+            content=I18n.get("backtest_run"),
             icon=ft.Icons.PLAY_ARROW,
             on_click=self._on_run_click,
             style=ft.ButtonStyle(
@@ -158,14 +158,8 @@ class BacktestConfigPanel(ft.Container):
         self.content = self._build_content()
 
     def did_mount(self):
-        """挂载时：将对话框安全地绑定到全局 overlay"""
+        """挂载时：DatePicker 在 V1 通过 page.show_dialog 打开，无需预挂载 overlay。"""
         super().did_mount()
-        if self.page:
-            if self.start_date_picker not in self.page.overlay:
-                self.page.overlay.append(self.start_date_picker)
-            if self.end_date_picker not in self.page.overlay:
-                self.page.overlay.append(self.end_date_picker)
-            self.page.update()
 
     def refresh_locale(self):
         """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。"""
@@ -193,7 +187,7 @@ class BacktestConfigPanel(ft.Container):
             )
             self.max_position_input.label = I18n.get("backtest_max_positions")
             self.stamp_duty_auto_checkbox.label = I18n.get("backtest_stamp_duty_auto")
-            self.run_btn.text = I18n.get("backtest_run")
+            self.run_btn.content = I18n.get("backtest_run")
             # 重建 content 以刷新所有内联 ft.Text(I18n.get(...)) 文案
             self.content = self._build_content()
             if self.page:
@@ -202,28 +196,16 @@ class BacktestConfigPanel(ft.Container):
             logger.warning("[BacktestConfigPanel] refresh_locale error: %s", e, exc_info=True)
 
     def will_unmount(self):
-        """卸载时：确保关闭并清理对话框"""
+        """卸载时：DatePicker 不再挂载 overlay，无需清理。"""
         super().will_unmount()
-        if not self.page:
-            return
-
-        needs_update = False
-        for picker in (self.start_date_picker, self.end_date_picker):
-            if getattr(self, "page", None) and picker in self.page.overlay:
-                picker.open = False  # 确保合规关闭，避免前端撕裂
-                self.page.overlay.remove(picker)
-                needs_update = True
-
-        if needs_update:
-            self.page.update()
 
     def _show_start_picker(self, e):
         if getattr(self, "page", None):
-            self.page.open(self.start_date_picker)
+            self.page.show_dialog(self.start_date_picker)
 
     def _show_end_picker(self, e):
         if getattr(self, "page", None):
-            self.page.open(self.end_date_picker)
+            self.page.show_dialog(self.end_date_picker)
 
     def _build_content(self) -> ft.Column:
         return ft.Column(
@@ -352,13 +334,13 @@ class BacktestConfigPanel(ft.Container):
     def _on_start_date_change(self, e):
         if e.control.value:
             self.start_date_value = e.control.value
-            self.start_date_btn.text = self.start_date_value.strftime("%Y-%m-%d")
+            self.start_date_btn.content = self.start_date_value.strftime("%Y-%m-%d")
             self.start_date_btn.update()
 
     def _on_end_date_change(self, e):
         if e.control.value:
             self.end_date_value = e.control.value
-            self.end_date_btn.text = self.end_date_value.strftime("%Y-%m-%d")
+            self.end_date_btn.content = self.end_date_value.strftime("%Y-%m-%d")
             self.end_date_btn.update()
 
     def _on_stamp_duty_auto_change(self, e):

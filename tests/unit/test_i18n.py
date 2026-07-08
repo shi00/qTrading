@@ -706,8 +706,12 @@ class TestRefreshDropdownOptions:
         assert dropdown.value is None
         assert len(dropdown.options) == 1
 
-    def test_update_raises_assertion_swallows_error(self):
-        """control.update() 抛 AssertionError（未挂载）时静默处理"""
+    def test_update_raises_unexpected_exception_propagates(self):
+        """control.update() 抛非预期异常（如 AssertionError）时必须传播，不得吞没
+
+        实现仅吞 RuntimeError（V1 未挂载）/ AttributeError（V0 兼容），
+        其他异常（编程错误）必须传播以暴露 bug，符合 CLAUDE.md §1.3 合理异常处理。
+        """
         from unittest.mock import patch
 
         import flet as ft
@@ -715,15 +719,12 @@ class TestRefreshDropdownOptions:
         from ui.i18n import refresh_dropdown_options
 
         dropdown = ft.Dropdown(value="dark")
-        with patch.object(dropdown, "update", side_effect=AssertionError("not added to page")):
-            # 不应抛出异常
-            refresh_dropdown_options(
-                dropdown,
-                [ft.dropdown.Option("dark", "Dark")],
-            )
-
-        # value 仍然恢复
-        assert dropdown.value == "dark"
+        with patch.object(dropdown, "update", side_effect=AssertionError("bug")):
+            with pytest.raises(AssertionError, match="bug"):
+                refresh_dropdown_options(
+                    dropdown,
+                    [ft.dropdown.Option("dark", "Dark")],
+                )
 
     def test_update_raises_generic_exception_swallows_error(self):
         """control.update() 抛其他异常时静默处理"""

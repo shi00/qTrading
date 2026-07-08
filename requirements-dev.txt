@@ -99,11 +99,14 @@ filelock==3.29.1
     # via
     #   cachecontrol
     #   huggingface-hub
-flet==0.28.3
+flet==0.85.3
     # via
     #   astockscreener (pyproject.toml)
+    #   flet-charts
     #   flet-desktop
-flet-desktop==0.28.3
+flet-charts==0.85.3
+    # via astockscreener (pyproject.toml)
+flet-desktop==0.85.3
     # via astockscreener (pyproject.toml)
 fonttools==4.63.0
     # via matplotlib
@@ -208,6 +211,7 @@ msgpack==1.2.1
     # via
     #   astockscreener (pyproject.toml)
     #   cachecontrol
+    #   flet
 multidict==6.7.1
     # via
     #   aiohttp
@@ -223,7 +227,7 @@ numpy==2.5.1
     #   matplotlib
     #   pandas
     #   pandas-stubs
-oauthlib==3.3.1 ; platform_system != 'Pyodide'
+oauthlib==3.3.1 ; sys_platform != 'emscripten'
     # via flet
 openai==2.41.0
     # via litellm

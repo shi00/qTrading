@@ -29,15 +29,14 @@ class TableViewerTab(ft.Container):
     def __init__(self, viewmodel: DataExplorerViewModel):
         super().__init__()
         self.vm = viewmodel
-        self._pending_export_df = None  # Temp storage for export data
 
-        self.save_file_picker = ft.FilePicker(on_result=self._on_save_file_result)  # pragma: no cover
+        self.save_file_picker = ft.FilePicker()  # pragma: no cover
 
         # UI Elements
         self.table_selector = ft.Dropdown(  # pragma: no cover
             width=250,  # pragma: no cover
             label=I18n.get("data_select_table"),  # pragma: no cover
-            on_change=self._on_table_changed,  # pragma: no cover
+            on_select=self._on_table_changed,  # pragma: no cover
             disabled=True,  # pragma: no cover
             bgcolor=AppColors.INPUT_BG,  # pragma: no cover
             color=AppColors.INPUT_TEXT,  # pragma: no cover
@@ -139,17 +138,17 @@ class TableViewerTab(ft.Container):
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
                 spacing=4,  # pragma: no cover
             ),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             expand=True,  # pragma: no cover
             padding=40,  # pragma: no cover
             bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),  # pragma: no cover
             border_radius=12,  # pragma: no cover
-            border=ft.border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),  # pragma: no cover
+            border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),  # pragma: no cover
         )  # pragma: no cover
 
         self.data_table = ft.DataTable(  # pragma: no cover
             columns=[  # pragma: no cover
-                ft.DataColumn(ft.Text(I18n.get("data_loading"))),  # pragma: no cover
+                ft.DataColumn(label=ft.Text(I18n.get("data_loading"))),  # pragma: no cover
             ],  # pragma: no cover
             rows=[],  # pragma: no cover
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
@@ -163,7 +162,7 @@ class TableViewerTab(ft.Container):
             divider_thickness=0,  # pragma: no cover
             show_checkbox_column=False,  # pragma: no cover
             border_radius=8,  # pragma: no cover
-            border=ft.border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
         )  # pragma: no cover
 
         # Scrollable table wrapper
@@ -213,7 +212,7 @@ class TableViewerTab(ft.Container):
                         spacing=5,  # pragma: no cover
                     ),  # pragma: no cover
                     padding=5,  # pragma: no cover
-                    border=ft.border.all(1, AppColors.BORDER),  # pragma: no cover
+                    border=ft.Border.all(1, AppColors.BORDER),  # pragma: no cover
                     border_radius=8,  # pragma: no cover
                     bgcolor=AppColors.SURFACE,  # pragma: no cover
                 ),  # pragma: no cover
@@ -223,7 +222,7 @@ class TableViewerTab(ft.Container):
                     tooltip=I18n.get("common_more_actions"),  # pragma: no cover
                     items=[  # pragma: no cover
                         ft.PopupMenuItem(  # pragma: no cover
-                            text=I18n.get("data_export_current"),  # pragma: no cover
+                            content=I18n.get("data_export_current"),  # pragma: no cover
                             icon=ft.Icons.DOWNLOAD,  # pragma: no cover
                             on_click=lambda e: self.page.run_task(  # type: ignore[union-attr]  # pragma: no cover
                                 self._export_csv,  # pragma: no cover
@@ -231,7 +230,7 @@ class TableViewerTab(ft.Container):
                             ),  # pragma: no cover
                         ),  # pragma: no cover
                         ft.PopupMenuItem(  # pragma: no cover
-                            text=I18n.get("data_export_all"),  # pragma: no cover
+                            content=I18n.get("data_export_all"),  # pragma: no cover
                             icon=ft.Icons.DRIVE_FILE_MOVE,  # pragma: no cover
                             on_click=lambda e: self.page.run_task(  # pragma: no cover
                                 self._export_csv,  # pragma: no cover
@@ -240,7 +239,7 @@ class TableViewerTab(ft.Container):
                         ),  # pragma: no cover
                     ],  # pragma: no cover
                 ),  # pragma: no cover
-                # 右侧留白：ft.Row 不支持 padding（Flet 0.28.3），用 Container 间隔器替代
+                # 右侧留白：ft.Row 不支持 padding（Flet 0.85.3），用 Container 间隔器替代
                 ft.Container(width=8),  # pragma: no cover
             ],  # pragma: no cover
             alignment=ft.MainAxisAlignment.START,  # pragma: no cover
@@ -290,9 +289,9 @@ class TableViewerTab(ft.Container):
                 ],  # pragma: no cover
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
             ),  # pragma: no cover
-            padding=ft.padding.symmetric(horizontal=20, vertical=5),  # pragma: no cover
+            padding=ft.Padding.symmetric(horizontal=20, vertical=5),  # pragma: no cover
             bgcolor=AppColors.SURFACE,  # pragma: no cover
-            border=ft.border.only(top=ft.border.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
+            border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
         )  # pragma: no cover
 
         return ft.Column(  # pragma: no cover
@@ -306,13 +305,13 @@ class TableViewerTab(ft.Container):
             return
         self._mounted = True
         if self.page:
-            self.page.overlay.append(self.save_file_picker)
+            self.page.services.append(self.save_file_picker)
             self.page.update()
 
     def will_unmount(self):  # pragma: no cover
         self._mounted = False
-        if self.page and getattr(self, "save_file_picker", None) in self.page.overlay:
-            self.page.overlay.remove(self.save_file_picker)
+        if self.page and getattr(self, "save_file_picker", None) in self.page.services:
+            self.page.services.remove(self.save_file_picker)
             self.page.update()
 
     def refresh_locale(self):
@@ -359,7 +358,7 @@ class TableViewerTab(ft.Container):
                 self._update_pagination_ui()
             else:
                 # 加载占位文案
-                self.data_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_loading")))]
+                self.data_table.columns = [ft.DataColumn(label=ft.Text(I18n.get("data_loading")))]
                 self.data_table.rows = []
 
             if self.page:
@@ -478,6 +477,9 @@ class TableViewerTab(ft.Container):
 
     def _rebuild_table_columns(self):  # pragma: no cover
         """Rebuild DataTable columns from vm.table_columns and vm.numeric_cols."""
+        # 先清除 sort_column_index，避免 columns 被清空后 Dart 端 DataTable
+        # 同步状态时引用已失效的列索引触发 "Null check operator" 异常。
+        self.data_table.sort_column_index = None
         self.data_table.columns = []
         for idx, col in enumerate(self.vm.table_columns):
             is_numeric = col in self.vm.numeric_cols
@@ -493,7 +495,7 @@ class TableViewerTab(ft.Container):
                             color=AppColors.TABLE_HEADER_TEXT,
                             text_align=ft.TextAlign.CENTER,
                         ),
-                        alignment=ft.alignment.center,
+                        alignment=ft.Alignment.CENTER,
                         expand=True,
                         on_click=lambda e, i=idx: self.page.run_task(  # type: ignore[untyped]
                             self._on_sort,
@@ -553,14 +555,14 @@ class TableViewerTab(ft.Container):
                 if is_long_text:
                     cell_container = ft.Container(
                         content=cell_text,
-                        alignment=ft.alignment.top_left,
+                        alignment=ft.Alignment.TOP_LEFT,
                         expand=True,  # 自适应宽度确保换行
-                        padding=ft.padding.symmetric(vertical=5),
+                        padding=ft.Padding.symmetric(vertical=5),
                     )
                 else:
                     cell_container = ft.Container(
                         content=cell_text,
-                        alignment=ft.alignment.center,
+                        alignment=ft.Alignment.CENTER,
                         expand=True,
                     )
 
@@ -673,32 +675,13 @@ class TableViewerTab(ft.Container):
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             default_filename = f"{self.vm.current_table}{suffix}_{timestamp}.csv"
 
-            self._pending_export_df = df
-            self.save_file_picker.save_file(
+            filepath = await self.save_file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
                 file_name=default_filename,
                 allowed_extensions=["csv"],
             )
 
-        except Exception as e:
-            logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
-            logger.debug("Export failed traceback", exc_info=True)
-            self.page.show_toast(  # type: ignore[untyped]
-                I18n.get("data_export_fail"),
-                "error",
-            )
-            await self._toggle_loading(False)
-
-    def _on_save_file_result(self, e: ft.FilePickerResultEvent):  # pragma: no cover
-        if not self.page:
-            self._pending_export_df = None
-            return
-
-        if e.path and self._pending_export_df is not None:
-            df = self._pending_export_df
-            self._pending_export_df = None
-
-            async def _do_save(filepath):
+            if filepath:
                 try:
                     await ThreadPoolManager().run_async(
                         TaskType.CPU,
@@ -713,13 +696,15 @@ class TableViewerTab(ft.Container):
                         I18n.get("data_export_fail"),
                         "error",
                     )
-                finally:
-                    await self._toggle_loading(False)
-
-            self.page.run_task(_do_save, e.path)  # type: ignore[untyped]
-        else:
-            self._pending_export_df = None
-            self.page.run_task(self._toggle_loading, False)  # type: ignore[untyped]
+        except Exception as e:
+            logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Export failed traceback", exc_info=True)
+            self.page.show_toast(  # type: ignore[untyped]
+                I18n.get("data_export_fail"),
+                "error",
+            )
+        finally:
+            await self._toggle_loading(False)
 
     def update_theme(self):  # pragma: no cover
         """Update styles on theme change"""
@@ -742,7 +727,7 @@ class TableViewerTab(ft.Container):
         self.data_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
         self.data_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
         self.data_table.heading_row_color = AppColors.TABLE_HEADER_BG
-        self.data_table.border = ft.border.all(1, AppColors.TABLE_BORDER)
+        self.data_table.border = ft.Border.all(1, AppColors.TABLE_BORDER)
 
         for col in self.data_table.columns:
             if isinstance(col.label, ft.Container) and isinstance(
@@ -793,7 +778,7 @@ class SQLConsoleTab(ft.Container):
             ),  # pragma: no cover
         )  # pragma: no cover
 
-        self.btn_run = ft.ElevatedButton(  # pragma: no cover
+        self.btn_run = ft.Button(  # pragma: no cover
             I18n.get("data_sql_execute"),  # pragma: no cover
             icon=ft.Icons.PLAY_ARROW,  # pragma: no cover
             style=AppStyles.primary_button(),  # pragma: no cover
@@ -808,12 +793,12 @@ class SQLConsoleTab(ft.Container):
         )  # pragma: no cover
 
         self.result_table = ft.DataTable(  # pragma: no cover
-            columns=[ft.DataColumn(ft.Text(I18n.get("data_sql_result")))],  # pragma: no cover
+            columns=[ft.DataColumn(label=ft.Text(I18n.get("data_sql_result")))],  # pragma: no cover
             rows=[],  # pragma: no cover
             vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
             horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),  # pragma: no cover
             heading_row_color=AppColors.TABLE_HEADER_BG,  # pragma: no cover
-            border=ft.border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
+            border=ft.Border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
             column_spacing=20,  # pragma: no cover
             visible=False,  # pragma: no cover
         )  # pragma: no cover
@@ -833,7 +818,7 @@ class SQLConsoleTab(ft.Container):
                 alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
             ),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             visible=True,  # pragma: no cover
         )  # pragma: no cover
 
@@ -883,8 +868,8 @@ class SQLConsoleTab(ft.Container):
                     ),  # pragma: no cover
                     padding=10,  # pragma: no cover
                     bgcolor=AppColors.SURFACE,  # pragma: no cover
-                    border=ft.border.only(  # pragma: no cover
-                        bottom=ft.border.BorderSide(1, AppColors.BORDER),  # pragma: no cover
+                    border=ft.Border.only(  # pragma: no cover
+                        bottom=ft.BorderSide(1, AppColors.BORDER),  # pragma: no cover
                     ),  # pragma: no cover
                 ),  # pragma: no cover
                 ft.Container(  # pragma: no cover
@@ -919,11 +904,11 @@ class SQLConsoleTab(ft.Container):
             MetaDataManager.invalidate_cache()
             self.sql_editor.label = I18n.get("data_sql_label")
             self.sql_editor.hint_text = I18n.get("data_sql_hint")
-            self.btn_run.text = I18n.get("data_sql_execute")
+            self.btn_run.content = I18n.get("data_sql_execute")
             self.empty_hint_text.value = I18n.get("data_sql_empty_hint")
             self.date_fmt_hint_text.value = I18n.get("data_date_fmt_hint")
-            self.btn_count.text = I18n.get("data_btn_count")
-            self.result_table.columns = [ft.DataColumn(ft.Text(I18n.get("data_sql_result")))]
+            self.btn_count.content = I18n.get("data_btn_count")
+            self.result_table.columns = [ft.DataColumn(label=ft.Text(I18n.get("data_sql_result")))]
             if self.page:
                 self.update()
         except Exception as e:
@@ -977,7 +962,7 @@ class SQLConsoleTab(ft.Container):
                 # Rebuild Table on Main Thread
                 self.result_table.columns = [
                     ft.DataColumn(
-                        ft.Text(
+                        label=ft.Text(
                             MetaDataManager.get_column_alias(None, col),
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.TABLE_HEADER_TEXT,
@@ -1056,7 +1041,7 @@ class SQLConsoleTab(ft.Container):
         self.result_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
         self.result_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
         self.result_table.heading_row_color = AppColors.TABLE_HEADER_BG
-        self.result_table.border = ft.border.all(1, AppColors.TABLE_BORDER)
+        self.result_table.border = ft.Border.all(1, AppColors.TABLE_BORDER)
 
         for col in self.result_table.columns:
             if isinstance(col.label, ft.Text):
@@ -1109,7 +1094,7 @@ class DataExplorerView(ft.Container):
                 alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
             ),  # pragma: no cover
-            alignment=ft.alignment.center,  # pragma: no cover
+            alignment=ft.Alignment.CENTER,  # pragma: no cover
             expand=True,  # pragma: no cover
         )  # pragma: no cover
 
@@ -1151,11 +1136,12 @@ class DataExplorerView(ft.Container):
         try:
             self._loading_text.value = I18n.get("data_loading")
             if hasattr(self, "tabs"):
-                # 刷新 Tabs 标题
-                if len(self.tabs.tabs) >= 1:
-                    self.tabs.tabs[0].text = I18n.get("data_tab_explorer")
-                if len(self.tabs.tabs) >= 2:
-                    self.tabs.tabs[1].text = I18n.get("data_tab_sql")
+                # 刷新 Tabs 标题（V1: 通过 _tab_bar.tabs 访问，label 替代 text）
+                if hasattr(self, "_tab_bar"):
+                    if len(self._tab_bar.tabs) >= 1:
+                        self._tab_bar.tabs[0].label = I18n.get("data_tab_explorer")
+                    if len(self._tab_bar.tabs) >= 2:
+                        self._tab_bar.tabs[1].label = I18n.get("data_tab_sql")
                 # 级联调用子 tab 的 refresh_locale
                 if hasattr(self, "table_tab"):
                     self.table_tab.refresh_locale()
@@ -1165,6 +1151,22 @@ class DataExplorerView(ft.Container):
                 self.update()
         except Exception as e:
             logger.warning("[DataExplorerView] refresh_locale error: %s", e, exc_info=True)
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:  # pragma: no cover - UI 事件
+        """窗口 resize 通知（§5.9 规范3）。
+
+        本视图布局全部依赖 expand=True 自动适应，无需手动调整尺寸。
+        子 tab 若实现 handle_resize，则级联调用以确保响应式布局同步。
+        """
+        if not self._ui_built:
+            return
+        try:
+            if hasattr(self, "table_tab") and hasattr(self.table_tab, "handle_resize"):
+                self.table_tab.handle_resize(width, height)
+            if hasattr(self, "sql_tab") and hasattr(self.sql_tab, "handle_resize"):
+                self.sql_tab.handle_resize(width, height)
+        except Exception as exc:
+            logger.debug("[DataExplorerView] handle_resize skipped: %s", exc, exc_info=True)
 
     async def did_mount_async(self):  # pragma: no cover
         import time as _time
@@ -1215,23 +1217,36 @@ class DataExplorerView(ft.Container):
             self.table_tab = TableViewerTab(self.vm)
             self.sql_tab = SQLConsoleTab(self.vm)
 
-            self.tabs = ft.Tabs(  # pragma: no cover
-                selected_index=0,  # pragma: no cover
-                animation_duration=300,  # pragma: no cover
+            # V1 Tabs 三件套：Tabs + TabBar + TabBarView（R12.b spike 定稿）
+            # 存储 _tab_bar 引用供 refresh_locale 更新 label
+            self._tab_bar = ft.TabBar(  # pragma: no cover
                 tabs=[  # pragma: no cover
                     ft.Tab(  # pragma: no cover
-                        text=I18n.get("data_tab_explorer"),  # pragma: no cover
+                        label=I18n.get("data_tab_explorer"),  # pragma: no cover
                         icon=ft.Icons.TABLE_CHART,  # pragma: no cover
-                        content=self.table_tab,  # pragma: no cover
                     ),  # pragma: no cover
                     ft.Tab(  # pragma: no cover
-                        text=I18n.get("data_tab_sql"),  # pragma: no cover
+                        label=I18n.get("data_tab_sql"),  # pragma: no cover
                         icon=ft.Icons.CODE,  # pragma: no cover
-                        content=self.sql_tab,  # pragma: no cover
                     ),  # pragma: no cover
                 ],  # pragma: no cover
+            )  # pragma: no cover
+            self.tabs = ft.Tabs(  # pragma: no cover
+                length=2,  # pragma: no cover
+                selected_index=0,  # pragma: no cover
+                animation_duration=300,  # pragma: no cover
                 expand=True,  # pragma: no cover
                 on_change=self._on_tab_changed,  # pragma: no cover
+                content=ft.Column(  # pragma: no cover
+                    expand=True,  # pragma: no cover
+                    controls=[  # pragma: no cover
+                        self._tab_bar,  # pragma: no cover
+                        ft.TabBarView(  # pragma: no cover
+                            expand=True,  # pragma: no cover
+                            controls=[self.table_tab, self.sql_tab],  # pragma: no cover
+                        ),  # pragma: no cover
+                    ],  # pragma: no cover
+                ),  # pragma: no cover
             )  # pragma: no cover
 
             # Swap content

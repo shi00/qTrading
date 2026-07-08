@@ -100,15 +100,26 @@ def test_load_width_exception_fallback(make_splitter):
 
 
 def test_drag_update_increments_width(splitter):
-    """delta_x 正向增量更新 _current_width。"""
-    splitter._on_drag_update(MockDragUpdateEvent(delta_x=50))
+    """primary_delta 正向增量更新 _current_width。"""
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=50))
     assert splitter._current_width == DEFAULT_WIDTH + 50
 
 
 def test_drag_update_negative_delta(splitter):
-    """delta_x 负向减量更新 _current_width。"""
-    splitter._on_drag_update(MockDragUpdateEvent(delta_x=-30))
+    """primary_delta 负向减量更新 _current_width。"""
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=-30))
     assert splitter._current_width == DEFAULT_WIDTH - 30
+
+
+def test_drag_update_local_delta_fallback(splitter):
+    """R13 回退路径：primary_delta 为 None 时使用 local_delta.x。
+
+    覆盖 V0 mock 或边界场景：当事件仅提供 local_delta.x 而无 primary_delta 时，
+    splitter 应正确回退并更新宽度（静默回归修复）。
+    """
+    local_delta = MagicMock(x=40)
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=None, local_delta=local_delta))
+    assert splitter._current_width == DEFAULT_WIDTH + 40
 
 
 # --- 5. Python 级节流 ---
@@ -119,13 +130,13 @@ def test_drag_update_throttle_ui_and_callback(make_splitter):
     on_resize = MagicMock()
     s = make_splitter(on_resize=on_resize, drag_interval=16)
     # 让 _left_container.page 为真值，使 update 分支可达
-    s._left_container._Control__page = MagicMock()
+    s._left_container._mock_page = MagicMock()
     s._left_container.update = MagicMock()
 
     # 连续 3 次快速拖动（间隔 < 16ms）
-    s._on_drag_update(MockDragUpdateEvent(delta_x=10))
-    s._on_drag_update(MockDragUpdateEvent(delta_x=10))
-    s._on_drag_update(MockDragUpdateEvent(delta_x=10))
+    s._on_drag_update(MockDragUpdateEvent(primary_delta=10))
+    s._on_drag_update(MockDragUpdateEvent(primary_delta=10))
+    s._on_drag_update(MockDragUpdateEvent(primary_delta=10))
 
     # 宽度跟随鼠标（3 次增量均生效）
     assert s._current_width == DEFAULT_WIDTH + 30
@@ -175,14 +186,14 @@ def test_exit_exception_no_raise(splitter, caplog):
 
 
 def test_drag_update_clamp_to_max(splitter):
-    """delta_x 使宽度超过 max_width 时 clamp 到 max_width。"""
-    splitter._on_drag_update(MockDragUpdateEvent(delta_x=1000))
+    """primary_delta 使宽度超过 max_width 时 clamp 到 max_width。"""
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=1000))
     assert splitter._current_width == MAX_WIDTH
 
 
 def test_drag_update_clamp_to_min(splitter):
-    """delta_x 使宽度低于 min_width 时 clamp 到 min_width。"""
-    splitter._on_drag_update(MockDragUpdateEvent(delta_x=-1000))
+    """primary_delta 使宽度低于 min_width 时 clamp 到 min_width。"""
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=-1000))
     assert splitter._current_width == MIN_WIDTH
 
 
@@ -192,7 +203,7 @@ def test_drag_update_clamp_to_min(splitter):
 def test_double_tap_resets_to_default(splitter):
     """双击恢复 default_width 并持久化。"""
     # 先拖动改变宽度
-    splitter._on_drag_update(MockDragUpdateEvent(delta_x=50))
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=50))
     assert splitter._current_width == DEFAULT_WIDTH + 50
     # 双击重置
     with patch("utils.config_handler.ConfigHandler.set_typed", return_value=True) as mock_set:
@@ -207,7 +218,7 @@ def test_double_tap_resets_to_default(splitter):
 
 def test_drag_end_persists_width(splitter):
     """_on_drag_end 调用 ConfigHandler.set_typed 持久化当前宽度。"""
-    splitter._on_drag_update(MockDragUpdateEvent(delta_x=40))
+    splitter._on_drag_update(MockDragUpdateEvent(primary_delta=40))
     with patch("utils.config_handler.ConfigHandler.set_typed", return_value=True) as mock_set:
         splitter._on_drag_end(MockDragUpdateEvent())
     mock_set.assert_called_once_with(CONFIG_KEY, DEFAULT_WIDTH + 40)

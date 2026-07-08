@@ -190,8 +190,6 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#004D40",
         tertiary="#64B5F6",
         surface="#1E1E1E",
-        surface_variant="#2D2D2D",
-        background="#121212",
         error="#FF1744",
         error_container="#93000A",
         on_primary="#FFFFFF",
@@ -200,7 +198,6 @@ THEME_COLOR_SCHEMES = {
         on_secondary_container="#A7FFEB",
         on_surface="#FFFFFF",
         on_surface_variant="#B0B0B0",
-        on_background="#FFFFFF",
         on_error="#FFFFFF",
         outline="#333333",
         outline_variant="#2C2C2C",
@@ -217,8 +214,6 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#B2DFDB",
         tertiary="#1976D2",
         surface="#FFFFFF",
-        surface_variant="#ECEFF1",
-        background="#F5F7FA",
         error="#D32F2F",
         error_container="#FFDAD6",
         on_primary="#FFFFFF",
@@ -227,7 +222,6 @@ THEME_COLOR_SCHEMES = {
         on_secondary_container="#004D40",
         on_surface="#212121",
         on_surface_variant="#757575",
-        on_background="#212121",
         on_error="#FFFFFF",
         outline="#E0E0E0",
         outline_variant="#EEEEEE",
@@ -244,8 +238,6 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#134E4A",
         tertiary="#7DD3FC",
         surface="#1E293B",
-        surface_variant="#334155",
-        background="#16213E",
         error="#F87171",
         error_container="#7F1D1D",
         on_primary="#0F172A",
@@ -254,7 +246,6 @@ THEME_COLOR_SCHEMES = {
         on_secondary_container="#CCFBF1",
         on_surface="#F1F5F9",
         on_surface_variant="#94A3B8",
-        on_background="#F1F5F9",
         on_error="#0F172A",
         outline="#334155",
         outline_variant="#1E293B",
@@ -271,8 +262,6 @@ THEME_COLOR_SCHEMES = {
         secondary_container="#44475A",
         tertiary="#8BE9FD",  # Cyan
         surface="#282A36",  # Background
-        surface_variant="#44475A",  # Current Line
-        background="#282A36",  # Background
         error="#FF5555",  # Red
         error_container="#44475A",
         on_primary="#282A36",
@@ -281,7 +270,6 @@ THEME_COLOR_SCHEMES = {
         on_secondary_container="#FF79C6",
         on_surface="#F8F8F2",  # Foreground
         on_surface_variant="#6272A4",  # Comment
-        on_background="#F8F8F2",
         on_error="#282A36",
         outline="#6272A4",
         outline_variant="#44475A",
@@ -450,6 +438,12 @@ class AppStyles:
     COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
     COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
 
+    # --- Responsive Breakpoints (响应式断点，见 CONTRIBUTING.md §5.9 规范 1) ---
+    # 基于 handle_resize 接收的 width 参数的 4 级断点（min_width=1280 约束下）
+    BREAKPOINT_COMPACT = 1200  # < 此值视为紧凑模式（min_width=1280 下不可达）
+    BREAKPOINT_STANDARD = 1600  # < 此值视为标准模式
+    BREAKPOINT_ULTRA_WIDE = 2400  # ≥ 此值视为超宽屏
+
     @staticmethod
     def card(
         padding: int = 15,
@@ -464,7 +458,7 @@ class AppStyles:
             "padding": padding,
         }
         if with_border:
-            style["border"] = ft.border.all(1, ft.Colors.OUTLINE)
+            style["border"] = ft.Border.all(1, ft.Colors.OUTLINE)
 
         if with_shadow:
             style["shadow"] = ft.BoxShadow(
@@ -482,7 +476,7 @@ class AppStyles:
             "bgcolor": ft.Colors.SURFACE,
             "border_radius": 4,
             "padding": padding,
-            "border": ft.border.all(1, ft.Colors.OUTLINE),
+            "border": ft.Border.all(1, ft.Colors.OUTLINE),
             "shadow": ft.BoxShadow(
                 spread_radius=0,
                 blur_radius=10,
@@ -497,7 +491,7 @@ class AppStyles:
             color=ft.Colors.ON_PRIMARY,
             icon_color=ft.Colors.ON_PRIMARY,
             bgcolor=ft.Colors.PRIMARY,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             elevation=0,
             text_style=ft.TextStyle(weight=ft.FontWeight.BOLD),
@@ -508,7 +502,7 @@ class AppStyles:
         return ft.ButtonStyle(
             color=ft.Colors.PRIMARY,
             bgcolor=ft.Colors.TRANSPARENT,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             side=ft.BorderSide(1, ft.Colors.PRIMARY),
             elevation=0,
@@ -519,7 +513,7 @@ class AppStyles:
         return ft.ButtonStyle(
             color=ft.Colors.ON_SECONDARY,
             bgcolor=ft.Colors.SECONDARY,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             elevation=0,
             text_style=ft.TextStyle(weight=ft.FontWeight.BOLD),
@@ -530,7 +524,7 @@ class AppStyles:
         return ft.ButtonStyle(
             color=ft.Colors.PRIMARY,
             bgcolor=ft.Colors.TRANSPARENT,
-            padding=ft.padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
             shape=ft.RoundedRectangleBorder(radius=2),
             side=ft.BorderSide(1, ft.Colors.PRIMARY),
             overlay_color=ft.Colors.with_opacity(0.1, ft.Colors.PRIMARY),

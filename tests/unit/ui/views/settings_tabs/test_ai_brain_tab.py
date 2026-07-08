@@ -815,9 +815,9 @@ class TestAIBrainTabLocaleChange:
 
         tab._on_locale_change()
 
-        assert tab.btn_reset_prompt.text == "settings_reset_prompt"
-        assert tab.btn_reset_news_prompt.text == "settings_reset_prompt"
-        assert tab.btn_save_ai.text == "settings_save_ai"
+        assert tab.btn_reset_prompt.content == "settings_reset_prompt"
+        assert tab.btn_reset_news_prompt.content == "settings_reset_prompt"
+        assert tab.btn_save_ai.content == "settings_save_ai"
 
     def test_on_locale_change_preserves_input_values(self):
         tab = self._make_tab()

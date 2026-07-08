@@ -59,7 +59,7 @@ class TestTierApiPanel:
             patch("ui.views.settings_tabs.tier_api_panel.AppStyles", self.mock_as),
             patch("ui.views.settings_tabs.tier_api_panel.SystemViewModel", spec=SystemViewModel),
             patch("data.external.tushare_client.TushareClient", return_value=self.mock_client),
-            patch("flet.core.control.Control.update"),  # no-op: Flet update() requires page binding
+            patch("flet.controls.control.Control.update"),  # no-op: Flet update() requires page binding
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -103,13 +103,13 @@ class TestTierApiPanel:
         assert options is not None
         assert len(options) == 5
         # 第一个 option 的 text 应包含 "translated_" 前缀（i18n.get 返回值）
-        # Flet 0.28.3：ft.dropdown.Option(key, text=...) 第二参数为 text
+        # Flet 0.85.3：ft.dropdown.Option(key, text=...) 第二参数为 text
         first_option_text = options[0].text if options[0].text else str(options[0].key)
         assert "translated_" in first_option_text
 
         # 验证关键文案已更新
         assert panel.points_hint_text.value == "translated_sys_tier_points_hint"
-        assert panel.probe_button.text == "translated_sys_tier_probe_button"
+        assert panel.probe_button.content == "translated_sys_tier_probe_button"
         assert panel.panel_title.value == "translated_sys_tier_panel_title"
 
     def test_tier_api_panel_dispose_unsubscribes(self, mock_page):
@@ -231,7 +231,8 @@ class TestTierApiPanel:
         # ResponsiveRow.controls[0] 是 Container，content 是 Row，Row.controls 含 [Text, Icon]
         api_name_container = controls[0].controls[0]
         api_row = api_name_container.content
-        has_badge = any(getattr(c, "name", None) == ft.Icons.ATTACH_MONEY_ROUNDED for c in api_row.controls)
+        # V1: ft.Icon 用 icon 属性存储图标（V0 用 name）
+        has_badge = any(getattr(c, "icon", None) == ft.Icons.ATTACH_MONEY_ROUNDED for c in api_row.controls)
         assert has_badge
 
     # ------------------------------------------------------------------

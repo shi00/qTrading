@@ -47,7 +47,6 @@ class _DummyPage:
         self.on_disconnect: AsyncEventHandler | None = None
         self.on_error: Callable[[Any], None] | None = None
         self.title = ""
-        self.window_icon = ""
         self.padding = 0
         self.toast = None
         self.controls = []
@@ -60,15 +59,27 @@ class _DummyPage:
     def update(self):
         self.updated_count += 1
 
-    def open(self, dialog):
+    def run_task(self, coro, *args):
+        # V1: main.py 直接调用 page.run_task(_perform_window_shutdown) 调度协程。
+        # 测试需要协程真正执行以验证 coordinator 调用，故用 loop.create_task 调度。
+        try:
+            loop = asyncio.get_event_loop()
+            if asyncio.iscoroutine(coro):
+                loop.create_task(coro)
+            elif asyncio.iscoroutinefunction(coro):
+                loop.create_task(coro(*args))
+        except RuntimeError:
+            pass
+
+    def show_dialog(self, dialog):
         self.current_dialog = dialog
         dialog.open = True
         self.update()
 
-    def close(self, dialog):
-        if self.current_dialog is dialog:
+    def pop_dialog(self):
+        if self.current_dialog is not None:
+            self.current_dialog.open = False
             self.current_dialog = None
-        dialog.open = False
         self.update()
 
 

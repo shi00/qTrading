@@ -4,6 +4,7 @@ from datetime import date, datetime
 from unittest.mock import MagicMock, patch
 
 import flet as ft
+import flet_charts as fch
 import polars as pl
 import pytest
 
@@ -153,6 +154,27 @@ class TestBacktestResultPanel:
         assert isinstance(content, ft.Column)
         assert len(content.controls) == 3
 
+    def test_build_content_uses_v1_tabs_three_piece_set(
+        self, panel: BacktestResultPanel, sample_result: BacktestResult
+    ) -> None:
+        """R12.b V1 三件套验证：_build_content 返回的 Column 含 ft.Tabs + ft.TabBar + ft.TabBarView。"""
+        panel._result = sample_result
+
+        content = panel._build_content()
+
+        # 第 3 个控件是 ft.Tabs（前两个是 metrics_section 和 Divider）
+        tabs_control = content.controls[2]
+        assert isinstance(tabs_control, ft.Tabs)
+        assert tabs_control.length == 4
+        assert tabs_control.selected_index == 0
+        # V1 三件套：content 是 ft.Column，含 ft.TabBar + ft.TabBarView
+        assert isinstance(tabs_control.content, ft.Column)
+        assert len(tabs_control.content.controls) == 2
+        assert isinstance(tabs_control.content.controls[0], ft.TabBar)
+        assert len(tabs_control.content.controls[0].tabs) == 4
+        assert isinstance(tabs_control.content.controls[1], ft.TabBarView)
+        assert len(tabs_control.content.controls[1].controls) == 4
+
     def test_build_content_without_result(self, panel: BacktestResultPanel) -> None:
         panel._result = None
 
@@ -229,7 +251,7 @@ class TestBacktestResultPanel:
         container = panel._build_nav_chart()
 
         assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.LineChart)
+        assert isinstance(container.content, fch.LineChart)
 
     def test_build_nav_chart_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
         panel._result = empty_result
@@ -277,7 +299,7 @@ class TestBacktestResultPanel:
         container = panel._build_ic_chart()
 
         assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.BarChart)
+        assert isinstance(container.content, fch.BarChart)
 
     def test_build_ic_chart_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
         panel._result = empty_result

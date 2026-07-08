@@ -232,6 +232,10 @@ class HomeView(ft.Container):
         except Exception as e:
             logger.error("[HomeView] Theme | ❌ Update failed: %s", e, exc_info=True)
 
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口尺寸变化时调整布局。HomeView 内容自适应，无需响应式调整。"""
+        # No responsive adjustment needed — dashboard 和 news_feed 使用 expand 自适应
+
     # --- Data Loading Logic ---
 
     async def _init_and_load(self):  # pragma: no cover
