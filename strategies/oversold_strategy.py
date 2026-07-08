@@ -10,6 +10,7 @@ from strategies.ai_mixin import AIStrategyMixin, PreFetchedContext
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from core.i18n import I18n
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr, qfq_ratio_series
 from utils.technical_analysis import TechnicalAnalysis
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -146,6 +147,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     # ============================================================
     # Main Filter Logic
     # ============================================================
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     @require_quality(QualityTier.SILVER)
     async def filter(self, context: StrategyContext):
         """
@@ -363,6 +365,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     # Context Builders — Strategy-specific enhancements
     # ============================================================
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _prefetch_strategy_specific(
         self, candidates_df: pd.DataFrame, context: dict, prefetched: PreFetchedContext
     ) -> PreFetchedContext:

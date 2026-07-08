@@ -21,6 +21,7 @@ from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from alembic import command
 from utils.error_classifier import classify_error, classify_severity
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ class DatabaseMigrator:
         return auto_migrate in ("1", "true", "yes")
 
     @classmethod
+    @log_async_operation(threshold_ms=PerfThreshold.GLOBAL_INIT)
     async def init_db(cls, engine: typing.Any, auto_migrate: bool | None = None):
         """Initialize and optionally upgrade database schema.
 
@@ -135,6 +137,7 @@ class DatabaseMigrator:
         await cls._run_alembic_upgrade(engine)
 
     @classmethod
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _heal_orphaned_revision(cls, engine: typing.Any) -> None:
         """Detect and fix orphaned alembic revision.
 
@@ -203,6 +206,7 @@ class DatabaseMigrator:
         return str(engine_url).replace("+asyncpg", "")
 
     @classmethod
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_head_revision(cls) -> str:
         """Get the latest Alembic revision."""
         alembic_cfg = cls._get_alembic_config()
@@ -211,6 +215,7 @@ class DatabaseMigrator:
         return head if head else ""
 
     @classmethod
+    @log_async_operation(threshold_ms=PerfThreshold.GLOBAL_INIT)
     async def _run_alembic_upgrade(cls, engine: typing.Any) -> None:
         """Run Alembic upgrade to head.
 
@@ -272,6 +277,7 @@ class DatabaseMigrator:
             logger.warning("[DatabaseMigrator] Schema version is None after migration, this is unexpected.")
 
     @classmethod
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def check_schema_status(cls, engine: typing.Any) -> tuple[str | None, str, bool]:
         """Check if schema needs migration.
 
@@ -283,6 +289,7 @@ class DatabaseMigrator:
         return current_rev, head_rev, current_rev != head_rev
 
     @classmethod
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_current_revision(cls, engine: typing.Any) -> str | None:
         """Get current schema version from alembic_version table.
 

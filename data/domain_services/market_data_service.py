@@ -190,6 +190,7 @@ class MarketDataService:
         """
         return self._cached_data  # type: ignore[return-value]
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _poll_loop(self):
         """主轮询循环"""
         # 首次立即执行一次
@@ -210,6 +211,7 @@ class MarketDataService:
                 logger.warning("[MarketDataService] Poll loop cancelled during shutdown.")
                 raise
 
+    @log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)
     async def _safe_fetch(self):
         """安全获取数据（带异常处理）"""
         if not self._running:
@@ -341,6 +343,7 @@ class MarketDataService:
                 except Exception as e:
                     logger.error("[MarketDataService] Listener error: %s", DataSanitizer.sanitize_error(e))
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_indices_batch(self, codes: list[str], date: str) -> list[dict]:
         """批量获取指数数据 - 1次DB/API调用替代N次"""
         if not codes:
@@ -391,6 +394,7 @@ class MarketDataService:
             "color": "grey",
         }
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_hsgt(self, date: str) -> dict:
         """获取北向资金数据 - 优先从缓存获取，缓存无数据时调用 API"""
         df = await self.cache.get_moneyflow_hsgt(trade_date=date)

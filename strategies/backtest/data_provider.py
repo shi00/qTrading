@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from utils.log_decorators import PerfThreshold, log_async_operation
 from data.persistence.quality_gate import QualityTier
 
 if TYPE_CHECKING:
@@ -66,6 +67,7 @@ class BacktestDataProvider:
         self._preloaded: dict | None = None
         self.preload_max_days = preload_max_days
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def preload_range(self, start_date: date, end_date: date):
         """一次性预取整个回测区间的各类数据到内存中，提升回测速度"""
         # 兼容处理输入参数类型并转为 date 对象
@@ -165,6 +167,7 @@ class BacktestDataProvider:
             logger.error("[BacktestDataProvider] Failed to preload range: %s", e, exc_info=True)
             self._preloaded = None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def build_context(
         self,
         trade_date: date,
@@ -199,6 +202,7 @@ class BacktestDataProvider:
             context["data_processor"] = self._quality_proxy
         return context
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _build_historical_screening_context(
         self,
         trade_date: date,
@@ -308,6 +312,7 @@ class BacktestDataProvider:
 
         return context
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_screening_data(self, trade_date: str) -> pd.DataFrame | None:
         """
         获取当日 screening_data（行情数据）。
@@ -329,6 +334,7 @@ class BacktestDataProvider:
             logger.warning("[BacktestDataProvider] Failed to get screening_data for %s: %s", trade_date, e)
             return None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_fundamental_screening_data(self, trade_date: str) -> pd.DataFrame | None:
         """
         获取当日 fundamental_screening_data（基本面数据）。
@@ -356,6 +362,7 @@ class BacktestDataProvider:
             return value
         return str(value)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_stock_meta(self) -> dict[str, dict]:
         """BT-002: 加载 stock_basic 元数据，包含 delist_date 字段。
 

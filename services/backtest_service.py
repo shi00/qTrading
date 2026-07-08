@@ -19,6 +19,7 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from utils.log_decorators import PerfThreshold, log_async_operation
 from data.cache.cache_manager import CacheManager
 
 if TYPE_CHECKING:
@@ -52,6 +53,7 @@ class BacktestService:
         self._engine_factory = engine_factory
         self._strategy_lookup = strategy_lookup
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_backtest(
         self,
         strategy_key: str,
@@ -79,6 +81,7 @@ class BacktestService:
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def run_backtest_with_strategy(
         self,
         strategy: BaseStrategy,
@@ -102,6 +105,7 @@ class BacktestService:
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_result(self, result: BacktestResult) -> BacktestResult:
         try:
             result_dict = result.to_persist_dict()
@@ -173,9 +177,11 @@ class BacktestService:
             logger.debug("[BacktestService] Failed to get app version: %s", e, exc_info=True)
             return "dev"
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def get_result(self, run_id: str) -> dict | None:
         return await self.cache.backtest_dao.get_result(run_id)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def list_results(
         self,
         strategy_name: str | None = None,
@@ -186,5 +192,6 @@ class BacktestService:
             limit=limit,
         )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def delete_result(self, run_id: str) -> bool:
         return await self.cache.backtest_dao.delete_result(run_id)

@@ -16,9 +16,11 @@
   - [安装步骤](#安装步骤)
   - [数据库设置](#数据库设置)
   - [常用开发与测试命令](#常用开发与测试命令)
+  - [交付前 DoD 自检清单](#交付前-dod-自检清单)
   - [代码风格基础](#代码风格基础)
   - [提交信息规范](#提交信息规范)
 - [第三部分：实现规范手册](#第三部分实现规范手册)
+  - [AI 助手方法论与项目概览](#ai-助手方法论与项目概览)
   - [单例模式实现模板](#单例模式实现模板)
   - [策略模式实现模板](#策略模式实现模板)
   - [Polars 向量化策略基类](#polars-向量化策略基类)
@@ -36,8 +38,8 @@
   - [错误处理标准模式](#错误处理标准模式)
   - [测试规范](#测试规范)
   - [CI/CD 流水线与门禁](#cicd-流水线与门禁)
-  - [语言切换响应 (I18n Hot Reload)](#语言切换响应-i18n-hot-reload)
-  - [响应式布局规范 (Responsive Layout)](#响应式布局规范-responsive-layout)
+  - [语言切换响应 (I18n Hot Reload) — 附录 A 命令式存量整改对照](#语言切换响应-i18n-hot-reload)
+  - [响应式布局规范 (Responsive Layout) — 附录 B 命令式存量整改对照](#响应式布局规范-responsive-layout)
   - [标准开发工作流 (How-To)](#标准开发工作流-how-to)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
@@ -209,6 +211,26 @@ pre-commit run --all-files
 python main.py
 ```
 
+## 交付前 DoD 自检清单
+
+每次提交前对照以下清单自检：
+
+- [ ] Ruff lint + format 通过（`ruff check .` + `ruff format --check .`）
+- [ ] Pyright 无新增 error
+- [ ] 相关单测通过（见下方「变更类型 → 最小验证子集」）
+- [ ] 无裸 `# type: ignore`（均带 `[reason]`，pre-commit 强制拦截）
+- [ ] 新增 `# NOTE(lazy):` 三要素齐全（简化内容 / ceiling / upgrade）
+- [ ] 对照 CLAUDE.md §3 红线逐条自查，无违规
+
+### 变更类型 → 最小验证子集
+
+| 改动范围 | 至少运行 |
+|---------|----------|
+| 仅 `ui/` | ruff + pyright + `tests/unit/ui/` |
+| `data/` DAO/模型 | 上述 + `tests/integration/`（需 DB）+ 若涉 schema 则 `alembic check` |
+| `strategies/` | ruff + pyright + `tests/unit/` 对应策略用例 |
+| 依赖变更 | 编辑 `pyproject.toml` → pre-commit 自动同步 `requirements*.txt` + `pip-audit` |
+
 ## 代码风格基础
 
 ### Python 代码规范
@@ -291,6 +313,93 @@ Closes #123
 # 第三部分：实现规范手册
 
 > 本部分承接 [CLAUDE.md](./CLAUDE.md) 宪法中移出的代码模板、详细规范与工作流步骤，供开发人员与 AI 编码助手按需查阅。
+
+## AI 助手方法论与项目概览
+
+> 对应 [CLAUDE.md §1.3 / §1.5 / §2 / §4.1](./CLAUDE.md)。宪法中保留方法论核心原则与决策红线，本节承接被下沉的方法论背景、详细示例、完整技术栈表与完整目录树，供需要深入查阅时使用。
+
+### 极简设计方法论背景（Lazy Ladder）
+
+CLAUDE.md §1.3 的 6 步「极简决策顺序」是对 [Ponytail](https://github.com/DietrichGebert/ponytail) 的 Lazy Ladder 方法论的简化落地。原版 Ponytail 7 层中，「平台原生能力」与「已装第三方依赖」两步针对 Python 桌面应用合并为第 4 步以简化决策。
+
+**Lazy Ladder 运行规则详解**：
+
+- 决策顺序在理解问题后运行，不替代理解。先读代码、追踪真实流程，再选最简路径。
+- 极简决策是快速反射，不是研究过程——多个层级都可行时，选最高（最懒）的层级，第一个有效懒方案就是对的。
+- 两个 stdlib 方案代码量相同时，选边界情况正确的那个；懒意味着写更少代码，不是选更脆弱的算法。
+
+**过度抽象的具体判定**（必须拒绝的形态）：
+
+- 单实现的接口（仅为「未来扩展」定义的接口）
+- 单产品的工厂（只有一个具体产品的工厂）
+- 永不变化的配置（无运行时变更需求的可配置项）
+- 单调用的层（仅被调用一次的抽象层）
+- 单次使用的辅助函数独立模块（应内联或归并到调用方）
+
+### 目标驱动与测试驱动示例
+
+CLAUDE.md §1.5 保留「非平凡逻辑必须验证」与「交付收尾原则」，本节承接测试驱动思维示例与多步规划模板。
+
+**测试驱动思维**：将每个开发任务转换为可验证的目标：
+
+- "添加输入校验" → "编写针对无效输入的测试并使其通过"。
+- "修复 Bug" → "先编写能稳定复现该 Bug 的测试，再修复代码使测试通过"。
+- "重构逻辑" → "确保重构前后的测试均完全通过"。
+
+**多步规划模板**：对于复杂或多步骤的任务，必须在动手前输出简要的步骤与验证清单：
+
+```text
+1. [步骤A] → 验证: [具体检查点/命令]
+2. [步骤B] → 验证: [具体检查点/命令]
+```
+
+### 项目完整技术栈
+
+**AStockScreener** 是一个本地化智能 A 股量化选股桌面应用，基于 Python 3.13+。以下为完整技术栈表（CLAUDE.md §2 仅保留一句话概述与高风险领域提示）：
+
+| 维度 | 技术选型 |
+|------|---------|
+| **UI 框架** | Flet 0.85.3 / Flet 1.0 (Flutter 驱动桌面应用，dataclass 控件 + 单线程 async UI 模型) |
+| **计算引擎** | Polars (策略层向量化) + Pandas (DAO 层 / 数据同步层) |
+| **数据库** | PostgreSQL 16 + SQLAlchemy 2.0 (asyncpg) |
+| **数据迁移** | Alembic (自动检测、幂等迁移、CI 强制验证 upgrade → downgrade → upgrade) |
+| **AI 推理** | LiteLLM (多家云端供应商统一网关) / llama-cpp-python (本地 GGUF) |
+| **数据源** | Tushare Pro (核心) + Akshare (补充) |
+| **任务调度** | APScheduler + 自研 `TaskManager` (优先级、持久化、UI 通知) |
+| **HTTP 客户端** | requests + httpx (异步) + urllib3 |
+| **代码质量** | Ruff (Linter + Formatter) + Pyright (类型检查) |
+| **配置验证** | Pydantic (AppConfig 模型验证 + 默认值管理) |
+| **CI/CD** | GitHub Actions (Linux + Windows 双平台，含 Windows E2E、PyInstaller 打包、依赖同步 PR) |
+| **依赖管理** | uv (`pyproject.toml` → `requirements*.txt`，`--universal` 跨平台锁定，pre-commit 自动同步) |
+
+### 完整目录结构
+
+CLAUDE.md §4.1 仅保留分层架构的依赖方向与禁止反向依赖规则，本节给出完整目录树：
+
+```text
+core/             ← 架构核心层 (i18n，不依赖任何其他层)
+app/              ← 引导层 (bootstrap: 启动初始化、服务编排，仅 main.py 调用)
+data/             ← 数据层 (DAO、同步策略、外部数据源、领域服务、缓存管理)
+  ├── cache/             缓存管理器 (CacheManager 单例，DAO 统一入口、引擎管理)
+  ├── persistence/       持久化 (DAOs、ORM 模型、数据库管理/迁移/配置、质量门控、配置/状态/元数据/复盘服务)
+  ├── domain_services/   领域服务 (交易日历、市场数据、离线日历快照、交易成本)
+  ├── external/          外部数据源 (Tushare 客户端、新闻抓取)
+  ├── sync/              数据同步策略 (历史数据、财务数据、股东数据、宏观数据)
+  ├── mixins/            数据层混入 (交易日历混入、健康检查混入)
+  ├── data_processor.py  数据处理与日历服务 (DataProcessor 单例)
+  ├── data_dictionary.py 数据字典 (表定义与元数据配置)
+  └── constants.py       数据层常量定义
+services/         ← 应用服务层 (AI 服务、任务管理器、本地模型管理、新闻订阅服务)
+strategies/       ← 策略层 (选股策略、AI 策略混入、Polars 向量化基类、Prompt 模板)
+ui/               ← 表现层 (MVVM: Views + ViewModels + Components + Theme + i18n 桥接)
+utils/            ← 工具层 (配置、安全、线程池、限流、日志、调度、代理、性能监控)
+tests/            ← 测试目录 (unit/ 单元测试, integration/ 集成测试, e2e/ 端到端测试)
+scripts/          ← 工具脚本 (覆盖率检查、安全审计、依赖同步等)
+locales/          ← 国际化资源文件
+man/              ← 架构专题文档 (数据库账号分离、表分区策略)
+```
+
+**同层内文件合并原则**：在不违反分层架构的前提下，同一职责的多个小函数可合并到一个文件，不为单次使用的辅助函数创建独立模块。但跨层合并禁止（如 `data/` 与 `ui/` 不可合并）。
 
 ## 单例模式实现模板
 
@@ -486,11 +595,11 @@ QUEUED → RUNNING → COMPLETED / FAILED / CANCELLED
 
 ### 演进方向
 
-项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 RC)。当前代码库保留少量 V0→V1 兼容垫片与 V1 渲染管线永久方案（见下文「兼容垫片使用规则」），**新开发的 UI 代码必须朝原生 V1 方式演进**，遵循以下原则：
+项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 alpha/beta)。当前代码库保留少量 V0→V1 兼容垫片与 V1 渲染管线永久方案（见下文「兼容垫片使用规则」），**新开发的 UI 代码必须朝原生 V1 方式演进**，遵循以下原则：
 
 - **不得引入新的 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）
 - **新控件优先用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非直接 `self.page = page` 赋值
-- **新代码使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`、`page.on_close` 而非 `window.on_event + CLOSE` 子事件（新代码优先选用语义更清晰的 V1 入口）
+- **新代码使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`；对话框用 `page.show_dialog()`/`page.pop_dialog()` 而非 `page.dialog=`/`page.open()`
 - **历史代码不强制重写**（§1.4 微创），仅在功能改动时顺带迁移
 
 ### 强制 API 约束（Breaking Changes）
@@ -519,6 +628,11 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；若必须在挂载前引用 page，继承 [`PageRefMixin`](./ui/v1_compat.py) | AttributeError |
 | 19 | 本地存储 | `page.client_storage` | `page.shared_preferences` | AttributeError |
 | 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `mock_flet._install_v1_compat_control_page_mock()` 全局桩兼容） | RuntimeError |
+| 21 | 窗口方法 | `page.window.destroy()`（同步） | `await page.window.destroy()`（V1 协程） | 运行期（RuntimeWarning: coroutine never awaited） |
+
+> **⚠️ 桌面关闭事件不可用 `page.on_close`**：`page.on_close` 在会话关闭/超时断开时触发，**非**用户点击窗口关闭按钮。桌面端关闭拦截必须用 `page.window.prevent_close = True` + `page.window.on_event`（监听 `ft.WindowEventType.CLOSE`），见 `main.py` 的窗口事件处理器。此为 V1 正确实现，非 V0 遗留。
+
+> **来源说明**：第 8 项（`src_base64` → `src`）与第 16 项（`delta_x` → `primary_delta`）来自 Flet 官方 issue #5238（V1 breaking changes 汇总）。
 
 ### 兼容垫片使用规则
 
@@ -529,24 +643,102 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | `PageRefMixin` | [`ui/v1_compat.py`](./ui/v1_compat.py) | 覆盖 `ft.Control.page` 只读 property，使 5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）可读写 `control.page` | 新控件应通过挂载到 `page.controls` 后由 V1 原生 `parent` 链访问 `page`；若必须在挂载前引用 page（如注册回调、读取 `page.theme_mode`），才允许继承 `PageRefMixin` |
 | `_install_v1_compat_control_page_mock()` | [`tests/unit/ui/mock_flet.py`](./tests/unit/ui/mock_flet.py) | 全局 monkey-patch `ft.Control.page`/`update`，使测试代码可注入 mock_page 且未挂载 `update()` 静默返回 | 新测试代码沿用现有桩；待测试基础设施整体重构为 V1 原生模式后再移除 |
 
-> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py)（[`ui/i18n.py`](./ui/i18n.py) L64）不是兼容垫片，而是 V1 渲染管线的永久解决方案。V1 `Prop` 描述符的值相等优化导致 `DropdownButton` 在批量 `page.update()` 中不触发 rebuild，此行为是 V1 固有特性而非临时 bug，故该函数需长期保留。i18n 热重载场景的 Dropdown 必须使用本函数。
+> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py)（`ui/i18n.py` 的 `refresh_dropdown_options()` 函数）不是兼容垫片，而是 V1 渲染管线的永久解决方案。V1 `Prop` 描述符的值相等优化导致 `DropdownButton` 在批量 `page.update()` 中不触发 rebuild，此行为是 V1 固有特性而非临时 bug，故该函数需长期保留。i18n 热重载场景的 Dropdown 必须使用本函数。
 
 > 每项垫片均遵循 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations) `# NOTE(lazy):` 标记规范。
 
+### V1 声明式 UI 开发规范
+
+> 宪法 [CLAUDE.md §3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 的唯一实现细则。
+> 命令式存量（`class X(ft.Container)` + `did_mount`/`will_unmount` + 手动 `self.update()`）一律视为技术债，整改对照见 [语言切换响应（附录 A 命令式存量整改对照）](#语言切换响应-i18n-hot-reload) 与 [响应式布局规范（附录 B 命令式存量整改对照）](#响应式布局规范-responsive-layout)。
+
+切到 Flet 0.85.3 后，新增 View/Panel/Component 必须采用声明式 `@ft.component` + 官方 hooks 写法。API 已对 `flet==0.85.3` 实测可用（见下方签名核实）。
+
+#### 1. 关注点对照（命令式作废 → 声明式要求）
+
+| 关注点 | 命令式旧写法（作废） | 声明式要求（宪法标准） |
+|--------|------|------|
+| 组件定义 | `class X(ft.Container): __init__/super()` | `@ft.component` 函数返回控件树 |
+| 状态 | 实例属性 + 手动 `self.update()` | `use_state` 状态变更自动重渲染 |
+| 生命周期/副作用 | `did_mount`/`will_unmount` | `use_effect(setup, dependencies, cleanup)` |
+| i18n 热切换 | `I18n.subscribe`/`unsubscribe` + `refresh_locale` + 手动刷新 | locale 作为声明式状态源，切换自动重渲染（不再手动订阅/刷新） |
+| 下拉刷新 | `refresh_dropdown_options` 两步 update 绕过 | 状态驱动重建 options，绕过随之删除 |
+| 响应式 | `handle_resize` 鸭子分发 + 断点手算 | 窗口尺寸作为 state/observable + `ResponsiveRow`，状态驱动布局 |
+| page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片删除 |
+
+#### 2. `@ft.component` 标准模板
+
+```python
+import flet as ft
+from core.i18n import I18n
+
+@ft.component
+def MetricCard(label_key: str):
+    # 声明式状态：值变更自动重渲染，无需手动 update()
+    value, set_value = ft.use_state(0)
+
+    # 副作用：挂载/卸载/依赖变更时执行；返回值作为 cleanup（卸载时自动调用）
+    def setup():
+        # 订阅 locale，切换时调用 set_value 触发重渲染
+        sub_id = I18n.subscribe(lambda: set_value(lambda v: v + 0))  # 触发重渲染
+        return lambda: I18n.unsubscribe(sub_id)  # 卸载时自动退订
+    ft.use_effect(setup, dependencies=[label_key])
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Text(I18n.get(label_key)),
+            ft.Text(str(value)),
+        ]),
+    )
+```
+
+#### 3. `use_state` / `use_effect` API（已对 `flet==0.85.3` 实测）
+
+- `ft.use_state(initial) -> (value, setter)`：类似 React `useState`。`setter` 接受新值，或接受接收前值返回新值的函数。
+- `ft.use_effect(setup, dependencies=None, cleanup=None)`：
+  - `setup` 为普通函数，可返回 cleanup 函数，或通过 `cleanup` 参数单独提供。
+  - `dependencies` 缺省时只在初次渲染运行；指定时按依赖变化重跑；cleanup 在重跑前与卸载时执行。
+  - hooks 必须在 `@ft.component` 渲染上下文内调用，独立调用抛 `RuntimeError: No current renderer`。
+- `ft.component(fn)` 装饰器：把函数标记为组件，返回值即控件树根节点。
+
+#### 4. i18n / 响应式声明式实现
+
+- **i18n**：locale 作为声明式状态源。组件通过 `use_state` 订阅 `I18n` 的 locale 变化（或在父组件统一管理 locale state，子组件经 props 接收），切换时自动重渲染。**不再**手动 `subscribe`/`refresh_locale`。
+- **响应式**：窗口尺寸作为 `use_state`（由根组件订阅 `page.on_resize` 更新），通过 props 下发；视图内用 `ResponsiveRow` + `col` 配置，状态驱动布局。**不再**实现 `handle_resize` 鸭子分发。
+- **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数在声明式下不再需要，存量命令式控件改造后随之删除。
+
+#### 5. 迁移约束
+
+- 旧控件**不做机械批量迁移**（§1.4 微创）；仅在因功能改动已触及某控件时，可顺带迁到声明式。
+- `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
+- async 窗口/控件方法必须 `await`。
+- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法属存量技术债，不再用于新代码。
+
 ### 依赖管理
 
-- `flet` / `flet-desktop` / `flet-charts` 三个独立包，均锁定 `==0.85.3`（见 [`pyproject.toml`](./pyproject.toml) L24-26）
+- `flet` / `flet-desktop` / `flet-charts` 三个独立包，均锁定 `==0.85.3`（见 [`pyproject.toml`](./pyproject.toml) 的 `dependencies` 中 `flet`/`flet-desktop`/`flet-charts` 三项）
 - `flet-charts` 是 V1 拆分出的图表控件独立包，新增图表控件必须 `import flet_charts as fch`
-- 版本锁定策略：`==` 精确锁定，避免 minor 版本间的 API 漂移（V1 处于 Beta/RC 阶段）
+- 版本锁定策略：`==` 精确锁定，避免 minor 版本间的 API 漂移（V1 处于 alpha/beta 阶段）
 - 升级 Flet 版本时，三个包必须同步升级
 
 ### PyInstaller 打包
 
-[`AStockScreener.spec`](./AStockScreener.spec) 的 `hiddenimports` 必须含 `flet` / `flet_desktop` / `flet_charts` 三项（L15-44）：
+[`AStockScreener.spec`](./AStockScreener.spec) 的 `hiddenimports` 列表必须含 `flet` / `flet_desktop` / `flet_charts` 三项：
 
 - `flet_charts` 是 V1 新增的独立模块，遗漏会导致打包产物 `import flet_charts` 报 ImportError
 - `flet_core` / `flet_desktop` 在 V1 已合并入 `flet`，但保守保留 `flet_desktop` 以兼容桌面打包路径
 - 新增 flet 相关 import 时，同步检查 spec 文件的 `hiddenimports` 是否覆盖
+
+### Flet 版本升级文档协同机制
+
+- `CLAUDE.md` 不记录具体 Flet API 细节，只记录升级时必须遵守的验证原则、红线与架构边界。
+- `CONTRIBUTING.md` 是 Flet API 约束、UI 开发范式、兼容垫片与测试模板的唯一细节源，必须随 `pyproject.toml` 中锁定的 Flet 版本同步更新。
+- 每次升级 Flet 小版本或大版本，必须完成：
+  1. 核对官方 breaking changes / deprecations；
+  2. 运行最小 UI 验证：启动、窗口关闭、dialog、resize、i18n 热重载、一个 V1 控件样例；
+  3. 更新 `CONTRIBUTING.md` 的 Flet 章节与对应验证清单；
+  4. 仅当升级影响红线、架构边界或 AI 行为规则时，才同步修改 `CLAUDE.md`。
+- 禁止在两份文档中重复维护同一 Flet API 细节；长期规范引用用符号锚点，不用硬编码行号。
 
 ## 类型标注与 Pyright 规则
 
@@ -740,6 +932,9 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > 对应 [CLAUDE.md §5.8](./CLAUDE.md#58-语言切换响应规范-i18n-hot-reload)。
 
+> ⚠️ **本节为附录 A：命令式存量整改对照，仅供改造期查阅，不作为新代码依据。**
+> 新 UI 必须采用声明式 `@ft.component` + `use_state`/`use_effect`（locale 作为状态源自动重渲染），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `I18n.subscribe`/`refresh_locale`/手动 `update()` 等命令式写法属技术债，存量改造后随之删除。
+
 程序运行后动态切换语言时，所有 UI 控件必须正确刷新。新增/修改 UI 视图或组件时，必须遵守以下 9 条规范。
 
 ### 判定决策树
@@ -801,7 +996,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
    ])
    ```
 
-   原理：工具函数内部先提交 `value=None` + 新 `options`，通过 `control.update()` 立即发送到前端（清除选中项显示）；再提交 `value=saved`，再次 `control.update()` 使前端用新 options 的 text 更新显示。`control.update()` 未挂载时抛 `AssertionError`，被工具函数 catch 后属性仍标记 dirty，后续 `page.update()` 兜底。
+   原理：工具函数内部先提交 `value=None` + 新 `options`，通过 `control.update()` 立即发送到前端（清除选中项显示）；再提交 `value=saved`，再次 `control.update()` 使前端用新 options 的 text 更新显示。`control.update()` 未挂载时抛 `RuntimeError`（V1）/ `AttributeError`（V0 兼容），被工具函数 catch 后属性仍标记 dirty，后续 `page.update()` 兜底。
 
    **边界情况**：当 `saved_value` 为 `None`（用户未选中）时，闭合态本就无文本需刷新，但套用本工具函数也无副作用；当 `saved_value` 为空字符串 `""` 时本方案失效（两次赋值均被短路），实际项目 option key 应非空，若出现需单独处理。
 
@@ -982,7 +1177,10 @@ def _rebuild_steps_after_locale_change(self):
 
 > 对应 [CLAUDE.md §5.9](./CLAUDE.md#59-响应式布局规范-responsive-layout)。
 
-本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 7 条规范。
+> ⚠️ **本节为附录 B：命令式存量整改对照，仅供改造期查阅，不作为新代码依据。**
+> 新 UI 必须采用声明式 `@ft.component` + `use_state`（窗口尺寸作为 state + `ResponsiveRow` 状态驱动布局），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `handle_resize` 鸭子分发/手动 `update()` 等命令式写法属技术债，存量改造后随之删除。
+
+本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 9 条规范。
 
 ### 背景与约束
 
@@ -1012,7 +1210,7 @@ def _rebuild_steps_after_locale_change(self):
 >
 > **设计选择**：断点基于 `WindowResizeEvent.width`（窗口总宽度）而非内容区净宽，这是有意的设计。同一窗口宽度下 nav 折叠/展开会改变内容区净宽，但断点保持稳定，避免 nav 切换导致侧栏宽度跳变。nav 折叠带来的额外空间由 `expand=True` 的主内容区自然吸收。
 
-### 10 条规范
+### 9 条规范
 
 #### 规范 1：断点分级 — 视图必须感知当前窗口尺寸
 
@@ -1143,35 +1341,7 @@ ft.ResponsiveRow([ft.Column([control])])
 - 但 **scroll 不得作为掩盖布局缺陷的手段**：若控件累计宽度经常超过容器宽度，应优先改用 `ResponsiveRow` 或 `wrap=True`。
 - `scroll=ft.ScrollMode.AUTO` 的 `ft.Column` 必须设置 `padding=ft.Padding.only(right=8)` 避免内容与滚动条重叠。
 
-#### 规范 7：max_width 约束 — 防止超宽屏内容过度拉伸
-
-在 `ui/app_layout.py` 的 `body` Container 上设置最大宽度，防止 4K 屏内容全宽铺开导致阅读困难。
-
-**实现方式**：在 `AppLayout._handle_resize()` 中统一处理 (而非每个视图各自处理)。注意 Flet 的 `Container.alignment` 控制的是**内容在 Container 内的对齐**，不是 Container 自身在父容器中的对齐。因此 `body` 设置 `width` 后需要用外层 Row 的 `alignment` 来实现居中：
-
-```python
-# ui/app_layout.py — 常量
-MAX_CONTENT_WIDTH = 2200  # 4K 屏内容区最大宽度
-
-# ui/app_layout.py — _init_ui 中，main_layout Row 包裹 body
-# main_layout = ft.Row([nav_rail, divider, body_wrapper], expand=True)
-# body_wrapper = ft.Row([body], alignment=ft.MainAxisAlignment.CENTER)  # 居中容器
-
-async def _handle_resize(self):
-    # ... 现有防抖逻辑 ...
-    if self.page:
-        nav_width = 80 if self._nav_collapsed else 180
-        available = self.page.width - nav_width - 1  # 减去 divider
-        body_width = min(available, MAX_CONTENT_WIDTH)
-        if self.body.width != body_width:
-            self.body.width = body_width
-            self.body.update()
-    # ... 现有 handle_resize 分发 ...
-```
-
-> **关键**：`body` 的父容器 (main_layout Row) 需通过 `alignment=ft.MainAxisAlignment.CENTER` 实现居中。若 `body.width < available`，Row 会将 body 居中显示；若 `body.width == available`，Row 铺满。
-
-#### 规范 8：触发时机完整性 — 任何改变内容区宽度的操作都必须分发 resize
+#### 规范 7：触发时机完整性 — 任何改变内容区宽度的操作都必须分发 resize
 
 `AppLayout._handle_resize()` 是 resize 事件的唯一分发入口。**任何改变内容区可用宽度的操作**，不仅是窗口拖拽，都必须触发 `schedule_resize()` 分发，否则视图会基于过时的 `page.width` 渲染。
 
@@ -1210,9 +1380,9 @@ if hasattr(new_view, "handle_resize"):
 self.schedule_resize()  # 语言切换后重新验证布局
 ```
 
-#### 规范 9：高度维度 — 对高度敏感的视图必须响应 `page.height`
+#### 规范 8：高度维度 — 对高度敏感的视图必须响应 `page.height`
 
-规范 1-8 仅关注宽度，但 `min_height=720` 下多个视图存在高度维度问题：
+规范 1-7 仅关注宽度，但 `min_height=720` 下多个视图存在高度维度问题：
 
 - `BacktestView` 配置面板内容溢出 (scroll 兜底，但用户需大量滚动)
 - `DataExplorerView` 表格每页行数固定，低高度下只能看到 3-4 行
@@ -1244,7 +1414,7 @@ def handle_resize(self, width: float = 0, height: float = 0) -> None:
 - 图表组件 (最小可读高度)
 - 超过 5 个表单项的长表单 (低高度下需折叠或分页)
 
-#### 规范 10：i18n 与响应式交互 — 语言切换后必须重新验证布局
+#### 规范 9：i18n 与响应式交互 — 语言切换后必须重新验证布局
 
 语言切换后文案长度变化 (中文"调仓频率"4 字 vs 英文"Rebalance Frequency"18 字符)，可能导致之前不溢出的布局突然溢出。
 
@@ -1279,11 +1449,11 @@ def _on_locale_change(self):
 ├─ 有 scroll=ft.ScrollMode.AUTO 的 Column 吗？
 │   └─ 是 → 设置 padding=ft.Padding.only(right=8) (规范 6)
 ├─ 有改变内容区宽度的操作 (nav 折叠、tab 切换) 吗？
-│   └─ 是 → 规范 8 (触发时机完整性)
+│   └─ 是 → 规范 7 (触发时机完整性)
 ├─ 含表格/图表/长表单等高度敏感元素吗？
-│   └─ 是 → 规范 9 (高度维度)
+│   └─ 是 → 规范 8 (高度维度)
 ├─ 视图展示 i18n 文案吗？
-│   └─ 是 → 规范 10 (i18n 与响应式交互)
+│   └─ 是 → 规范 9 (i18n 与响应式交互)
 └─ 视图在 960×640 最小窗口下验证过吗？
     └─ 是 → 确认无溢出、无截断、无重叠 (规范 1 断点验证)
 ```
@@ -1317,7 +1487,7 @@ def _on_locale_change(self):
 | `SettingsView` | ⚠️ 部分 | 未实现 `handle_resize` (需补空方法) |
 | `MarketDashboard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，4 张卡退化为纵向堆叠 |
 | `OnboardingWizard` | ❌ 不合规 | `ResponsiveRow` 无 col 配置，6 张卡纵向堆叠 |
-| `AppLayout` | ✅ 已修复 | `on_resize` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize；(max_width 约束待实现) |
+| `AppLayout` | ✅ 已修复 | `on_resize` 事件注册正确；`schedule_resize` 缓存并传递实时尺寸；`_toggle_nav` 触发 resize；tab 切换有 `handle_resize` 兜底；i18n 回调触发 resize |
 
 ### 测试要求
 
@@ -1436,6 +1606,9 @@ def _on_locale_change(self):
 | 级别 | 问题描述 | 产生背景与现状 | 期望的最终解法 |
 |------|---------|---------------|--------------|
 | **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
+| **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
+| **P3** | **命令式 UI 存量需整改为声明式** | 现有 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型，命令式视为技术债。 | 独立重构主线：按视图切分逐个改造为 `@ft.component` + `use_state`/`use_effect`；i18n 九规范、响应式九规范、`PageRefMixin`、`refresh_dropdown_options` 等命令式绕过随改造删除。整改工作量大，作为独立任务排期。当前状态：独立重构任务。 |
+| **P3** | **doc-lint 自动化未实现** | F3/F4 类数字/一致性漂移靠人工检视才发现，缺自动化校验。 | 新增 `scripts/check_docs_consistency.py` pre-commit/CI 脚本，覆盖 markdown 锚点死链校验、"N 条规范"数字一致性、红线自动化声明与 `.pre-commit-config.yaml`/`pyproject.toml` 交叉校验。当前状态：待实现，独立任务。 |
 
 ---
 

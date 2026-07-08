@@ -38,6 +38,7 @@ from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
 from utils.time_utils import get_now, to_yyyymmdd_str
@@ -284,6 +285,7 @@ class AIStrategyMixin:
             as_of = as_of - datetime.timedelta(days=SAFE_BACKTEST_LEARNING_OFFSET_DAYS)
         return as_of
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def run_ai_analysis(
         self,
         candidates_df: pd.DataFrame,
@@ -682,6 +684,7 @@ class AIStrategyMixin:
         )
         return row_dict
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def _mixin_analyze_single(
         self,
         row: dict,
@@ -1305,6 +1308,7 @@ class AIStrategyMixin:
                 labels_out.clear()
             return I18n.get("ai_capital_flow_fetch_failed")
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _build_multi_period_financials(
         self,
         ts_code: str,
@@ -1643,6 +1647,7 @@ class AIStrategyMixin:
             f"{'、'.join(parts)}（{I18n.get('ai_express_ann_date')}: {ann_str}）"
         )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _build_auxiliary_data_text(
         self,
         ts_code: str,
@@ -1906,6 +1911,7 @@ class AIStrategyMixin:
             return ("\n".join(lines) + "\n", True)
         return ("", False)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _build_macro_context(self, cache: typing.Any, as_of_date: str | None = None) -> str:
         """
         构建宏观经济环境上下文。

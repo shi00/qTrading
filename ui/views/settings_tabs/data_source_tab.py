@@ -864,3 +864,7 @@ class DataSourceTab(ft.Container):
 
             error_info = classify_error(ex, context="general")
             self.show_snack(get_error_message(error_info), color=AppColors.ERROR)
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed

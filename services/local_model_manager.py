@@ -13,6 +13,7 @@ import traceback
 from typing import Any
 
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -306,6 +307,7 @@ class LocalModelManager:
             logger.info("[LocalModel] Persistent worker started. pid=%s", proc.pid)
             return True
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def _await_worker_ready(self, timeout: float = 180.0) -> bool:
         """Wait for the persistent worker to become ready without blocking the event loop.
 
@@ -416,6 +418,7 @@ class LocalModelManager:
         """Backward-compatible alias for calculate_file_sha256."""
         return LocalModelManager.calculate_file_sha256(file_path)
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def load_model(
         self,
         model_path: str,
@@ -551,6 +554,7 @@ class LocalModelManager:
                 self._verification_start_time = 0.0
                 logger.warning("[LocalModel] Verification failed, exiting verification mode.")
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def run_inference(
         self,
         prompt: str,

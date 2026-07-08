@@ -11,6 +11,7 @@ import pandas as pd
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import get_loop_local
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -740,9 +741,10 @@ class BaseDao:
 
         return val
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _read_db(
         self, sql: typing.Any, params: typing.Any = None, *, suppress_errors: bool = True, max_rows: int | None = None
-    ):
+    ) -> pd.DataFrame:
         """Generic Read returning DataFrame (Offloaded CSV conversion)
 
         Args:
@@ -854,12 +856,13 @@ class BaseDao:
 
         return df
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _read_db_select(
         self,
         stmt: sa.Select | sa.CompoundSelect,
         *,
         suppress_errors: bool = True,
-    ):
+    ) -> pd.DataFrame:
         """Execute a SQLAlchemy Core select statement and return DataFrame.
 
         This is the preferred way to build dynamic queries — it uses

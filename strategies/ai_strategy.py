@@ -8,6 +8,7 @@ from strategies.ai_mixin import AIStrategyMixin
 from strategies.utils import StrategyContext
 from strategies.base_strategy import BaseStrategy, register_strategy
 from utils.config_handler import ConfigHandler
+from utils.log_decorators import PerfThreshold, log_async_operation
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class AISelectionStrategy(BaseStrategy, AIStrategyMixin):
         super().__init__("strategy_ai_active_name", "strategy_ai_active_desc")
         self.limit = ConfigHandler.get_ai_max_candidates()
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def filter(self, context: StrategyContext):
         _check_tier(
             context.get("data_processor"),

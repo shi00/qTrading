@@ -512,6 +512,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.AI_INFERENCE)
     async def _cancellable_llm_call(
         self,
         ai_service: typing.Any,

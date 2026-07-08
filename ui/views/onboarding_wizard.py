@@ -1130,3 +1130,7 @@ class OnboardingWizard(ft.Container):
     def _show_loading_overlay(self, show: bool):  # pragma: no cover
         self.loading_overlay.visible = show
         self._update_navigation_buttons()
+
+    def handle_resize(self, width: float = 0, height: float = 0) -> None:
+        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
+        # No responsive adjustment needed

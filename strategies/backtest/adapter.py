@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import polars as pl
 
+from utils.log_decorators import PerfThreshold, log_async_operation
+
 if TYPE_CHECKING:
     from strategies.base_strategy import BaseStrategy
     from strategies.utils import StrategyContext
@@ -29,6 +31,7 @@ class BacktestStrategyAdapter:
     3. 规范化输出为标准信号 schema
     """
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def generate_signal(
         self,
         strategy: BaseStrategy,

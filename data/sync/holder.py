@@ -44,6 +44,7 @@ class HolderSyncStrategy(ISyncStrategy):
     def __init__(self, context: typing.Any):
         super().__init__(context)
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_effective_trade_date(self) -> datetime.date:
         """Prefer the latest closed trade date for default snapshot anchoring."""
         try:
@@ -192,6 +193,7 @@ class HolderSyncStrategy(ISyncStrategy):
 
         return result
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_stk_holdernumber(self, enddate: str):
         """
         Fetch full-market stk_holdernumber snapshot by enddate.
@@ -228,6 +230,7 @@ class HolderSyncStrategy(ISyncStrategy):
             self._log_sync_error("stk_holdernumber", enddate, e)
             return -1
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_top10_holders(self, period: str):
         """
         Fetch top10_holders for all stocks by iterating per-stock.
@@ -388,6 +391,7 @@ class HolderSyncStrategy(ISyncStrategy):
             self._log_sync_error("top10_holders", period, e)
             return -1
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_existing_top10_ts_codes(self, period: str) -> set[str]:
         """
         Query the database for ts_codes that already have top10_holders
@@ -408,6 +412,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             return set()
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _save_top10_checkpoint(self, all_dfs: list[pd.DataFrame], period: str) -> bool:
         """
         Save accumulated top10_holders data as a checkpoint.
@@ -447,6 +452,7 @@ class HolderSyncStrategy(ISyncStrategy):
             exc_info=True,
         )
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_one_table(
         self,
         api_func: typing.Any,
@@ -502,6 +508,7 @@ class HolderSyncStrategy(ISyncStrategy):
             )
             return -1
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_pledge_stat(self):
         """
         Fetch the latest full-market pledge_stat snapshot.
@@ -582,6 +589,7 @@ class HolderSyncStrategy(ISyncStrategy):
             logger.warning("[HolderSync] Table | ⚠️ Error syncing pledge_stat: %s", e, exc_info=True)
             return -1, None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_share_float(self):
         """
         Fetch recent + upcoming share_float (限售解禁) by ann_date range.
@@ -643,6 +651,7 @@ class HolderSyncStrategy(ISyncStrategy):
             logger.warning("[HolderSync] Table | ⚠️ Error syncing share_float: %s", e, exc_info=True)
             return -1, None
 
+    @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_stk_holdertrade(self):
         """
         Fetch recent stk_holdertrade (股东增减持) by ann_date range.
