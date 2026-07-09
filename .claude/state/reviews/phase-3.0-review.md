@@ -214,8 +214,80 @@ pre-commit run --files <phase 3.0 files> → 全绿
 3. **符合 CLAUDE.md**：§1.3 极简设计、§1.4 微创修改、§1.5 验证说明、§3.2 UI 模型、§1.10 反幻觉护栏全部通过 ✓
 4. **单元测试全部通过**：2362 passed ✓
 5. **集成测试全部通过**：7 skipped（Windows/headless Linux 限制，技术债已登记）✓
+6. **superpowers 复检修复**：初次 review 后 superpowers 检视发现 2 个 P0 + 1 个 P1 问题（集成测试代码层，单元测试与 grep 守护未覆盖），已全部修复并复验，详见 §9 ✓
 
 ### Phase 3.0 结论
 3 个高风险声明式模式（Dialog/PubSub/性能基准）验证通过，为 Phase 3.2-3.7 的 35 个 Task 批量重写奠定基础。性能基准真实验证降级为技术债（CI Linux + xvfb），降级方案明确（超阈值时 use_ref + 局部 .update()，需用户裁决）。
 
 可进入 Phase 3.2（叶子 config panels 批量重写）。
+
+---
+
+## 9. superpowers 复检发现与修复（2026-07-10）
+
+初次 review（§1-§8）基于单元测试通过 + grep 守护通过 + 集成测试 Windows skip，未深入审查集成测试代码逻辑。superpowers 检视（用户指令"无问题引入，无场景遗漏，符合 CLAUDE.md 要求，遵循 Flet 最佳实践，发现问题立即解决，不带病前行"）发现 3 个问题，已全部修复。
+
+### 9.1 P0-1：PubSub 测试使用 Mock 专有 API 断言真实 Page 对象
+
+- **文件**：`tests/integration/test_spike_pubsub_runtask.py`
+- **问题**：L75 `page.pubsub.subscribe.assert_called_once()` 和 L94/L96 `page.pubsub.unsubscribe.called` / `assert_called_once_with()` 使用 Mock 专有方法断言真实 Page 对象
+- **根因**：`flet_test_page` fixture 返回真实 Page（`ft.run_async` 启动），`page.pubsub` 是真实 `PubSubClient` 实例（`flet/pubsub/pubsub_client.py`），无 `assert_called_once` / `called` / `assert_called_once_with` 方法
+- **影响**：CI Linux（有 X server）运行时会 `AttributeError: 'PubSubClient' object has no attribute 'assert_called_once'`，测试必然失败
+- **验证证据**：`inspect.signature(PubSubClient.unsubscribe)` = `(self)`，`PubSubClient` 无 Mock 接口
+- **修复**：改用 `unittest.mock.patch.object(page.pubsub, "subscribe", wraps=page.pubsub.subscribe)` spy 模式，记录调用同时转发给真实方法（标准 spy 模式，不破坏声明式组件的真实生命周期）
+- **复验**：ruff check + format check 通过；28 单元测试通过；7 集成测试 Windows skip（无 import 错误）
+
+### 9.2 P0-2：Dialog 测试使用 `page._dialogs` 当作 list
+
+- **文件**：`tests/integration/test_spike_dialog_declarative.py`
+- **问题**：L86 `len(page._dialogs) == 0`、L113 `len(page._dialogs) > 0 and page._dialogs[0].open`、L116 `page._dialogs[0].title.value`、L130/L140 `len(page._dialogs)` 把 `page._dialogs` 当 list 用
+- **根因**：`page._dialogs` 是 `Dialogs` 控制对象（`flet/controls/base_page.py:276` `_dialogs: "Dialogs" = field(default_factory=lambda: Dialogs())`，`Dialogs` 继承 `BaseControl`），不是 list；实际 list 在 `page._dialogs.controls`
+- **验证证据**：
+  - `ft.use_dialog` 源码（`flet/components/hooks/use_dialog.py`）使用 `page._dialogs.controls.append(dialog)` 和 `page._dialogs.controls[prev_idx] = dialog`
+  - `_find_dialog_index` 内部用 `dialogs.controls` 遍历
+  - `hasattr(ft.Page, '_dialogs')` = False（实例属性，非类属性，类层级检查会漏判）
+- **影响**：CI Linux 运行时 `len(page._dialogs)` 和 `page._dialogs[0]` 行为不确定（依赖 `Dialogs` 是否实现 `__len__`/`__getitem__`），即使不抛错也断言错误对象
+- **修复**：全局替换 `page._dialogs` → `page._dialogs.controls`（8 处：注释/docstring/断言）
+- **复验**：ruff check + format check 通过；pyright 0 errors（4 warnings 为 Flet 类型系统已知问题，§7.2）；28 单元测试通过
+
+### 9.3 P1-3：`test_flet_test_page_helpers.py` docstring 过时
+
+- **文件**：`tests/unit/ui/test_flet_test_page_helpers.py`
+- **问题**：docstring L4 仍提及 `trigger_state_change`，但该垫片已在 Phase 3.0.1 删除
+- **根因**：删除 `trigger_state_change` 方法时未同步更新 docstring
+- **影响**：文档与实际 API 不一致，违反 CLAUDE.md §1.10 反幻觉护栏
+- **修复**：删除 docstring 中 `/ ``trigger_state_change``` 文字
+- **复验**：ruff check 通过；13 单元测试通过
+
+### 9.4 检视范围与无场景遗漏确认
+
+复检覆盖 Phase 3.0 全部产物：
+- `tests/integration/test_spike_pubsub_runtask.py`（P0-1 修复）
+- `tests/integration/test_spike_dialog_declarative.py`（P0-2 修复）
+- `tests/integration/test_spike_perf_baseline.py`（无新问题，`append_btn.on_click(mock_event)` 是属性访问+调用，合法；`ElevatedButton` deprecated 是 P2 技术债，spike 代码不影响功能）
+- `tests/integration/conftest.py`（FletTestPage 类 + `_find_control_recursive`，逻辑正确）
+- `tests/unit/ui/test_flet_test_page_helpers.py`（P1-3 修复）
+- `tests/unit/ui/test_spike_dialog_pattern.py`（grep 守护，无新问题）
+- `tests/unit/ui/test_spike_pubsub_runtask_pattern.py`（R2 验证 + API 签名守护，无新问题）
+- `tests/unit/ui/test_spike_perf_baseline_pattern.py`（阈值 + grep 守护，无新问题）
+
+### 9.5 复验结果
+
+```
+ruff check <3 files> → All checks passed!
+ruff format --check <3 files> → 3 files already formatted
+pyright <3 files> → 0 errors, 4 warnings（Flet 类型系统已知问题，§7.2）
+pytest <4 unit test files> → 28 passed in 0.95s
+pytest <3 integration test files> → 7 skipped (Windows: ft.run_async 不兼容)
+```
+
+### 9.6 教训
+
+初次 review（§1-§8）的盲区：集成测试在 Windows/headless Linux 全部 skip，单元测试只验证 source 文本和 API 签名（grep 守护），两者都未验证集成测试代码的运行时行为。superpowers 检视通过阅读 Flet 源码（`use_dialog` hook 实现、`PubSubClient` 类定义、`base_page.py` 的 `_dialogs` 字段类型）才发现 Mock API 误用和 `_dialogs` 类型误用。
+
+**改进**：后续 Phase 3.2-3.7 的集成测试 review 必须额外检查"测试代码是否使用了被测对象不存在的 API"（特别是 Mock 专有 API 误用、私有属性类型误用），不能仅依赖单元测试 grep 守护。
+
+### 9.7 新增技术债
+
+- **P2：`ElevatedButton` deprecated**：`test_spike_perf_baseline.py` 和 `test_spike_dialog_declarative.py` 的 spike 组件使用 `ft.ElevatedButton`（Flet 0.80.0 起 deprecated，1.0 移除，应改用 `ft.Button`）。spike 代码不影响功能，但批量重写 Phase 3.2-3.7 时应用 `ft.Button`。
+  - **升级触发条件**：Phase 3.2 开始批量重写时统一改用 `ft.Button`，或在 Flet 升级到 1.0 前批量替换。

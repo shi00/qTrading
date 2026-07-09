@@ -1,8 +1,8 @@
 """FletTestPage helper 单元测试（Phase 3.0.1）。
 
 集成测试（test_flet_test_page_probe.py）依赖 ``ft.run_async``，Windows/headless Linux
-会 skip。本文件用 mock page 单元测试 ``wait_for_condition`` / ``trigger_state_change``
-/ ``find_control`` 的纯逻辑，确保 helper 在所有平台可验证。
+会 skip。本文件用 mock page 单元测试 ``wait_for_condition`` / ``find_control``
+的纯逻辑，确保 helper 在所有平台可验证。
 
 策略：
 - 构造 ``MagicMock(spec=ft.Page)`` 模拟 page（``page.controls`` 为可变 list）

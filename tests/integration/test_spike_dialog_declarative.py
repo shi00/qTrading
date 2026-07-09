@@ -82,12 +82,12 @@ async def test_spike_dialog_renders_host_without_dialog(flet_test_page):
         ),
         timeout=2.0,
     )
-    # 初始 show=False，dialog=None，page._dialogs 应为空
-    assert len(page._dialogs) == 0
+    # 初始 show=False，dialog=None，page._dialogs.controls 应为空
+    assert len(page._dialogs.controls) == 0
 
 
 async def test_spike_dialog_opens_on_button_click(flet_test_page):
-    """DoD 2: 点击 open 按钮后 Dialog 挂载到 page._dialogs，open=True。"""
+    """DoD 2: 点击 open 按钮后 Dialog 挂载到 page._dialogs.controls，open=True。"""
     page = flet_test_page.page
     page.add(_spike_dialog_view())
     flet_test_page.wait_for_condition(
@@ -110,14 +110,14 @@ async def test_spike_dialog_opens_on_button_click(flet_test_page):
 
     # 等待 state 变更触发重渲染，Dialog 挂载
     flet_test_page.wait_for_condition(
-        lambda: len(page._dialogs) > 0 and page._dialogs[0].open is True,
+        lambda: len(page._dialogs.controls) > 0 and page._dialogs.controls[0].open is True,
         timeout=2.0,
     )
-    assert page._dialogs[0].title.value == "spike-title"
+    assert page._dialogs.controls[0].title.value == "spike-title"
 
 
 async def test_spike_dialog_closes_on_button_click(flet_test_page):
-    """DoD 3: 点击 close 按钮后 Dialog 从 page._dialogs 移除（state 驱动，非 page.pop_dialog）。"""
+    """DoD 3: 点击 close 按钮后 Dialog 从 page._dialogs.controls 移除（state 驱动，非 page.pop_dialog）。"""
     page = flet_test_page.page
     page.add(_spike_dialog_view())
 
@@ -127,7 +127,7 @@ async def test_spike_dialog_closes_on_button_click(flet_test_page):
     )
     flet_test_page.wait_for_condition(lambda: open_btn is not None, timeout=2.0)
     open_btn.on_click(MagicMock())
-    flet_test_page.wait_for_condition(lambda: len(page._dialogs) > 0, timeout=2.0)
+    flet_test_page.wait_for_condition(lambda: len(page._dialogs.controls) > 0, timeout=2.0)
 
     # 查找 close 按钮并触发 click
     close_btn = flet_test_page.find_control(
@@ -137,4 +137,4 @@ async def test_spike_dialog_closes_on_button_click(flet_test_page):
     close_btn.on_click(MagicMock())
 
     # 等待 state 变更触发重渲染，Dialog 移除
-    flet_test_page.wait_for_condition(lambda: len(page._dialogs) == 0, timeout=2.0)
+    flet_test_page.wait_for_condition(lambda: len(page._dialogs.controls) == 0, timeout=2.0)

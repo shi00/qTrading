@@ -11,6 +11,7 @@
 
 import os
 import sys
+from unittest.mock import patch
 
 import flet as ft
 import pytest
@@ -59,38 +60,47 @@ def _spike_pubsub_view() -> ft.Control:
 
 
 async def test_spike_pubsub_subscribes_on_mount(flet_test_page):
-    """DoD 1: 组件挂载时调用 page.pubsub.subscribe。"""
+    """DoD 1: 组件挂载时调用 page.pubsub.subscribe。
+
+    flet_test_page 返回真实 Page（ft.run_async 启动），page.pubsub 是真实
+    PubSubClient 实例，无 Mock 专有 API。用 ``patch.object`` spy 模式包装真实
+    subscribe：记录调用同时转发给真实方法（标准 spy 模式）。
+    """
     page = flet_test_page.page
-    page.add(_spike_pubsub_view())
-    flet_test_page.wait_for_condition(
-        lambda: (
-            flet_test_page.find_control(
-                lambda c: isinstance(c, ft.Text) and getattr(c, "value", None) == "spike-pubsub-host"
-            )
-            is not None
-        ),
-        timeout=2.0,
-    )
-    # subscribe 应被调用
-    page.pubsub.subscribe.assert_called_once()
+    with patch.object(page.pubsub, "subscribe", wraps=page.pubsub.subscribe) as spy_subscribe:
+        page.add(_spike_pubsub_view())
+        flet_test_page.wait_for_condition(
+            lambda: (
+                flet_test_page.find_control(
+                    lambda c: isinstance(c, ft.Text) and getattr(c, "value", None) == "spike-pubsub-host"
+                )
+                is not None
+            ),
+            timeout=2.0,
+        )
+        spy_subscribe.assert_called_once()
 
 
 async def test_spike_pubsub_unsubscribes_on_unmount(flet_test_page):
-    """DoD 2: 组件卸载时调用 page.pubsub.unsubscribe（零参，R2 兼容）。"""
+    """DoD 2: 组件卸载时调用 page.pubsub.unsubscribe（零参，R2 兼容）。
+
+    同上，用 ``patch.object`` spy 模式包装真实 unsubscribe。
+    """
     page = flet_test_page.page
-    page.add(_spike_pubsub_view())
-    flet_test_page.wait_for_condition(
-        lambda: (
-            flet_test_page.find_control(
-                lambda c: isinstance(c, ft.Text) and getattr(c, "value", None) == "spike-pubsub-host"
-            )
-            is not None
-        ),
-        timeout=2.0,
-    )
-    # 清空 controls 模拟 unmount
-    page.controls.clear()
-    page.update()
-    flet_test_page.wait_for_condition(lambda: page.pubsub.unsubscribe.called, timeout=2.0)
-    # unsubscribe 零参调用
-    page.pubsub.unsubscribe.assert_called_once_with()
+    with patch.object(page.pubsub, "unsubscribe", wraps=page.pubsub.unsubscribe) as spy_unsubscribe:
+        page.add(_spike_pubsub_view())
+        flet_test_page.wait_for_condition(
+            lambda: (
+                flet_test_page.find_control(
+                    lambda c: isinstance(c, ft.Text) and getattr(c, "value", None) == "spike-pubsub-host"
+                )
+                is not None
+            ),
+            timeout=2.0,
+        )
+        # 清空 controls 模拟 unmount
+        page.controls.clear()
+        page.update()
+        flet_test_page.wait_for_condition(lambda: spy_unsubscribe.called, timeout=2.0)
+        # unsubscribe 零参调用
+        spy_unsubscribe.assert_called_once_with()
