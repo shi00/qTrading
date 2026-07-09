@@ -11,12 +11,34 @@ import pytest
 
 from tests.unit.ui.conftest import set_page
 from ui.viewmodels.onboarding_view_model import (
+    OnboardingState,
     OnboardingViewModel,
     STEP_CONFIGS,
     StepConfig,
 )
 
 pytestmark = pytest.mark.unit
+
+
+# --- Helpers ---
+
+
+def _count_transitions(snapshots, field_getter, initial) -> int:
+    """Count state transitions in snapshots for a given field.
+
+    A transition occurs when consecutive snapshots (including the initial state)
+    have different values for the field returned by field_getter(snapshots[i]).
+    The `initial` argument represents the state value before any snapshots.
+    """
+    transitions = 0
+    prev = initial
+    for s in snapshots:
+        value = field_getter(s)
+        if value != prev:
+            transitions += 1
+            prev = value
+    return transitions
+
 
 # --- I18n mock (autouse, returns key as value) ---
 
@@ -38,21 +60,27 @@ def vm():
 
 
 @pytest.fixture
-def bound_vm(vm):
-    """ViewModel with all callbacks bound to MagicMocks or AsyncMocks."""
+def snapshots():
+    """List to collect OnboardingState snapshots from bound_vm."""
+    return []
+
+
+@pytest.fixture
+def bound_vm(vm, snapshots):
+    """ViewModel with fn_* callbacks and on_complete bound to MagicMocks/AsyncMocks.
+
+    Phase 2 改造: on_* 通知回调移除,改用 state snapshot + subscribe。
+    snapshots fixture 自动订阅 bound_vm 的 state 变化。
+    """
     vm.bind(
         fn_validate_database=AsyncMock(return_value=True),
         fn_validate_token=AsyncMock(return_value=True),
         fn_validate_cloud_ai=AsyncMock(return_value=True),
         fn_validate_local_model=AsyncMock(return_value=True),
         fn_push_schedule_state=MagicMock(),
-        on_step_changed=MagicMock(),
-        on_sync_progress=MagicMock(),
-        on_sync_state_changed=MagicMock(),
-        on_validation_state_changed=MagicMock(),
         on_complete=AsyncMock(),
-        on_schedule_time_normalized=MagicMock(),
     )
+    vm.subscribe(lambda s: snapshots.append(s))
     return vm
 
 
@@ -125,24 +153,31 @@ class TestOnboardingVMBind:
             fn_validate_cloud_ai=cb_async,
             fn_validate_local_model=cb_async,
             fn_push_schedule_state=cb,
-            on_step_changed=cb,
-            on_sync_progress=cb,
-            on_sync_state_changed=cb,
-            on_validation_state_changed=cb,
             on_complete=cb_async,
-            on_schedule_time_normalized=cb,
         )
         assert vm.fn_validate_database is cb_async
-        assert vm.on_step_changed is cb
+        assert vm.fn_push_schedule_state is cb
         assert vm.on_complete is cb_async
 
     def test_dispose_clears_callbacks(self, bound_vm):
         bound_vm.dispose()
         assert bound_vm.fn_validate_database is None
         assert bound_vm.fn_validate_token is None
-        assert bound_vm.on_step_changed is None
         assert bound_vm.on_complete is None
-        assert bound_vm.on_schedule_time_normalized is None
+        assert bound_vm.state == OnboardingState()
+
+    def test_state_defaults(self, vm):
+        assert vm.state == OnboardingState()
+
+    def test_notifies_subscribers(self, vm):
+        received: list = []
+        unsub = vm.subscribe(lambda s: received.append(s))
+        vm._set_state(current_step=3)
+        assert len(received) == 1
+        assert received[0].current_step == 3
+        unsub()
+        vm._set_state(current_step=5)
+        assert len(received) == 1
 
 
 # =====================================================================
@@ -151,10 +186,11 @@ class TestOnboardingVMBind:
 
 
 class TestOnboardingVMNavigation:
-    async def test_next_step_advances(self, bound_vm):
+    async def test_next_step_advances(self, bound_vm, snapshots):
         await bound_vm.next_step()
         assert bound_vm.current_step == 1
-        bound_vm.on_step_changed.assert_called_once()
+        assert bound_vm.state.current_step == 1
+        assert any(s.current_step == 1 for s in snapshots)
 
     async def test_next_step_validates_required(self, bound_vm):
         bound_vm.current_step = 1  # database step
@@ -167,7 +203,7 @@ class TestOnboardingVMNavigation:
         bound_vm.validate_and_persist_current_step = AsyncMock(return_value=False)
         await bound_vm.next_step()
         assert bound_vm.current_step == 1
-        bound_vm.on_step_changed.assert_not_called()
+        assert bound_vm.state.current_step == 1
 
     async def test_next_step_on_complete_calls_callback(self, bound_vm):
         bound_vm.current_step = 7  # complete step
@@ -180,17 +216,18 @@ class TestOnboardingVMNavigation:
         await bound_vm.next_step()
         assert bound_vm.current_step == 7
 
-    async def test_prev_step_goes_back(self, bound_vm):
+    async def test_prev_step_goes_back(self, bound_vm, snapshots):
         bound_vm.current_step = 3
         await bound_vm.prev_step()
         assert bound_vm.current_step == 2
-        bound_vm.on_step_changed.assert_called_once()
+        assert bound_vm.state.current_step == 2
+        assert any(s.current_step == 2 for s in snapshots)
 
     async def test_prev_step_does_not_go_below_zero(self, bound_vm):
         bound_vm.current_step = 0
         await bound_vm.prev_step()
         assert bound_vm.current_step == 0
-        bound_vm.on_step_changed.assert_not_called()
+        assert bound_vm.state.current_step == 0
 
     async def test_prev_step_resets_validation(self, bound_vm):
         bound_vm.current_step = 1  # database step validates_before_next
@@ -198,11 +235,12 @@ class TestOnboardingVMNavigation:
         await bound_vm.prev_step()
         assert bound_vm.step_validated["database"] is False
 
-    async def test_skip_step_advances(self, bound_vm):
+    async def test_skip_step_advances(self, bound_vm, snapshots):
         bound_vm.current_step = 4  # local_model step
         await bound_vm.skip_step()
         assert bound_vm.current_step == 5
-        bound_vm.on_step_changed.assert_called_once()
+        assert bound_vm.state.current_step == 5
+        assert any(s.current_step == 5 for s in snapshots)
 
     async def test_skip_step_does_not_exceed_max(self, bound_vm):
         bound_vm.current_step = 7
@@ -268,13 +306,18 @@ class TestOnboardingVMValidation:
         assert result is False
         assert bound_vm.step_validated.get("database") is not True
 
-    async def test_validation_sets_validation_in_progress(self, bound_vm):
+    async def test_validation_sets_validation_in_progress(self, bound_vm, snapshots):
         bound_vm.current_step = 1
         await bound_vm.validate_and_persist_current_step()
         assert bound_vm.validation_in_progress is False  # finally resets
-        bound_vm.on_validation_state_changed.assert_any_call()
-        # Called twice: True then False
-        assert bound_vm.on_validation_state_changed.call_count == 2
+        # validation_in_progress transitions: False→True, True→False
+        transitions = 0
+        prev = False
+        for s in snapshots:
+            if s.validation_in_progress != prev:
+                transitions += 1
+                prev = s.validation_in_progress
+        assert transitions == 2
 
     async def test_validation_clears_progress_on_exception(self, bound_vm):
         bound_vm.fn_validate_database = AsyncMock(side_effect=RuntimeError("BOOM"))
@@ -301,7 +344,7 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         assert bound_vm.step_validated["schedule"] is True
-        bound_vm.on_schedule_time_normalized.assert_called_with("16:30")
+        assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_invalid_time_defaults(self, bound_vm, mock_config_handler):
         self._setup_schedule_vm(bound_vm, mock_config_handler)
@@ -309,7 +352,7 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         assert bound_vm._schedule_time == "16:30"
-        bound_vm.on_schedule_time_normalized.assert_called_with("16:30")
+        assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_empty_time_defaults(self, bound_vm, mock_config_handler):
         self._setup_schedule_vm(bound_vm, mock_config_handler)
@@ -317,6 +360,7 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         assert bound_vm._schedule_time == "16:30"
+        assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_saves_to_config_handler(self, bound_vm, mock_config_handler):
         self._setup_schedule_vm(bound_vm, mock_config_handler)
@@ -351,6 +395,9 @@ class TestOnboardingVMScheduleValidation:
         assert vm._schedule_enabled is False
         assert vm._schedule_time == "09:00"
         assert vm.normalized_schedule_time == "09:00"
+        assert vm.state.schedule_enabled is False
+        assert vm.state.schedule_time == "09:00"
+        assert vm.state.normalized_schedule_time == "09:00"
 
 
 # =====================================================================
@@ -364,10 +411,12 @@ class TestOnboardingVMSync:
         bound_vm._data_processor = mock_data_processor
         return bound_vm
 
-    async def test_start_sync_sets_state(self, sync_vm):
+    async def test_start_sync_sets_state(self, sync_vm, snapshots):
         await sync_vm.start_sync(quick=True)
         assert sync_vm.sync_in_progress is False  # finally resets
-        sync_vm.on_sync_state_changed.assert_any_call()
+        # sync_in_progress transitions: False→True (start), True→False (finally)
+        transitions = _count_transitions(snapshots, lambda s: s.sync_in_progress, initial=False)
+        assert transitions == 2
 
     async def test_start_sync_calls_initialize_system(self, sync_vm, mock_data_processor):
         await sync_vm.start_sync(quick=True)
@@ -380,32 +429,33 @@ class TestOnboardingVMSync:
         call_kwargs = mock_data_processor.initialize_system.call_args[1]
         assert call_kwargs["quick"] is False
 
-    async def test_start_sync_success_advances(self, sync_vm, mock_data_processor):
+    async def test_start_sync_success_advances(self, sync_vm, mock_data_processor, snapshots):
         sync_vm.current_step = 5  # data_sync step
         sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
         sync_vm.next_step.assert_awaited_once()
-        sync_vm.on_sync_progress.assert_any_call(1.0, "wizard_status_done")
+        assert any(s.sync_progress == 1.0 and s.sync_progress_message == "wizard_status_done" for s in snapshots)
 
-    async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor):
-        """on_sync_state_changed must be called exactly twice on success: once for start, once for end.
-        Before the fix, it was called 3 times (start + manual end + finally end)."""
+    async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor, snapshots):
+        """sync_in_progress must transition exactly twice on success: True at start, False in finally.
+        Before the fix, it was 3 transitions (start + manual end + finally end)."""
         sync_vm.current_step = 5
         sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
-        # 2 calls: sync_in_progress=True at start, sync_in_progress=False in finally
-        assert sync_vm.on_sync_state_changed.call_count == 2
+        # 2 transitions: False→True at start, True→False in finally
+        transitions = _count_transitions(snapshots, lambda s: s.sync_in_progress, initial=False)
+        assert transitions == 2
 
-    async def test_start_sync_cancelled_result(self, sync_vm, mock_data_processor):
+    async def test_start_sync_cancelled_result(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.initialize_system = AsyncMock(return_value=False)
         sync_vm.next_step = AsyncMock()
         await sync_vm.start_sync(quick=True)
         sync_vm.next_step.assert_not_awaited()
-        sync_vm.on_sync_progress.assert_any_call(0, "wizard_status_cancelled")
+        assert any(s.sync_progress == 0.0 and s.sync_progress_message == "wizard_status_cancelled" for s in snapshots)
 
-    async def test_start_sync_exception(self, sync_vm, mock_data_processor):
+    async def test_start_sync_exception(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.initialize_system = AsyncMock(side_effect=RuntimeError("sync failed"))
         with (
             patch(
@@ -419,15 +469,16 @@ class TestOnboardingVMSync:
         ):
             await sync_vm.start_sync(quick=True)
         assert sync_vm.sync_in_progress is False
-        sync_vm.on_sync_state_changed.assert_any_call()
+        # sync_in_progress transitioned to True at start, then to False in finally
+        assert any(s.sync_in_progress is True for s in snapshots)
 
-    async def test_start_sync_progress_callback(self, sync_vm, mock_data_processor):
+    async def test_start_sync_progress_callback(self, sync_vm, mock_data_processor, snapshots):
         await sync_vm.start_sync(quick=True)
         call_kwargs = mock_data_processor.initialize_system.call_args[1]
         assert "progress_callback" in call_kwargs
         cb = call_kwargs["progress_callback"]
         cb(75, 100, "Three quarters")
-        sync_vm.on_sync_progress.assert_any_call(0.75, "Three quarters")
+        assert any(s.sync_progress == 0.75 and s.sync_progress_message == "Three quarters" for s in snapshots)
 
     async def test_cancel_sync(self, sync_vm, mock_data_processor):
         await sync_vm.cancel_sync()
@@ -439,21 +490,22 @@ class TestOnboardingVMSync:
         await sync_vm.cancel_sync()
         assert sync_vm.sync_in_progress is False
 
-    async def test_cancel_sync_exception(self, sync_vm, mock_data_processor):
+    async def test_cancel_sync_exception(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.stop = AsyncMock(side_effect=RuntimeError("stop failed"))
         await sync_vm.cancel_sync()
         assert sync_vm.sync_in_progress is False
-        sync_vm.on_sync_state_changed.assert_any_call()
+        # cancel_sync 在 finally 中调用 _set_state(sync_in_progress=False),产生 snapshot
+        assert len(snapshots) >= 1
 
-    async def test_skip_sync(self, sync_vm):
+    async def test_skip_sync(self, sync_vm, snapshots):
         sync_vm.next_step = AsyncMock()
         await sync_vm.skip_sync()
-        sync_vm.on_sync_progress.assert_any_call(0, "wizard_status_skip")
+        assert any(s.sync_progress == 0.0 and s.sync_progress_message == "wizard_status_skip" for s in snapshots)
         sync_vm.next_step.assert_awaited_once()
 
-    async def test_start_sync_quick_check_progress_init(self, sync_vm):
+    async def test_start_sync_quick_check_progress_init(self, sync_vm, snapshots):
         await sync_vm.start_sync(quick=True)
-        sync_vm.on_sync_progress.assert_any_call(0, "wizard_status_init")
+        assert any(s.sync_progress == 0.0 and s.sync_progress_message == "wizard_status_init" for s in snapshots)
 
 
 # =====================================================================
@@ -509,15 +561,21 @@ class TestOnboardingVMServiceDelegation:
 
 
 class TestOnboardingVMValidationState:
-    async def test_set_validation_in_progress_notifies(self, bound_vm):
+    async def test_set_validation_in_progress_notifies(self, bound_vm, snapshots):
         bound_vm._set_validation_in_progress(True)
         assert bound_vm.validation_in_progress is True
-        bound_vm.on_validation_state_changed.assert_called_once()
+        # validation_in_progress transitioned from False to True (1 transition)
+        transitions = _count_transitions(snapshots, lambda s: s.validation_in_progress, initial=False)
+        assert transitions == 1
+        assert snapshots[-1].validation_in_progress is True
 
-    async def test_clear_validation_in_progress_notifies(self, bound_vm):
+    async def test_clear_validation_in_progress_notifies(self, bound_vm, snapshots):
         bound_vm._set_validation_in_progress(False)
         assert bound_vm.validation_in_progress is False
-        bound_vm.on_validation_state_changed.assert_called_once()
+        # _set_state fires _notify even when value is unchanged (False→False, no transition)
+        # 但订阅者仍然收到通知
+        assert len(snapshots) == 1
+        assert snapshots[-1].validation_in_progress is False
 
 
 # =====================================================================

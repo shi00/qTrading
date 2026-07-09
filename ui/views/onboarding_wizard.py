@@ -146,6 +146,10 @@ class OnboardingWizard(ft.Container):
         self.did_mount = self._on_mount
         self.will_unmount = self._on_unmount
 
+        # NOTE(lazy): _prev_state 用于 state-driven diff 通知,Phase 4 View 声明式重写时移除。
+        # ceiling: Phase 4 View 重写完成. upgrade: Phase 4 Task 4.x OnboardingWizard 声明式重写.
+        self._prev_state = self.vm.state
+
         self._bind_vm()
 
     def _bind_vm(self):  # pragma: no cover
@@ -155,13 +159,36 @@ class OnboardingWizard(ft.Container):
             fn_validate_cloud_ai=self._validate_cloud_ai_via_panel,
             fn_validate_local_model=self._validate_local_model_via_panel,
             fn_push_schedule_state=self._push_schedule_state,
-            on_step_changed=self._on_vm_step_changed,
-            on_sync_progress=self._on_vm_sync_progress,
-            on_sync_state_changed=self._on_vm_sync_state_changed,
-            on_validation_state_changed=self._on_vm_validation_state_changed,
             on_complete=self.on_complete or self._default_on_complete,
-            on_schedule_time_normalized=self._on_schedule_time_normalized,
         )
+        # NOTE(lazy): on_* 通知回调已移除,改用 subscribe(state) diff 派发。
+        # Phase 4 View 声明式重写时,此 subscribe + _on_vm_* handler 全部移除。
+        # ceiling: Phase 4 View 重写完成. upgrade: Phase 4 Task 4.x OnboardingWizard 声明式重写.
+        self.vm.subscribe(self._on_vm_state_changed)
+
+    def _on_vm_state_changed(self, state) -> None:  # pragma: no cover
+        """Single state-driven handler replacing 5 separate on_* callbacks.
+
+        根据 state diff 派发到对应的 _on_vm_* UI 更新方法。
+        NOTE(lazy): 混合态过渡实现,Phase 4 View 声明式重写时移除。
+        ceiling: Phase 4 View 重写完成. upgrade: Phase 4 Task 4.x OnboardingWizard 声明式重写.
+        """
+        prev = self._prev_state
+        if prev is None or prev.current_step != state.current_step:
+            self._on_vm_step_changed()
+        if prev is None or prev.sync_in_progress != state.sync_in_progress:
+            self._on_vm_sync_state_changed()
+        if (
+            prev is None
+            or prev.sync_progress != state.sync_progress
+            or prev.sync_progress_message != state.sync_progress_message
+        ):
+            self._on_vm_sync_progress(state.sync_progress, state.sync_progress_message)
+        if prev is None or prev.validation_in_progress != state.validation_in_progress:
+            self._on_vm_validation_state_changed()
+        if prev is None or prev.normalized_schedule_time != state.normalized_schedule_time:
+            self._on_schedule_time_normalized(state.normalized_schedule_time)
+        self._prev_state = state
 
     def _rebind_panel_callbacks(self):  # pragma: no cover
         """Rebind panel operation callbacks (called after panel recreation on locale change)."""
