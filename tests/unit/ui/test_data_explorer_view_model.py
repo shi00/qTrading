@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+from ui.viewmodels import Message
 from ui.viewmodels.data_explorer_view_model import DataExplorerState, DataExplorerViewModel
 
 pytestmark = pytest.mark.unit
@@ -124,7 +125,7 @@ class TestSubscribe:
 class TestDispose:
     def test_dispose_clears_state(self, vm):
         vm._current_data = pd.DataFrame({"a": [1]})
-        vm._set_state(tables_list=("t1",), table_columns=("col1",), error_message="err")
+        vm._set_state(tables_list=("t1",), table_columns=("col1",), error_message=Message("err"))
         vm.dispose()
         assert vm.current_data.empty
         assert vm.state.tables_list == ()
@@ -205,7 +206,7 @@ class TestInitTablesErrors:
         mock_db.get_all_tables.side_effect = RuntimeError("DB connection failed")
         await vm.init_tables()
         assert vm.state.error_message is not None
-        # get_error_message returns i18n translated message, not raw error string
+        # error_message 为 Message(key, params)，VM 不感知 locale
 
     async def test_cancelled_error_propagates(self, vm, mock_db):
         mock_db.get_all_tables.side_effect = asyncio.CancelledError()
@@ -267,7 +268,7 @@ class TestLoadSchema:
         mock_db.get_table_schema.side_effect = RuntimeError("Schema error")
         await vm.load_table_schema("stock_basic")
         assert vm.state.error_message is not None
-        # get_error_message returns i18n translated message, not raw error string
+        # error_message 为 Message(key, params)，VM 不感知 locale
 
 
 class TestLoadSchemaCancelled:
@@ -478,7 +479,7 @@ class TestStateManagement:
             filter_col="close",
             filter_op=">",
             filter_val="10",
-            error_message="some error",
+            error_message=Message("some error"),
         )
         vm.reset_table_state()
         assert vm.state.current_page == 1
@@ -490,7 +491,7 @@ class TestStateManagement:
         assert vm.state.error_message is None
 
     def test_clear_error(self, vm):
-        vm._set_state(error_message="Something went wrong")
+        vm._set_state(error_message=Message("Something went wrong"))
         vm.clear_error()
         assert vm.state.error_message is None
 

@@ -21,6 +21,7 @@ from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.base_strategy import get_strategy_registry
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,8 @@ class BacktestState:
 
     is_running: bool = False
     progress: float = 0.0
-    progress_message: str = ""
-    status_message: str = ""
+    progress_message: Message | None = None
+    status_message: Message | None = None
     status_color: str = ""
     # Incremented when _result changes; View pulls vm.result on change (dual-track, §3.0.4).
     result_version: int = 0
@@ -170,7 +171,7 @@ class BacktestViewModel:
 
         if self.state.is_running:
             self._set_state(
-                status_message=I18n.get("backtest_already_running"),
+                status_message=Message("backtest_already_running"),
                 status_color="orange",
             )
             return
@@ -180,8 +181,8 @@ class BacktestViewModel:
         self._set_state(
             is_running=True,
             progress=0.0,
-            progress_message=I18n.get("backtest_initializing"),
-            status_message=I18n.get("backtest_starting"),
+            progress_message=Message("backtest_initializing"),
+            status_message=Message("backtest_starting"),
             status_color="blue",
         )
 
@@ -191,7 +192,16 @@ class BacktestViewModel:
                 def _progress_callback(progress: float, message: str):
                     if not self.state.is_running:
                         return
-                    self._set_state(progress=progress, progress_message=message)
+                    # NOTE(lazy): message 是 service/engine 层硬编码英文字符串(非 i18n key),
+                    #   暂以原字符串作为 Message.key 直接透传。当前 BacktestView 未消费此字段
+                    #   (legacy 命令式 _on_vm_progress 走 str 回调,与 state 解耦),无渲染影响。
+                    #   ceiling: Phase 3-4 BacktestView 声明式重写时改为 service 传 i18n key +
+                    #   params 或新增 backtest_progress 通用 key。
+                    #   upgrade: Phase 3-4 BacktestView 声明式重写.
+                    self._set_state(
+                        progress=progress,
+                        progress_message=Message(message, {}),
+                    )
                     TaskManager().update_progress(task_id, progress, message)
 
                 def _cancel_check() -> bool:
@@ -208,7 +218,10 @@ class BacktestViewModel:
 
                 self._result = result
                 self._set_state(
-                    status_message=I18n.get("backtest_completed").format(duration=result.duration_ms),
+                    status_message=Message(
+                        "backtest_completed",
+                        {"duration": result.duration_ms},
+                    ),
                     status_color="green",
                     result_version=self.state.result_version + 1,
                 )
@@ -220,7 +233,7 @@ class BacktestViewModel:
             except Exception as e:
                 logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
                 self._set_state(
-                    status_message=I18n.get("backtest_failed"),
+                    status_message=Message("backtest_failed"),
                     status_color="red",
                 )
                 raise
@@ -228,7 +241,7 @@ class BacktestViewModel:
                 self._set_state(
                     is_running=False,
                     progress=1.0,
-                    progress_message=I18n.get("backtest_done"),
+                    progress_message=Message("backtest_done"),
                 )
 
         strategy_obj = get_strategy_registry().get(strategy_key)
@@ -246,7 +259,7 @@ class BacktestViewModel:
         if task_id is None:
             self._set_state(
                 is_running=False,
-                status_message=I18n.get("backtest_task_rejected"),
+                status_message=Message("backtest_task_rejected"),
                 status_color="orange",
             )
 

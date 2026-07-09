@@ -62,7 +62,7 @@ class TestScreenerViewModelInit:
         """VM 不再有回调属性；state 字段覆盖原回调承载的 UI 状态。"""
         vm = ScreenerViewModel()
         assert vm.state.loading is False
-        assert vm.state.status_message == ""
+        assert vm.state.status_message is None
         assert vm.state.status_color == ""
         assert vm.state.logs == ()
         assert vm.state.task_unlocked is False

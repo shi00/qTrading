@@ -16,12 +16,12 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
-from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error, get_error_message
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ class OnboardingState:
     sync_in_progress: bool = False
     validation_in_progress: bool = False
     sync_progress: float = 0.0
-    sync_progress_message: str = ""
+    sync_progress_message: Message | None = None
     schedule_enabled: bool = True
     schedule_time: str = "16:30"
     normalized_schedule_time: str = "16:30"
@@ -411,13 +411,13 @@ class OnboardingViewModel:
         self._set_state(
             sync_in_progress=True,
             sync_progress=0.0,
-            sync_progress_message=I18n.get("wizard_status_init"),
+            sync_progress_message=Message("wizard_status_init"),
         )
 
         try:
 
             def progress_callback(current, total, message):
-                self._set_state(sync_progress=current / 100, sync_progress_message=message)
+                self._set_state(sync_progress=current / 100, sync_progress_message=Message(key=message))
 
             result = await self.data_processor.initialize_system(
                 progress_callback=progress_callback,
@@ -427,14 +427,14 @@ class OnboardingViewModel:
             if result:
                 self._set_state(
                     sync_progress=1.0,
-                    sync_progress_message=I18n.get("wizard_status_done"),
+                    sync_progress_message=Message("wizard_status_done"),
                 )
                 await asyncio.sleep(1)
                 await self.next_step()
             else:
                 self._set_state(
                     sync_progress=0.0,
-                    sync_progress_message=I18n.get("wizard_status_cancelled"),
+                    sync_progress_message=Message("wizard_status_cancelled"),
                 )
 
         except asyncio.CancelledError:
@@ -444,7 +444,7 @@ class OnboardingViewModel:
             error_info = classify_error(e, context="general")
             self._set_state(
                 sync_progress=0.0,
-                sync_progress_message=get_error_message(error_info),
+                sync_progress_message=Message(key=get_error_message(error_info)),
             )
         finally:
             self._set_state(sync_in_progress=False)
@@ -455,7 +455,7 @@ class OnboardingViewModel:
                 await self._data_processor.stop()
             self._set_state(
                 sync_progress=0.0,
-                sync_progress_message=I18n.get("wizard_status_cancelled"),
+                sync_progress_message=Message("wizard_status_cancelled"),
             )
         except Exception as e:
             logger.warning("[OnboardingVM] Failed to cancel sync: %s", e, exc_info=True)
@@ -465,7 +465,7 @@ class OnboardingViewModel:
     async def skip_sync(self):
         self._set_state(
             sync_progress=0.0,
-            sync_progress_message=I18n.get("wizard_status_skip"),
+            sync_progress_message=Message("wizard_status_skip"),
         )
         await self.next_step()
 

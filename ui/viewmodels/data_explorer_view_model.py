@@ -14,6 +14,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class DataExplorerState:
     filter_val: str = ""
     is_loading: bool = False
     tables_loaded: bool = False
-    error_message: str | None = None
+    error_message: Message | None = None
     # 轻量集合状态(tuple/frozenset 替代 list/set)
     tables_list: tuple[str, ...] = ()
     table_columns: tuple[str, ...] = ()
@@ -181,7 +182,12 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in init_tables: %s", e, exc_info=True)
-            self._set_state(error_message=get_error_message(error_info))
+            self._set_state(
+                error_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                )
+            )
             return []
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -217,7 +223,12 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in load_table_schema: %s", e, exc_info=True)
-            self._set_state(error_message=get_error_message(error_info))
+            self._set_state(
+                error_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                )
+            )
             return []
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -281,7 +292,12 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in query_data: %s", e, exc_info=True)
-            self._set_state(error_message=get_error_message(error_info))
+            self._set_state(
+                error_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                )
+            )
             return self._current_data
         finally:
             self._set_state(is_loading=False)
@@ -323,7 +339,12 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in query_count: %s", e, exc_info=True)
-            self._set_state(error_message=get_error_message(error_info))
+            self._set_state(
+                error_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                )
+            )
             return 0
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -367,7 +388,12 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in export_data: %s", e, exc_info=True)
-            self._set_state(error_message=get_error_message(error_info))
+            self._set_state(
+                error_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                )
+            )
             return pd.DataFrame()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -404,6 +430,7 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in execute_sql: %s", e, exc_info=True)
+            # NOTE(lazy): _sql_result.error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: Phase 3-4 View 声明式重写时, _sql_result.error 改为 Message 或 i18n key + format_args 透传.
             self._sql_result = {"success": False, "data": None, "error": get_error_message(error_info)}
             self._set_state(sql_result_version=self._state.sql_result_version + 1)
             return self._sql_result

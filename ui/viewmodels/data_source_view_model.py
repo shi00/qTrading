@@ -22,6 +22,7 @@ from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
 from services.ai_service import AIService
 from services.task_manager import AppTask, TaskManager, TaskStatus
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class DataSourceState:
 
     # --- Progress ---
     progress: float = 0.0
-    progress_message: str = ""
+    progress_message: Message | None = None
 
     # --- Dual-track versions (View pulls last_* on version change, §3.0.4) ---
     health_result_version: int = 0
@@ -92,7 +93,7 @@ class DataSourceViewModel:
 
         # --- Dual-track internal storage (§3.0.4) ---
         self._last_health_result: dict | None = None
-        self._last_snack: tuple[str, str] | None = None  # (message, color_name)
+        self._last_snack: tuple[Message, str] | None = None  # (message, color_name)
         self._last_health_error: str | None = None
 
     # ------------------------------------------------------------------
@@ -109,8 +110,8 @@ class DataSourceViewModel:
         return self._last_health_result
 
     @property
-    def last_snack(self) -> tuple[str, str] | None:
-        """最近一次 snack 通知 (message, color_name)（dual-track,View 在 snack_version 变化时拉取）。"""
+    def last_snack(self) -> tuple[Message, str] | None:
+        """最近一次 snack 通知 (Message, color_name)（dual-track,View 在 snack_version 变化时拉取）。"""
         return self._last_snack
 
     @property
@@ -147,7 +148,7 @@ class DataSourceViewModel:
 
     # --- Dual-track emitters ---
 
-    def _emit_snack(self, message: str, color_name: str) -> None:
+    def _emit_snack(self, message: Message, color_name: str) -> None:
         """Store snack and notify via snack_version (dual-track)."""
         self._last_snack = (message, color_name)
         self._set_state(snack_version=self._state.snack_version + 1)
@@ -257,21 +258,21 @@ class DataSourceViewModel:
             try:
                 await self._processor.run_daily_update(progress_callback=_progress)
                 self._emit_snack(
-                    I18n.get("snack_full_sync_done_simple"),
+                    Message("snack_full_sync_done_simple"),
                     "success",
                 )
                 return I18n.get("ds_daily_update_done")
             except asyncio.CancelledError:
                 if self._state.is_syncing:
                     self._emit_snack(
-                        I18n.get("settings_msg_sync_cancelled"),
+                        Message("settings_msg_sync_cancelled"),
                         "warning",
                     )
                 raise
             except Exception as ex:
                 classify_error(ex, context="general")
                 self._emit_snack(
-                    I18n.get("common_op_fail"),
+                    Message("common_op_fail"),
                     "error",
                 )
                 raise
@@ -312,19 +313,19 @@ class DataSourceViewModel:
                     manual_trigger=True,
                     ai_service=self._ai_service,
                 )
-                self._emit_snack(I18n.get("snack_ai_concept_done"), "success")
+                self._emit_snack(Message("snack_ai_concept_done"), "success")
                 return I18n.get("ds_ai_concept_rebuild_done")
             except asyncio.CancelledError:
                 if self._state.is_syncing:
                     self._emit_snack(
-                        I18n.get("settings_msg_sync_cancelled"),
+                        Message("settings_msg_sync_cancelled"),
                         "warning",
                     )
                 raise
             except Exception as ex:
                 classify_error(ex, context="general")
                 self._emit_snack(
-                    I18n.get("common_op_fail"),
+                    Message("common_op_fail"),
                     "error",
                 )
                 raise
@@ -352,7 +353,7 @@ class DataSourceViewModel:
             t for t in self._tm.get_all_tasks() if t.status == TaskStatus.RUNNING and t.unique_key != "cache_clear"
         ]
         if running:
-            self._emit_snack(I18n.get("ds_clear_cache_syncing"), "warning")
+            self._emit_snack(Message("ds_clear_cache_syncing"), "warning")
             return
 
         self._set_sync_busy(True, "cache_clear")
@@ -360,13 +361,13 @@ class DataSourceViewModel:
         async def _clear_logic(task_id: str, **kwargs):
             try:
                 await self._cache.clear_all_cache()
-                self._emit_snack(I18n.get("ds_cache_cleared"), "success")
+                self._emit_snack(Message("ds_cache_cleared"), "success")
                 self._emit_cache_cleared()
                 return I18n.get("ds_cache_clear_done")
             except Exception as ex:
                 classify_error(ex, context="general")
                 self._emit_snack(
-                    I18n.get("ds_clean_fail"),
+                    Message("ds_clean_fail"),
                     "error",
                 )
                 raise
@@ -395,10 +396,11 @@ class DataSourceViewModel:
 
         async def _run_initial_sync(task_id: str, **kwargs):
             try:
-                self._set_state(progress=0, progress_message=I18n.get("wizard_status_init"))
+                self._set_state(progress=0, progress_message=Message("wizard_status_init"))
 
                 def _combined_progress(c, t, m):
-                    self._set_state(progress=c / t if t > 0 else 0, progress_message=m)
+                    # NOTE(lazy): m 是 service 层传入的字符串,作为 key 透传. ceiling: service 层产出 Message. upgrade: service 层重构.
+                    self._set_state(progress=c / t if t > 0 else 0, progress_message=Message(m))
                     # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
                     # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
                     if not self._tm.update_progress(
@@ -419,7 +421,7 @@ class DataSourceViewModel:
                     raise InitSyncError(I18n.get("ds_init_fail_generic"))
 
                 self._reset_init_sync(TaskStatus.COMPLETED)
-                self._emit_snack(I18n.get("settings_init_done"), "success")
+                self._emit_snack(Message("settings_init_done"), "success")
 
                 return I18n.get("sys_init_success")
 
@@ -430,13 +432,13 @@ class DataSourceViewModel:
                 msg = str(e)
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
-                self._emit_snack(msg, "error")
+                self._emit_snack(Message("ds_init_fail_generic"), "error")
                 raise RuntimeError(msg) from e
             except Exception as e:
                 msg = I18n.get("ds_init_fail_fmt")
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
-                self._emit_snack(msg, "error")
+                self._emit_snack(Message("ds_init_fail_fmt"), "error")
                 raise RuntimeError(msg) from e
 
         task_id = self._tm.submit_task(

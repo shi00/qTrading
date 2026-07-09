@@ -463,12 +463,11 @@ class TestScreenerViewModelRunStrategy:
     async def test_with_not_found_strategy(self, screener_vm, mock_sm):
         """策略不存在时，state.status_color 设为 red（替代 on_status 回调）。"""
         mock_sm.get_strategy.return_value = None
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "not found"
-            await screener_vm.run_strategy("nonexistent")
+        await screener_vm.run_strategy("nonexistent")
         mock_sm.get_strategy.assert_called_once_with("nonexistent")
         assert screener_vm.state.status_color == "red"
-        assert screener_vm.state.status_message == "not found"
+        assert screener_vm.state.status_message is not None
+        assert screener_vm.state.status_message.key == "screener_strategy_not_found"
 
 
 class TestScreenerViewModelRunStrategyExecution:
@@ -1025,12 +1024,12 @@ class TestScreenerViewModelGetStrategyDesc:
 class TestScreenerViewModelOnAiProgress:
     def test_updates_state_status(self, screener_vm):
         """_on_ai_progress 更新 state.status_message/status_color（替代 on_status 回调）。"""
-        with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
-            mock_i18n.get.side_effect = lambda key, *a, **kw: key
-            screener_vm._on_ai_progress(5, 10, "analyzing")
+        screener_vm._on_ai_progress(5, 10, "analyzing")
 
         assert screener_vm.state.status_color == "blue"
-        assert screener_vm.state.status_message != ""
+        assert screener_vm.state.status_message is not None
+        assert screener_vm.state.status_message.key == "screener_ai_analyzing"
+        assert screener_vm.state.status_message.params == {"done": 5, "total": 10, "msg": "analyzing"}
 
 
 class TestScreenerViewModelOnAiResultStreamFlush:

@@ -12,6 +12,7 @@ import pytest
 
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig
+from ui.viewmodels import Message
 from ui.viewmodels.backtest_view_model import BacktestViewModel
 
 pytestmark = pytest.mark.unit
@@ -31,8 +32,8 @@ class TestBacktestViewModel:
         vm = BacktestViewModel()
         assert vm.state.is_running is False
         assert vm.state.progress == 0.0
-        assert vm.state.progress_message == ""
-        assert vm.state.status_message == ""
+        assert vm.state.progress_message is None
+        assert vm.state.status_message is None
         assert vm.state.status_color == ""
         assert vm.state.result_version == 0
 
@@ -205,7 +206,8 @@ class TestBacktestViewModel:
         await vm.run_backtest("test_strategy", config)
 
         assert vm.state.status_color == "orange"
-        assert "运行中" in vm.state.status_message or "already" in vm.state.status_message.lower()
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "backtest_already_running"
 
     @pytest.mark.asyncio
     async def test_get_historical_results(self):
@@ -357,7 +359,9 @@ class TestBacktestViewModelRunBacktest:
 
         progress_snapshots = [s for s in snapshots if s.progress == 0.5]
         assert len(progress_snapshots) >= 1
-        assert progress_snapshots[-1].progress_message == "halfway"
+        assert progress_snapshots[-1].progress_message is not None
+        assert progress_snapshots[-1].progress_message.key == "halfway"
+        assert progress_snapshots[-1].progress_message.params == {}
 
     @pytest.mark.asyncio
     async def test_run_backtest_exception_path(self):
@@ -556,7 +560,7 @@ class TestBacktestViewModelRunBacktest:
         # The late callback should NOT have updated state — is_running is False,
         # meaning the guard in _progress_callback prevented the update
         assert vm.state.progress == 1.0
-        assert vm.state.progress_message != "late update"
+        assert vm.state.progress_message != Message("late update")
 
     @pytest.mark.asyncio
     async def test_run_backtest_failure_reverts_state_properly(self):
@@ -598,10 +602,7 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.result_version == 0
         # Verify status was set to error (red)
         assert vm.state.status_color == "red"
-        assert (
-            "backtest_failed" in vm.state.status_message
-            or "回测失败" in vm.state.status_message
-            or "Backtest failed" in vm.state.status_message
-        )
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "backtest_failed"
         # Verify progress was set to 1.0 (final state from finally block)
         assert vm.state.progress == 1.0

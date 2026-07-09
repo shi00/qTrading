@@ -28,6 +28,7 @@ from ui.components.config_panels.local_model_config_panel import LocalModelConfi
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels import Message
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
@@ -240,9 +241,9 @@ class OnboardingWizard(ft.Container):
     def _on_vm_step_changed(self):  # pragma: no cover
         self._update_wizard()
 
-    def _on_vm_sync_progress(self, progress: float, message: str):  # pragma: no cover
+    def _on_vm_sync_progress(self, progress: float, message: Message | None):  # pragma: no cover
         self.sync_progress.value = progress
-        self.sync_status.value = message
+        self.sync_status.value = I18n.get(message.key, **message.params) if message else ""
         self._safe_update()
 
     def _on_vm_sync_state_changed(self):  # pragma: no cover

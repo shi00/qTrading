@@ -16,6 +16,7 @@ from data.persistence.quality_gate import QualityGateError
 from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class ScreenerState:
     sort_ascending: bool = True
     # Status bar (message + color)
     loading: bool = False
-    status_message: str = ""
+    status_message: Message | None = None
     status_color: str = ""
     # AI streaming logs (append-only tuple)
     logs: tuple[LogEntry, ...] = ()
@@ -228,7 +229,7 @@ class ScreenerViewModel:
         if not strategy:
             logger.error("[ScreenerVM] Strategy not found: %s", strategy_key)
             self._set_state(
-                status_message=I18n.get("screener_strategy_not_found"),
+                status_message=Message("screener_strategy_not_found"),
                 status_color="red",
             )
             return
@@ -263,11 +264,19 @@ class ScreenerViewModel:
                         for key, status in table_status.items()
                         if isinstance(status, dict) and not status.get("ready", True)
                     ]
-                    detail = f": {', '.join(not_ready)}" if not_ready else ""
-                    self._set_state(
-                        status_message=f"{I18n.get('strategy_dep_degraded')}{detail}",
-                        status_color="orange",
-                    )
+                    if not_ready:
+                        self._set_state(
+                            status_message=Message(
+                                "strategy_dep_degraded_detail",
+                                {"tables": ", ".join(not_ready)},
+                            ),
+                            status_color="orange",
+                        )
+                    else:
+                        self._set_state(
+                            status_message=Message("strategy_dep_degraded"),
+                            status_color="orange",
+                        )
 
                 context["data_processor"] = self.data_processor
                 context["params"] = params or {}  # Dynamic strategy parameters from UI
@@ -341,8 +350,9 @@ class ScreenerViewModel:
                     self._set_state(
                         page_no=1,
                         loading=False,
-                        status_message=I18n.get("screener_done_saved").format(
-                            count=len(result_df),
+                        status_message=Message(
+                            "screener_done_saved",
+                            {"count": len(result_df)},
                         ),
                         status_color="green",
                         data_version=self._state.data_version + 1,
@@ -354,7 +364,7 @@ class ScreenerViewModel:
                 self._set_state(
                     page_no=1,
                     loading=False,
-                    status_message=I18n.get("screener_no_results"),
+                    status_message=Message("screener_no_results"),
                     status_color="orange",
                     data_version=self._state.data_version + 1,
                 )
@@ -363,7 +373,7 @@ class ScreenerViewModel:
             except asyncio.CancelledError:
                 self._set_state(
                     loading=False,
-                    status_message=I18n.get("screener_cancelled"),
+                    status_message=Message("screener_cancelled"),
                     status_color="orange",
                 )
                 raise
@@ -375,7 +385,7 @@ class ScreenerViewModel:
                 )
                 self._set_state(
                     loading=False,
-                    status_message=I18n.get("screener_blocked", reason=str(e)),
+                    status_message=Message("screener_blocked", {"reason": str(e)}),
                     status_color="orange",
                 )
                 return I18n.get("screener_blocked", reason=str(e))
@@ -388,7 +398,7 @@ class ScreenerViewModel:
                 # Show generic user-friendly message, avoid raw traceback on UI
                 self._set_state(
                     loading=False,
-                    status_message=I18n.get("screener_exec_error"),
+                    status_message=Message("screener_exec_error"),
                     status_color="red",
                 )
                 raise RuntimeError(f"Strategy execution crashed: {e}") from e
@@ -399,7 +409,13 @@ class ScreenerViewModel:
         self._set_state(
             page_no=1,
             loading=True,
-            status_message=I18n.get("screener_running_strategy").format(name=I18n.get(strategy.name_key)),
+            # NOTE(lazy): params.name 存放已翻译策略名,语言切换时需 View 重新翻译.
+            #   ceiling: Phase 3-4 View 声明式重写时改为嵌套 Message 或策略名 i18n key 直传.
+            #   upgrade: Phase 3-4 ScreenerView 声明式重写.
+            status_message=Message(
+                "screener_running_strategy",
+                {"name": I18n.get(strategy.name_key)},
+            ),
             status_color="blue",
         )
 
@@ -414,7 +430,7 @@ class ScreenerViewModel:
         if task_id is None:
             self._set_state(
                 loading=False,
-                status_message=I18n.get("screener_task_rejected"),
+                status_message=Message("screener_task_rejected"),
                 status_color="orange",
             )
         else:
@@ -496,10 +512,9 @@ class ScreenerViewModel:
     def _on_ai_progress(self, current, total, msg):
         # Pass through status update
         self._set_state(
-            status_message=I18n.get("screener_ai_analyzing").format(
-                done=current,
-                total=total,
-                msg=msg,
+            status_message=Message(
+                "screener_ai_analyzing",
+                {"done": current, "total": total, "msg": msg},
             ),
             status_color="blue",
         )

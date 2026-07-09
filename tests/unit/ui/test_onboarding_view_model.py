@@ -45,9 +45,9 @@ def _count_transitions(snapshots, field_getter, initial) -> int:
 
 @pytest.fixture(autouse=True)
 def _mock_i18n():
-    with patch("ui.viewmodels.onboarding_view_model.I18n") as mock_i18n:
-        mock_i18n.get = MagicMock(side_effect=lambda key, **kwargs: key)
-        yield mock_i18n
+    mock_i18n = MagicMock()
+    mock_i18n.get = MagicMock(side_effect=lambda key, **kwargs: key)
+    yield mock_i18n
 
 
 # --- Fixtures ---
@@ -435,7 +435,12 @@ class TestOnboardingVMSync:
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
         sync_vm.next_step.assert_awaited_once()
-        assert any(s.sync_progress == 1.0 and s.sync_progress_message == "wizard_status_done" for s in snapshots)
+        assert any(
+            s.sync_progress == 1.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_done"
+            for s in snapshots
+        )
 
     async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor, snapshots):
         """sync_in_progress must transition exactly twice on success: True at start, False in finally.
@@ -453,7 +458,12 @@ class TestOnboardingVMSync:
         sync_vm.next_step = AsyncMock()
         await sync_vm.start_sync(quick=True)
         sync_vm.next_step.assert_not_awaited()
-        assert any(s.sync_progress == 0.0 and s.sync_progress_message == "wizard_status_cancelled" for s in snapshots)
+        assert any(
+            s.sync_progress == 0.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_cancelled"
+            for s in snapshots
+        )
 
     async def test_start_sync_exception(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.initialize_system = AsyncMock(side_effect=RuntimeError("sync failed"))
@@ -478,7 +488,12 @@ class TestOnboardingVMSync:
         assert "progress_callback" in call_kwargs
         cb = call_kwargs["progress_callback"]
         cb(75, 100, "Three quarters")
-        assert any(s.sync_progress == 0.75 and s.sync_progress_message == "Three quarters" for s in snapshots)
+        assert any(
+            s.sync_progress == 0.75
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "Three quarters"
+            for s in snapshots
+        )
 
     async def test_cancel_sync(self, sync_vm, mock_data_processor):
         await sync_vm.cancel_sync()
@@ -500,12 +515,22 @@ class TestOnboardingVMSync:
     async def test_skip_sync(self, sync_vm, snapshots):
         sync_vm.next_step = AsyncMock()
         await sync_vm.skip_sync()
-        assert any(s.sync_progress == 0.0 and s.sync_progress_message == "wizard_status_skip" for s in snapshots)
+        assert any(
+            s.sync_progress == 0.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_skip"
+            for s in snapshots
+        )
         sync_vm.next_step.assert_awaited_once()
 
     async def test_start_sync_quick_check_progress_init(self, sync_vm, snapshots):
         await sync_vm.start_sync(quick=True)
-        assert any(s.sync_progress == 0.0 and s.sync_progress_message == "wizard_status_init" for s in snapshots)
+        assert any(
+            s.sync_progress == 0.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_init"
+            for s in snapshots
+        )
 
 
 # =====================================================================

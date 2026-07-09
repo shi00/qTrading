@@ -16,6 +16,7 @@ from ui.components.settings_widgets import (
 )
 from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
@@ -622,14 +623,15 @@ class DataSourceTab(ft.Container):
 
     # --- ViewModel Callback Handlers ---
 
-    def _on_vm_show_snack(self, message: str, color_name: str):
+    def _on_vm_show_snack(self, message: Message, color_name: str):
         color_map = {
             "success": AppColors.SUCCESS,
             "warning": AppColors.WARNING,
             "error": AppColors.ERROR,
             "info": AppColors.INFO,
         }
-        self.show_snack(message, color=color_map.get(color_name, AppColors.INFO))
+        text = I18n.get(message.key, **message.params)
+        self.show_snack(text, color=color_map.get(color_name, AppColors.INFO))
 
     def _on_vm_sync_busy_changed(self, is_busy: bool, active_key: str | None):
         btn_map = {
@@ -827,12 +829,13 @@ class DataSourceTab(ft.Container):
             self.progress_text.value = ""
         self._safe_update()
 
-    def _on_vm_progress_update(self, progress: float, message: str):
+    def _on_vm_progress_update(self, progress: float, message: Message | None):
         now = time.time()
         should_update = (progress >= 1.0) or (not hasattr(self, "_last_ui_update") or now - self._last_ui_update > 0.1)
         if should_update:
             self.progress_bar.value = progress
-            self.progress_text.value = f"{progress * 100:.1f}% - {message}"
+            msg_text = I18n.get(message.key, **message.params) if message else ""
+            self.progress_text.value = f"{progress * 100:.1f}% - {msg_text}"
             self._safe_update()
             self._last_ui_update = now
 

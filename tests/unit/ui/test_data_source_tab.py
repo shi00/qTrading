@@ -20,6 +20,7 @@ import pytest
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.components.settings_widgets import MetricCard
 from ui.theme import AppColors
+from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
@@ -212,23 +213,23 @@ class TestOnTushareSave:
 
 class TestOnVmShowSnack:
     def test_success_color(self, tab):
-        tab._on_vm_show_snack("msg", "success")
+        tab._on_vm_show_snack(Message("msg"), "success")
         tab.show_snack.assert_called_once_with("msg", color=AppColors.SUCCESS)
 
     def test_warning_color(self, tab):
-        tab._on_vm_show_snack("msg", "warning")
+        tab._on_vm_show_snack(Message("msg"), "warning")
         tab.show_snack.assert_called_once_with("msg", color=AppColors.WARNING)
 
     def test_error_color(self, tab):
-        tab._on_vm_show_snack("msg", "error")
+        tab._on_vm_show_snack(Message("msg"), "error")
         tab.show_snack.assert_called_once_with("msg", color=AppColors.ERROR)
 
     def test_info_color(self, tab):
-        tab._on_vm_show_snack("msg", "info")
+        tab._on_vm_show_snack(Message("msg"), "info")
         tab.show_snack.assert_called_once_with("msg", color=AppColors.INFO)
 
     def test_unknown_color_falls_back_to_info(self, tab):
-        tab._on_vm_show_snack("msg", "unknown")
+        tab._on_vm_show_snack(Message("msg"), "unknown")
         tab.show_snack.assert_called_once_with("msg", color=AppColors.INFO)
 
 
@@ -552,24 +553,24 @@ class TestOnVmInitSyncReset:
 
 class TestOnVmProgressUpdate:
     def test_first_update_always_applies(self, tab):
-        tab._on_vm_progress_update(0.5, "Processing...")
+        tab._on_vm_progress_update(0.5, Message("Processing..."))
         assert tab.progress_bar.value == 0.5
         assert tab.progress_text.value == "50.0% - Processing..."
 
     def test_full_progress_always_applies(self, tab):
         tab._last_ui_update = time.time()  # Very recent
-        tab._on_vm_progress_update(1.0, "Done")
+        tab._on_vm_progress_update(1.0, Message("Done"))
         assert tab.progress_bar.value == 1.0
 
     def test_throttle_skips_rapid_updates(self, tab):
         tab._last_ui_update = time.time()  # Just updated
-        tab._on_vm_progress_update(0.3, "Should be skipped")
+        tab._on_vm_progress_update(0.3, Message("Should be skipped"))
         # Should NOT update because throttle
         assert tab.progress_bar.value != 0.3 or tab.progress_text.value != "30.0% - Should be skipped"
 
     def test_update_after_throttle_interval(self, tab):
         tab._last_ui_update = time.time() - 0.2  # 200ms ago
-        tab._on_vm_progress_update(0.6, "After interval")
+        tab._on_vm_progress_update(0.6, Message("After interval"))
         assert tab.progress_bar.value == 0.6
 
 

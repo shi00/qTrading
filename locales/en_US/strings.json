@@ -1322,6 +1322,7 @@
     "health_suspended_filtered": "Filtered {count} suspended stocks",
     "strategy_dep_unready": "Strategy dependencies not ready",
     "strategy_dep_degraded": "Strategy running in degraded mode",
+    "strategy_dep_degraded_detail": "Strategy running in degraded mode: {tables}",
     "review_ctx_positive": "Review Reference - Positive Samples",
     "review_ctx_negative": "Review Reference - Negative Samples",
     "review_ctx_none": "No historical review samples available.",
