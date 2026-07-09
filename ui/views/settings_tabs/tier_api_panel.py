@@ -17,6 +17,7 @@ i18n 9 条规范:
 """
 
 import logging
+from collections.abc import Callable
 from datetime import datetime
 
 import flet as ft
@@ -37,8 +38,8 @@ class TierApiPanel(ft.Column):
     """高级配置面板——展示各档位 API 列表 + probe 状态 + 独立付费标记 + 触发探测按钮。
 
     通过构造注入 ``SystemViewModel``（v1.6.0 P1-10：单一实例由 system_tab 创建并注入，
-    Panel 不自行实例化 VM）。VM 通过 ``on_probe_completed`` 单回调字段通知 Panel
-    probe 结果（同 ``DataSourceViewModel.on_show_snack`` 模式）。
+    Panel 不自行实例化 VM）。VM 通过 state + subscribe 通知 Panel probe 结果
+    (Phase 2 改造: on_probe_completed 回调移除,改用 probe_result_version 通知 + last_probe_result 拉取)。
     """
 
     def __init__(self, viewmodel: SystemViewModel):  # pragma: no cover - UI 渲染入口
@@ -52,6 +53,10 @@ class TierApiPanel(ft.Column):
         self._stale_apis: list[str] = []
         self._probe_in_progress = False
         self._locale_sub_id: object | None = None
+        # NOTE(lazy): VM subscribe 替代 on_probe_completed 回调,Phase 4 声明式重写时移除。
+        # ceiling: Phase 4 TierApiPanel 重写. upgrade: Task 4.x TierApiPanel 声明式重写.
+        self._vm_unsubscribe: Callable[[], None] | None = None
+        self._prev_probe_result_version: int = 0
         self._build_ui()
         # 订阅 locale 变更（subscribe 返回 callback 本身；__init__ 已构建 UI，
         # 用 sync_immediately=False 避免重复重建）
@@ -368,15 +373,16 @@ class TierApiPanel(ft.Column):
     # ------------------------------------------------------------------
 
     def did_mount(self) -> None:  # pragma: no cover - UI 生命周期
-        """挂载时注册 ViewModel 的 on_probe_completed 回调（单回调字段模式）。
+        """挂载时订阅 ViewModel state 变化（probe_result_version 通知模式）。
 
         v1.9.0 M-5 修订：自动 probe（bootstrap 启动）可能在 TierApiPanel 挂载之前完成，
-        此时 on_probe_completed 为 None，_emit_probe_result 静默丢失（已改 logger.warning）。
+        此时无订阅者，_emit_probe_result 静默丢失（已改 logger.warning）。
         did_mount 主动调用 ``client.get_capability_cache()`` 拉取最新缓存刷新 API 列表，
         覆盖自动 probe 早完成的情况。
         """
         try:
-            self._viewmodel.on_probe_completed = self._on_probe_result
+            # NOTE(lazy): subscribe 替代 on_probe_completed,Phase 4 声明式重写时移除。
+            self._vm_unsubscribe = self._viewmodel.subscribe(self._on_vm_state_changed)
             # M-5：主动拉取最新缓存，覆盖自动 probe 在 Panel 挂载前完成的情况
             from data.external.tushare_client import TushareClient  # lazy import to avoid circular dependency
 
@@ -393,10 +399,23 @@ class TierApiPanel(ft.Column):
             logger.warning("[TierApiPanel] did_mount refresh failed: %s", exc, exc_info=True)
 
     def will_unmount(self) -> None:  # pragma: no cover - UI 生命周期
-        """卸载时清空回调，避免悬挂引用/内存泄漏。"""
-        if self._viewmodel.on_probe_completed is self._on_probe_result:
-            self._viewmodel.on_probe_completed = None
+        """卸载时取消订阅，避免悬挂引用/内存泄漏。"""
+        if self._vm_unsubscribe is not None:
+            self._vm_unsubscribe()
+            self._vm_unsubscribe = None
         self.dispose()
+
+    def _on_vm_state_changed(self, state) -> None:  # pragma: no cover - UI 生命周期
+        """VM state 变化回调: 当 probe_result_version 递增时拉取 last_probe_result 并分派。
+
+        NOTE(lazy): 混合态过渡实现,Phase 4 TierApiPanel 声明式重写时移除。
+        ceiling: Phase 4 TierApiPanel 重写. upgrade: Task 4.x TierApiPanel 声明式重写.
+        """
+        if state.probe_result_version != self._prev_probe_result_version:
+            self._prev_probe_result_version = state.probe_result_version
+            result = self._viewmodel.last_probe_result
+            if result is not None:
+                self._on_probe_result(result)
 
     # ------------------------------------------------------------------
     # 档位下拉框回调
@@ -418,8 +437,8 @@ class TierApiPanel(ft.Column):
         """执行档位变更全链路（异步）。
 
         通过 ``SystemViewModel.on_tier_changed`` 完成 set_tier → reload_limiters →
-        clear_cache → probe → _emit_probe_result 链路。结果通过 on_probe_completed
-        回调刷新 Panel。
+        clear_cache → probe → _emit_probe_result 链路。结果通过 state.probe_result_version
+        通知（_on_vm_state_changed 拉取 last_probe_result）刷新 Panel。
         """
         self._set_probe_in_progress()
         try:
@@ -446,11 +465,11 @@ class TierApiPanel(ft.Column):
             self._notify_probe_failed(str(exc))
 
     # ------------------------------------------------------------------
-    # View 回调方法（由 ViewModel 通过 on_probe_completed 触发）
+    # View 回调方法（由 _on_vm_state_changed 在 probe_result_version 变化时触发）
     # ------------------------------------------------------------------
 
     def _on_probe_result(self, result: dict) -> None:
-        """on_probe_completed 回调：根据 result.type 分派到对应 _notify_* 方法。
+        """probe 结果分派：根据 result.type 分派到对应 _notify_* 方法。
 
         result.type 由 SystemViewModel._emit_probe_result 定义:
         - "completed" → _notify_probe_completed(tier, available, unavailable, unknown)
