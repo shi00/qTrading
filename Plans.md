@@ -62,6 +62,7 @@
 | 2.7 | [lane:gate][tdd:required] DataExplorerViewModel 特殊形态改造（方案 §3.0.4 双轨制）：轻量 UI 状态封装为 frozen `DataExplorerState`（tuple 替代 list、frozenset 替代 set）；大体积数据（DataFrame/dict）VM 内部持有 + property 拉取 + `_notify` 通知。配套 `test_data_explorer_view_model.py` 整改 | `vm.state` 为 frozen dataclass；`vm.current_data` property 返回 DataFrame；`vm.subscribe` 存在；`pytest tests/unit/ui/test_data_explorer_view_model.py` 通过 | 0.2 | cc:完了 [fc478d5, 69+41 tests green, ruff/pyright clean, 修复 Task 2.1 遗留 vm.mode 直接赋值] |
 | 2.8 | [lane:gate] Phase 2 回归验收：`grep -rn "on_update=\|on_log=\|on_status=" --include=*.py ui/viewmodels/` = 0；全量 `pytest tests/unit/ -m "not slow"` 通过 | grep = 0；pytest 全绿；ruff + pyright 通过 | 2.1-2.7 | cc:完了 [grep=0, 7676 tests green, ruff/pyright clean] |
 | 2.9 | [lane:gate][tdd:skip:review-gate] Phase 2 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-2-review.md`；7 个 VM 形态契约一致(frozen dataclass + subscribe/_notify)；中断/取消路径覆盖；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 2.8 | cc:完了 [APPROVE, 7 VM 形态契约一致, 15 处 CancelledError 全 raise, 7676 tests green] |
+| 2.10 | [lane:gate] Phase 2 locale 场景遗漏修复：6 个 VM 的 message 字段违反"VM 不感知 locale"契约(str 类型直接调 I18n.get())；新建 Message dataclass 统一 i18n 消息契约；View 消费端适配 | `ui/viewmodels/__init__.py` Message dataclass；6 VM message 字段改 Message\|None；View 消费端 I18n.get(msg.key, **msg.params)；ruff/pyright/pytest 全绿 | 2.9 | cc:完了 [aa1f69c, 17 files, 7676 tests green, 0 pyright errors] |
 
 ---
 
