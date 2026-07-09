@@ -6,8 +6,8 @@
 3. getter：_page_ref 未设置，ft.Control.page.fget 抛 RuntimeError → 返回 None
 4. setter：写入 __dict__['_page_ref']
 
-注意：mock_flet.py 的 _install_v1_compat_control_page_mock() 会 monkey-patch
-ft.Control.page，但 PageRefMixin 通过 MRO 优先级覆盖，二者不冲突。
+注意：conftest.py 的 ``_v1_page_compat`` autouse fixture 会 monkey-patch
+``ft.Control.page``，但 PageRefMixin 通过 MRO 优先级覆盖，二者不冲突。
 """
 
 from unittest.mock import MagicMock, patch

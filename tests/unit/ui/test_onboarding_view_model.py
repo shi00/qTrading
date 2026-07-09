@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import flet as ft
 import pytest
 
-from tests.unit.ui.conftest import set_page
 from ui.viewmodels.onboarding_view_model import (
     OnboardingState,
     OnboardingViewModel,
@@ -802,14 +801,14 @@ class TestOnboardingWizardNavigation(_OnboardingWizardBase):
 
     async def test_next_step_advances(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard._update_wizard = MagicMock()
         await wizard._next_step()
         assert wizard.vm.current_step == 1
 
     async def test_next_step_blocks_on_validation_failure(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 1
         wizard.vm.validate_and_persist_current_step = AsyncMock(return_value=False)
         await wizard._next_step()
@@ -817,7 +816,7 @@ class TestOnboardingWizardNavigation(_OnboardingWizardBase):
 
     async def test_prev_step_does_not_go_below_zero(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 0
         await wizard._prev_step()
         assert wizard.vm.current_step == 0
@@ -828,49 +827,49 @@ class TestOnboardingWizardRendering(_OnboardingWizardBase):
 
     def test_update_wizard_updates_step_container(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 1
         wizard._update_wizard()
         assert wizard.step_container.content == wizard.steps_content[1]
 
     def test_update_wizard_shows_indicators_for_config_steps(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 3
         wizard._update_wizard()
         assert wizard.step_indicators.visible is True
 
     def test_update_wizard_hides_indicators_for_welcome(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 0
         wizard._update_wizard()
         assert wizard.step_indicators.visible is False
 
     def test_update_wizard_hides_indicators_for_complete(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 7
         wizard._update_wizard()
         assert wizard.step_indicators.visible is False
 
     def test_update_wizard_shows_header_for_welcome(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 0
         wizard._update_wizard()
         assert wizard.header_container.visible is True
 
     def test_update_wizard_shows_header_for_complete(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 7
         wizard._update_wizard()
         assert wizard.header_container.visible is True
 
     def test_update_wizard_hides_header_for_config_steps(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 3
         wizard._update_wizard()
         assert wizard.header_container.visible is False
@@ -878,7 +877,7 @@ class TestOnboardingWizardRendering(_OnboardingWizardBase):
     def test_on_vm_step_changed_triggers_update_wizard(self, mock_page):
         """VM 步骤变更回调触发 View 更新"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.current_step = 3
         wizard._update_wizard = MagicMock()
         wizard._on_vm_step_changed()
@@ -890,7 +889,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
 
     def test_on_locale_change_updates_header_title(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         original_title = wizard.header_title
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_title" else key
         wizard._on_locale_change()
@@ -899,7 +898,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
 
     def test_on_locale_change_updates_header_desc(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         original_desc = wizard.header_desc
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: (
             f"en_{key}" if key == "wizard_welcome_desc_with_time" else key
@@ -910,7 +909,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
 
     def test_on_locale_change_updates_gradient_guide_text(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         original_text = wizard.gradient_guide_text
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_guide" else key
         wizard._on_locale_change()
@@ -924,7 +923,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         """§5.8 规范 4：_on_locale_change 重建 options 后 value 必须保留。"""
         self.mock_i18n.current_locale.return_value = "zh_CN"
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.wizard_language_dropdown.value = "zh_CN"
         original_value = wizard.wizard_language_dropdown.value
         wizard._on_locale_change()
@@ -935,7 +934,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
     def test_on_locale_change_updates_btn_sync_later_text(self, mock_page):
         """§5.8 规范 3：_on_locale_change 必须更新 btn_sync_later.text（避免重建步骤时丢失翻译）"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         original_btn = wizard.btn_sync_later
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_btn_sync_later" else key
         wizard._on_locale_change()
@@ -950,7 +949,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
 
     async def test_on_language_change_wizard_preserves_header_reference(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         original_header_container = wizard.header_container
         original_header_title = wizard.header_title
         original_header_desc = wizard.header_desc
@@ -963,7 +962,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
 
     async def test_on_language_change_wizard_updates_header_title_directly(self, mock_page):
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         original_title = wizard.header_title
         original_desc = wizard.header_desc
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if "welcome" in key else key
@@ -985,7 +984,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         mock_page.update = MagicMock()
 
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
         self.mock_i18n.current_locale.return_value = "en_US"
@@ -998,7 +997,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
     async def test_on_language_change_wizard_persist_failure_skips_i18n_set(self, mock_page):
         """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown。"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard._safe_update = MagicMock()
         self.mock_ch.set_locale.return_value = False
         self.mock_i18n.current_locale.return_value = "zh_CN"
@@ -1013,7 +1012,7 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
     async def test_language_change_rebinds_panel_callbacks(self, mock_page):
         """语言切换后 VM 回调指向新面板"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.wizard_language_dropdown = MagicMock()
         wizard.wizard_language_dropdown.value = "en_US"
         await wizard._do_language_change_wizard_async()
@@ -1042,7 +1041,7 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
     async def test_cleanup_vm_cancels_sync_and_disposes(self, mock_page):
         """卸载时取消进行中的同步并清理 VM"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.sync_in_progress = True
         wizard.vm.cancel_sync = AsyncMock()
         wizard.vm.dispose = MagicMock()
@@ -1053,7 +1052,7 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
     async def test_cleanup_vm_disposes_without_sync(self, mock_page):
         """卸载时无进行中同步，直接清理 VM"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.sync_in_progress = False
         wizard.vm.cancel_sync = AsyncMock()
         wizard.vm.dispose = MagicMock()
@@ -1068,14 +1067,14 @@ class TestOnboardingWizardLoading(_OnboardingWizardBase):
     def test_on_panel_loading_change_shows_overlay_when_loading(self, mock_page):
         """面板加载中 → 遮罩显示"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard._on_panel_loading_change(True)
         assert wizard.loading_overlay.visible is True
 
     def test_on_panel_loading_change_hides_overlay_when_not_loading_and_not_validating(self, mock_page):
         """面板加载完成 + VM 校验完成 → 遮罩隐藏"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard.vm.validation_in_progress = False
         wizard._on_panel_loading_change(False)
         assert wizard.loading_overlay.visible is False
@@ -1083,7 +1082,7 @@ class TestOnboardingWizardLoading(_OnboardingWizardBase):
     def test_on_panel_loading_change_keeps_overlay_when_validating(self, mock_page):
         """面板加载完成但 VM 校验中 → 遮罩保持显示"""
         wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
+        wizard.page = mock_page
         wizard._show_loading_overlay(True)
         wizard.vm.validation_in_progress = True
         wizard._on_panel_loading_change(False)

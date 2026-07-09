@@ -8,7 +8,7 @@ import flet as ft
 import pytest
 
 from services.task_manager import AppTask, TaskStatus
-from tests.unit.ui.conftest import set_page, wrap_mock_page
+from tests.unit.ui.conftest import wrap_mock_page
 from ui.views.task_center_view import (
     PAGE_SIZE,
     TaskCenterView,
@@ -308,7 +308,7 @@ class TestTaskCenterView:
 
     def test_go_prev_decrements_page(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._current_page = 3
         view._total_pages = 5
         view._all_tasks = [MagicMock()] * 25
@@ -326,7 +326,7 @@ class TestTaskCenterView:
 
     def test_go_next_increments_page(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._current_page = 1
         view._total_pages = 3
         view._all_tasks = [MagicMock()] * 25
@@ -344,7 +344,7 @@ class TestTaskCenterView:
 
     def test_go_prev_with_actual_refresh(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task() for _ in range(PAGE_SIZE + 1)]
         view._refresh_ui(tasks)
         view._go_prev(None)
@@ -352,7 +352,7 @@ class TestTaskCenterView:
 
     def test_go_next_with_actual_refresh(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task() for _ in range(PAGE_SIZE + 1)]
         view._refresh_ui(tasks)
         view._go_next(None)
@@ -362,14 +362,14 @@ class TestTaskCenterView:
 
     def test_refresh_ui_with_empty_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._refresh_ui([])
         assert view.scroll_area.controls == [view.empty_view]
         assert view.pagination_row.visible is False
 
     def test_refresh_ui_with_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task(status=TaskStatus.QUEUED)]
         view._refresh_ui(tasks)
         assert len(view.scroll_area.controls) == 1
@@ -377,7 +377,7 @@ class TestTaskCenterView:
 
     def test_refresh_ui_stats_text(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [
             _make_task(status=TaskStatus.RUNNING),
             _make_task(status=TaskStatus.QUEUED),
@@ -387,14 +387,14 @@ class TestTaskCenterView:
 
     def test_refresh_ui_pagination_visible_when_multiple_pages(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task() for _ in range(PAGE_SIZE + 1)]
         view._refresh_ui(tasks)
         assert view.pagination_row.visible is True
 
     def test_refresh_ui_pagination_hidden_when_single_page(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task()]
         view._refresh_ui(tasks)
         assert view.pagination_row.visible is False
@@ -408,14 +408,14 @@ class TestTaskCenterView:
 
     def test_refresh_ui_stores_all_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task(), _make_task(status=TaskStatus.RUNNING)]
         view._refresh_ui(tasks)
         assert view._all_tasks == tasks
 
     def test_refresh_ui_counts_running_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [
             _make_task(status=TaskStatus.RUNNING),
             _make_task(status=TaskStatus.RUNNING),
@@ -427,7 +427,7 @@ class TestTaskCenterView:
 
     def test_refresh_ui_with_page_size_plus_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task() for _ in range(PAGE_SIZE + 5)]
         view._refresh_ui(tasks)
         # Only PAGE_SIZE cards on first page
@@ -449,7 +449,7 @@ class TestTaskCenterView:
     )
     def test_build_task_card_all_statuses(self, mock_page, status):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=status, progress=0.5, cancellable=True)
         if status == TaskStatus.FAILED:
             task.error = "some error"
@@ -460,7 +460,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_running_with_progress(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.RUNNING, progress=0.75, cancellable=True)
         card = view._build_task_card(task)
         assert card is not None
@@ -468,21 +468,21 @@ class TestTaskCenterView:
 
     def test_build_task_card_completed_full_progress(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.COMPLETED, progress=1.0)
         card = view._build_task_card(task)
         assert card is not None
 
     def test_build_task_card_failed_shows_error(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.FAILED, error="disk full")
         card = view._build_task_card(task)
         assert card is not None
 
     def test_build_task_card_cancellable_running(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.RUNNING, cancellable=True)
         card = view._build_task_card(task)
         # The bottom_row should contain a TextButton for cancel
@@ -490,21 +490,21 @@ class TestTaskCenterView:
 
     def test_build_task_card_not_cancellable_running(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.RUNNING, cancellable=False)
         card = view._build_task_card(task)
         assert card is not None
 
     def test_build_task_card_cancellable_queued(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.QUEUED, cancellable=True)
         card = view._build_task_card(task)
         assert card is not None
 
     def test_build_task_card_not_cancellable_completed(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.COMPLETED, cancellable=True)
         card = view._build_task_card(task)
         # Completed tasks should not show cancel button even if cancellable=True
@@ -546,7 +546,7 @@ class TestTaskCenterView:
 
     def test_on_tasks_updated_mounted(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._mounted = True
         view._on_tasks_updated([])
         mock_page.run_task.assert_called_once_with(view._safe_refresh, [])
@@ -554,7 +554,7 @@ class TestTaskCenterView:
     def test_on_tasks_updated_not_mounted(self, mock_page):
         view = self._make_view(mock_page)
         page = wrap_mock_page(mock_page)
-        set_page(view, page)
+        view.page = page
         view._mounted = False
         view._on_tasks_updated([])
         page.run_task.assert_not_called()
@@ -568,7 +568,7 @@ class TestTaskCenterView:
 
     def test_on_tasks_updated_passes_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._mounted = True
         tasks = [_make_task()]
         view._on_tasks_updated(tasks)
@@ -579,7 +579,7 @@ class TestTaskCenterView:
     @pytest.mark.asyncio
     async def test_safe_refresh(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task()]
         await view._safe_refresh(tasks)
         assert view._all_tasks == tasks
@@ -596,7 +596,7 @@ class TestTaskCenterView:
     def test_refresh_ui_empty_then_populated(self, mock_page):
         """Verify transition from empty to populated state."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._refresh_ui([])
         assert view.scroll_area.controls == [view.empty_view]
 
@@ -608,7 +608,7 @@ class TestTaskCenterView:
     def test_refresh_ui_populated_then_empty(self, mock_page):
         """Verify transition from populated to empty state."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task(status=TaskStatus.RUNNING)]
         view._refresh_ui(tasks)
         assert len(view.scroll_area.controls) == 1
@@ -619,7 +619,7 @@ class TestTaskCenterView:
     def test_task_state_transition_queued_to_running(self, mock_page):
         """Verify UI handles a task transitioning from QUEUED to RUNNING."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.QUEUED)
         view._refresh_ui([task])
         assert len(view.scroll_area.controls) == 1
@@ -632,7 +632,7 @@ class TestTaskCenterView:
     def test_task_state_transition_running_to_completed(self, mock_page):
         """Verify UI handles a task transitioning from RUNNING to COMPLETED."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.RUNNING, progress=0.5)
         view._refresh_ui([task])
 
@@ -644,7 +644,7 @@ class TestTaskCenterView:
     def test_task_state_transition_running_to_failed(self, mock_page):
         """Verify UI handles a task transitioning from RUNNING to FAILED."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = _make_task(status=TaskStatus.RUNNING, progress=0.5)
         view._refresh_ui([task])
 
@@ -656,7 +656,7 @@ class TestTaskCenterView:
     def test_multiple_tasks_mixed_statuses(self, mock_page):
         """Verify rendering with multiple tasks in different statuses."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [
             _make_task(name="Queued Task", status=TaskStatus.QUEUED),
             _make_task(
@@ -674,7 +674,7 @@ class TestTaskCenterView:
     def test_pagination_across_pages(self, mock_page):
         """Verify navigating through multiple pages."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task() for _ in range(PAGE_SIZE * 3)]
         view._refresh_ui(tasks)
 
@@ -694,7 +694,7 @@ class TestTaskCenterView:
     def test_page_info_text_updates(self, mock_page):
         """Verify page info text reflects current pagination state."""
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [_make_task() for _ in range(PAGE_SIZE * 2)]
         view._refresh_ui(tasks)
         assert "1" in (view.page_info_text.value or "")

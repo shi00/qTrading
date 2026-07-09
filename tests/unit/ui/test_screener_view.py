@@ -15,7 +15,7 @@ from ui.views.screener_view import (
     _format_cell_value,
     ScreenerView,
 )
-from tests.unit.ui.conftest import set_page, wrap_mock_page
+from tests.unit.ui.conftest import wrap_mock_page
 
 pytestmark = pytest.mark.unit
 
@@ -157,7 +157,7 @@ class TestScreenerView:
 
     def _make_view(self, mock_page):
         view = ScreenerView(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         return view
 
     def test_instantiation_creates_controls(self, mock_page):
@@ -1458,7 +1458,7 @@ class TestScreenerView:
         """覆盖 1394->1396: df 为 None 且 page 无 show_toast 时安全跳过。"""
         view = self._make_view(mock_page)
         no_toast = _NoToastPage()
-        set_page(view, no_toast)
+        view.page = no_toast
         view.vm.get_export_data.return_value = None
         await view._on_export_click(None)  # should not raise
 
@@ -1543,7 +1543,7 @@ class TestStrategyTierHint:
 
     def _make_view(self, mock_page):
         view = ScreenerView(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         return view
 
     def _patch_tier_deps(self, *, current_tier: str, min_tier: str):

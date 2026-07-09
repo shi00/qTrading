@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
-from tests.unit.ui.conftest import set_page
 
 pytestmark = pytest.mark.unit
 
@@ -114,7 +113,7 @@ class TestMetricCard:
         from ui.components.settings_widgets import MetricCard
 
         card = MetricCard(label="L", value="old")
-        set_page(card, mock_page)
+        card.page = mock_page
         card.update = MagicMock()
         card.set_value("new", icon=ft.Icons.CHECK, status_color="green")
         assert card.value_text == "new"
@@ -135,7 +134,7 @@ class TestMetricCard:
         from ui.components.settings_widgets import MetricCard
 
         card = MetricCard(label="old", value="v")
-        set_page(card, mock_page)
+        card.page = mock_page
         card.update = MagicMock()
         card.set_label("NEW")
         assert card.label_text == "NEW"
@@ -162,7 +161,7 @@ class TestMetricCard:
         from ui.components.settings_widgets import MetricCard
 
         card = MetricCard(label="L", value="V", trend="+1%", trend_up=True)
-        set_page(card, mock_page)
+        card.page = mock_page
         card.update = MagicMock()
         card.update_theme()
         # 重建后内容刷新，update 被调用
@@ -216,7 +215,7 @@ class TestActionChip:
         from ui.components.settings_widgets import ActionChip
 
         chip = ActionChip(icon=ft.Icons.ADD, title="t", subtitle="s", on_click=MagicMock(), is_primary=True)
-        set_page(chip, mock_page)
+        chip.page = mock_page
         chip.update = MagicMock()
         chip.set_loading(True)
         assert chip.disabled is True
@@ -228,7 +227,7 @@ class TestActionChip:
         from ui.components.settings_widgets import ActionChip
 
         chip = ActionChip(icon=ft.Icons.ADD, title="t", subtitle="s", on_click=MagicMock(), is_primary=False)
-        set_page(chip, mock_page)
+        chip.page = mock_page
         chip.update = MagicMock()
         # 先 loading 再恢复
         chip.set_loading(True)
@@ -249,7 +248,7 @@ class TestActionChip:
         from ui.components.settings_widgets import ActionChip
 
         chip = ActionChip(icon=ft.Icons.ADD, title="t", subtitle="s", on_click=MagicMock(), is_primary=True)
-        set_page(chip, mock_page)
+        chip.page = mock_page
         chip.update = MagicMock(side_effect=RuntimeError("ui boom"))
         with caplog.at_level(logging.DEBUG, logger="ui.components.settings_widgets"):
             # 不应抛出异常
@@ -260,7 +259,7 @@ class TestActionChip:
         from ui.components.settings_widgets import ActionChip
 
         chip = ActionChip(icon=ft.Icons.ADD, title="old", subtitle="sub", on_click=MagicMock(), is_primary=True)
-        set_page(chip, mock_page)
+        chip.page = mock_page
         chip.update = MagicMock()
         chip.set_text("new_title")
         assert chip.title_text == "new_title"
@@ -271,7 +270,7 @@ class TestActionChip:
         from ui.components.settings_widgets import ActionChip
 
         chip = ActionChip(icon=ft.Icons.ADD, title="old", subtitle="old_sub", on_click=MagicMock(), is_primary=False)
-        set_page(chip, mock_page)
+        chip.page = mock_page
         chip.update = MagicMock()
         chip.set_text("new_title", "new_sub")
         assert chip.title_text == "new_title"
@@ -289,7 +288,7 @@ class TestActionChip:
         from ui.components.settings_widgets import ActionChip
 
         chip = ActionChip(icon=ft.Icons.ADD, title="old", subtitle="sub", on_click=MagicMock(), is_primary=True)
-        set_page(chip, mock_page)
+        chip.page = mock_page
         chip.update = MagicMock(side_effect=RuntimeError("ui boom"))
         with caplog.at_level(logging.DEBUG, logger="ui.components.settings_widgets"):
             chip.set_text("new")
@@ -324,7 +323,7 @@ class TestStatusBadge:
         from ui.components.settings_widgets import StatusBadge
 
         badge = StatusBadge(text="old", color="green", icon=ft.Icons.CHECK)
-        set_page(badge, mock_page)
+        badge.page = mock_page
         badge.update = MagicMock()
         badge.set_text("new")
         assert badge.badge_text == "new"
@@ -345,7 +344,7 @@ class TestStatusBadge:
         from ui.components.settings_widgets import StatusBadge
 
         badge = StatusBadge(text="old", color="green")
-        set_page(badge, mock_page)
+        badge.page = mock_page
         badge.update = MagicMock(side_effect=RuntimeError("ui boom"))
         with caplog.at_level(logging.DEBUG, logger="ui.components.settings_widgets"):
             badge.set_text("new")

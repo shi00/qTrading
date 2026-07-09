@@ -1,9 +1,14 @@
+import asyncio
 import hashlib
 import logging
 import os
+import time
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote_plus
 
 import asyncpg
+import flet as ft
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, insert
@@ -52,18 +57,49 @@ from tests.integration.fixtures.mvd_data import (
     MVD_TRADE_CAL,
 )
 
-# NOTE(lazy): 集成测试侧显式调用 V1 兼容桩，让 ft.Control.page 可读写、update() 容忍未挂载情况.
-# ceiling: 集成测试套件（tests/integration/ 路径）.
-# upgrade: 与 mock_flet._install_v1_compat_control_page_mock 同步移除，
-#     集成测试代码改用 PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
-# 集成测试（如 test_config_panels.py）用 `panel.page = mock_page` 赋值，
-# 但 V1 中 ft.Control.page 是只读 property，需此桩恢复 V0 行为。
-# 导入 mock_flet 模块时已自动应用桩，此处显式调用确保幂等。
-from tests.unit.ui.mock_flet import _install_v1_compat_control_page_mock
-
-_install_v1_compat_control_page_mock()
-
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _v1_page_compat(monkeypatch):
+    """Per-test V1 page 兼容桩（替代旧 mock_flet 全局桩，方案 §3.3.1）。
+
+    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
+    ``Control.update()`` 要求控件已挂载。本 fixture 用 monkeypatch 作用域隔离地
+    恢复 V0 兼容行为：page 可读写、未挂载 ``update()`` 静默返回。
+
+    集成测试（如 test_config_panels.py）用 ``panel.page = mock_page`` 注入 page。
+    与 tests/unit/ui/conftest.py 的同名 fixture 行为一致，避免重复维护两套桩。
+    """
+    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
+    original_page_get: Any = ft.Control.page.fget
+    original_update: Any = ft.Control.update
+
+    @property
+    def page(self) -> ft.Page | None:
+        mock_page = self.__dict__.get("_mock_page")
+        if mock_page is not None:
+            return mock_page
+        try:
+            return original_page_get(self)
+        except RuntimeError:
+            return None
+
+    @page.setter
+    def page(self, value: ft.Page | None) -> None:
+        self.__dict__["_mock_page"] = value
+
+    def update(self) -> None:
+        if self.__dict__.get("_mock_page") is None:
+            try:
+                original_page_get(self)
+            except RuntimeError:
+                return
+        original_update(self)
+
+    monkeypatch.setattr(ft.Control, "page", page)
+    monkeypatch.setattr(ft.Control, "update", update)
+
 
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
@@ -217,6 +253,71 @@ async def _cleanup_mvd_data(test_engine: AsyncEngine):
         await conn.execute(delete(StockBasic).where(StockBasic.ts_code.in_(["000001.SZ", "600000.SH"])))
 
 
+@dataclass
+class FletTestPage:
+    """``flet_test_page`` fixture 返回值：含 page + ``wait_for_render`` 辅助方法（方案 §3.3.3）。
+
+    为有状态主 View 提供集成测试环境。``wait_for_render`` 基于 ``page.controls``
+    长度变化轮询，不依赖 Flet 内部渲染事件（无公开 API），超时抛 ``TimeoutError``。
+    """
+
+    page: ft.Page
+
+    def wait_for_render(self, timeout: float = 2.0, expected_controls: int | None = None) -> None:
+        """轮询 ``page.controls`` 长度变化，超时抛 ``TimeoutError``（方案 §3.3.3 M3）。
+
+        Args:
+            timeout: 超时秒数，默认 2.0。
+            expected_controls: 期望的控件数量；None 表示当前数量 + 1。
+        """
+        deadline = time.monotonic() + timeout
+        initial = len(self.page.controls)
+        target = expected_controls if expected_controls is not None else initial + 1
+        while time.monotonic() < deadline:
+            if len(self.page.controls) >= target:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"wait_for_render 超时: 期望 {target} 个控件，实际 {len(self.page.controls)}")
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def flet_test_page():
+    """启动完整 Flet app 返回 ``FletTestPage``（page + ``wait_for_render``，方案 §3.3.3）。
+
+    通过 ``ft.run_async`` + ``AppView.FLET_APP_HIDDEN`` 启动隐藏 Flet app，
+    在 ``main`` 回调中捕获 page。session 作用域避免每次测试重新启动 app。
+
+    首次运行需下载 Flet bundle（one-time），预热后启动较快。
+    spike 验证：``ft.run_async`` + ``FLET_APP_HIDDEN`` 可在 60s 内捕获 page
+    （含首次 bundle 下载），``page.add`` 后 ``page.controls`` 立即更新。
+
+    Windows 限制：``ft.run_async`` 的 socket server 不兼容
+    ``WindowsSelectorEventLoop``（抛 ``NotImplementedError``），而 pytest-asyncio
+    在 Windows 强制 selector policy。因此 Windows 本地无法运行依赖此 fixture
+    的测试（probe 测试已加 ``skipif(win32)``）。CI 集成测试在 Linux 运行，
+    用 ``DefaultEventLoopPolicy`` 不受影响。本地 Windows 验证请用独立 spike：
+    ``python -m tests.integration._spike_flet_run_async``。
+    """
+    captured: list[ft.Page] = []
+    ready = asyncio.Event()
+
+    async def app_main(page: ft.Page) -> None:
+        captured.append(page)
+        ready.set()
+
+    task = asyncio.create_task(ft.run_async(app_main, view=ft.AppView.FLET_APP_HIDDEN, port=0))
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=120.0)
+        yield FletTestPage(page=captured[0])
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # task 被主动取消是预期行为（fixture teardown），非业务异常吞没
+            pass
+
+
 @pytest_asyncio.fixture
 async def mvd_data(test_engine):
     """
@@ -320,11 +421,15 @@ def _reset_thread_pool():
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def db_schema_ready(request, test_engine):
+async def db_schema_ready(request):
     """Ensure database schema is ready before each test.
 
     Skip for tests that use isolated database fixtures (e.g., migrated_db_engine,
     metadata_db_engine, etc.) to avoid conflicting with their own database setup.
+
+    Skip for tests marked ``no_db`` (e.g., flet_test_page probe) — 这类测试
+    不需要 DB，不应触发 ``test_engine`` 创建。``test_engine`` 改为延迟加载
+    避免被 autouse fixture 强制依赖（方案 §3.3.3 DoD）。
     """
     # Skip for tests that use isolated database fixtures
     isolated_fixtures = {
@@ -342,7 +447,15 @@ async def db_schema_ready(request, test_engine):
         "db_via_alembic",
     }
     fixture_names = set(request.fixturenames)
+
+    # no_db marker: 完全跳过 DB schema 初始化（不调用 test_engine）
+    if request.node.get_closest_marker("no_db"):
+        yield
+        return
+
     if not (isolated_fixtures & fixture_names):
+        # 延迟加载 test_engine，仅在需要 DB 的测试中创建
+        test_engine = request.getfixturevalue("test_engine")
         from data.persistence.db_migrator import DatabaseMigrator
 
         with override_db_url(TEST_DB_URL):

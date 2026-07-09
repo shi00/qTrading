@@ -430,9 +430,6 @@ class TestDatabaseTabRefreshLocale:
 
         return DatabaseTab(show_snack_callback=MagicMock())
 
-    def _set_page(self, tab, page):
-        tab._mock_page = page
-
     def test_refresh_locale_updates_title_text(self):
         tab = self._make_tab()
         tab.refresh_locale()
@@ -443,7 +440,7 @@ class TestDatabaseTabRefreshLocale:
 
     def test_refresh_locale_with_page_calls_update(self, mock_page):
         tab = self._make_tab()
-        self._set_page(tab, mock_page)
+        tab.page = mock_page
         tab.update = MagicMock()
         tab.refresh_locale()
         tab.update.assert_called_once()
@@ -474,7 +471,7 @@ class TestDatabaseTabRefreshLocale:
         from ui.views.settings_tabs.database_tab import logger as tab_logger
 
         tab = self._make_tab()
-        self._set_page(tab, mock_page)
+        tab.page = mock_page
         # update 抛异常，但 refresh_locale 的 try/except 应捕获
         tab.update = MagicMock(side_effect=RuntimeError("update failed"))
 

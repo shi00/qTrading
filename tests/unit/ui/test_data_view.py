@@ -5,7 +5,7 @@ import flet as ft
 import pandas as pd
 import pytest
 
-from tests.unit.ui.conftest import set_page, wrap_mock_page
+from tests.unit.ui.conftest import wrap_mock_page
 
 pytestmark = pytest.mark.unit
 
@@ -43,20 +43,20 @@ class TestDataExplorerView:
 
     def test_did_mount_sets_mounted_flag(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.did_mount()
         assert view._mounted is True
 
     def test_did_mount_skips_if_already_mounted(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._mounted = True
         view.did_mount()
         mock_page.run_task.assert_not_called()
 
     def test_will_unmount_clears_mounted_flag(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view._mounted = True
         view.will_unmount()
         assert view._mounted is False
@@ -64,14 +64,14 @@ class TestDataExplorerView:
 
     def test_on_broadcast_message_cache_cleared(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view._ui_built = True
         view._on_broadcast_message("cache_cleared")
         view.vm.mark_tables_stale.assert_called_once()
 
     def test_on_broadcast_message_ignores_other(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view._ui_built = True
         view.vm.state.tables_loaded = True
         view._on_broadcast_message("other_message")
@@ -79,7 +79,7 @@ class TestDataExplorerView:
 
     def test_update_theme_propagates_to_tabs(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view.table_tab = MagicMock()
         view.sql_tab = MagicMock()
         view.update_theme()
@@ -88,7 +88,7 @@ class TestDataExplorerView:
 
     def test_on_tab_changed_triggers_table_mount(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._ui_built = True
         view.tabs = MagicMock()
         view.tabs.selected_index = 0
@@ -98,13 +98,13 @@ class TestDataExplorerView:
 
     def test_on_tab_changed_skips_if_not_built(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view._ui_built = False
         view._on_tab_changed(None)
 
     def test_will_unmount_unsubscribes_pubsub(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view._pubsub_subscribed = True
         view.will_unmount()
         mock_page.pubsub.unsubscribe.assert_called_once()
@@ -112,7 +112,7 @@ class TestDataExplorerView:
 
     def test_will_unmount_cancels_mount_task(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         mock_task = MagicMock()
         view._mount_task = mock_task
         view.will_unmount()
@@ -122,7 +122,7 @@ class TestDataExplorerView:
     @pytest.mark.asyncio
     async def test_lazy_build_ui_creates_tabs(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         await view._lazy_build_ui()
         assert hasattr(view, "table_tab")
         assert hasattr(view, "sql_tab")
@@ -132,7 +132,7 @@ class TestDataExplorerView:
     async def test_lazy_build_ui_uses_v1_tabs_three_piece_set(self, mock_page):
         """R12.b V1 三件套验证：_lazy_build_ui 创建的 tabs 是 ft.Tabs + ft.TabBar + ft.TabBarView。"""
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         await view._lazy_build_ui()
 
         # view.tabs 是 ft.Tabs（V1 三件套容器）
@@ -167,7 +167,7 @@ class TestDataExplorerView:
         import ui.views.data_view as mod
 
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         # 构造 refresh_locale 依赖的最小 UI 状态
         view._loading_text = MagicMock()
         view.tabs = MagicMock()
@@ -255,27 +255,27 @@ class TestTableViewerTab:
 
     def test_did_mount_sets_flag(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.did_mount()
         assert tab._mounted is True
 
     def test_did_mount_skips_if_already_mounted(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab._mounted = True
         tab.did_mount()
         assert tab._mounted is True
 
     def test_will_unmount_clears_flag(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab._mounted = True
         tab.will_unmount()
         assert tab._mounted is False
 
     def test_update_theme(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.update_theme()
         assert tab.table_selector.bgcolor == self.mock_ac.INPUT_BG
         assert tab.btn_query.icon_color == self.mock_ac.PRIMARY
@@ -283,7 +283,7 @@ class TestTableViewerTab:
     @pytest.mark.asyncio
     async def test_did_mount_async_loads_tables(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, wrap_mock_page(mock_page))
+        tab.page = wrap_mock_page(mock_page)
 
         async def _mock_init_tables():
             tab.vm.state.tables_loaded = True
@@ -299,7 +299,7 @@ class TestTableViewerTab:
     @pytest.mark.asyncio
     async def test_did_mount_async_handles_error(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, wrap_mock_page(mock_page))
+        tab.page = wrap_mock_page(mock_page)
         tab.vm.init_tables = AsyncMock(side_effect=Exception("DB error"))
         await tab.did_mount_async()
         assert tab.vm.state.tables_loaded is False
@@ -307,14 +307,14 @@ class TestTableViewerTab:
     @pytest.mark.asyncio
     async def test_did_mount_async_skips_if_already_loaded(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.vm.state.tables_loaded = True
         await tab.did_mount_async()
 
     @pytest.mark.asyncio
     async def test_on_table_changed_updates_table(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.table_selector.value = "daily_quotes"
         tab._load_schema_and_data = AsyncMock()
         await tab._on_table_changed(None)
@@ -324,7 +324,7 @@ class TestTableViewerTab:
     @pytest.mark.asyncio
     async def test_rebuild_table_rows_with_data(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.vm.state.table_columns = ("col1", "col2")
         tab.vm.state.numeric_cols = frozenset({"col1"})
         tab.vm.current_data = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
@@ -336,7 +336,7 @@ class TestTableViewerTab:
         import ui.views.data_view as mod
 
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         # 配置 tables_list 与 get_table_alias 返回，确保 table_selector.options 能重建
         tab.vm.state.tables_list = ("stock_basic", "daily")
         mod.MetaDataManager.get_table_alias.return_value = "alias"
@@ -362,7 +362,7 @@ class TestTableViewerTab:
         import ui.views.data_view as mod
 
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.vm.state.tables_list = ("stock_basic", "daily")
         tab.vm.state.current_table = "stock_basic"
         tab.vm.state.table_columns = ("col1", "col2")
@@ -378,7 +378,7 @@ class TestTableViewerTab:
     def test_news_cell_no_hardcoded_width(self, mock_page):
         """§6.3：新闻 cell 不应硬编码 width=400，应使用 expand=True 自适应宽度。"""
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.vm.state.current_table = "market_news"
         tab.vm.state.table_columns = ("content", "col2")
         tab.vm.state.numeric_cols = frozenset()
@@ -399,7 +399,7 @@ class TestTableViewerTab:
         Container 间隔实现等价右侧留白（同时覆盖滚动与非滚动两种布局）。
         """
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         toolbar_row = tab.content.controls[0].controls[0].content
         assert isinstance(toolbar_row, ft.Row)
         assert toolbar_row.scroll == ft.ScrollMode.AUTO
@@ -452,20 +452,20 @@ class TestSQLConsoleTab:
     @pytest.mark.asyncio
     async def test_run_query_empty_sql(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.sql_editor.value = ""
         await tab._run_query(None)
 
     def test_update_theme(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.update_theme()
         assert tab.sql_editor.bgcolor == self.mock_ac.INPUT_BG
 
     @pytest.mark.asyncio
     async def test_run_query_with_valid_sql(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.sql_editor.value = "SELECT * FROM stock_basic LIMIT 10"
         df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
         tab.vm.execute_sql = AsyncMock(return_value={"success": True, "data": df})
@@ -477,7 +477,7 @@ class TestSQLConsoleTab:
     @pytest.mark.asyncio
     async def test_run_query_with_error_result(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.sql_editor.value = "SELECT * FROM nonexistent"
         tab.vm.execute_sql = AsyncMock(return_value={"success": False, "error": "Table not found"})
         await tab._run_query(None)
@@ -487,7 +487,7 @@ class TestSQLConsoleTab:
     @pytest.mark.asyncio
     async def test_run_query_with_exception(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.sql_editor.value = "INVALID SQL"
         tab.vm.execute_sql = AsyncMock(side_effect=Exception("Connection error"))
         await tab._run_query(None)

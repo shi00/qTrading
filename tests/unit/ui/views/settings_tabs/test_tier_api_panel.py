@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
-from tests.unit.ui.conftest import set_page, wrap_mock_page
+from tests.unit.ui.conftest import wrap_mock_page
 from ui.viewmodels.system_viewmodel import SystemViewModel
 from ui.views.settings_tabs.tier_api_panel import (
     _TIER_PANEL_LG_BREAKPOINT,
@@ -69,7 +69,7 @@ class TestTierApiPanel:
     def _make_panel(self, mock_page):
         vm = SystemViewModel()
         panel = TierApiPanel(vm)
-        set_page(panel, wrap_mock_page(mock_page))
+        panel.page = wrap_mock_page(mock_page)
         return panel
 
     def test_tier_api_panel_handle_resize(self, mock_page):

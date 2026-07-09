@@ -1,11 +1,53 @@
+from typing import Any
 from unittest.mock import MagicMock, create_autospec
 
 import flet as ft
 import pytest
 
+from core.i18n import DEFAULT_LOCALE, I18n, I18nState
 from tests.unit.ui.mock_flet import MockFletPage
-from ui.theme import AppColors, AppStyles
+from ui.theme import AppColors, AppColorsState, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
+
+
+@pytest.fixture(autouse=True)
+def _v1_page_compat(monkeypatch):
+    """Per-test V1 page 兼容桩（替代旧 mock_flet 全局桩，方案 §3.3.1）。
+
+    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
+    ``Control.update()`` 要求控件已挂载。本 fixture 用 monkeypatch 作用域隔离地
+    恢复 V0 兼容行为：page 可读写、未挂载 ``update()`` 静默返回。
+
+    测试代码用 ``control.page = mock_page`` 注入 page（替代已删除的 page 注入 helper）。
+    """
+    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
+    original_page_get: Any = ft.Control.page.fget
+    original_update: Any = ft.Control.update
+
+    @property
+    def page(self) -> ft.Page | None:
+        mock_page = self.__dict__.get("_mock_page")
+        if mock_page is not None:
+            return mock_page
+        try:
+            return original_page_get(self)
+        except RuntimeError:
+            return None
+
+    @page.setter
+    def page(self, value: ft.Page | None) -> None:
+        self.__dict__["_mock_page"] = value
+
+    def update(self) -> None:
+        if self.__dict__.get("_mock_page") is None:
+            try:
+                original_page_get(self)
+            except RuntimeError:
+                return
+        original_update(self)
+
+    monkeypatch.setattr(ft.Control, "page", page)
+    monkeypatch.setattr(ft.Control, "update", update)
 
 
 @pytest.fixture
@@ -25,11 +67,44 @@ def mock_i18n():
 
 
 @pytest.fixture
-def mock_app_colors():
-    """基于 create_autospec 的 AppColors mock。
+def mock_i18n_state(monkeypatch):
+    """MockI18nState 注入 fixture：可控 locale 的 I18nState 实例（方案 §3.3.1）。
+
+    声明式组件通过 ``ft.use_state(I18n.get_observable_state)`` 订阅，
+    本 fixture 用 monkeypatch 注入 ``I18n._state``，让 ``get_observable_state()``
+    返回此 mock 实例。替代旧 ``I18n.subscribe`` mock（命令式 View 用，阶段 4 删除）。
+
+    单测中 ``render_component`` 绕过 Renderer，``use_state`` 不会真正订阅，
+    但 ``I18n.get_observable_state()`` 仍被调用以读取初始 locale。
+    """
+    state = I18nState(locale=DEFAULT_LOCALE)
+    monkeypatch.setattr(I18n, "_state", state)
+    return state
+
+
+@pytest.fixture
+def mock_app_colors_state(monkeypatch):
+    """MockAppColorsState 注入 fixture：可控 theme_name 的 AppColorsState 实例（方案 §3.3.1 H2）。
+
+    声明式组件通过 ``ft.use_state(AppColors.get_observable_state)`` 订阅，
+    本 fixture 用 monkeypatch 注入 ``AppColors._state``，让 ``get_observable_state()``
+    返回此 mock 实例。替代旧 ``AppColors._listeners`` mock（命令式 View 用，阶段 4 删除）。
+    """
+    state = AppColorsState(theme_name=ThemeName.DARK)
+    monkeypatch.setattr(AppColors, "_state", state)
+    return state
+
+
+@pytest.fixture
+def mock_app_colors(mock_app_colors_state):
+    """基于 create_autospec 的 AppColors mock（含 Observable state 注入，H2）。
 
     方法签名跟随 AppColors 类定义；颜色 token 从真实类复制，
     确保 token 重命名/删除时测试立即失败（P2-2）。
+
+    依赖 ``mock_app_colors_state`` 注入 ``AppColors._state``，让声明式组件
+    通过 ``AppColors.get_observable_state()`` 拿到 mock state（方案 §3.2 H2）。
+    命令式 View 旧测试访问 ``mock_app_colors.subscribe``/``load_theme`` 不受影响。
     """
     m = create_autospec(AppColors, instance=True)
     # 复制所有公开数据属性（颜色字符串、常量），保持与生产单一真相源对齐
@@ -97,16 +172,6 @@ def mock_config_handler():
     m.get_theme_name.return_value = "dark"
     m.get_tushare_point_tier.return_value = "points_5000"
     return m
-
-
-def set_page(control: ft.Control, page: ft.Page | MockFletPage) -> None:
-    # NOTE(lazy): 测试侧 set_page helper，写入 _mock_page 由 mock_flet 桩读取.
-    # ceiling: 测试套件（仅 tests/unit/ui/ 与 tests/integration/ 路径导入 mock_flet 时生效）.
-    # upgrade: 与 mock_flet._install_v1_compat_control_page_mock 同步移除，
-    #     测试代码改用 PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
-    # V1 兼容：写入 __dict__['_mock_page']，由 mock_flet.py 的 page getter 读取。
-    # V0 用 _Control__page（name-mangled self.__page），V1 的 page property 不再读它。
-    control._mock_page = page
 
 
 def wrap_mock_page(mock_page):

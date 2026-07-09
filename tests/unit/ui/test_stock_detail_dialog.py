@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from data.data_processor import DataProcessor
-from tests.unit.ui.conftest import set_page
 from ui.components.stock_detail_dialog import logger as detail_logger
 
 pytestmark = pytest.mark.unit
@@ -225,7 +224,7 @@ class TestStockDetailDialog:
     def test_close_calls_pop_dialog(self, mock_page):
         # R3: V1 _close 通过 page.pop_dialog() 关闭对话框（不再设置 self.open）
         dlg = self._make_dialog()
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         mock_page.pop_dialog = MagicMock()
         dlg._close(None)
         mock_page.pop_dialog.assert_called_once()
@@ -239,7 +238,7 @@ class TestStockDetailDialog:
     def test_refresh_locale_rebuilds_content(self, mock_page):
         """§5.8 规范 6：refresh_locale 应正确刷新文案（重建 title/content/actions），不抛出异常。"""
         dlg = self._make_dialog({"ts_code": "000001.SZ", "name": "平安银行"})
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.update = MagicMock()
         original_title = dlg.title
         original_content = dlg.content
@@ -263,7 +262,7 @@ class TestStockDetailDialog:
     def test_refresh_locale_swallows_exception(self, mock_page, caplog):
         """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
         dlg = self._make_dialog({"ts_code": "000001.SZ"})
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         # 强制 I18n.get 抛异常以触发 try/except
         self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
 
@@ -276,7 +275,7 @@ class TestStockDetailDialog:
     @pytest.mark.asyncio
     async def test_load_chart_no_processor(self, mock_page):
         dlg = self._make_dialog(data_processor=None)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
         await dlg.load_chart("000001.SZ")
         dlg.chart_container.update.assert_called_once()
@@ -286,7 +285,7 @@ class TestStockDetailDialog:
         mock_dp = MagicMock(spec=DataProcessor)
         mock_dp.get_stock_history = MagicMock(return_value=_async_empty_df())
         dlg = self._make_dialog(data_processor=mock_dp)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async.return_value = _async_b64()
@@ -676,7 +675,7 @@ class TestStockDetailDialogLoadChart:
         mock_dp.get_stock_history = MagicMock(return_value=fut)
 
         dlg = self._make_dialog(data_processor=mock_dp)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
 
         await dlg.load_chart("000001.SZ")
@@ -688,7 +687,7 @@ class TestStockDetailDialogLoadChart:
         mock_dp.get_stock_history = MagicMock(side_effect=Exception("network error"))
 
         dlg = self._make_dialog(data_processor=mock_dp)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
 
         await dlg.load_chart("000001.SZ")
@@ -1089,7 +1088,7 @@ class TestStockDetailDialogLifecycle:
         import flet as ft
 
         dlg = self._make_dialog({"ts_code": "000001.SZ", "name": "测试"})
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.update = MagicMock()
 
         # 模拟已加载的 K 线图（ft.Image）
@@ -1107,7 +1106,7 @@ class TestStockDetailDialogLifecycle:
         import flet as ft
 
         dlg = self._make_dialog({"ts_code": "000001.SZ"})
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.update = MagicMock()
 
         # chart_container.content 是 ProgressRing（非 ft.Image）
@@ -1158,7 +1157,7 @@ class TestStockDetailDialogLoadChartSuccess:
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         dlg = self._make_dialog(data={"name": "测试股票"}, data_processor=mock_dp)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.chart_container = MagicMock()
 
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
@@ -1183,7 +1182,7 @@ class TestStockDetailDialogLoadChartSuccess:
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
         dlg = self._make_dialog(data={"name": "测试"}, data_processor=mock_dp)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.chart_container = MagicMock()
 
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:

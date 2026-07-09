@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tests.unit.ui.conftest import set_page
 
 pytestmark = pytest.mark.unit
 
@@ -190,7 +189,7 @@ class TestSystemTabThemeChange:
 
     async def test_on_theme_change_applies_theme(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.theme_dropdown.value = "light"
         with (
             patch("ui.theme.apply_page_theme") as mock_apply,
@@ -202,7 +201,7 @@ class TestSystemTabThemeChange:
     async def test_on_theme_change_updates_page(self, mock_page):
         tab = self._make_tab()
         page = MagicMock()
-        set_page(tab, page)
+        tab.page = page
         tab.theme_dropdown.value = "navy"
         with (
             patch("ui.theme.apply_page_theme"),
@@ -225,7 +224,7 @@ class TestSystemTabThemeChange:
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.theme_dropdown.value = "dark"
         with (
             patch("ui.theme.apply_page_theme", side_effect=Exception("theme error")),
@@ -271,7 +270,7 @@ class TestSystemTabLanguageChange:
 
     async def test_on_language_change_empty_value_skips(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.language_dropdown.value = None
         with _patch_thread_pool():
             await tab._do_language_change_async()
@@ -280,7 +279,7 @@ class TestSystemTabLanguageChange:
     async def test_on_language_change_persist_failure_reverts_dropdown(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.show_snack = snack
         tab._safe_update = MagicMock()
         self.mock_ch.set_locale.return_value = False
@@ -297,7 +296,7 @@ class TestSystemTabLanguageChange:
     async def test_on_language_change_exception_shows_error(self, mock_page):
         snack = MagicMock()
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.show_snack = snack
         self.mock_ch.set_locale.side_effect = Exception("config error")
         tab.language_dropdown.value = "en_US"
@@ -316,7 +315,7 @@ class TestSystemTabLanguageChange:
         mock_page.locale_configuration.current_locale = ft.Locale("zh", "CN")
         mock_page.update = MagicMock()
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.show_snack = MagicMock()
         self.mock_ch.set_locale.return_value = True
         tab.language_dropdown.value = "en_US"
@@ -366,7 +365,7 @@ class TestSystemTabLogLevelChange:
 
     async def test_on_log_level_change_calls_update_log_level(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.log_level_dropdown.value = "WARNING"
         with (
             patch("utils.logger.update_log_level") as mock_update,
@@ -423,7 +422,7 @@ class TestSystemTabConcurrency:
 
     async def test_save_concurrency_boundary_min(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.concurrency_input.value = "1"
         with _patch_thread_pool():
             await tab._do_save_concurrency_async()
@@ -431,7 +430,7 @@ class TestSystemTabConcurrency:
 
     async def test_save_concurrency_boundary_max(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.concurrency_input.value = "32"
         with _patch_thread_pool():
             await tab._do_save_concurrency_async()
@@ -515,7 +514,7 @@ class TestSystemTabDBPoolSettings:
 
     async def test_save_db_pool_settings_boundary_pool_size_min(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.pool_size_input.value = "1"
         tab.db_overflow_input.value = "0"
         tab.db_timeout_input.value = "5"
@@ -525,7 +524,7 @@ class TestSystemTabDBPoolSettings:
 
     async def test_save_db_pool_settings_boundary_pool_size_max(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.pool_size_input.value = "50"
         tab.db_overflow_input.value = "0"
         tab.db_timeout_input.value = "5"
@@ -579,7 +578,7 @@ class TestSystemTabThreadPoolSettings:
 
     async def test_save_thread_pool_settings_io_boundary_min(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.io_workers_input.value = "4"
         tab.cpu_workers_input.value = "1"
         with _patch_thread_pool():
@@ -588,7 +587,7 @@ class TestSystemTabThreadPoolSettings:
 
     async def test_save_thread_pool_settings_io_boundary_max(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.io_workers_input.value = "512"
         tab.cpu_workers_input.value = "4"
         with _patch_thread_pool():
@@ -597,7 +596,7 @@ class TestSystemTabThreadPoolSettings:
 
     async def test_save_thread_pool_settings_cpu_boundary_min(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "1"
         with _patch_thread_pool():
@@ -606,7 +605,7 @@ class TestSystemTabThreadPoolSettings:
 
     async def test_save_thread_pool_settings_cpu_boundary_max(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "64"
         with _patch_thread_pool():
@@ -635,7 +634,7 @@ class TestSystemTabThreadPoolSettings:
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.io_workers_input.value = "8"
         tab.cpu_workers_input.value = "4"
         with _patch_thread_pool():
@@ -679,7 +678,7 @@ class TestSystemTabNoProxyDomains:
 
     async def test_save_no_proxy_domains_strips_whitespace(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.no_proxy_input.value = "  localhost , 127.0.0.1 , example.com  "
         with (
             patch("utils.proxy_manager.ProxyManager"),
@@ -690,7 +689,7 @@ class TestSystemTabNoProxyDomains:
 
     async def test_save_no_proxy_domains_filters_empty_entries(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.no_proxy_input.value = "localhost,,127.0.0.1,"
         with (
             patch("utils.proxy_manager.ProxyManager"),
@@ -713,7 +712,7 @@ class TestSystemTabNoProxyDomains:
 
     async def test_save_no_proxy_domains_submits_proxy_reapply(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.no_proxy_input.value = "localhost"
         with (
             patch("utils.proxy_manager.ProxyManager"),
@@ -759,7 +758,7 @@ class TestSystemTabDiagnostics:
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
-        set_page(tab, mock_page)
+        tab.page = mock_page
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_dc:
             mock_dc.export = AsyncMock(return_value="/tmp/diag.zip")
             await tab.on_export_diagnostics(None)
@@ -771,7 +770,7 @@ class TestSystemTabDiagnostics:
         snack = MagicMock()
         tab = self._make_tab()
         tab.show_snack = snack
-        set_page(tab, mock_page)
+        tab.page = mock_page
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_dc:
             mock_dc.export = AsyncMock(side_effect=Exception("export failed"))
             await tab.on_export_diagnostics(None)
@@ -780,7 +779,7 @@ class TestSystemTabDiagnostics:
 
     async def test_on_export_diagnostics_disables_button_during_export(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_dc:
             mock_dc.export = AsyncMock(return_value="/tmp/diag.zip")
             await tab.on_export_diagnostics(None)
@@ -788,7 +787,7 @@ class TestSystemTabDiagnostics:
 
     async def test_on_export_diagnostics_reenables_button_after_failure(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_dc:
             mock_dc.export = AsyncMock(side_effect=Exception("export failed"))
             await tab.on_export_diagnostics(None)
@@ -829,21 +828,21 @@ class TestSystemTabLocaleChange:
 
     def test_on_locale_change_updates_dropdown_labels(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_theme")
         self.mock_i18n.get.assert_any_call("settings_log_level")
 
     def test_on_locale_change_updates_input_labels(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab._on_locale_change()
         self.mock_i18n.get.assert_any_call("settings_concurrency")
         self.mock_i18n.get.assert_any_call("settings_db_pool")
 
     def test_on_locale_change_calls_row_update_locale(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab._on_locale_change()
         rows = [
             tab.row_language,
@@ -862,13 +861,13 @@ class TestSystemTabLocaleChange:
 
     def test_on_locale_change_calls_section_header_update_locale(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab._on_locale_change()
         tab.section_header.update_locale.assert_called_once()
 
     def test_on_locale_change_exception_handled(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         self.mock_i18n.get.side_effect = RuntimeError("locale error")
         tab._on_locale_change()
 
@@ -958,7 +957,7 @@ class TestSystemTabSafeUpdate:
     def test_safe_update_with_page(self, mock_page):
         tab = self._make_tab()
         page = MagicMock()
-        set_page(tab, page)
+        tab.page = page
         tab._safe_update()
         page.update.assert_called_once()
 
@@ -971,7 +970,7 @@ class TestSystemTabSafeUpdate:
         tab = self._make_tab()
         page = MagicMock()
         page.update.side_effect = RuntimeError("update failed")
-        set_page(tab, page)
+        tab.page = page
         tab._safe_update()
 
 
@@ -1009,7 +1008,7 @@ class TestSystemTabUpdateTheme:
 
     def test_update_theme_sets_input_colors(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.update_theme()
         assert tab.theme_dropdown.bgcolor == self.mock_ac.INPUT_BG
         assert tab.theme_dropdown.color == self.mock_ac.INPUT_TEXT
@@ -1017,7 +1016,7 @@ class TestSystemTabUpdateTheme:
 
     def test_update_theme_sets_concurrency_input_colors(self, mock_page):
         tab = self._make_tab()
-        set_page(tab, mock_page)
+        tab.page = mock_page
         tab.update_theme()
         assert tab.concurrency_input.bgcolor == self.mock_ac.INPUT_BG
         assert tab.concurrency_input.color == self.mock_ac.INPUT_TEXT
@@ -1032,6 +1031,6 @@ class TestSystemTabUpdateTheme:
     def test_update_theme_calls_update_with_page(self, mock_page):
         tab = self._make_tab()
         page = MagicMock()
-        set_page(tab, page)
+        tab.page = page
         tab.update_theme()
         page.update.assert_called_once()

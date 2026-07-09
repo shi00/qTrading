@@ -8,7 +8,7 @@ import flet as ft
 import pytest
 
 from services.task_manager import TaskStatus
-from tests.unit.ui.conftest import set_page, wrap_mock_page
+from tests.unit.ui.conftest import wrap_mock_page
 from ui.views.home_view import logger as home_view_logger
 from ui.views.task_center_view import (
     PAGE_SIZE,
@@ -72,7 +72,7 @@ class TestSettingsView:
 
     def test_on_tab_click_updates_current_tab_index(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         e = MagicMock()
         e.control.data = "2"
         view._on_tab_click(e)
@@ -80,7 +80,7 @@ class TestSettingsView:
 
     def test_on_tab_click_with_invalid_index_does_nothing(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         original = view.current_tab_index
         e = MagicMock()
         e.control.data = "99"
@@ -89,7 +89,7 @@ class TestSettingsView:
 
     def test_on_tab_click_with_non_numeric_data_does_nothing(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         original = view.current_tab_index
         e = MagicMock()
         e.control.data = "abc"
@@ -98,31 +98,31 @@ class TestSettingsView:
 
     def test_show_snack_with_show_toast_info(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.show_snack("hello")
         mock_page.show_toast.assert_called_once_with("hello", type="info")
 
     def test_show_snack_with_show_toast_error(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.show_snack("fail", color=ft.Colors.RED)
         mock_page.show_toast.assert_called_once_with("fail", type="error")
 
     def test_show_snack_with_show_toast_success(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.show_snack("ok", color=ft.Colors.GREEN)
         mock_page.show_toast.assert_called_once_with("ok", type="success")
 
     def test_show_snack_with_show_toast_warning_amber(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.show_snack("warn", color=ft.Colors.AMBER)
         mock_page.show_toast.assert_called_once_with("warn", type="warning")
 
     def test_show_snack_with_show_toast_warning_orange(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.show_snack("warn", color=ft.Colors.ORANGE)
         mock_page.show_toast.assert_called_once_with("warn", type="warning")
 
@@ -135,20 +135,20 @@ class TestSettingsView:
         page = MagicMock(spec=["overlay", "update", "show_dialog"])
         page.overlay = []
         page.show_dialog.side_effect = lambda snack: page.overlay.append(snack)
-        set_page(view, page)
+        view.page = page
         view.show_snack("fallback", color=ft.Colors.RED)
         assert any(isinstance(o, ft.SnackBar) for o in page.overlay)
 
     def test_on_unmount_unsubscribes_i18n(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         view._on_unmount()
         self.mock_i18n.unsubscribe.assert_called_with(view.refresh_locale)
 
     def test_on_unmount_cascades_to_child_tabs(self, mock_page):
         """§5.8 规范 6：_on_unmount 应级联调用子 tab 的 will_unmount（优先）或 _on_unmount（兼容）"""
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         mock_tab = MagicMock()
         view.tab_contents = [mock_tab]
         view._on_unmount()
@@ -157,7 +157,7 @@ class TestSettingsView:
 
     def test_update_theme_propagates_to_tabs(self, mock_page):
         view = self._make_view()
-        set_page(view, mock_page)
+        view.page = mock_page
         mock_tab = MagicMock()
         view.tab_contents = [mock_tab]
         view.update_theme()
@@ -243,7 +243,7 @@ class TestTaskCenterView:
 
     def test_go_prev_decrements_page(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._current_page = 3
         view._total_pages = 5
         view._all_tasks = [MagicMock()] * 25
@@ -261,7 +261,7 @@ class TestTaskCenterView:
 
     def test_go_next_increments_page(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._current_page = 1
         view._total_pages = 3
         view._all_tasks = [MagicMock()] * 25
@@ -323,14 +323,14 @@ class TestTaskCenterView:
 
     def test_refresh_ui_with_empty_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._refresh_ui([])
         assert view.scroll_area.controls == [view.empty_view]
         assert view.pagination_row.visible is False
 
     def test_refresh_ui_with_tasks(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [self._make_task(status=TaskStatus.QUEUED)]
         view._refresh_ui(tasks)
         assert len(view.scroll_area.controls) == 1
@@ -338,7 +338,7 @@ class TestTaskCenterView:
 
     def test_refresh_ui_stats_text(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [
             self._make_task(status=TaskStatus.RUNNING),
             self._make_task(status=TaskStatus.QUEUED),
@@ -348,14 +348,14 @@ class TestTaskCenterView:
 
     def test_refresh_ui_pagination_visible_when_multiple_pages(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [self._make_task() for _ in range(PAGE_SIZE + 1)]
         view._refresh_ui(tasks)
         assert view.pagination_row.visible is True
 
     def test_refresh_ui_pagination_hidden_when_single_page(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [self._make_task()]
         view._refresh_ui(tasks)
         assert view.pagination_row.visible is False
@@ -409,7 +409,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_running(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.RUNNING, progress=0.5, cancellable=True)
         card = view._build_task_card(task)
         assert card is not None
@@ -418,7 +418,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_completed(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.COMPLETED, progress=1.0)
         card = view._build_task_card(task)
         assert card is not None
@@ -427,7 +427,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_failed(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.FAILED, error="some error")
         card = view._build_task_card(task)
         assert card is not None
@@ -436,7 +436,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_cancelled(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.CANCELLED, progress=0.3)
         card = view._build_task_card(task)
         assert card is not None
@@ -445,7 +445,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_interrupted(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.INTERRUPTED, progress=0.4)
         card = view._build_task_card(task)
         assert card is not None
@@ -454,7 +454,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_queued(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.QUEUED, cancellable=True)
         card = view._build_task_card(task)
         assert card is not None
@@ -463,7 +463,7 @@ class TestTaskCenterView:
 
     def test_build_task_card_not_cancellable_running(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         task = self._make_task(status=TaskStatus.RUNNING, cancellable=False)
         card = view._build_task_card(task)
         assert card is not None
@@ -472,7 +472,7 @@ class TestTaskCenterView:
 
     def test_on_tasks_updated_mounted(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._mounted = True
         view._on_tasks_updated([])
         mock_page.run_task.assert_called_once_with(view._safe_refresh, [])
@@ -480,7 +480,7 @@ class TestTaskCenterView:
     def test_on_tasks_updated_not_mounted(self, mock_page):
         view = self._make_view(mock_page)
         page = wrap_mock_page(mock_page)
-        set_page(view, page)
+        view.page = page
         view._mounted = False
         view._on_tasks_updated([])
         page.run_task.assert_not_called()
@@ -494,7 +494,7 @@ class TestTaskCenterView:
     @pytest.mark.asyncio
     async def test_safe_refresh(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [self._make_task()]
         await view._safe_refresh(tasks)
         assert view._all_tasks == tasks
@@ -507,7 +507,7 @@ class TestTaskCenterView:
 
     def test_go_prev_with_actual_refresh(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [self._make_task() for _ in range(PAGE_SIZE + 1)]
         view._refresh_ui(tasks)
         view._go_prev(None)
@@ -515,7 +515,7 @@ class TestTaskCenterView:
 
     def test_go_next_with_actual_refresh(self, mock_page):
         view = self._make_view(mock_page)
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         tasks = [self._make_task() for _ in range(PAGE_SIZE + 1)]
         view._refresh_ui(tasks)
         view._go_next(None)
@@ -572,21 +572,21 @@ class TestHomeView:
 
     def test_on_broadcast_message_cache_cleared(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._is_mounted = True
         view._on_broadcast_message("cache_cleared")
         self.mock_vm.clear_state.assert_called_once()
 
     def test_on_broadcast_message_ignores_other_messages(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._is_mounted = True
         view._on_broadcast_message("other_message")
         self.mock_vm.clear_state.assert_not_called()
 
     def test_run_if_visible_skips_when_not_visible(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._is_visible = False
         view._is_mounted = True
         task_func = MagicMock()
@@ -595,7 +595,7 @@ class TestHomeView:
 
     def test_run_if_visible_skips_when_not_mounted(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._is_visible = True
         view._is_mounted = False
         task_func = MagicMock()
@@ -604,7 +604,7 @@ class TestHomeView:
 
     def test_run_if_visible_executes_when_visible_and_mounted(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._is_visible = True
         view._is_mounted = True
         task_func = MagicMock()
@@ -613,14 +613,14 @@ class TestHomeView:
 
     def test_did_mount_subscribes_pubsub(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.did_mount()
         mock_page.pubsub.subscribe.assert_called_once_with(view._on_broadcast_message)
         assert view._pubsub_subscribed is True
 
     def test_will_unmount_unsubscribes_pubsub(self, mock_page):
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view._pubsub_subscribed = True
         view.will_unmount()
         mock_page.pubsub.unsubscribe.assert_called_once_with(view._on_broadcast_message)
@@ -629,7 +629,7 @@ class TestHomeView:
     def test_refresh_locale_cascades_to_sub_components(self, mock_page):
         """§5.8 规范 6：refresh_locale 必须级联调用 dashboard.update_locale 和 news_feed.update_locale。"""
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         view.update = MagicMock()
         # vm.last_market_data 必须返回 dict 以便 .get("date", "--") 与 .get("stale", False) 正常工作
         self.mock_vm.last_market_data = {}
@@ -647,7 +647,7 @@ class TestHomeView:
     def test_refresh_locale_swallows_exception(self, mock_page, caplog):
         """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
         view = self._make_view()
-        set_page(view, wrap_mock_page(mock_page))
+        view.page = wrap_mock_page(mock_page)
         # 强制 I18n.get 抛异常以触发 try/except
         self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
 

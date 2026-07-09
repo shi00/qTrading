@@ -4,7 +4,7 @@ import logging
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from tests.unit.ui.conftest import set_page, wrap_mock_page
+from tests.unit.ui.conftest import wrap_mock_page
 from ui.components.health_report_dialog import logger as dialog_logger
 
 pytestmark = pytest.mark.unit
@@ -103,7 +103,7 @@ class TestHealthReportDialog:
     @pytest.mark.asyncio
     async def test_run_deep_scan_closes_and_opens_scan_dialog(self, mock_page):
         dlg = self._make_dialog(mock_page)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.close_dialog = MagicMock()
         mock_scan = MagicMock()
         mock_scan.start_scan = AsyncMock()
@@ -137,7 +137,7 @@ class TestHealthReportDialog:
     def test_refresh_locale_rebuilds_actions(self, mock_page):
         """§5.8 规范 6：refresh_locale 应正确刷新文案（重建 actions），不抛出异常。"""
         dlg = self._make_dialog(mock_page, self._make_report("green"))
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.update = MagicMock()
         original_content = dlg.content
 
@@ -157,7 +157,7 @@ class TestHealthReportDialog:
     def test_refresh_locale_swallows_exception(self, mock_page, caplog):
         """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
         dlg = self._make_dialog(mock_page, self._make_report("green"))
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         # 强制 I18n.get 抛异常以触发 try/except
         self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
 
@@ -215,7 +215,7 @@ class TestHealthReportDialog:
     def test_refresh_locale_no_page_skips_update(self, mock_page):
         """B5: refresh_locale 无 page 时不调用 update。"""
         dlg = self._make_dialog(mock_page, self._make_report("green"))
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         # 模拟无 page 场景
         dlg._mock_page = None
         dlg.update = MagicMock()
@@ -232,7 +232,7 @@ class TestHealthReportDialog:
         此测试改为验证 show_dialog 直接调用（无回退）。
         """
         dlg = self._make_dialog(mock_page)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.close_dialog = MagicMock()
 
         mock_scan = MagicMock()
@@ -551,7 +551,7 @@ class TestHealthScanDialog:
     def test_refresh_locale_updates_texts(self, mock_page):
         """B9: refresh_locale 正常路径。"""
         dlg = self._make_scan_dialog(mock_page)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.update = MagicMock()
 
         dlg.refresh_locale()
@@ -563,7 +563,7 @@ class TestHealthScanDialog:
     def test_refresh_locale_calls_show_results_when_visible(self, mock_page):
         """B10: refresh_locale 结果区域可见时调用 show_results。"""
         dlg = self._make_scan_dialog(mock_page)
-        set_page(dlg, mock_page)
+        dlg.page = mock_page
         dlg.result_content.visible = True
         dlg._last_result = {"score": 90, "tier": 3}
         dlg.show_results = MagicMock()

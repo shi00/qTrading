@@ -114,6 +114,7 @@ markers = [
     "ai: Tests requiring AI service",
     "no_auto_mock: Skip auto-mocking of external services in conftest",
     "mutates_config: marks tests that mutate global config (theme/language) and need restoration",
+    "no_db: Tests that do not require database (skip DB schema initialization in integration autouse fixture)",
 ]
 
 [tool.coverage.run]
