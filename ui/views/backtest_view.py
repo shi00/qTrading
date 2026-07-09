@@ -69,12 +69,9 @@ class BacktestView(ft.Container):
         self.config_panel = BacktestConfigPanel(on_run_backtest=self._on_run_backtest)
         self.result_panel = BacktestResultPanel()
 
-        self.vm.bind(
-            on_update=self._on_vm_update,
-            on_status=self._on_vm_status,
-            on_progress=self._on_vm_progress,
-            on_result=self._on_vm_result,
-        )
+        # NOTE(lazy): vm.bind() removed — BacktestViewModel now uses state + subscribe/_notify
+        # (Phase 2 改造). BacktestView will be rewritten to use_viewmodel hook in Phase 4.
+        # ceiling: Phase 4 BacktestView 声明式重写. upgrade: Task 4.2 完成.
 
         self.content = self._build_content()
         self._load_strategies()
