@@ -97,7 +97,7 @@ class ScreenerViewModel:
 
         # View-provided callbacks for strategy context (not VM→View notifications).
         # These are callables the strategy invokes to signal UI element creation;
-        # they do not match the Phase 2 grep (on_update=/on_log=/on_status=).
+        # they do not match the Phase 2 grep (on_update / on_log / on_status 回调注入).
         self.on_log_stream_start: Callable[[str], Callable] | None = None
         self.on_ai_card_start: Callable[[str], None] | None = None
 
