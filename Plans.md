@@ -61,7 +61,7 @@
 | 2.6 | [lane:gate][tdd:required] HomeViewModel 改造：frozen dataclass state snapshot + subscribe/_notify；命令式 `dict`/`list` 状态字段改 frozen dataclass + `tuple[Row, ...]`。配套 `test_ui_home_vm.py` 整改 | 同 2.1 模式；`pytest tests/unit/test_ui_home_vm.py` 通过 | 0.2 | cc:完了 [e152240] |
 | 2.7 | [lane:gate][tdd:required] DataExplorerViewModel 特殊形态改造（方案 §3.0.4 双轨制）：轻量 UI 状态封装为 frozen `DataExplorerState`（tuple 替代 list、frozenset 替代 set）；大体积数据（DataFrame/dict）VM 内部持有 + property 拉取 + `_notify` 通知。配套 `test_data_explorer_view_model.py` 整改 | `vm.state` 为 frozen dataclass；`vm.current_data` property 返回 DataFrame；`vm.subscribe` 存在；`pytest tests/unit/ui/test_data_explorer_view_model.py` 通过 | 0.2 | cc:完了 [fc478d5, 69+41 tests green, ruff/pyright clean, 修复 Task 2.1 遗留 vm.mode 直接赋值] |
 | 2.8 | [lane:gate] Phase 2 回归验收：`grep -rn "on_update=\|on_log=\|on_status=" --include=*.py ui/viewmodels/` = 0；全量 `pytest tests/unit/ -m "not slow"` 通过 | grep = 0；pytest 全绿；ruff + pyright 通过 | 2.1-2.7 | cc:完了 [grep=0, 7676 tests green, ruff/pyright clean] |
-| 2.9 | [lane:gate][tdd:skip:review-gate] Phase 2 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-2-review.md`；7 个 VM 形态契约一致(frozen dataclass + subscribe/_notify)；中断/取消路径覆盖；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 2.8 | cc:TODO |
+| 2.9 | [lane:gate][tdd:skip:review-gate] Phase 2 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-2-review.md`；7 个 VM 形态契约一致(frozen dataclass + subscribe/_notify)；中断/取消路径覆盖；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 2.8 | cc:完了 [APPROVE, 7 VM 形态契约一致, 15 处 CancelledError 全 raise, 7676 tests green] |
 
 ---
 
