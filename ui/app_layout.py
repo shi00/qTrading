@@ -287,7 +287,7 @@ class AppLayout(PageRefMixin, ft.Container):
         elif index == NavTabs.DATA:
             view = DataExplorerView()
         elif index == NavTabs.TASKS:
-            view = TaskCenterView(self.page)  # type: ignore[untyped]
+            view = TaskCenterView()
         elif index == NavTabs.SETTINGS:
             view = SettingsView()
         else:
