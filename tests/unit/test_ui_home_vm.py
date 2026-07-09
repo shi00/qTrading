@@ -23,20 +23,18 @@ class TestHomeViewModelInit:
         """初始状态"""
         vm = HomeViewModel()
 
-        assert vm.news_page == 0
+        assert vm.state.news_page == 0
         assert vm.PAGE_SIZE == 20
-        assert vm.has_more_news is False
-        assert vm.is_loading_more is False
+        assert vm.state.has_more_news is False
+        assert vm.state.is_loading_more is False
         assert vm.last_market_data == {}
         assert vm.news_data is None
-        assert vm.on_news_update is None
-        assert vm.on_market_update is None
+        assert vm.state.news_update_version == 0
+        assert vm.state.market_update_version == 0
 
-    def test_init_with_callbacks(self):
-        """带回调初始化"""
+    def test_init_subscribes_services(self):
+        """init 订阅 NewsSubscriptionService / MarketDataService"""
         vm = HomeViewModel()
-        on_news = MagicMock()
-        on_market = MagicMock()
 
         with (
             patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_news_svc,
@@ -45,26 +43,42 @@ class TestHomeViewModelInit:
             mock_news_svc.return_value.add_listener = MagicMock()
             mock_market_svc.return_value.add_listener = MagicMock()
 
-            vm.init(on_news, on_market)
+            vm.init()
 
-            assert vm.on_news_update == on_news
-            assert vm.on_market_update == on_market
+            mock_news_svc.return_value.add_listener.assert_called_once()
+            mock_market_svc.return_value.add_listener.assert_called_once()
 
-    def test_dispose(self):
-        """销毁时取消订阅"""
+    def test_subscribe_returns_unsubscribe_and_removes_callback(self):
+        """subscribe 返回取消订阅函数,调用后移除 callback"""
         vm = HomeViewModel()
+        callback = MagicMock()
+        unsubscribe = vm.subscribe(callback)
+        assert callable(unsubscribe)
+
+        vm._set_state(has_more_news=True)
+        callback.assert_called_once()
+
+        unsubscribe()
+        callback.reset_mock()
+        vm._set_state(has_more_news=False)
+        callback.assert_not_called()
+
+    def test_dispose_clears_subscribers(self):
+        """dispose 清空 subscribers 列表"""
+        vm = HomeViewModel()
+        callback = MagicMock()
+        vm.subscribe(callback)
 
         with (
-            patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_news_svc,
-            patch("ui.viewmodels.home_view_model.MarketDataService") as mock_market_svc,
+            patch("ui.viewmodels.home_view_model.NewsSubscriptionService"),
+            patch("ui.viewmodels.home_view_model.MarketDataService"),
         ):
-            mock_news_svc.return_value.remove_listener = MagicMock()
-            mock_market_svc.return_value.remove_listener = MagicMock()
-
             vm.dispose()
 
-            mock_news_svc.return_value.remove_listener.assert_called_once()
-            mock_market_svc.return_value.remove_listener.assert_called_once()
+        # dispose 后 _notify 不应再调用 callback
+        callback.reset_mock()
+        vm._set_state(has_more_news=True)
+        callback.assert_not_called()
 
 
 class TestHomeViewModelMarketData:
@@ -163,7 +177,7 @@ class TestHomeViewModelNewsData:
 
         assert len(result) == 20
         assert has_more is True
-        assert vm.news_page == 0
+        assert vm.state.news_page == 0
 
     @pytest.mark.asyncio
     async def test_refresh_news_empty(self, vm):
@@ -196,7 +210,7 @@ class TestHomeViewModelNewsData:
 
         assert len(new_batch) == 20
         assert has_more is True
-        assert vm.news_page == 1
+        assert vm.state.news_page == 1
         assert len(vm.news_data) == 40
 
     @pytest.mark.asyncio
@@ -218,7 +232,7 @@ class TestHomeViewModelNewsData:
     @pytest.mark.asyncio
     async def test_load_next_page_while_loading(self, vm):
         """加载中时阻止重复加载"""
-        vm.is_loading_more = True
+        vm._set_state(is_loading_more=True)
 
         result, has_more = await vm.load_next_page()
 
@@ -277,45 +291,42 @@ class TestHomeViewModelStateManagement:
         """清除状态"""
         vm.last_market_data = {"test": "data"}
         vm.news_data = pd.DataFrame({"title": ["test"]})
-        vm.has_more_news = True
-        vm.news_page = 5
+        vm._set_state(has_more_news=True, news_page=5)
 
         vm.clear_state()
 
         assert vm.last_market_data == {}
         assert vm.news_data is None
-        assert vm.has_more_news is False
-        assert vm.news_page == 0
+        assert vm.state.has_more_news is False
+        assert vm.state.news_page == 0
 
-    def test_on_news_service_update(self, vm):
-        """新闻服务更新回调"""
-        callback = MagicMock()
-        vm.on_news_update = callback
-
-        vm._on_news_service_update("update_type", {"data": "test"})
-
-        callback.assert_called_once_with("update_type", {"data": "test"})
-
-    def test_on_market_service_update(self, vm):
-        """市场服务更新回调"""
-        callback = MagicMock()
-        vm.on_market_update = callback
-
-        vm._on_market_service_update()
-
-        callback.assert_called_once()
-
-    def test_on_news_service_update_no_callback(self, vm):
-        """无回调时新闻服务更新"""
-        vm.on_news_update = None
+    def test_on_news_service_update_emits_state_and_stores_last(self, vm):
+        """新闻服务更新: 递增 news_update_version + 存储 last_news_update"""
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
 
         vm._on_news_service_update("update_type", {"data": "test"})
 
-    def test_on_market_service_update_no_callback(self, vm):
-        """无回调时市场服务更新"""
-        vm.on_market_update = None
+        assert vm.state.news_update_version == 1
+        assert vm.last_news_update == ("update_type", {"data": "test"})
+        assert any(s.news_update_version == 1 for s in snapshots)
+
+    def test_on_market_service_update_emits_state(self, vm):
+        """市场服务更新: 递增 market_update_version"""
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
 
         vm._on_market_service_update()
+
+        assert vm.state.market_update_version == 1
+        assert any(s.market_update_version == 1 for s in snapshots)
+
+    def test_on_news_service_update_without_subscribers(self, vm):
+        """无 subscribers 时新闻服务更新不报错,仍存储 last_news_update"""
+        vm._on_news_service_update("update_type", {"data": "test"})
+
+        assert vm.last_news_update == ("update_type", {"data": "test"})
+        assert vm.state.news_update_version == 1
 
 
 class TestHomeViewModelInitData:
@@ -368,7 +379,7 @@ class TestHomeViewModelPagination:
 
         await vm.refresh_news()
 
-        assert vm.has_more_news is True
+        assert vm.state.has_more_news is True
 
     @pytest.mark.asyncio
     async def test_pagination_less_than_page_size(self, vm):
@@ -382,7 +393,7 @@ class TestHomeViewModelPagination:
 
         await vm.refresh_news()
 
-        assert vm.has_more_news is False
+        assert vm.state.has_more_news is False
 
     @pytest.mark.asyncio
     async def test_pagination_more_than_page_size(self, vm):
@@ -394,13 +405,13 @@ class TestHomeViewModelPagination:
         vm.processor.cache.get_market_news = AsyncMock(side_effect=[page1, page2, page3])
 
         await vm.refresh_news()
-        assert vm.has_more_news is True
+        assert vm.state.has_more_news is True
 
         await vm.load_next_page()
-        assert vm.has_more_news is True
+        assert vm.state.has_more_news is True
 
         await vm.load_next_page()
-        assert vm.has_more_news is False
+        assert vm.state.has_more_news is False
 
     @pytest.mark.asyncio
     async def test_pagination_offset_calculation(self, vm):

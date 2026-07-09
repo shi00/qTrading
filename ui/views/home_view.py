@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 
 import flet as ft
 import pandas as pd
@@ -38,6 +39,10 @@ class HomeView(ft.Container):
         self._is_mounted = False  # pragma: no cover
         self._is_visible = True  # pragma: no cover
         self._pubsub_subscribed = False  # pragma: no cover
+        # NOTE(lazy): VM subscribe 替代 init(on_*),Phase 4 声明式重写时移除。
+        # ceiling: Phase 4 HomeView 重写. upgrade: Task 4.x HomeView 声明式重写.
+        self._vm_unsubscribe: Callable[[], None] | None = None
+        self._prev_state = self.vm.state  # pragma: no cover
 
         # --- Initialize Components ---
         self.header_title = ft.Text(  # pragma: no cover
@@ -95,13 +100,11 @@ class HomeView(ft.Container):
             self.page.pubsub.subscribe(self._on_broadcast_message)
             self._pubsub_subscribed = True
 
-        # Initialize ViewModel
-        # We pass *callbacks* that the VM calls when data is ready/updated
+        # Initialize ViewModel (subscribe state diff 替代 init(on_*))
         logger.debug("[HomeView] Initializing ViewModel and Listeners")
-        self.vm.init(
-            on_news_update=self.refresh_news_if_visible,
-            on_market_update=self.refresh_market_if_visible,
-        )
+        self.vm.init()
+        self._prev_state = self.vm.state
+        self._vm_unsubscribe = self.vm.subscribe(self._on_vm_state_changed)
 
         # Subscribe to I18n
         I18n.subscribe(self.refresh_locale)
@@ -112,6 +115,9 @@ class HomeView(ft.Container):
 
     def will_unmount(self):  # pragma: no cover
         self._is_mounted = False
+        if self._vm_unsubscribe is not None:
+            self._vm_unsubscribe()
+            self._vm_unsubscribe = None
         self.vm.dispose()
         # Fix P1-9: Unsubscribe PubSub to prevent ghost event handling
         if self.page and self._pubsub_subscribed:
@@ -126,6 +132,20 @@ class HomeView(ft.Container):
             logger.debug("[HomeView] I18n unsubscribe skipped: %s", exc, exc_info=True)
         if self._init_task:
             self._init_task.cancel()
+
+    def _on_vm_state_changed(self, state) -> None:
+        """VM state 变更 diff 派发 (Phase 2: 替代 on_news_update/on_market_update 回调)。"""
+        prev = self._prev_state
+        # 1. news_update (dual-track: 拉取 last_news_update)
+        if state.news_update_version != prev.news_update_version:
+            news_update = self.vm.last_news_update
+            if news_update is not None:
+                update_type, data = news_update
+                self.refresh_news_if_visible(update_type, data)
+        # 2. market_update (dual-track: 通知 View 刷新市场数据)
+        if state.market_update_version != prev.market_update_version:
+            self.refresh_market_if_visible()
+        self._prev_state = state
 
     # --- Event Handlers & Callbacks ---
 

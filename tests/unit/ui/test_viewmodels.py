@@ -42,12 +42,8 @@ def home_vm(mock_processor, mock_news_service, mock_market_service):
 
 
 class TestHomeViewModelInit:
-    def test_init_registers_listeners_and_binds_callbacks(self, home_vm, mock_news_service, mock_market_service):
-        news_cb = MagicMock()
-        market_cb = MagicMock()
-        home_vm.init(on_news_update=news_cb, on_market_update=market_cb)
-        assert home_vm.on_news_update is news_cb
-        assert home_vm.on_market_update is market_cb
+    def test_init_registers_listeners(self, home_vm, mock_news_service, mock_market_service):
+        home_vm.init()
         mock_news_service.add_listener.assert_called_once_with(home_vm._on_news_service_update)
         mock_market_service.add_listener.assert_called_once_with(home_vm._on_market_service_update)
 
@@ -65,25 +61,28 @@ class TestHomeViewModelDispose:
 
 
 class TestHomeViewModelServiceHandlers:
-    def test_on_news_service_update_forwards_to_callback(self, home_vm):
-        cb = MagicMock()
-        home_vm.on_news_update = cb
+    def test_on_news_service_update_emits_state_and_stores_last(self, home_vm):
+        snapshots: list = []
+        home_vm.subscribe(lambda s: snapshots.append(s))
         home_vm._on_news_service_update("added", {"id": 1})
-        cb.assert_called_once_with("added", {"id": 1})
+        assert home_vm.state.news_update_version == 1
+        assert home_vm.last_news_update == ("added", {"id": 1})
+        assert any(s.news_update_version == 1 for s in snapshots)
 
-    def test_on_news_service_update_noop_without_callback(self, home_vm):
-        home_vm.on_news_update = None
+    def test_on_news_service_update_without_subscribers(self, home_vm):
         home_vm._on_news_service_update("added", {})
+        assert home_vm.last_news_update == ("added", {})
 
-    def test_on_market_service_update_forwards_to_callback(self, home_vm):
-        cb = MagicMock()
-        home_vm.on_market_update = cb
+    def test_on_market_service_update_emits_state(self, home_vm):
+        snapshots: list = []
+        home_vm.subscribe(lambda s: snapshots.append(s))
         home_vm._on_market_service_update()
-        cb.assert_called_once()
+        assert home_vm.state.market_update_version == 1
+        assert any(s.market_update_version == 1 for s in snapshots)
 
-    def test_on_market_service_update_noop_without_callback(self, home_vm):
-        home_vm.on_market_update = None
+    def test_on_market_service_update_without_subscribers(self, home_vm):
         home_vm._on_market_service_update()
+        assert home_vm.state.market_update_version == 1
 
 
 class TestHomeViewModelInitData:
@@ -131,28 +130,26 @@ class TestHomeViewModelGetCachedMarketData:
 class TestHomeViewModelRefreshNews:
     async def test_resets_page_and_increments_generation(self, home_vm, mock_processor):
         home_vm._load_generation = 5
-        home_vm.news_page = 3
-        with patch.object(home_vm, "_fetch_news_page", new_callable=AsyncMock):
+        home_vm._set_state(news_page=3)
+        with patch.object(home_vm, "_fetch_news_batch", new_callable=AsyncMock, return_value=None):
             await home_vm.refresh_news()
-        assert home_vm.news_page == 0
+        assert home_vm.state.news_page == 0
         assert home_vm._load_generation == 6
 
 
 class TestHomeViewModelLoadNextPage:
     async def test_returns_none_when_loading(self, home_vm):
-        home_vm.is_loading_more = True
+        home_vm._set_state(is_loading_more=True)
         result, has_more = await home_vm.load_next_page()
         assert result is None
 
     async def test_returns_none_when_no_more(self, home_vm):
-        home_vm.is_loading_more = False
-        home_vm.has_more_news = False
+        home_vm._set_state(is_loading_more=False, has_more_news=False)
         result, has_more = await home_vm.load_next_page()
         assert result is None
 
     async def test_aborts_on_generation_change(self, home_vm, mock_processor):
-        home_vm.is_loading_more = False
-        home_vm.has_more_news = True
+        home_vm._set_state(is_loading_more=False, has_more_news=True)
         home_vm._load_generation = 1
 
         async def _bump_gen(page):
@@ -164,8 +161,7 @@ class TestHomeViewModelLoadNextPage:
         assert has_more is False
 
     async def test_succeeds_with_data(self, home_vm, mock_processor):
-        home_vm.is_loading_more = False
-        home_vm.has_more_news = True
+        home_vm._set_state(is_loading_more=False, has_more_news=True)
         home_vm.news_data = pd.DataFrame({"title": ["old"]})
         home_vm.PAGE_SIZE = 20
         batch = pd.DataFrame({"title": [f"news_{i}" for i in range(20)]})
@@ -177,21 +173,20 @@ class TestHomeViewModelLoadNextPage:
                 result, has_more = await home_vm.load_next_page()
         assert result is batch
         assert has_more is True
-        assert home_vm.news_page == 1
-        assert home_vm.is_loading_more is False
+        assert home_vm.state.news_page == 1
+        assert home_vm.state.is_loading_more is False
 
 
 class TestHomeViewModelClearState:
     def test_clear_state_resets_all(self, home_vm):
         home_vm.last_market_data = {"x": 1}
         home_vm.news_data = pd.DataFrame()
-        home_vm.has_more_news = True
-        home_vm.news_page = 5
+        home_vm._set_state(has_more_news=True, news_page=5)
         home_vm.clear_state()
         assert home_vm.last_market_data == {}
         assert home_vm.news_data is None
-        assert home_vm.has_more_news is False
-        assert home_vm.news_page == 0
+        assert home_vm.state.has_more_news is False
+        assert home_vm.state.news_page == 0
 
 
 # ============================================================================
