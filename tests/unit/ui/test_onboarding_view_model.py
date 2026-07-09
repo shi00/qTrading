@@ -470,11 +470,7 @@ class TestOnboardingVMSync:
         with (
             patch(
                 "ui.viewmodels.onboarding_view_model.classify_error",
-                return_value={"type": "general"},
-            ),
-            patch(
-                "ui.viewmodels.onboarding_view_model.get_error_message",
-                return_value="Error occurred",
+                return_value={"message_key": "common_err_unknown", "format_args": {}},
             ),
         ):
             await sync_vm.start_sync(quick=True)

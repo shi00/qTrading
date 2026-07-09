@@ -116,7 +116,12 @@ class DataSourceViewModel:
 
     @property
     def last_health_error(self) -> str | None:
-        """最近一次健康检查错误消息（dual-track,View 在 health_error_version 变化时拉取）。"""
+        """最近一次健康检查错误消息（dual-track,View 在 health_error_version 变化时拉取）。
+
+        NOTE(lazy): 返回 get_error_message() 已翻译字符串,VM 间接感知 locale.
+        ceiling: dual-track 大体积数据非 state 字段,Phase 2 locale 修复仅覆盖 state 字段.
+        upgrade: Phase 3-4 View 声明式重写时, _last_health_error 改为 Message 或 i18n key + format_args 透传.
+        """
         return self._last_health_error
 
     def subscribe(self, callback: Callable[[DataSourceState], None]) -> Callable[[], None]:

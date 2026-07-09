@@ -18,7 +18,7 @@ from dataclasses import dataclass, replace
 
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
-from utils.error_classifier import classify_error, get_error_message
+from utils.error_classifier import classify_error
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
 from ui.viewmodels import Message
@@ -417,6 +417,8 @@ class OnboardingViewModel:
         try:
 
             def progress_callback(current, total, message):
+                # NOTE(lazy): message 是 service 层(DataProcessor)传入的已翻译字符串,作为 key 透传.
+                #   ceiling: service 层产出 i18n key + params. upgrade: DataProcessor.progress_callback 重构.
                 self._set_state(sync_progress=current / 100, sync_progress_message=Message(key=message))
 
             result = await self.data_processor.initialize_system(
@@ -444,7 +446,10 @@ class OnboardingViewModel:
             error_info = classify_error(e, context="general")
             self._set_state(
                 sync_progress=0.0,
-                sync_progress_message=Message(key=get_error_message(error_info)),
+                sync_progress_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                ),
             )
         finally:
             self._set_state(sync_in_progress=False)
