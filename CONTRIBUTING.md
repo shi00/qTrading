@@ -677,7 +677,7 @@ def ScreenerView():
 
 ### 存量技术债
 
-[ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 使用 `on_update`/`on_log` 回调注入（见 [screener_view_model.py](./ui/viewmodels/screener_view_model.py)），属过渡形态；命令式 View 用 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`。两者触及时迁到 state snapshot + commands + `use_viewmodel` 目标范式（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）。新代码不得沿用回调注入范式。
+[ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 使用 `on_update`/`on_log` 回调注入（见 [screener_view_model.py](./ui/viewmodels/screener_view_model.py)），属过渡形态；命令式 View 用 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`。**策略：全面重写为 state snapshot + commands + `use_viewmodel` 目标范式，不保留兼容垫片**（CLAUDE.md §1.4 UI 迁移例外 + §3.3）。新代码不得沿用回调注入范式。
 
 ## Flet 0.85.3 (V1) API 关键约束
 
@@ -685,12 +685,13 @@ def ScreenerView():
 
 ### 演进方向
 
-项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 alpha/beta)。当前代码库保留少量 V0→V1 兼容垫片与 V1 渲染管线永久方案（见下文「兼容垫片使用规则」），**新开发的 UI 代码必须朝原生 V1 方式演进**，遵循以下原则：
+项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 alpha/beta)。**项目策略：全面拥抱 V1 声明式，所有命令式 UI 代码全面重写，不保留兼容垫片**（CLAUDE.md §1.4 UI 迁移例外）。遵循以下原则：
 
-- **不得引入新的 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）
-- **新控件优先用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非直接 `self.page = page` 赋值
-- **新代码使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`；对话框用 `page.show_dialog()`/`page.pop_dialog()` 而非 `page.dialog=`/`page.open()`
-- **历史代码不强制重写**（§1.4 微创），仅在功能改动时顺带迁移
+- **不得引入任何 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）
+- **全面采用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非 `PageRefMixin` 覆写
+- **全面使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`；对话框用 `page.show_dialog()`/`page.pop_dialog()` 而非 `page.dialog=`/`page.open()`
+- **历史命令式代码全面重写**（§1.4 UI 迁移例外）：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，全部重写为 `@ft.component` + `use_viewmodel` 声明式范式
+- **兼容垫片即将删除**：`PageRefMixin` 与 `mock_flet` 测试桩在依赖代码重写完成后立即删除（见下文「兼容垫片使用规则」）
 
 ### 强制 API 约束（Breaking Changes）
 
@@ -715,7 +716,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 15 | Tabs 构造 | `ft.Tabs(tabs=[ft.Tab(text=..., content=...)])` | `ft.Tabs(length=N, content=ft.Column([ft.TabBar(tabs=[ft.Tab(label=...)]), ft.TabBarView(controls=[...])]))` | TypeError |
 | 16 | 拖拽增量 | `e.delta_x` | `e.primary_delta`（主路径），`e.local_delta.x`（回退） | **静默回归**（恒 0） |
 | 17 | 窗口图标 | `page.window_icon` | `page.window.icon` | AttributeError |
-| 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；若必须在挂载前引用 page，继承 [`PageRefMixin`](./ui/v1_compat.py) | AttributeError |
+| 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；声明式组件内经 `ft.context.page` 或事件 `e.page` 获取（`PageRefMixin` 即将删除，新代码禁用） | AttributeError |
 | 19 | 本地存储 | `page.client_storage` | `page.shared_preferences` | AttributeError |
 | 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `mock_flet._install_v1_compat_control_page_mock()` 全局桩兼容） | RuntimeError |
 | 21 | 窗口方法 | `page.window.destroy()`（同步） | `await page.window.destroy()`（V1 协程） | 运行期（RuntimeWarning: coroutine never awaited） |
@@ -724,16 +725,16 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 > **来源说明**：第 8 项（`src_base64` → `src`）与第 16 项（`delta_x` → `primary_delta`）来自 Flet 官方 issue #5238（V1 breaking changes 汇总）。
 
-### 兼容垫片使用规则
+### 兼容垫片使用规则（即将删除）
 
-以下 V0→V1 兼容垫片为本次升级新增，**仅限历史代码使用**。新代码应优先采用 V1 原生方式，避免依赖垫片。
+以下 V0→V1 兼容垫片为本次升级新增，**即将删除**——所有依赖垫片的代码正在全面重写为声明式范式（CLAUDE.md §1.4 UI 迁移例外 + §3.3）。重写完成后立即删除垫片本身。
 
-| 垫片 | 位置 | 用途 | 新代码策略 |
+| 垫片 | 位置 | 用途 | 删除条件 |
 |------|------|------|----------|
-| `PageRefMixin` | [`ui/v1_compat.py`](./ui/v1_compat.py) | 覆盖 `ft.Control.page` 只读 property，使 5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）可读写 `control.page` | 新控件应通过挂载到 `page.controls` 后由 V1 原生 `parent` 链访问 `page`；若必须在挂载前引用 page（如注册回调、读取 `page.theme_mode`），才允许继承 `PageRefMixin` |
-| `_install_v1_compat_control_page_mock()` | [`tests/unit/ui/mock_flet.py`](./tests/unit/ui/mock_flet.py) | 全局 monkey-patch `ft.Control.page`/`update`，使测试代码可注入 mock_page 且未挂载 `update()` 静默返回 | 新测试代码沿用现有桩；待测试基础设施整体重构为 V1 原生模式后再移除 |
+| `PageRefMixin` | [`ui/v1_compat.py`](./ui/v1_compat.py) | 覆盖 `ft.Control.page` 只读 property，使 5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）可读写 `control.page` | 5 个历史控件全部重写为 `@ft.component` 声明式后删除 |
+| `_install_v1_compat_control_page_mock()` | [`tests/unit/ui/mock_flet.py`](./tests/unit/ui/mock_flet.py) | 全局 monkey-patch `ft.Control.page`/`update`，使测试代码可注入 mock_page 且未挂载 `update()` 静默返回 | 所有命令式 View 测试重构为声明式测试后删除 |
 
-> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py)（`ui/i18n.py` 的 `refresh_dropdown_options()` 函数）不是兼容垫片，而是 V1 渲染管线的永久解决方案。V1 `Prop` 描述符的值相等优化导致 `DropdownButton` 在批量 `page.update()` 中不触发 rebuild，此行为是 V1 固有特性而非临时 bug，故该函数需长期保留。i18n 热重载场景的 Dropdown 必须使用本函数。
+> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py) 不是兼容垫片，而是 V1 渲染管线针对命令式 `page.update()` 批量更新的永久解决方案。**声明式下不再需要**（options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化）。所有命令式控件重写为声明式后，该函数随之删除。
 
 > 每项垫片均遵循 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations) `# NOTE(lazy):` 标记规范。
 
@@ -831,10 +832,10 @@ def ScreenerView():
 
 #### 6. 迁移约束
 
-- 旧控件**不做机械批量迁移**（§1.4 微创）；仅在因功能改动已触及某控件时，可顺带迁到声明式。
+- **所有命令式 UI 代码全面重写为声明式**（CLAUDE.md §1.4 UI 迁移例外）：不受 §1.4 微创原则约束，所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，全部重写为 `@ft.component` + `use_viewmodel` 声明式范式。前置阻塞：`use_viewmodel` hook 必须先实现。
 - `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
 - async 窗口/控件方法必须 `await`。
-- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法属存量技术债，不再用于新代码。
+- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法属存量技术债，全面重写后删除。
 
 ### 依赖管理
 
@@ -861,6 +862,32 @@ def ScreenerView():
   3. 更新 `CONTRIBUTING.md` 的 Flet 章节与对应验证清单；
   4. 仅当升级影响红线、架构边界或 AI 行为规则时，才同步修改 `CLAUDE.md`。
 - 禁止在两份文档中重复维护同一 Flet API 细节；长期规范引用用符号锚点，不用硬编码行号。
+
+### 通用 Flet v1 开发参考
+
+> 宪法依据：CLAUDE.md §5 索引指向本节；本节不重复 API 细节，仅声明引用关系与优先级。
+
+项目规范的 Flet 知识聚焦于**项目专属约束**（上文 21 行 breaking changes 表、V1 声明式 UI 规范、兼容垫片、依赖管理、PyInstaller、升级协同）。通用 Flet v1 概念（路由 `ft.Router`、Services 用法、`SharedPreferences`/`Clipboard`/`StoragePaths`/`FilePicker`、`use_state`/`use_effect`/`use_ref`/`use_dialog`/`create_context` 基础 Hooks、`yield` 中间进度反馈、资源管理、构建打包、性能与错误处理通用模式等）见 [`man/flet-0.85.3-best-practices.md`](./man/flet-0.85.3-best-practices.md)（通用 Flet v1 开发参考手册，API 声明已对 `flet==0.85.3` 实测核实）。
+
+**优先级（冲突时前者覆盖后者）**：
+
+1. [CLAUDE.md](./CLAUDE.md)（红线 R1~R17、架构边界、交互准则）
+2. 本文件（CONTRIBUTING.md，项目实现规范）
+3. [`man/flet-0.85.3-best-practices.md`](./man/flet-0.85.3-best-practices.md)（通用 Flet v1 参考）
+
+**项目专属约束覆盖通用手册的 7 处分叉**（查阅通用手册时须以下表项目规范为准）：
+
+| 维度 | 通用手册 | 项目规范（优先） |
+|------|---------|----------------|
+| 适用范围 | Web/移动/桌面通用 | 仅桌面端（`page.window.min_width=1280`，见 [响应式布局规范](#响应式布局规范-responsive-layout)） |
+| UI 模型 | 裸 `use_state`/`use_effect` 组件 | MVVM + `use_viewmodel` hook（CLAUDE.md §3.2 强制；`use_viewmodel` 待建，见 CLAUDE.md §3.3） |
+| 异步线程 | `asyncio.to_thread` / `page.run_thread` | `ThreadPoolManager.run_async(TaskType.IO/CPU)`（CLAUDE.md §3.1 R16 红线） |
+| API 约束表 | 通用手册 §17 迁移表 | 本节上文 21 行 breaking changes 表（含检测方式，实测对齐 0.85.3） |
+| 版本锁定 | `flet==0.85.3` + charts 解析版本 | `flet`/`flet-desktop`/`flet-charts` 三包全锁 `==0.85.3`（见 [依赖管理](#依赖管理)） |
+| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | compact/standard/wide/ultra_wide 1200/1600/2400（见 [响应式布局规范](#响应式布局规范-responsive-layout)） |
+| 桌面打包 | `flet pack`（通用手册 §13.5） | PyInstaller（[`AStockScreener.spec`](./AStockScreener.spec)，见 [PyInstaller 打包](#pyinstaller-打包)） |
+
+通用手册中 Web/移动专属内容（WASM/CDN、APK/IPA 构建、`SafeArea`、Cupertino `adaptive`、移动端 `NavigationBar` 等）项目桌面端不适用，仅作背景知识。
 
 ## 类型标注与 Pyright 规则
 
@@ -1054,8 +1081,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 > 宪法依据：CLAUDE.md §3.2（UI 模型强制）与 §3.3（命令式存量技术债）；本附录仅供改造期查阅。
 
-> ⚠️ **本附录不得作为新增 UI 的入口；仅在触及命令式存量组件并进行局部整改时查阅，不作为新代码依据。**
-> 新 UI 必须采用声明式 `@ft.component` + `use_state`/`use_effect`（locale 作为状态源自动重渲染），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `I18n.subscribe`/`refresh_locale`/手动 `update()` 等命令式写法属技术债，存量改造后随之删除。
+> ⚠️ **本附录仅供命令式存量全面重写参考，不作为新代码依据。**
+> 新 UI 必须采用声明式 `@ft.component` + `use_state`/`use_effect`（locale 作为状态源自动重渲染），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `I18n.subscribe`/`refresh_locale`/手动 `update()` 等命令式写法属技术债，按 CLAUDE.md §1.4 UI 迁移例外全面重写为声明式后，本附录随之删除。
 
 程序运行后动态切换语言时，所有 UI 控件必须正确刷新。新增/修改 UI 视图或组件时，必须遵守以下 9 条规范。
 
@@ -1299,8 +1326,8 @@ def _rebuild_steps_after_locale_change(self):
 
 > 宪法依据：CLAUDE.md §3.2（UI 模型强制）与 §3.3（命令式存量技术债）；本附录仅供改造期查阅。
 
-> ⚠️ **本附录不得作为新增 UI 的入口；仅在触及命令式存量组件并进行局部整改时查阅，不作为新代码依据。**
-> 新 UI 必须采用声明式 `@ft.component` + `use_state`（窗口尺寸作为 state + `ResponsiveRow` 状态驱动布局），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `handle_resize` 鸭子分发/手动 `update()` 等命令式写法属技术债，存量改造后随之删除。
+> ⚠️ **本附录仅供命令式存量全面重写参考，不作为新代码依据。**
+> 新 UI 必须采用声明式 `@ft.component` + `use_state`（窗口尺寸作为 state + `ResponsiveRow` 状态驱动布局），详见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。本节描述的 `handle_resize` 鸭子分发/手动 `update()` 等命令式写法属技术债，按 CLAUDE.md §1.4 UI 迁移例外全面重写为声明式后，本附录随之删除。
 
 本规范确保应用在 1280px (最小窗口) 到 4K (3840px) 的各种分辨率下均能提供良好体验。新增/修改 UI 视图或组件时必须遵守以下 9 条规范。
 

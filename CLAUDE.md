@@ -57,6 +57,7 @@
 - **删除优于添加**：优先通过删除死代码、未使用的灵活性、推测性功能来解决问题，而非添加新代码。重构时先问"能否删除"，再问"如何修改"。但"不可简化清单"中的内容（输入校验、错误处理、安全、专项规范要求）不可因"删除"而省略。
 - **严格融入风格**：必须与现有代码的编码风格（哪怕是你认为不够优雅的风格）保持绝对一致。
 - **残留代码处理**：若发现无关的死代码（Dead Code），在回复中指出，绝不顺手删除。
+- **UI 声明式迁移例外**：UI 层的 V0→V1 声明式全面重写不受上述"不做无益重构""绝不随意改变周边代码"约束（详见 §3.3）。UI 层所有命令式代码（`class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入）必须全面重写为声明式 `@ft.component` + `use_viewmodel` 范式，不保留兼容垫片。其他层（`core/`/`data/`/`services/`/`strategies/`/`utils/`）仍严格遵守本节微创原则。
 
 ### 1.5 目标驱动与验证 (Goal-Driven Execution)
 
@@ -171,7 +172,7 @@
 
 - **Windows 测试泄漏 (P1-2)**: 测试环境下由于 Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 被妥协为 `session` 级，会导致 loop-local 缓存（如 `asyncio.Event`）跨测试泄漏。目前通过 autouse fixture 维持隔离，排查多线程并发测试问题时需格外关注。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
 - **`use_viewmodel` hook 实现待建（阻塞新 UI 开发）**: C 桥接模式基础设施，契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)。未实现前，新增声明式 View 必须先实现/扩展本 hook 再写 View；不得用 `use_state`+`use_effect` 内联订阅 `_notify` 的退路绕过，不得继续沿用 `on_update`/`on_log` 回调注入范式写新代码。
-- **7 个现有 ViewModel + 命令式 View 迁移**: [ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 使用 `on_update`/`on_log` 回调注入（见 [screener_view_model.py](./ui/viewmodels/screener_view_model.py)），命令式 View 用 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`；触及时迁到 state snapshot + commands + `use_viewmodel` 目标范式。
+- **7 个现有 ViewModel + 命令式 View 全面重写**: [ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 使用 `on_update`/`on_log` 回调注入（见 [screener_view_model.py](./ui/viewmodels/screener_view_model.py)），命令式 View 用 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`。**策略：全面重写为 state snapshot + commands + `use_viewmodel` 目标范式，不保留兼容垫片**（§1.4 UI 迁移例外）。前置阻塞：`use_viewmodel` hook 必须先实现。5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）依赖 `PageRefMixin`，重写后删除该垫片。
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 
@@ -223,3 +224,4 @@ app → 编排所有层，仅被 main.py 调用
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 / Flet 0.85.3 (V1) API 约束 / 升级协同机制 | 对应小节 |
+| 通用 Flet v1 开发参考（man/flet-0.85.3-best-practices.md） | 「通用 Flet v1 开发参考」 |
