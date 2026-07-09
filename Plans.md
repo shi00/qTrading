@@ -42,7 +42,7 @@
 |------|------|-----|---------|--------|
 | 0.1 | [lane:fast][tdd:skip:infrastructure-setup] 创建特性分支 `feature/flet-v1-declarative`，基于最新 main（67d2856） | `git branch --show-current` = `feature/flet-v1-declarative`；分支基于 main HEAD | - | cc:完了 [67d2856] |
 | 0.2 | [lane:fast][tdd:skip:batch-recovery] 恢复已有批次工作：cherry-pick tag `flet-v1-declarative-stage-0`（70939ff Spike）、`flet-v1-declarative-stage-1`（f859b6f i18n+AppColors Observable）、`flet-v1-declarative-stage-1.5`（0d81edb use_viewmodel hook）到特性分支 | `ui/hooks.py` 存在且含 `use_viewmodel`；`core/i18n.py` 含 `I18nState` Observable；`ui/theme.py` 含 `AppColorsState` Observable；`tests/unit/ui/test_hooks.py` 通过；`ruff check .` + `ruff format --check .` + `pyright` + `pytest tests/unit/ -m "not slow"` 通过 | 0.1 | cc:完了 [f6dc829] |
-| 0.3 | [lane:gate][tdd:skip:review-gate] Phase 0 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-0-review.md`；cherry-pick 无冲突残留；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A（本阶段未触及） | 0.2 | cc:TODO |
+| 0.3 | [lane:gate][tdd:skip:review-gate] Phase 0 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-0-review.md`；cherry-pick 无冲突残留；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A（本阶段未触及） | 0.2 | cc:完了 [APPROVE] |
 
 ---
 
