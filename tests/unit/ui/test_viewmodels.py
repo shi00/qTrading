@@ -194,6 +194,11 @@ class TestHomeViewModelClearState:
         assert home_vm.news_page == 0
 
 
+# ============================================================================
+# ScreenerViewModel tests (state-based, §3.0.1 paradigm)
+# ============================================================================
+
+
 @pytest.fixture
 def mock_dp():
     with patch("ui.viewmodels.screener_view_model.DataProcessor") as cls:
@@ -232,94 +237,52 @@ def screener_vm(mock_dp, mock_sm, mock_rm, mock_tm):
     return ScreenerViewModel()
 
 
-class TestScreenerViewModelBind:
-    def test_bind_sets_callbacks(self, screener_vm):
-        on_update = MagicMock()
-        on_log = MagicMock()
-        on_status = MagicMock()
-        on_progress = MagicMock()
-        on_log_stream_start = MagicMock()
-        screener_vm.bind(
-            on_update=on_update,
-            on_log=on_log,
-            on_status=on_status,
-            on_progress=on_progress,
-            on_log_stream_start=on_log_stream_start,
-        )
-        assert screener_vm.on_update is on_update
-        assert screener_vm.on_log is on_log
-        assert screener_vm.on_status is on_status
-        assert screener_vm.on_progress is on_progress
-        assert screener_vm.on_log_stream_start is on_log_stream_start
-
-    def test_bind_captures_event_loop(self, screener_vm):
-        with patch("ui.viewmodels.screener_view_model.asyncio") as mock_aio:
-            mock_loop = MagicMock()
-            mock_aio.get_running_loop.return_value = mock_loop
-            screener_vm.bind(
-                on_update=MagicMock(),
-                on_log=MagicMock(),
-                on_status=MagicMock(),
-                on_progress=MagicMock(),
-            )
-            assert screener_vm._main_loop is mock_loop
-
-
 class TestScreenerViewModelDispose:
-    def test_dispose_clears_callbacks_and_state(self, screener_vm):
-        screener_vm.on_update = MagicMock()
-        screener_vm.on_log = MagicMock()
-        screener_vm.on_status = MagicMock()
-        screener_vm.on_progress = MagicMock()
-        screener_vm.on_log_stream_start = MagicMock()
+    def test_dispose_clears_state_and_internal_refs(self, screener_vm):
         screener_vm._main_loop = MagicMock()
         screener_vm._full_results = pd.DataFrame({"a": [1]})
         screener_vm._ai_buffer = [{"x": 1}]
         screener_vm._realtime_snapshot = {"full_results": pd.DataFrame()}
         screener_vm.dispose()
-        assert screener_vm.on_update is None
-        assert screener_vm.on_log is None
-        assert screener_vm.on_status is None
-        assert screener_vm.on_progress is None
-        assert screener_vm.on_log_stream_start is None
         assert screener_vm._main_loop is None
         assert screener_vm._full_results is None
         assert screener_vm._ai_buffer == []
         assert screener_vm._realtime_snapshot is None
+        # State reset to defaults
+        assert screener_vm.state.loading is False
+        assert screener_vm.state.mode == "REALTIME"
+        assert screener_vm.state.logs == ()
 
 
 class TestScreenerViewModelSortData:
     async def test_toggles_ascending(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": [3, 1, 2]})
-        screener_vm.sort_column = "a"
-        screener_vm.sort_ascending = True
+        screener_vm._set_state(sort_column="a", sort_ascending=True)
         with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as tp_cls:
             tp_instance = MagicMock()
             tp_instance.run_async = AsyncMock(return_value=pd.DataFrame({"a": [3, 2, 1]}))
             tp_cls.return_value = tp_instance
             await screener_vm.sort_data("a")
-        assert screener_vm.sort_ascending is False
+        assert screener_vm.state.sort_ascending is False
 
     async def test_noop_on_empty(self, screener_vm):
         screener_vm._full_results = None
-        on_progress = MagicMock()
-        screener_vm.on_progress = on_progress
+        snapshots: list = []
+        screener_vm.subscribe(lambda s: snapshots.append(s))
         await screener_vm.sort_data("a")
-        on_progress.assert_not_called()
+        # No state changes (noop before setting loading)
+        assert len(snapshots) == 0
 
     async def test_sorts_data(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": [3, 1, 2]})
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
         with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as tp_cls:
             tp_instance = MagicMock()
             sorted_df = pd.DataFrame({"a": [1, 2, 3]})
             tp_instance.run_async = AsyncMock(return_value=sorted_df)
             tp_cls.return_value = tp_instance
             await screener_vm.sort_data("a", ascending=True)
-        assert screener_vm.sort_ascending is True
-        assert screener_vm.page_no == 1
-        on_update.assert_called_once()
+        assert screener_vm.state.sort_ascending is True
+        assert screener_vm.state.page_no == 1
 
 
 class TestScreenerViewModelSortHelper:
@@ -336,49 +299,37 @@ class TestScreenerViewModelSortHelper:
 
 class TestScreenerViewModelChangePage:
     def test_valid_page(self, screener_vm):
-        screener_vm.page_no = 1
-        screener_vm.total_pages = 3
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
+        screener_vm._set_state(page_no=1, total_pages=3)
         screener_vm.change_page(1)
-        assert screener_vm.page_no == 2
-        on_update.assert_called_once()
+        assert screener_vm.state.page_no == 2
 
     def test_out_of_range(self, screener_vm):
-        screener_vm.page_no = 3
-        screener_vm.total_pages = 3
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
+        screener_vm._set_state(page_no=3, total_pages=3)
         screener_vm.change_page(1)
-        assert screener_vm.page_no == 3
-        on_update.assert_not_called()
+        assert screener_vm.state.page_no == 3
 
 
 class TestScreenerViewModelChangePageSize:
     def test_updates_size(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": range(100)})
-        screener_vm.page_size = 50
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
+        screener_vm._update_pagination()
         screener_vm.change_page_size(25)
-        assert screener_vm.page_size == 25
-        assert screener_vm.page_no == 1
-        on_update.assert_called_once()
+        assert screener_vm.state.page_size == 25
+        assert screener_vm.state.page_no == 1
 
     def test_same_size_noop(self, screener_vm):
-        screener_vm.page_size = 50
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
+        screener_vm._set_state(page_size=50)
+        snapshots: list = []
+        screener_vm.subscribe(lambda s: snapshots.append(s))
         screener_vm.change_page_size(50)
-        assert screener_vm.page_size == 50
-        on_update.assert_not_called()
+        assert screener_vm.state.page_size == 50
+        assert len(snapshots) == 0
 
 
 class TestScreenerViewModelGetCurrentPageData:
     def test_returns_correct_slice(self, screener_vm):
         screener_vm._full_results = pd.DataFrame({"a": range(10)})
-        screener_vm.page_no = 2
-        screener_vm.page_size = 3
+        screener_vm._set_state(page_no=2, page_size=3)
         result = screener_vm.get_current_page_data()
         assert list(result["a"]) == [3, 4, 5]
 
@@ -393,20 +344,18 @@ class TestScreenerViewModelSwitchToHistory:
     def test_snapshots_state(self, screener_vm):
         df = pd.DataFrame({"a": [1]})
         screener_vm._full_results = df
-        screener_vm.page_no = 3
-        screener_vm.sort_column = "a"
-        screener_vm.sort_ascending = False
+        screener_vm._set_state(page_no=3, sort_column="a", sort_ascending=False)
         screener_vm._ai_buffer = [{"x": 1}]
         screener_vm.switch_to_history()
-        assert screener_vm.mode == "HISTORY"
+        assert screener_vm.state.mode == "HISTORY"
         assert screener_vm._realtime_snapshot is not None
         assert screener_vm._realtime_snapshot["full_results"] is df
         assert screener_vm._realtime_snapshot["page_no"] == 3
         assert screener_vm._full_results is None
-        assert screener_vm.page_no == 1
+        assert screener_vm.state.page_no == 1
 
     def test_idempotent(self, screener_vm):
-        screener_vm.mode = "HISTORY"
+        screener_vm._set_state(mode="HISTORY")
         screener_vm._realtime_snapshot = None
         screener_vm.switch_to_history()
         assert screener_vm._realtime_snapshot is None
@@ -415,7 +364,7 @@ class TestScreenerViewModelSwitchToHistory:
 class TestScreenerViewModelSwitchToRealtime:
     def test_restores_snapshot(self, screener_vm):
         df = pd.DataFrame({"a": [1]})
-        screener_vm.mode = "HISTORY"
+        screener_vm._set_state(mode="HISTORY")
         screener_vm._realtime_snapshot = {
             "full_results": df,
             "page_no": 3,
@@ -424,13 +373,13 @@ class TestScreenerViewModelSwitchToRealtime:
             "ai_buffer": [{"x": 1}],
         }
         screener_vm.switch_to_realtime()
-        assert screener_vm.mode == "REALTIME"
+        assert screener_vm.state.mode == "REALTIME"
         assert screener_vm._full_results is df
-        assert screener_vm.page_no == 3
+        assert screener_vm.state.page_no == 3
         assert screener_vm._realtime_snapshot is None
 
     def test_merges_discarded_buffer(self, screener_vm):
-        screener_vm.mode = "HISTORY"
+        screener_vm._set_state(mode="HISTORY")
         screener_vm._realtime_snapshot = {
             "full_results": None,
             "page_no": 1,
@@ -444,9 +393,9 @@ class TestScreenerViewModelSwitchToRealtime:
         assert screener_vm._discarded_buffer == []
 
     def test_idempotent(self, screener_vm):
-        screener_vm.mode = "REALTIME"
+        screener_vm._set_state(mode="REALTIME")
         screener_vm.switch_to_realtime()
-        assert screener_vm.mode == "REALTIME"
+        assert screener_vm.state.mode == "REALTIME"
 
 
 class TestScreenerViewModelGetExportData:
@@ -489,8 +438,8 @@ class TestScreenerViewModelGetStrategyParams:
 
 
 class TestScreenerViewModelOnAiResultStream:
-    def test_buffers_and_triggers_flush(self, screener_vm):
-        screener_vm.on_log = MagicMock()
+    def test_buffers_and_appends_log(self, screener_vm):
+        """_on_ai_result_stream 将日志追加到 state.logs（替代 on_log 回调）。"""
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = False
         screener_vm._flush_ai_buffer = MagicMock()
@@ -499,27 +448,32 @@ class TestScreenerViewModelOnAiResultStream:
             row = {"name": "TestStock", "ai_score": 85, "thinking": "good"}
             screener_vm._on_ai_result_stream(row)
         assert len(screener_vm._ai_buffer) == 1
-        screener_vm.on_log.assert_called_once_with("TestStock", 85, "good")
+        assert len(screener_vm.state.logs) == 1
+        assert screener_vm.state.logs[0].name == "TestStock"
+        assert screener_vm.state.logs[0].score == 85
+        assert screener_vm.state.logs[0].thinking == "good"
 
     def test_noop_on_empty_data(self, screener_vm):
         screener_vm._on_ai_result_stream(None)
         assert screener_vm._ai_buffer == []
+        assert len(screener_vm.state.logs) == 0
 
     def test_noop_on_empty_dict(self, screener_vm):
         screener_vm._on_ai_result_stream({})
         assert screener_vm._ai_buffer == []
+        assert len(screener_vm.state.logs) == 0
 
 
 class TestScreenerViewModelRunStrategy:
     async def test_with_not_found_strategy(self, screener_vm, mock_sm):
+        """策略不存在时，state.status_color 设为 red（替代 on_status 回调）。"""
         mock_sm.get_strategy.return_value = None
-        on_status = MagicMock()
-        screener_vm.on_status = on_status
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
             mock_i18n.get.return_value = "not found"
             await screener_vm.run_strategy("nonexistent")
         mock_sm.get_strategy.assert_called_once_with("nonexistent")
-        on_status.assert_called_once_with("not found", "red")
+        assert screener_vm.state.status_color == "red"
+        assert screener_vm.state.status_message == "not found"
 
 
 class TestScreenerViewModelRunStrategyExecution:
@@ -531,7 +485,6 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_rm = mock_rm
         self.mock_rm.save_results = AsyncMock()
         self.mock_tm = mock_tm
-        self.vm.bind(MagicMock(), MagicMock(), MagicMock(), MagicMock())
 
     def _make_strategy(self, name_key="strategy_name", is_async=True):
         strategy = MagicMock()
@@ -797,28 +750,24 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_dp.init_data.assert_awaited_once()
 
     async def test_run_strategy_task_rejected(self):
+        """TaskManager 拒绝任务时，state.loading 为 False 且 status_color 为 orange。"""
         strategy = self._make_strategy()
         self.mock_sm.get_strategy.return_value = strategy
         self.mock_tm.submit_task.return_value = None
-
-        on_progress = MagicMock()
-        on_status = MagicMock()
-        self.vm.on_progress = on_progress
-        self.vm.on_status = on_status
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, *a, **kw: key
             await self.vm.run_strategy("momentum")
 
-        on_progress.assert_called_with(False)
-        on_status.assert_any_call("screener_task_rejected", "orange")
+        assert self.vm.state.loading is False
+        assert self.vm.state.status_color == "orange"
 
     async def test_run_strategy_resets_state(self):
         strategy = self._make_strategy()
         self.mock_sm.get_strategy.return_value = strategy
 
         self.vm._full_results = pd.DataFrame({"a": [1]})
-        self.vm.page_no = 5
+        self.vm._set_state(page_no=5)
         self.vm._ai_buffer = [{"x": 1}]
 
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
@@ -826,7 +775,7 @@ class TestScreenerViewModelRunStrategyExecution:
             await self.vm.run_strategy("momentum")
 
         assert self.vm._full_results is None
-        assert self.vm.page_no == 1
+        assert self.vm.state.page_no == 1
         assert self.vm._ai_buffer == []
 
     async def test_execute_screening_missing_trade_date(self):
@@ -868,7 +817,7 @@ class TestScreenerViewModelFlushAiBuffer:
         assert screener_vm._flush_pending is False
 
     async def test_flush_history_mode_saves_to_discarded_buffer(self, screener_vm):
-        screener_vm.mode = "HISTORY"
+        screener_vm._set_state(mode="HISTORY")
         screener_vm._ai_buffer = [{"name": "Stock1", "ai_score": 85}]
         screener_vm._flush_pending = True
 
@@ -967,8 +916,6 @@ class TestScreenerViewModelLoadHistoryTree:
 class TestScreenerViewModelLoadHistoryData:
     async def test_with_data_and_ai_score(self, screener_vm):
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "ai_score": [85]})
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
 
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
@@ -977,10 +924,9 @@ class TestScreenerViewModelLoadHistoryData:
             await screener_vm.load_history_data("2026-05-16")
 
         assert screener_vm._full_results is not None
-        assert screener_vm.sort_column == "ai_score"
-        assert screener_vm.sort_ascending is False
-        assert screener_vm.page_no == 1
-        on_update.assert_called_once()
+        assert screener_vm.state.sort_column == "ai_score"
+        assert screener_vm.state.sort_ascending is False
+        assert screener_vm.state.page_no == 1
 
     async def test_with_data_no_ai_score(self, screener_vm):
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"]})
@@ -990,12 +936,9 @@ class TestScreenerViewModelLoadHistoryData:
             MockCM.return_value = cm_instance
             await screener_vm.load_history_data("2026-05-16")
 
-        assert screener_vm.sort_column is None
+        assert screener_vm.state.sort_column is None
 
     async def test_with_empty_data(self, screener_vm):
-        on_update = MagicMock()
-        screener_vm.on_update = on_update
-
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.get_history_records = AsyncMock(return_value=pd.DataFrame())
@@ -1004,8 +947,7 @@ class TestScreenerViewModelLoadHistoryData:
 
         assert isinstance(screener_vm._full_results, pd.DataFrame)
         assert screener_vm._full_results.empty
-        assert screener_vm.sort_column is None
-        on_update.assert_called_once()
+        assert screener_vm.state.sort_column is None
 
     async def test_with_none_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
@@ -1086,24 +1028,19 @@ class TestScreenerViewModelGetStrategyDesc:
 
 
 class TestScreenerViewModelOnAiProgress:
-    def test_forwards_to_on_status(self, screener_vm):
-        on_status = MagicMock()
-        screener_vm.on_status = on_status
-
+    def test_updates_state_status(self, screener_vm):
+        """_on_ai_progress 更新 state.status_message/status_color（替代 on_status 回调）。"""
         with patch("ui.viewmodels.screener_view_model.I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, *a, **kw: key
             screener_vm._on_ai_progress(5, 10, "analyzing")
 
-        on_status.assert_called_once()
-
-    def test_noop_without_on_status(self, screener_vm):
-        screener_vm.on_status = None
-        screener_vm._on_ai_progress(5, 10, "analyzing")
+        assert screener_vm.state.status_color == "blue"
+        assert screener_vm.state.status_message != ""
 
 
 class TestScreenerViewModelOnAiResultStreamFlush:
     def test_flush_via_main_loop_fallback(self, screener_vm):
-        screener_vm.on_log = MagicMock()
+        """无 running loop 时，通过 main_loop fallback 调度 flush。"""
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = False
         screener_vm._main_loop = MagicMock()
@@ -1119,9 +1056,11 @@ class TestScreenerViewModelOnAiResultStreamFlush:
 
         mock_rcts.assert_called_once()
         assert len(screener_vm._ai_buffer) == 1
+        # Log still appended to state
+        assert len(screener_vm.state.logs) == 1
 
     def test_flush_no_loop_available(self, screener_vm):
-        screener_vm.on_log = MagicMock()
+        """无可用 loop 时，flush_pending 重置为 False，但日志仍追加到 state。"""
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = False
         screener_vm._main_loop = None
@@ -1132,9 +1071,10 @@ class TestScreenerViewModelOnAiResultStreamFlush:
 
         assert screener_vm._flush_pending is False
         assert len(screener_vm._ai_buffer) == 1
+        assert len(screener_vm.state.logs) == 1
 
     def test_flush_already_pending_skips_scheduling(self, screener_vm):
-        screener_vm.on_log = MagicMock()
+        """flush_pending 为 True 时，跳过调度但日志仍追加到 state。"""
         screener_vm._last_ai_update = 0
         screener_vm._flush_pending = True
 
@@ -1144,3 +1084,4 @@ class TestScreenerViewModelOnAiResultStreamFlush:
 
         mock_get_loop.assert_not_called()
         assert len(screener_vm._ai_buffer) == 1
+        assert len(screener_vm.state.logs) == 1
