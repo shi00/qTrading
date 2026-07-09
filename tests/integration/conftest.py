@@ -294,9 +294,16 @@ async def flet_test_page():
     Windows 限制：``ft.run_async`` 的 socket server 不兼容
     ``WindowsSelectorEventLoop``（抛 ``NotImplementedError``），而 pytest-asyncio
     在 Windows 强制 selector policy。因此 Windows 本地无法运行依赖此 fixture
-    的测试（probe 测试已加 ``skipif(win32)``）。CI 集成测试在 Linux 运行，
-    用 ``DefaultEventLoopPolicy`` 不受影响。本地 Windows 验证请用独立 spike：
+    的测试（probe 测试已加 ``skipif(win32)``）。本地 Windows 验证请用独立 spike：
     ``python -m tests.integration._spike_flet_run_async``。
+
+    Headless Linux 限制：``ft.run_async`` 内部 ``is_linux_server()`` 检测
+    ``DISPLAY`` 环境变量——CI ubuntu-latest headless 下返回 True，强制
+    ``view=AppView.WEB_BROWSER``（flet app.py L188-190），启动 web server
+    等待浏览器连接，无浏览器则 main 回调永不触发，fixture 挂起 120s 超时。
+    因此依赖此 fixture 的测试在 CI headless Linux 下也需 skip（probe 测试
+    已加 ``skipif(_IS_HEADLESS_LINUX)``）。本地 Linux 需有 X server 或用
+    ``xvfb-run``。技术债：CI 完整验证需装 ``xvfb`` + ``flet_desktop``。
     """
     captured: list[ft.Page] = []
     ready = asyncio.Event()

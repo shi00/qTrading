@@ -8,24 +8,45 @@
 ``no_db`` marker: 跳过 ``db_schema_ready`` autouse fixture 的 DB 初始化，
 让 probe 测试在 DB 不可用环境也能运行（方案 §3.3.3 DoD）。
 
-Windows skip: ``ft.run_async`` 的 socket server 不兼容 ``WindowsSelectorEventLoop``
-（抛 ``NotImplementedError``），而 pytest-asyncio 在 Windows 强制 selector policy
-（``tests/conftest.py`` L25）。CI 集成测试在 Linux（``ubuntu-latest``）运行，
-用 ``DefaultEventLoopPolicy`` 不受影响。本地 Windows 验证请用独立 spike：
-``python -m tests.integration._spike_flet_run_async``。
+运行环境限制（双重 skip）：
+
+1. **Windows skip**: ``ft.run_async`` 的 socket server 不兼容
+   ``WindowsSelectorEventLoop``（抛 ``NotImplementedError``），而 pytest-asyncio
+   在 Windows 强制 selector policy（``tests/conftest.py`` L25）。
+
+2. **Headless Linux skip**: ``ft.run_async`` 内部调用 ``is_linux_server()``
+   检测 ``DISPLAY`` 环境变量——CI ubuntu-latest headless 环境下返回 True，
+   强制 ``view=AppView.WEB_BROWSER``（flet app.py L188-190），启动 web server
+   等待浏览器连接。无浏览器时 main 回调永不触发，fixture 挂起 120s 超时失败。
+
+   因此 probe 测试在 CI headless Linux 下也 skip。本地 Linux 有 X server
+   或用 ``xvfb-run`` 时 ``DISPLAY`` 已设置，可正常运行。本地 Windows 验证
+   请用独立 spike：``python -m tests.integration._spike_flet_run_async``。
+
+技术债：CI 完整验证 flet_test_page 需装 ``xvfb`` + ``flet_desktop``（见
+``phase-2.5-review.md`` 限制章节）。
 """
 
+import os
 import sys
 
 import flet as ft
 import pytest
+
+# Headless Linux 判定（与 flet.utils.is_linux_server 一致：Linux + 非 WSL + DISPLAY 未设置）
+# CI ubuntu-latest 符合此条件；本地 Linux 有 X server 时 DISPLAY 已设置
+_IS_HEADLESS_LINUX = sys.platform == "linux" and not os.environ.get("DISPLAY")
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.no_db,
     pytest.mark.skipif(
         sys.platform == "win32",
-        reason="ft.run_async socket server 不兼容 WindowsSelectorEventLoop；CI Linux 验证",
+        reason="ft.run_async socket server 不兼容 WindowsSelectorEventLoop（pytest-asyncio 强制 selector policy）",
+    ),
+    pytest.mark.skipif(
+        _IS_HEADLESS_LINUX,
+        reason="ft.run_async 在 headless Linux 被 is_linux_server() 强制切到 WEB_BROWSER，无浏览器则 main 不触发；需 xvfb + flet_desktop（技术债）",
     ),
 ]
 

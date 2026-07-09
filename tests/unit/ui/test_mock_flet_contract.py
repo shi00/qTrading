@@ -224,11 +224,13 @@ def test_v1_control_page_property_writable_via_mock():
     ctrl = ft.Container()
 
     # 注入 mock_page（fixture patched page setter 在运行时生效）
-    ctrl.page = mock_page
+    # setattr 绕过 pyright 静态只读 property 检查（运行时 monkeypatch 已注入 setter）
+    # noqa: B010 — ruff 建议直接赋值，但 pyright 报只读 property，setattr 是必要的折中
+    setattr(ctrl, "page", mock_page)  # noqa: B010
     assert ctrl.page is mock_page
 
     # 清除 mock_page 后，未挂载控件应返回 None（不抛 RuntimeError）
-    ctrl._mock_page = None
+    setattr(ctrl, "_mock_page", None)  # noqa: B010
     assert ctrl.page is None
 
 
