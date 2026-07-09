@@ -83,80 +83,148 @@
 
 ---
 
-## Phase 3: 简单 View 声明式重写（TaskCenter / Home / Settings）
+## Phase 3: 纯声明式 UI 重写（禁绝混合模式）
 
-> 方案 §2 阶段 3、§3.4 断言迁移模板、§3.7 响应式布局、§3.8 Material 3。
-> **grep 验收**：`grep -rn "handle_resize" --include=*.py ui/` 在阶段 4 结束后为 0
-
-| Task | 内容 | DoD | Depends | Status |
-|------|------|-----|---------|--------|
-| 3.1 | [lane:gate][tdd:required] `TaskCenterView` 声明式重写：`@ft.component` + `use_viewmodel`；移除 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`；M3 控件变体；响应式布局。配套 `test_task_center_view.py` 重写（17 处断言迁移，方案 §3.2 第一组） | `grep "did_mount\|will_unmount\|\.update()\|PageRefMixin" ui/views/task_center_view.py` = 0；`use_viewmodel` 在文件中出现；`pytest tests/unit/ui/test_task_center_view.py` 通过 | Phase 2.5 | cc:完了 [69 测试通过, 150 测试通过(含 test_views.py 清理), 2369 UI 测试通过, ruff+pyright 0 错误, pre-commit 全绿] |
-| 3.2 | [lane:gate][tdd:required] `HomeView` 声明式重写 + `AppLayout` 响应式布局改造：`@ft.component` + `use_viewmodel` + `use_effect` resize state 驱动（方案 §3.7.2）；NavigationRail M3 变体 + 断点折叠。配套 `test_views.py` 重写（18 处断言迁移，含 handle_resize 6 测试迁移到 use_effect cleanup，方案 §3.2 第一组 H3） | `grep "handle_resize\|\.update()\|did_mount" ui/views/home_view.py ui/app_layout.py` = 0；resize 改 `use_effect` + `page.on_resize = handler`；`pytest tests/unit/ui/test_views.py` 通过 | Phase 2.5 | cc:TODO |
-| 3.3 | [lane:gate][tdd:required] `SettingsView` 声明式重写：`@ft.component` + `use_viewmodel`；`ft.Tabs` M3 变体。配套 `test_settings_view.py` + `test_settings_tabs.py` 重写（17 处断言迁移） | `grep "did_mount\|\.update()" ui/views/settings_view.py` = 0；`pytest tests/unit/ui/test_settings_view.py tests/unit/ui/test_settings_tabs.py` 通过 | Phase 2.5 | cc:TODO |
-| 3.4 | [lane:gate][tdd:required] `DatabaseTab` + `AutomationTab` + `NotificationsTab` + `SystemTab` 声明式重写。配套 `test_database_tab.py` + `test_automation_tab.py` + `test_system_tab.py` 重写 | 各 Tab `grep "did_mount\|\.update()\|on_update=\|on_log="` = 0；对应测试通过 | Phase 2.5 | cc:TODO |
-| 3.5 | [lane:gate] Phase 3 回归验收：`pytest tests/unit/ -m "not slow"` 通过；已改造 View 无命令式残留 | pytest 全绿；已改造文件 grep 命令式模式 = 0 | 3.1-3.4 | cc:TODO |
-| 3.6 | [lane:gate][tdd:skip:review-gate] Phase 3 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-3-review.md`；声明式 View 形态契约一致(`@ft.component` + `use_viewmodel`)；响应式布局 + M3 控件变体无遗漏；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 3.5 | cc:TODO |
-
----
-
-## Phase 4: 复杂 View 声明式重写（Screener / Backtest / Data / Onboarding）
-
-> 方案 §2 阶段 4。含 LLM 流式响应测试整改、FilePicker 声明式挂载、配置面板群重写。
-> **grep 验收**：`grep -rn "refresh_locale" --include=*.py ui/` = 0（阶段 4 结束前删除所有 refresh_locale）
+> **修正背景**：Phase 3.2/3.3 首版采用"声明式外壳 + 命令式内核缓存"混合模式（use_ref cache 命令式 View 实例 + 手动级联 effect），用户判定为伪声明式，已 git reset 回滚到 Phase 3.1（a1cfde3），混合模式改动保留在 `backup/phase-3.2-3.3-mixed-mode` branch。
+>
+> **架构原则（红线，禁绝混合模式）**：
+> 1. **所有** View/Tab/Component 都是 `@ft.component` 函数组件
+> 2. **VM 策略按职责分层**（§1.3 YAGNI）：有业务逻辑 → `use_viewmodel`；纯 UI 状态 → `use_state` + `ft.use_state(*.get_observable_state)`
+> 3. **page 访问**：`ft.context.page`（try/except 守卫 RuntimeError）
+> 4. **禁止** `use_ref` cache 命令式实例
+> 5. **禁止** 手动级联 effect（i18n/theme 每个组件自管）
+> 6. **状态驱动**：`ft.Stack` + `visible` prop 切换；Dialog 用条件渲染 + `use_state`
+>
+> 方案 §2 阶段 3/4、§3.4 断言迁移模板、§3.7 响应式布局、§3.8 Material 3。
+> **grep 验收**：`grep -rn "handle_resize" --include=*.py ui/` 在 Phase 3 结束后为 0
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 4.1 | [lane:gate][tdd:required] `ScreenerView` 声明式重写（~1620 行测试）：`@ft.component` + `use_viewmodel`；LLM 流式响应改 `state.logs: tuple[LogEntry, ...]` + `replace` 生成新 tuple（方案 §3.2 第一组 H5）；FilePicker 声明式挂载（方案 §3.6.1 方案 A）；`ft.Button` → M3 变体。配套 `test_screener_view.py` 整文件重写（33 处断言迁移） | `grep "\.update()\|did_mount\|on_log=" ui/views/screener_view.py` = 0；`pytest tests/unit/ui/test_screener_view.py` 通过 | Phase 3 | cc:TODO |
-| 4.2 | [lane:gate][tdd:required] `BacktestView` 声明式重写：`@ft.component` + `use_viewmodel`；`ft.Tabs` M3 + `ft.Button` → M3 变体。配套 `test_backtest_view.py` 重写（5 处断言迁移） | `grep "\.update()\|did_mount" ui/views/backtest_view.py` = 0；`pytest tests/unit/ui/test_backtest_view.py` 通过 | Phase 3 | cc:TODO |
-| 4.3 | [lane:gate][tdd:required] `DataExplorerView` 声明式重写：`@ft.component` + `use_viewmodel`（消费 DataExplorerViewModel 双轨制 state）；`ft.Tabs` M3 + `ft.DataTable` M3；`page.pubsub` 改 `use_effect` cleanup。配套 `test_data_view.py` 重写（5 处断言迁移） | `grep "\.update()\|did_mount" ui/views/data_view.py` = 0；`pytest tests/unit/ui/test_data_view.py` 通过 | Phase 3 | cc:TODO |
-| 4.4 | [lane:gate][tdd:required] `OnboardingWizard` 声明式重写：`@ft.component` + `use_viewmodel`；表单控件改 `ft.TextField` 双向绑定绕开 Flutter #129324 焦点问题（方案 §5.5）。配套 `test_onboarding_view_model.py` 回归 | `grep "\.update()\|did_mount" ui/views/onboarding_wizard.py` = 0；onboarding E2E xfail 消除路径准备就绪 | Phase 3 | cc:TODO |
-| 4.5 | [lane:gate][tdd:required] 配置面板群声明式重写：`FailoverConfigPanel`（~2500 行测试）+ `ProviderCredentialDialog`（→ `ft.use_dialog()` hook）+ `TushareConfigPanel` + `DatabaseConfigPanel` + `LLMConfigPanel` + `LocalModelConfigPanel` + `AIBrainTab` + `TierApiPanel` + `DataSourceTab`。配套 `test_failover_config_panel.py` + `test_config_panels.py`（79 处断言）+ `test_data_source_tab.py` + `test_ai_brain_tab.py` + `test_tier_api_panel.py` + `test_local_model_config_panel.py` 重写 | 各面板 `grep "\.update()\|did_mount\|page\.show_dialog"` = 0；`grep "ft\.Button(" ui/components/config_panels/` = 0；对应测试通过 | Phase 3 | cc:TODO |
-| 4.6 | [lane:gate] Phase 4 回归验收：`grep -rn "refresh_locale" --include=*.py ui/` = 0；`pytest tests/unit/ -m "not slow"` 通过 | grep = 0；pytest 全绿 | 4.1-4.5 | cc:TODO |
-| 4.7 | [lane:gate][tdd:skip:review-gate] Phase 4 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-4-review.md`；复杂 View + 配置面板形态契约一致；LLM 流式响应 state 化 + FilePicker 声明式挂载无遗漏；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 4.6 | cc:TODO |
+| 3.1 | [lane:gate][tdd:required] `TaskCenterView` 声明式重写（保留为样板）：`@ft.component` + `use_viewmodel`；移除 `did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`；M3 控件变体；响应式布局。配套 `test_task_center_view.py` 重写（17 处断言迁移，方案 §3.2 第一组） | `grep "did_mount\|will_unmount\|\.update()\|PageRefMixin" ui/views/task_center_view.py` = 0；`use_viewmodel` 在文件中出现；`pytest tests/unit/ui/test_task_center_view.py` 通过 | Phase 2.5 | cc:完了 [69 测试通过, 150 测试通过(含 test_views.py 清理), 2369 UI 测试通过, ruff+pyright 0 错误, pre-commit 全绿] |
+
+### Phase 3.0: 模式确立 + 集成测试基础设施
+
+> 批量重写前先验证 3 个高风险模式 + 建 flet_test_page 集成测试能力。避免在 35 个 Task 中反复踩坑。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.0.1 | [lane:gate][tdd:skip:test-infrastructure] 扩展 `tests/integration/conftest.py` 的 `flet_test_page` fixture：支持 `use_state`/`use_effect` 真订阅（render_component 仅支持无状态组件，含状态组件需集成测试）；新增 `wait_for_condition` + `find_control` helper（**不引入 `trigger_state_change` 垫片**——state 变更后用 `vm.command(); ftp.wait_for_condition(lambda: ftp.find_control(pred) is not None)` 模式断言，避免轮询"控件树稳定"的近似实现） | `flet_test_page` 可渲染含 `use_state`/`use_viewmodel` 的 `@ft.component`；`wait_for_condition` + `find_control` 单元测试通过；spike 集成测试通过（Windows/headless Linux skip） | Phase 2.5 | cc:完了 [13 单元测试通过, FletTestPage 扩展 wait_for_condition+find_control, _find_control_recursive 模块级] |
+| 3.0.2 | [lane:gate][tdd:required] Spike: Dialog 声明式模式验证。用条件渲染 + `use_state(dialog_visible)` 替代 `page.show_dialog`/`page.pop_dialog`；写 spike 测试验证 mount/unmount/dialog open 状态切换 | spike 文件 `tests/integration/test_spike_dialog_declarative.py` 通过；验证 `ft.AlertDialog(open=state)` + 条件渲染可行；grep `page.show_dialog` 在 spike 中为 0 | 3.0.1 | cc:完了 [3 集成测试 Windows skip, 3 单元测试通过, ft.use_dialog 官方 API 验证, grep page.show_dialog=0] |
+| 3.0.3 | [lane:gate][tdd:required] Spike: PubSub + run_task 声明式模式验证。`use_effect(setup_subscribe, dependencies=[], cleanup=cleanup_unsubscribe)` + `page.run_task(vm.command)` + R2 CancelledError 传播；写 spike 测试验证订阅/退订/取消 | spike 文件 `tests/integration/test_spike_pubsub_runtask.py` 通过；验证 pubsub 订阅在 cleanup 中零参 unsubscribe；run_task 取消时 CancelledError 传播（R2） | 3.0.1 | cc:完了 [2 集成测试 Windows skip, 6 单元测试通过, R2 CancelledError 传播验证, page.pubsub.unsubscribe() 零参整批退订] |
+| 3.0.4 | [lane:gate][tdd:required] Spike: 性能基准（ScreenerView 流式 + Splitter 拖拽）。建立 `@track_performance` 基准，验证声明式 reconcile 在 100 行表格 + 60fps 拖拽下不卡顿 | spike 文件 `tests/integration/test_spike_perf_baseline.py` 通过；阈值：流式 <50ms/帧，拖拽 <16ms/帧；若超阈值记录为技术债并在对应 Task 降级方案 | 3.0.1 | cc:完了 [2 集成测试 Windows skip, 6 单元测试通过, 阈值常量 50ms/16ms 验证, 按钮触发 state 变更替代 GestureDetector, 技术债: CI Linux+xvfb 真实验证] |
+| 3.0.5 | [lane:gate][tdd:skip:review-gate] Phase 3.0 per-phase code review gate | 检视记录沉淀到 `.claude/state/reviews/phase-3.0-review.md`；3 个高风险模式验证通过；性能基准达标或降级方案明确；`pytest tests/integration/test_spike_*.py` 全绿 | 3.0.1-3.0.4 | cc:TODO |
+
+### Phase 3.2: 叶子 config panels 批量重写
+
+> 自底向上第一步：config panels 是 View/Tab 的直接子依赖，必须先重写。修正原方案遗漏（原 Phase 3 未列 config panels）。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.2.1 | [lane:gate][tdd:required] `DatabaseConfigPanel` 声明式重写：`@ft.component` + 新建 `DatabaseConfigPanelViewModel`（DB 配置/测试连接）；移除 did_mount/.update()/refresh_locale | `grep "did_mount\|\.update()\|refresh_locale" ui/components/config_panels/database_config_panel.py` = 0；`pytest` 对应测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.2 | [lane:gate][tdd:required] `TushareConfigPanel` 声明式重写：`@ft.component` + 新建 `TushareConfigPanelViewModel`（Token/tier/probe）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.3 | [lane:gate][tdd:required] `LLMConfigPanel` 声明式重写：`@ft.component` + 新建 `LLMConfigPanelViewModel`（provider/key/test）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.4 | [lane:gate][tdd:required] `LocalModelConfigPanel` 声明式重写：`@ft.component` + `use_state`（纯 UI 状态，直调 ConfigHandler，YAGNI 不建 VM）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.5 | [lane:gate][tdd:required] `BacktestConfigPanel` 声明式重写：`@ft.component` + 复用 `BacktestViewModel` 或新建子 VM；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.6 | [lane:gate][tdd:required] `BacktestResultPanel` 声明式重写：`@ft.component` + `use_state`（纯展示，props 推送数据）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.7 | [lane:gate][tdd:required] `StockDetailDialog` + `HealthReportDialog` 声明式重写：`@ft.component` + 条件渲染（Phase 3.0.2 模式）；移除 `page.show_dialog` | `grep "page.show_dialog" ui/components/` = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.8 | [lane:gate] Phase 3.2 回归验收：`pytest tests/unit/ -m "not slow"` 通过；已改造 config panel 无命令式残留 | pytest 全绿；已改造文件 grep 命令式模式 = 0 | 3.2.1-3.2.7 | cc:TODO |
+
+### Phase 3.3: 叶子展示组件 + 极薄 Tab
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.3.1 | [lane:gate][tdd:required] `MarketDashboard` 声明式重写：`@ft.component` + `use_state`（纯展示，props 推送数据，YAGNI 不建 VM）；移除 update_data/update_theme/update_locale 命令式方法 | `grep "did_mount\|\.update()\|update_data\|update_theme\|update_locale" ui/components/market_dashboard.py` = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.3.2 | [lane:gate][tdd:required] `NewsFeed` 声明式重写：`@ft.component` + `use_state`（纯展示，props 推送）；移除 set_news/prepend_news/append_news 命令式方法 | grep 命令式方法 = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.3.3 | [lane:gate][tdd:required] `DatabaseTab` 声明式重写：`@ft.component` + `use_state`（105 行极薄包装，YAGNI 不建 VM）；消费声明式 DatabaseConfigPanel | `grep "did_mount\|\.update()\|refresh_locale" ui/views/settings_tabs/database_tab.py` = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.3.4 | [lane:gate][tdd:required] `AutomationTab` 声明式重写：`@ft.component` + `use_state`（纯设置项，直调 ConfigHandler）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.3.5 | [lane:gate][tdd:required] `NotificationsTab` 声明式重写：`@ft.component` + `use_state`；page 访问改 `ft.context.page`（旧用 weakref page_ref）；移除命令式模式 | grep 命令式模式 = 0；`grep "_page_ref" ui/views/settings_tabs/automation_tab.py` = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.3.6 | [lane:gate] Phase 3.3 回归验收 | pytest 全绿；已改造文件 grep 命令式模式 = 0 | 3.3.1-3.3.5 | cc:TODO |
+
+### Phase 3.4: 删除 PageRefMixin 垫片（3 个历史控件重写）
+
+> [CLAUDE.md §3.3](file:///d:/workspace/qTrading/CLAUDE.md) 技术债列出的 5 个 PageRefMixin 历史控件中，AppLayout/TaskCenterView 已在 Phase 3.1/3.6 处理；本 Phase 删除剩余 3 个垫片（ResizableSplitter/FailoverConfigPanel/ProviderCredentialDialog），是 ScreenerView/BacktestView/AIBrainTab 的传递依赖，必须先重写。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.4.1 | [lane:gate][tdd:required] `ResizableSplitter` 声明式重写：`@ft.component` + `use_state(width)` + on_drag_update set_width；移除 PageRefMixin；性能验证（Phase 3.0.4 基准，若超阈值降级为 use_ref + 局部 update，需用户裁决） | `grep "PageRefMixin\|\.update()" ui/components/resizable_splitter.py` = 0；拖拽性能达标或降级方案记录；测试通过 | Phase 3.0 | cc:TODO |
+| 3.4.2 | [lane:gate][tdd:required] `FailoverConfigPanel` 声明式重写：`@ft.component` + `use_state`（providers list）；移除 PageRefMixin；移除命令式模式 | grep PageRefMixin/命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.4.3 | [lane:gate][tdd:required] `ProviderCredentialDialog` 声明式重写：`@ft.component` + 条件渲染（Phase 3.0.2 模式）；移除 PageRefMixin；移除 `page.show_dialog` | `grep "page.show_dialog\|PageRefMixin" ui/components/config_panels/` = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.4.4 | [lane:gate] Phase 3.4 回归验收 | pytest 全绿；`grep "PageRefMixin" ui/components/` = 0 | 3.4.1-3.4.3 | cc:TODO |
+
+### Phase 3.5: 中间容器 View/Tab
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.5.1 | [lane:gate][tdd:required] `DataSourceTab` 声明式重写：`@ft.component` + `use_viewmodel(DataSourceViewModel)`；消费声明式 TushareConfigPanel/MetricCard/ActionChip/HealthReportDialog；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2/3.3 | cc:TODO |
+| 3.5.2 | [lane:gate][tdd:required] `AIBrainTab` 声明式重写：`@ft.component` + 新建 `AIBrainTabViewModel`；消费声明式 LLMConfigPanel/FailoverConfigPanel/LocalModelConfigPanel；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2/3.4 | cc:TODO |
+| 3.5.3 | [lane:gate][tdd:required] `SystemTab` 声明式重写：`@ft.component` + `use_viewmodel(SystemViewModel)`；消费声明式 TierApiPanel；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2/3.3 | cc:TODO |
+| 3.5.4 | [lane:gate][tdd:required] `TierApiPanel` 声明式重写：`@ft.component` + `use_viewmodel(SystemViewModel)`（复用）；响应式断点用 `use_state` + `ft.context.page` on_resize；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.5.5 | [lane:gate][tdd:required] `DataExplorerView` + `TableViewerTab` + `SQLConsoleTab` 声明式重写：`@ft.component` + `use_viewmodel(DataExplorerViewModel)`；pubsub 改 `use_effect`（Phase 3.0.3 模式）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0/3.2 | cc:TODO |
+| 3.5.6 | [lane:gate] Phase 3.5 回归验收 | pytest 全绿；已改造文件 grep 命令式模式 = 0 | 3.5.1-3.5.5 | cc:TODO |
+
+### Phase 3.6: 顶层 View + 容器重写
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.6.1 | [lane:gate][tdd:required] `HomeView` 声明式重写：`@ft.component` + `use_viewmodel(HomeViewModel)`；消费声明式 MarketDashboard/NewsFeed；移除命令式模式（无 use_ref cache） | `grep "use_ref.*cache\|did_mount\|\.update()" ui/views/home_view.py` = 0；测试通过 | Phase 3.3 | cc:TODO |
+| 3.6.2 | [lane:gate][tdd:required] `ScreenerView` 声明式重写（~1867 行）：`@ft.component` + `use_viewmodel(ScreenerViewModel)`；LLM 流式用 ref buffer + 节流 set_state（Phase 3.0.4 模式）；消费声明式 ResizableSplitter/PaginatedTable/StockDetailDialog；移除命令式模式 | grep 命令式模式 = 0；流式性能达标；测试通过 | Phase 3.4/3.5 | cc:TODO |
+| 3.6.3 | [lane:gate][tdd:required] `BacktestView` 声明式重写：`@ft.component` + `use_viewmodel(BacktestViewModel)`；消费声明式 BacktestConfigPanel/BacktestResultPanel/ResizableSplitter；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2/3.4 | cc:TODO |
+| 3.6.4 | [lane:gate][tdd:required] `OnboardingWizard` 声明式重写（~1164 行）：`@ft.component` + `use_viewmodel(OnboardingViewModel)`；8 步状态机用 `use_state(current_step)`；消费声明式 DatabaseConfigPanel/TushareConfigPanel/LLMConfigPanel/LocalModelConfigPanel；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.2 | cc:TODO |
+| 3.6.5 | [lane:gate][tdd:required] `AppLayout` 声明式重写：`@ft.component` + `use_state(current_tab, nav_collapsed)`；**无 use_ref cache**（直接调用子组件函数 HomeView()/ScreenerView()/...）；resize 用 `use_effect` + `page.on_resize`；移除手动级联 effect（i18n/theme 子组件自管） | `grep "use_ref.*cache\|on_locale_change\|on_theme_change" ui/app_layout.py` = 0；测试通过 | Phase 3.6.1-3.6.4 | cc:TODO |
+| 3.6.6 | [lane:gate][tdd:required] `SettingsView` 声明式重写：`@ft.component` + `use_state(current_tab)`；**无 use_ref cache**（直接调用子组件函数 DatabaseTab()/...）；移除手动级联 effect | `grep "use_ref.*cache\|on_locale_change\|on_theme_change" ui/views/settings_view.py` = 0；测试通过 | Phase 3.5 | cc:TODO |
+| 3.6.7 | [lane:gate] Phase 3.6 回归验收 | pytest 全绿；`grep "use_ref.*cache" ui/views/ ui/app_layout.py` = 0；`grep "on_locale_change\|on_theme_change" ui/views/ ui/app_layout.py` = 0（仅 Observable state 自管） | 3.6.1-3.6.6 | cc:TODO |
+
+### Phase 3.7: 级联修改 + 全量验证 + review gate
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| 3.7.1 | [lane:gate][tdd:required] 级联修改：`main.py` 移除 `_on_resize`（AppLayout use_effect 自管）；`startup_views.py` 改 `page.add(AppLayout())`；契约测试同步更新（声明式 grep 守护） | `grep "_on_resize\|isinstance.*AppLayout" main.py` = 0；`grep "app_layout.show\|AppLayout(self._page)" ui/startup_views.py` = 0；测试通过 | Phase 3.6 | cc:TODO |
+| 3.7.2 | [lane:gate] Phase 3 全量回归：`pytest tests/unit/ -m "not slow"` + `pytest tests/integration/` 通过；已改造 View 无命令式残留；`grep -rn "handle_resize" --include=*.py ui/` = 0 | pytest 全绿；grep 命令式模式 = 0；`handle_resize` = 0 | 3.7.1 | cc:TODO |
+| 3.7.3 | [lane:gate][tdd:skip:review-gate] Phase 3 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-3-review.md`；声明式 View 形态契约一致（`@ft.component` + 按职责分层 use_viewmodel/use_state）；无混合模式残留（无 use_ref cache 命令式实例、无手动级联 effect）；响应式布局 + M3 控件变体无遗漏；`pytest tests/unit/ tests/integration/` 全绿 | 3.7.2 | cc:TODO |
 
 ---
 
-## Phase 5: main 入口 + 特殊控件目标态重写
+## Phase 4: main 入口 + 特殊控件目标态重写
 
 > 方案 §2 阶段 5、§3.6 6 类遗漏控件。含 `v1_compat.py` 移除、`main.py` 入口改造。
 > **grep 验收**：`grep -rn "v1_compat\|PageRefMixin\|_page_ref" --include=*.py .` = 0
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 5.1 | [lane:gate][tdd:required] `main.py:163` 入口改造：`close_confirm_dialog.update()` 改 state 驱动（方案 §1.2 H15）；`StartupViewRenderer` 改 `@ft.component`（方案 §3.6）。配套 `test_ui_infrastructure.py` + `test_startup_views.py` 重写 | `grep "\.update()" main.py` = 0；`grep "page\.controls\.clear\|page\.add" ui/startup_views.py` 改 state 驱动；对应测试通过 | Phase 4 | cc:TODO |
-| 5.2 | [lane:gate][tdd:required] FilePicker 声明式挂载（3 处：`data_view.py`/`screener_view.py`/`local_model_config_panel.py`）：`use_ref` + `use_effect` 挂载到 `page.services` + state 驱动 pick 操作（方案 §3.6.1 方案 A）。配套测试改 mock FilePicker 结果注入 | 3 处 FilePicker `grep "page\.services\.append\|page\.overlay\.append"` 用 `use_effect` 包装；`on_result` 回调改 command；对应测试通过 | Phase 4 | cc:TODO |
-| 5.3 | [lane:gate][tdd:required] AlertDialog 子类声明式重写（4 个：`StockDetailDialog`/`HealthReportDialog`/`HealthScanDialog`/`ProviderCredentialDialog` + 1 内联 `data_source_tab.py`）：`@ft.component` 函数式 + `ft.use_dialog()` hook + `use_state` 控制 `open`（方案 §3.6）。配套 `test_stock_detail_dialog.py` + `test_health_report_dialog.py` 重写 | `grep "page\.show_dialog\|page\.pop_dialog" ui/` = 0；4 个 Dialog 用 `ft.use_dialog()` hook；对应测试通过 | Phase 4 | cc:TODO |
-| 5.4 | [lane:gate][tdd:required] 特殊控件重写：`ToastManager` overlay 挂载改 state 驱动（方案 §3.6.1 M20）；`ResizableSplitter` + `PaginatedTable` 保留自实现 + 声明式重写（方案附录 C.2.1 C20）；`flet_charts` 改 `use_effect` + `use_ref`；`DatePicker` 改 `use_state` + 条件渲染或 `ft.use_dialog()`。配套 `test_toast_manager.py` + `test_resizable_splitter.py` + `test_virtual_table.py` + `test_backtest_view_splitter.py` + `test_backtest_result_panel.py` 重写 | 各控件 `grep "\.update()\|did_mount"` = 0；`grep "page\.overlay\.append.*self\.container" ui/components/toast_manager.py` 改 state 驱动；对应测试通过 | Phase 4 | cc:TODO |
-| 5.5 | [lane:gate] `v1_compat.py` 删除 + `test_v1_compat.py` 删除 + `test_mock_flet_contract.py` 重写为 V1 原生 mock 契约（方案 §3.1 原则 6、§4.2 grep 验收） | `grep "v1_compat" .` = 0（含文件删除）；`test_mock_flet_contract.py` 守护 V1 原生 mock 契约；`pytest tests/unit/ui/test_mock_flet_contract.py` 通过 | 5.1-5.4 | cc:TODO |
-| 5.6 | [lane:gate] Phase 5 回归验收：`grep -rn "v1_compat\|PageRefMixin\|_page_ref" --include=*.py .` = 0；`grep -rn "\.update()" --include=*.py ui/ main.py` = 0；`pytest tests/unit/ -m "not slow"` 通过 | grep 全部 = 0；pytest 全绿 | 5.1-5.5 | cc:TODO |
-| 5.7 | [lane:gate][tdd:skip:review-gate] Phase 5 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-5-review.md`；`v1_compat.py` 删除后无残留引用；FilePicker/AlertDialog/特殊控件形态契约一致；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 5.6 | cc:TODO |
+| 4.1 | [lane:gate][tdd:required] `main.py:163` 入口改造：`close_confirm_dialog.update()` 改 state 驱动（方案 §1.2 H15）；`StartupViewRenderer` 改 `@ft.component`（方案 §3.6）。配套 `test_ui_infrastructure.py` + `test_startup_views.py` 重写 | `grep "\.update()" main.py` = 0；`grep "page\.controls\.clear\|page\.add" ui/startup_views.py` 改 state 驱动；对应测试通过 | Phase 3 | cc:TODO |
+| 4.2 | [lane:gate][tdd:required] FilePicker 声明式挂载（3 处：`data_view.py`/`screener_view.py`/`local_model_config_panel.py`）：`use_ref` + `use_effect` 挂载到 `page.services` + state 驱动 pick 操作（方案 §3.6.1 方案 A）。配套测试改 mock FilePicker 结果注入 | 3 处 FilePicker `grep "page\.services\.append\|page\.overlay\.append"` 用 `use_effect` 包装；`on_result` 回调改 command；对应测试通过 | Phase 3 | cc:TODO |
+| 4.3 | [lane:gate][tdd:required] AlertDialog 子类声明式重写（剩余：`HealthScanDialog` + 1 内联 `data_source_tab.py`；`StockDetailDialog`/`HealthReportDialog`/`ProviderCredentialDialog` 已在 Phase 3.2.7/3.4.3 完成）：`@ft.component` 函数式 + `ft.use_dialog()` hook + `use_state` 控制 `open`（方案 §3.6）。配套 `test_health_scan_dialog.py` 重写 | `grep "page\.show_dialog\|page\.pop_dialog" ui/` = 0；剩余 Dialog 用 `ft.use_dialog()` hook；对应测试通过 | Phase 3 | cc:TODO |
+| 4.4 | [lane:gate][tdd:required] 特殊控件重写：`ToastManager` overlay 挂载改 state 驱动（方案 §3.6.1 M20）；`PaginatedTable` 保留自实现 + 声明式重写（方案附录 C.2.1 C20）；`flet_charts` 改 `use_effect` + `use_ref`；`DatePicker` 改 `use_state` + 条件渲染或 `ft.use_dialog()`。配套 `test_toast_manager.py` + `test_virtual_table.py` + `test_backtest_view_splitter.py` 重写 | 各控件 `grep "\.update()\|did_mount"` = 0；`grep "page\.overlay\.append.*self\.container" ui/components/toast_manager.py` 改 state 驱动；对应测试通过 | Phase 3 | cc:TODO |
+| 4.5 | [lane:gate][tdd:required] `v1_compat.py` 删除 + `test_v1_compat.py` 删除 + `test_mock_flet_contract.py` 重写为 V1 原生 mock 契约（方案 §3.1 原则 6、§4.2 grep 验收） | `grep "v1_compat" .` = 0（含文件删除）；`test_mock_flet_contract.py` 守护 V1 原生 mock 契约；`pytest tests/unit/ui/test_mock_flet_contract.py` 通过 | 4.1-4.4 | cc:TODO |
+| 4.6 | [lane:gate] Phase 4 回归验收：`grep -rn "v1_compat\|PageRefMixin\|_page_ref" --include=*.py .` = 0；`grep -rn "\.update()" --include=*.py ui/ main.py` = 0；`pytest tests/unit/ -m "not slow"` 通过 | grep 全部 = 0；pytest 全绿 | 4.1-4.5 | cc:TODO |
+| 4.7 | [lane:gate][tdd:skip:review-gate] Phase 4 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-4-review.md`；`v1_compat.py` 删除后无残留引用；FilePicker/AlertDialog/特殊控件形态契约一致；`pytest tests/unit/ -m "not slow"` 全绿；集成测试 N/A | 4.6 | cc:TODO |
 
 ---
 
-## Phase 6: 最终清理 + E2E 完整回归 + xfail 消除
+## Phase 5: 最终清理 + E2E 完整回归 + xfail 消除
 
 > 方案 §2 阶段 6、§4.2 全部 22 项 grep 验收、§5.4 混合态清零 9 类、§5.5 E2E xfail 消除。
 > **用户硬约束**：E2E test cases must all pass, no xFail cases allowed
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 6.1 | [lane:gate] 22 项 grep 验收（方案 §4.2）：`v1_compat`/`PageRefMixin`/`.update()`/`did_mount`/`will_unmount`/`self.page =`/命令式控件子类/`ft.Button(`/`use_material_3=False`/`handle_resize`/`set_page`/`refresh_locale`/`AppColors._listeners`/`page.show_dialog`/硬编码像素布局/`use_viewmodel` ≥ 7/`on_update=`/`test_v1_compat`/附录 C 填充完整 | 22 项 grep 全部达标；不达标项修正至达标 | Phase 5 | cc:TODO |
-| 6.2 | [lane:gate] 混合态清零验证（方案 §5.4 9 类）：命令式 View 调声明式 VM / 声明式 View 调命令式 VM / `refresh_locale` 与 Observable 共存 / `AppColors._listeners` 与 Observable 共存 / `set_page` 与声明式 View 共存 / `.update()` 残留 / 自实现与原生控件共存 / 固定像素与响应式共存 / M2 与 M3 共存 | 9 类混合态全部清零；任一残留视为未完成 | 6.1 | cc:TODO |
-| 6.3 | [lane:gate][tdd:required] E2E 完整回归（11 文件）+ xfail 消除：移除 `@pytest.mark.xfail` 标记（`test_onboarding_wizard.py:123-133` Flutter #129324）；E2E 选择器同步调整（方案 §3.4.5 10 类场景）；视口策略验证 | `pytest tests/e2e/ -v` 全绿（**0 xFail**，用户硬约束）；E2E 选择器不依赖具体 Flet 控件类名 | 6.2 | cc:TODO |
-| 6.4 | [lane:gate] 完整门禁回归：`ruff check .` + `ruff format --check .` + `pyright` + `pytest tests/unit/ -m "not slow"` + `pytest tests/integration/` + `pytest tests/e2e/` + `pre-commit run --all-files` 全部通过 | 7 项门禁全绿 | 6.3 | cc:TODO |
-| 6.5 | [lane:gate][tdd:skip:review-gate] Phase 6 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-6-review.md`；22 项 grep 验收 + 9 类混合态清零无遗漏；E2E 0 xFail 用户硬约束达成；`pytest tests/unit/ tests/integration/ tests/e2e/` 全绿 | 6.4 | cc:TODO |
+| 5.1 | [lane:gate] 22 项 grep 验收（方案 §4.2）：`v1_compat`/`PageRefMixin`/`.update()`/`did_mount`/`will_unmount`/`self.page =`/命令式控件子类/`ft.Button(`/`use_material_3=False`/`handle_resize`/`set_page`/`refresh_locale`/`AppColors._listeners`/`page.show_dialog`/硬编码像素布局/`use_viewmodel` ≥ 7/`on_update=`/`test_v1_compat`/附录 C 填充完整 | 22 项 grep 全部达标；不达标项修正至达标 | Phase 4 | cc:TODO |
+| 5.2 | [lane:gate] 混合态清零验证（方案 §5.4 9 类）：命令式 View 调声明式 VM / 声明式 View 调命令式 VM / `refresh_locale` 与 Observable 共存 / `AppColors._listeners` 与 Observable 共存 / `set_page` 与声明式 View 共存 / `.update()` 残留 / 自实现与原生控件共存 / 固定像素与响应式共存 / M2 与 M3 共存 | 9 类混合态全部清零；任一残留视为未完成 | 5.1 | cc:TODO |
+| 5.3 | [lane:gate][tdd:required] E2E 完整回归（11 文件）+ xfail 消除：移除 `@pytest.mark.xfail` 标记（`test_onboarding_wizard.py:123-133` Flutter #129324）；E2E 选择器同步调整（方案 §3.4.5 10 类场景）；视口策略验证 | `pytest tests/e2e/ -v` 全绿（**0 xFail**，用户硬约束）；E2E 选择器不依赖具体 Flet 控件类名 | 5.2 | cc:TODO |
+| 5.4 | [lane:gate] 完整门禁回归：`ruff check .` + `ruff format --check .` + `pyright` + `pytest tests/unit/ -m "not slow"` + `pytest tests/integration/` + `pytest tests/e2e/` + `pre-commit run --all-files` 全部通过 | 7 项门禁全绿 | 5.3 | cc:TODO |
+| 5.5 | [lane:gate][tdd:skip:review-gate] Phase 5 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-5-review.md`；22 项 grep 验收 + 9 类混合态清零无遗漏；E2E 0 xFail 用户硬约束达成；`pytest tests/unit/ tests/integration/ tests/e2e/` 全绿 | 5.4 | cc:TODO |
 
 ---
 
-## Phase 7: 文档同步（CONTRIBUTING.md / CLAUDE.md）
+## Phase 6: 文档同步（CONTRIBUTING.md / CLAUDE.md）
 
 > 方案 §8 CONTRIBUTING.md 同步修订清单。前置条件：§4.1/§4.2/§4.4/§5.5/§5.4/附录 C/8 阶段全部完成（方案 §4.3）。
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| 7.1 | [lane:fast][tdd:skip:docs-only] CONTRIBUTING.md 同步修订（方案 §8.1 + §8.2 + §8.4）：①技术债清单标记 P3 命令式 UI 存量 / P3 MAX_CONTENT_WIDTH 为"已偿还"；②四项强制约束（零命令式刷新/原生组件优先/响应式布局/全面 M3）沉淀到 V1 声明式 UI 开发规范 §7；③删除命令式存量附录（响应式布局规范 9 条 + 语言切换响应 9 条）；④版本号与 CLAUDE.md 同步；⑤10 项验证清单通过 | `grep "refresh_locale\|handle_resize\|self\.update()" CONTRIBUTING.md` 仅在历史引用中出现；四约束小节存在；命令式附录已删除；版本号一致 | Phase 6 | cc:TODO |
-| 7.2 | [lane:fast][tdd:skip:docs-only] CLAUDE.md §3.3 已知技术债标记"已偿还"/"已实现"（方案 §8.3）：`use_viewmodel` hook 待建 → 已实现；7 个 ViewModel + 命令式 View 全面重写 → 已偿还 | CLAUDE.md §3.3 两个技术债条目标记"已偿还"/"已实现"；版本号与 CONTRIBUTING.md 一致 | 7.1 | cc:TODO |
-| 7.3 | [lane:gate][tdd:skip:review-gate] Phase 7 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-7-review.md`；CONTRIBUTING.md/CLAUDE.md 版本号一致；命令式附录已删除无残留；技术债标记准确；docs-only 无单测/集成测试要求 | 7.2 | cc:TODO |
+| 6.1 | [lane:fast][tdd:skip:docs-only] CONTRIBUTING.md 同步修订（方案 §8.1 + §8.2 + §8.4）：①技术债清单标记 P3 命令式 UI 存量 / P3 MAX_CONTENT_WIDTH 为"已偿还"；②四项强制约束（零命令式刷新/原生组件优先/响应式布局/全面 M3）沉淀到 V1 声明式 UI 开发规范 §7；③删除命令式存量附录（响应式布局规范 9 条 + 语言切换响应 9 条）；④版本号与 CLAUDE.md 同步；⑤10 项验证清单通过 | `grep "refresh_locale\|handle_resize\|self\.update()" CONTRIBUTING.md` 仅在历史引用中出现；四约束小节存在；命令式附录已删除；版本号一致 | Phase 5 | cc:TODO |
+| 6.2 | [lane:fast][tdd:skip:docs-only] CLAUDE.md §3.3 已知技术债标记"已偿还"/"已实现"（方案 §8.3）：`use_viewmodel` hook 待建 → 已实现；7 个 ViewModel + 命令式 View 全面重写 → 已偿还 | CLAUDE.md §3.3 两个技术债条目标记"已偿还"/"已实现"；版本号与 CONTRIBUTING.md 一致 | 6.1 | cc:TODO |
+| 6.3 | [lane:gate][tdd:skip:review-gate] Phase 6 per-phase code review gate（见顶部 `[review-gate]` 约定） | 检视记录沉淀到 `.claude/state/reviews/phase-6-review.md`；CONTRIBUTING.md/CLAUDE.md 版本号一致；命令式附录已删除无残留；技术债标记准确；docs-only 无单测/集成测试要求 | 6.2 | cc:TODO |
 
 ---
 

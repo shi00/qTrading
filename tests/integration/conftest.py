@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus
@@ -255,10 +256,19 @@ async def _cleanup_mvd_data(test_engine: AsyncEngine):
 
 @dataclass
 class FletTestPage:
-    """``flet_test_page`` fixture 返回值：含 page + ``wait_for_render`` 辅助方法（方案 §3.3.3）。
+    """``flet_test_page`` fixture 返回值：含 page + 集成测试辅助方法（方案 §3.3.3 + Phase 3.0.1 扩展）。
 
-    为有状态主 View 提供集成测试环境。``wait_for_render`` 基于 ``page.controls``
-    长度变化轮询，不依赖 Flet 内部渲染事件（无公开 API），超时抛 ``TimeoutError``。
+    Phase 3.0.1 扩展：支持声明式组件 ``use_state``/``use_viewmodel`` 真订阅测试。
+    - ``wait_for_render``: 基于控件数量轮询（向后兼容）
+    - ``wait_for_condition``: 通用条件轮询（支持内容断言，替代仅数量检查）
+    - ``find_control``: 深度优先查找满足谓词的控件（用于断言 state 变更后的内容）
+
+    典型用法（state 变更后断言内容）::
+
+        vm.set_current_step(2)  # 触发 state 变更 → Renderer reconcile
+        ftp.wait_for_condition(
+            lambda: ftp.find_control(lambda c: isinstance(c, ft.Text) and c.value == "Step 2") is not None
+        )
     """
 
     page: ft.Page
@@ -278,6 +288,73 @@ class FletTestPage:
                 return
             time.sleep(0.05)
         raise TimeoutError(f"wait_for_render 超时: 期望 {target} 个控件，实际 {len(self.page.controls)}")
+
+    def wait_for_condition(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float = 2.0,
+        interval: float = 0.05,
+    ) -> None:
+        """通用条件轮询：``predicate`` 返回 True 时返回，超时抛 ``TimeoutError``（Phase 3.0.1）。
+
+        用于声明式组件 ``use_state``/``use_viewmodel`` 触发重渲染后的内容断言。
+        ``wait_for_render`` 仅感知控件数量变化，无法感知 state 变更后的内容更新；
+        本方法配合 ``find_control`` 可断言"控件内容已反映新 state"。
+
+        Args:
+            predicate: 返回 bool 的可调用对象；True 表示条件满足。
+            timeout: 超时秒数，默认 2.0。
+            interval: 轮询间隔秒数，默认 0.05。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if predicate():
+                    return
+            except Exception:
+                # predicate 内部访问控件属性可能因渲染未完成抛异常，继续轮询
+                pass
+            time.sleep(interval)
+        raise TimeoutError(f"wait_for_condition 超时: predicate 未在 {timeout}s 内返回 True")
+
+    def find_control(self, predicate: Callable[[ft.BaseControl], bool]) -> ft.BaseControl | None:
+        """深度优先查找满足 ``predicate`` 的控件（Phase 3.0.1）。
+
+        用于断言 state 变更后的内容（如 ``lambda c: isinstance(c, ft.Text) and c.value == "new"``）。
+        遍历 ``page.controls`` 及其子控件（``content``/``controls`` 属性）。
+
+        Args:
+            predicate: 接受 ``ft.BaseControl`` 返回 bool 的可调用对象。
+
+        Returns:
+            第一个满足谓词的控件；未找到返回 None。
+        """
+        return _find_control_recursive(self.page.controls, predicate)
+
+
+def _find_control_recursive(
+    controls: Sequence[ft.BaseControl],
+    predicate: Callable[[ft.BaseControl], bool],
+) -> ft.BaseControl | None:
+    """``find_control`` 的递归实现（模块级，避免 dataclass 方法递归开销）。"""
+    for control in controls:
+        try:
+            if predicate(control):
+                return control
+        except Exception:
+            pass
+        # 深度优先：先 content（单控件），再 controls（控件列表）
+        content = getattr(control, "content", None)
+        if isinstance(content, ft.BaseControl):
+            found = _find_control_recursive([content], predicate)
+            if found is not None:
+                return found
+        children = getattr(control, "controls", None)
+        if isinstance(children, list):
+            found = _find_control_recursive(children, predicate)
+            if found is not None:
+                return found
+    return None
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")

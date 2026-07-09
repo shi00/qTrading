@@ -73,3 +73,49 @@ async def test_wait_for_render_raises_timeout(flet_test_page):
     unreachable_target = len(page.controls) + 100
     with pytest.raises(TimeoutError):
         flet_test_page.wait_for_render(timeout=0.3, expected_controls=unreachable_target)
+
+
+# ============================================================================
+# Phase 3.0.1 扩展：wait_for_condition / find_control
+# ============================================================================
+
+
+async def test_wait_for_condition_returns_when_true(flet_test_page):
+    """DoD 4: wait_for_condition 正常路径——predicate 返回 True 时立即返回。"""
+    page = flet_test_page.page
+    page.add(ft.Text("condition-probe"))
+    # predicate 检查控件内容已渲染
+    flet_test_page.wait_for_condition(
+        predicate=lambda: any(getattr(c, "value", None) == "condition-probe" for c in page.controls),
+        timeout=2.0,
+    )
+
+
+async def test_wait_for_condition_raises_timeout(flet_test_page):
+    """DoD 5: wait_for_condition 超时抛 TimeoutError。"""
+    # predicate 永远返回 False
+    with pytest.raises(TimeoutError):
+        flet_test_page.wait_for_condition(predicate=lambda: False, timeout=0.3)
+
+
+async def test_find_control_returns_matching_control(flet_test_page):
+    """DoD 6: find_control 深度优先查找满足谓词的控件。"""
+    page = flet_test_page.page
+    target_text = ft.Text("find-me", key="target")
+    container = ft.Container(content=ft.Column([ft.Text("other"), target_text]))
+    page.add(container)
+    # 深度优先：page → Container → Column → Text("other") / Text("find-me")
+    found = flet_test_page.find_control(
+        predicate=lambda c: isinstance(c, ft.Text) and getattr(c, "value", None) == "find-me"
+    )
+    assert found is target_text
+
+
+async def test_find_control_returns_none_when_not_found(flet_test_page):
+    """DoD 7: find_control 未找到时返回 None。"""
+    page = flet_test_page.page
+    page.add(ft.Text("exists"))
+    found = flet_test_page.find_control(
+        predicate=lambda c: isinstance(c, ft.Text) and getattr(c, "value", None) == "nonexistent"
+    )
+    assert found is None
