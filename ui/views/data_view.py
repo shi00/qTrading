@@ -325,7 +325,7 @@ class TableViewerTab(ft.Container):
             self.table_selector.label = I18n.get("data_select_table")
             refresh_dropdown_options(
                 self.table_selector,
-                [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.tables_list],
+                [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.state.tables_list],
             )
 
             self.filter_col.label = I18n.get("data_filter_col")
@@ -352,7 +352,7 @@ class TableViewerTab(ft.Container):
             self._loading_hint.value = I18n.get("data_loading_hint")
 
             # 重建表头以刷新列别名翻译
-            if self.vm.table_columns:
+            if self.vm.state.table_columns:
                 self._rebuild_table_columns()
                 self._rebuild_table_rows()
                 self._update_pagination_ui()
@@ -368,7 +368,7 @@ class TableViewerTab(ft.Container):
 
     async def did_mount_async(self):  # pragma: no cover
         # Skip re-loading if tables already loaded (switching back to this view)
-        if self.vm.tables_loaded:
+        if self.vm.state.tables_loaded:
             logger.debug("[TableViewerTab] Skipping re-load - tables already loaded")
             return
 
@@ -382,7 +382,7 @@ class TableViewerTab(ft.Container):
             self.table_selector.disabled = False
 
             if tables:
-                self.table_selector.value = self.vm.current_table
+                self.table_selector.value = self.vm.state.current_table
                 await self._load_schema_and_data()
 
             if self.page:
@@ -394,8 +394,8 @@ class TableViewerTab(ft.Container):
                 self.page.show_toast(I18n.get("data_err_load_schema"), "error")  # type: ignore[untyped]
 
     async def _on_table_changed(self, e):  # pragma: no cover
-        self.vm.current_table = self.table_selector.value
-        UILogger.log_action("TableViewerTab", "Select", f"table={self.vm.current_table}")
+        self.vm.set_table(self.table_selector.value)
+        UILogger.log_action("TableViewerTab", "Select", f"table={self.vm.state.current_table}")
         self.vm.reset_table_state()
         self.filter_val.value = ""  # Clear filters
         await self._load_schema_and_data()
@@ -414,7 +414,7 @@ class TableViewerTab(ft.Container):
 
         self.btn_query.disabled = loading
         self.btn_refresh.disabled = loading
-        self.btn_prev.disabled = loading or self.vm.current_page <= 1
+        self.btn_prev.disabled = loading or self.vm.state.current_page <= 1
         self.btn_next.disabled = loading  # Will be updated after load
         self.table_selector.disabled = loading
         # Guard: only call update() if control is mounted to page
@@ -423,7 +423,7 @@ class TableViewerTab(ft.Container):
 
     async def _load_schema_and_data(self):  # pragma: no cover
         # Prevent concurrent loading (race condition guard)
-        if self.vm.is_loading:
+        if self.vm.state.is_loading:
             logger.debug("[TableViewerTab] Skipped load - already loading")
             return
 
@@ -431,7 +431,7 @@ class TableViewerTab(ft.Container):
             await self._toggle_loading(True)
 
             # 1. Load schema via ViewModel
-            await self.vm.load_table_schema(self.vm.current_table)
+            await self.vm.load_table_schema(self.vm.state.current_table)
 
             # 2. Populate filter dropdown from vm state
             self._populate_filter_columns()
@@ -467,13 +467,13 @@ class TableViewerTab(ft.Container):
         self.filter_col.options = [
             ft.dropdown.Option(
                 key=col,
-                text=MetaDataManager.get_column_alias(self.vm.current_table, col),
+                text=MetaDataManager.get_column_alias(self.vm.state.current_table, col),
             )
-            for col in self.vm.table_columns
+            for col in self.vm.state.table_columns
         ]
-        if self.vm.table_columns:
+        if self.vm.state.table_columns:
             self.filter_col.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.filter_col.value = self.vm.table_columns[0]
+            self.filter_col.value = self.vm.state.table_columns[0]
 
     def _rebuild_table_columns(self):  # pragma: no cover
         """Rebuild DataTable columns from vm.table_columns and vm.numeric_cols."""
@@ -481,9 +481,9 @@ class TableViewerTab(ft.Container):
         # 同步状态时引用已失效的列索引触发 "Null check operator" 异常。
         self.data_table.sort_column_index = None
         self.data_table.columns = []
-        for idx, col in enumerate(self.vm.table_columns):
-            is_numeric = col in self.vm.numeric_cols
-            header_text = MetaDataManager.get_column_alias(self.vm.current_table, col)
+        for idx, col in enumerate(self.vm.state.table_columns):
+            is_numeric = col in self.vm.state.numeric_cols
+            header_text = MetaDataManager.get_column_alias(self.vm.state.current_table, col)
 
             self.data_table.columns.append(
                 ft.DataColumn(
@@ -508,19 +508,19 @@ class TableViewerTab(ft.Container):
             )
 
         # Reset sort state display
-        self.data_table.sort_column_index = self.vm.sort_col_index
-        self.data_table.sort_ascending = self.vm.sort_asc
+        self.data_table.sort_column_index = self.vm.state.sort_col_index
+        self.data_table.sort_ascending = self.vm.state.sort_asc
 
     def _rebuild_table_rows(self):  # pragma: no cover
         """Rebuild DataTable rows from vm.current_data."""
         df = self.vm.current_data
-        current_columns = self.vm.table_columns
+        current_columns = self.vm.state.table_columns
         self.data_table.rows = []
         for idx, (_, row) in enumerate(df.iterrows()):
             cells = []
             for col_name in current_columns:
                 val = row.get(col_name)
-                is_numeric = col_name in self.vm.numeric_cols
+                is_numeric = col_name in self.vm.state.numeric_cols
 
                 # Formatting
                 str_val = str(val)
@@ -533,7 +533,7 @@ class TableViewerTab(ft.Container):
                         str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
 
                 # 仅对 market_news 表的长文本字段使用左对齐和自动换行
-                is_news_table = self.vm.current_table == "market_news"
+                is_news_table = self.vm.state.current_table == "market_news"
                 is_long_text = is_news_table and col_name.lower() in (
                     "content",
                     "tags",
@@ -573,18 +573,18 @@ class TableViewerTab(ft.Container):
 
     def _update_pagination_ui(self):  # pragma: no cover
         """Update pagination controls from vm state."""
-        total_pages = max(1, -(-self.vm.total_rows // self.vm.page_size))  # ceil division
+        total_pages = max(1, -(-self.vm.state.total_rows // self.vm.state.page_size))  # ceil division
         self.txt_count_info.value = I18n.get("data_total_rows").format(
-            count=self.vm.total_rows,
+            count=self.vm.state.total_rows,
         )
         self.txt_page.value = I18n.get("data_page_num").format(
-            current=self.vm.current_page,
+            current=self.vm.state.current_page,
             total=total_pages,
         )
-        self.btn_prev.disabled = self.vm.current_page <= 1
-        self.btn_next.disabled = self.vm.current_page >= total_pages
-        self.data_table.sort_column_index = self.vm.sort_col_index
-        self.data_table.sort_ascending = self.vm.sort_asc
+        self.btn_prev.disabled = self.vm.state.current_page <= 1
+        self.btn_next.disabled = self.vm.state.current_page >= total_pages
+        self.data_table.sort_column_index = self.vm.state.sort_col_index
+        self.data_table.sort_ascending = self.vm.state.sort_asc
 
     async def _on_query_click(self, e):  # pragma: no cover
         ensure_correlation_id()
@@ -619,8 +619,8 @@ class TableViewerTab(ft.Container):
             return
 
         # Toggle sort direction
-        if self.vm.sort_col_index == col_index:
-            self.vm.set_sort(col_index, not self.vm.sort_asc)
+        if self.vm.state.sort_col_index == col_index:
+            self.vm.set_sort(col_index, not self.vm.state.sort_asc)
         else:
             self.vm.set_sort(col_index, True)
 
@@ -635,10 +635,10 @@ class TableViewerTab(ft.Container):
 
     async def _on_prev_page(self, e):  # pragma: no cover
         UILogger.log_action("TableViewerTab", "Click", "btn_prev_page")
-        if self.vm.current_page > 1:
+        if self.vm.state.current_page > 1:
             try:
                 await self._toggle_loading(True)
-                await self.vm.query_data(page=self.vm.current_page - 1)
+                await self.vm.query_data(page=self.vm.state.current_page - 1)
                 self._rebuild_table_rows()
                 self._update_pagination_ui()
             finally:
@@ -646,11 +646,11 @@ class TableViewerTab(ft.Container):
 
     async def _on_next_page(self, e):  # pragma: no cover
         UILogger.log_action("TableViewerTab", "Click", "btn_next_page")
-        total_pages = -(-self.vm.total_rows // self.vm.page_size)  # ceil division
-        if self.vm.current_page < total_pages:
+        total_pages = -(-self.vm.state.total_rows // self.vm.state.page_size)  # ceil division
+        if self.vm.state.current_page < total_pages:
             try:
                 await self._toggle_loading(True)
-                await self.vm.query_data(page=self.vm.current_page + 1)
+                await self.vm.query_data(page=self.vm.state.current_page + 1)
                 self._rebuild_table_rows()
                 self._update_pagination_ui()
             finally:
@@ -671,9 +671,9 @@ class TableViewerTab(ft.Container):
                 await self._toggle_loading(False)
                 return
 
-            suffix = f"_p{self.vm.current_page}" if current_page else "_all"
+            suffix = f"_p{self.vm.state.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"{self.vm.current_table}{suffix}_{timestamp}.csv"
+            default_filename = f"{self.vm.state.current_table}{suffix}_{timestamp}.csv"
 
             filepath = await self.save_file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
@@ -1297,7 +1297,7 @@ class DataExplorerView(ft.Container):
         if message == "cache_cleared":
             # Reset tables_loaded flag to force reload on next mount
             if self._ui_built:
-                self.vm.tables_loaded = False
+                self.vm.mark_tables_stale()
             logger.debug(
                 "[DataExplorerView] Cache cleared - will reload data on next view",
             )

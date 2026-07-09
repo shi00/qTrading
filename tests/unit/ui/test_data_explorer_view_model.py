@@ -1,7 +1,8 @@
-"""Unit tests for DataExplorerViewModel — TDD RED phase.
+"""Unit tests for DataExplorerViewModel — 双轨制形态(frozen state + property)。
 
-These tests define the expected ViewModel contract.
-They will fail until DataExplorerViewModel is implemented.
+VM 改造后(方案 §3.0.4 双轨制):
+- 轻量 UI 状态封装为 frozen `DataExplorerState`(tuple/frozenset 替代 list/set);
+- 大体积数据(current_data: DataFrame / sql_result: dict)VM 内部持有 + property 拉取 + version 通知。
 """
 
 import asyncio
@@ -11,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
-from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
+from ui.viewmodels.data_explorer_view_model import DataExplorerState, DataExplorerViewModel
 
 pytestmark = pytest.mark.unit
 
@@ -69,37 +70,66 @@ class TestInit:
         assert vm._tp is mock_tp
 
     def test_initial_state(self, vm):
-        assert vm.current_table == "stock_basic"
-        assert vm.current_page == 1
-        assert vm.page_size == 50
-        assert vm.total_rows == 0
-        assert vm.table_columns == []
-        assert vm.numeric_cols == set()
-        assert vm.sort_col_index is None
-        assert vm.sort_asc is True
-        assert vm.filter_col is None
-        assert vm.filter_op == "="
-        assert vm.filter_val == ""
-        assert vm.is_loading is False
-        assert vm.tables_list == []
-        assert vm.tables_loaded is False
+        """frozen state 初始快照断言。"""
+        s = vm.state
+        assert isinstance(s, DataExplorerState)
+        assert s.current_table == "stock_basic"
+        assert s.current_page == 1
+        assert s.page_size == 50
+        assert s.total_rows == 0
+        assert s.table_columns == ()
+        assert s.numeric_cols == frozenset()
+        assert s.sort_col_index is None
+        assert s.sort_asc is True
+        assert s.filter_col is None
+        assert s.filter_op == "="
+        assert s.filter_val == ""
+        assert s.is_loading is False
+        assert s.tables_list == ()
+        assert s.tables_loaded is False
+        assert s.error_message is None
+        assert s.sql_is_executing is False
+        # dual-track versions
+        assert s.data_version == 0
+        assert s.sql_result_version == 0
+        # 大体积数据 property
         assert vm.current_data.empty
-        assert vm.error_message is None
         assert vm.sql_result is None
-        assert vm.sql_is_executing is False
+
+
+class TestSubscribe:
+    def test_subscribe_returns_unsubscribe_and_removes_callback(self, vm):
+        """subscribe 返回 unsubscribe 函数,调用后移除回调。"""
+        received: list[DataExplorerState] = []
+        unsubscribe = vm.subscribe(lambda s: received.append(s))
+        assert callable(unsubscribe)
+
+        vm._set_state(current_page=3)
+        assert len(received) == 1
+        assert received[0].current_page == 3
+
+        unsubscribe()
+        vm._set_state(current_page=5)
+        assert len(received) == 1  # 不再接收通知
+
+    def test_notify_swallows_subscriber_exceptions(self, vm):
+        """_notify 捕获订阅者异常,不影响其他订阅者。"""
+        received: list[DataExplorerState] = []
+        vm.subscribe(lambda s: (_ for _ in ()).throw(RuntimeError("boom")))  # type: ignore[func-returns-value]
+        vm.subscribe(lambda s: received.append(s))
+        vm._set_state(current_page=2)
+        assert len(received) == 1
 
 
 class TestDispose:
     def test_dispose_clears_state(self, vm):
-        vm.current_data = pd.DataFrame({"a": [1]})
-        vm.tables_list = ["t1"]
-        vm.table_columns = ["col1"]
-        vm.error_message = "err"
+        vm._current_data = pd.DataFrame({"a": [1]})
+        vm._set_state(tables_list=("t1",), table_columns=("col1",), error_message="err")
         vm.dispose()
         assert vm.current_data.empty
-        assert vm.tables_list == []
-        assert vm.table_columns == []
-        assert vm.error_message is None
+        assert vm.state.tables_list == ()
+        assert vm.state.table_columns == ()
+        assert vm.state.error_message is None
 
     def test_dispose_releases_db_reference(self, vm, mock_db):
         vm.dispose()
@@ -130,7 +160,7 @@ class TestDispose:
 
     async def test_query_data_after_dispose_returns_current(self, vm):
         vm.dispose()
-        vm.current_data = pd.DataFrame({"existing": [1]})
+        vm._current_data = pd.DataFrame({"existing": [1]})
         result = await vm.query_data()
         assert "existing" in result.columns
 
@@ -149,32 +179,32 @@ class TestInitTables:
     async def test_success_populates_tables_list(self, vm, mock_db):
         mock_db.get_all_tables.return_value = ["daily_quotes", "stock_basic"]
         result = await vm.init_tables()
-        assert result == ["daily_quotes", "stock_basic"]
-        assert vm.tables_list == ["daily_quotes", "stock_basic"]
-        assert vm.tables_loaded is True
+        assert result == ("daily_quotes", "stock_basic")
+        assert vm.state.tables_list == ("daily_quotes", "stock_basic")
+        assert vm.state.tables_loaded is True
 
     async def test_success_selects_stock_basic_default(self, vm, mock_db):
         mock_db.get_all_tables.return_value = ["daily_quotes", "stock_basic"]
         await vm.init_tables()
-        assert vm.current_table == "stock_basic"
+        assert vm.state.current_table == "stock_basic"
 
     async def test_no_stock_basic_selects_first(self, vm, mock_db):
         mock_db.get_all_tables.return_value = ["alpha_table", "beta_table"]
         await vm.init_tables()
-        assert vm.current_table == "alpha_table"
+        assert vm.state.current_table == "alpha_table"
 
     async def test_empty_tables_sets_current_table_empty(self, vm, mock_db):
         mock_db.get_all_tables.return_value = []
         await vm.init_tables()
-        assert vm.current_table == ""
-        assert vm.tables_list == []
+        assert vm.state.current_table == ""
+        assert vm.state.tables_list == ()
 
 
 class TestInitTablesErrors:
     async def test_db_error_sets_error_message(self, vm, mock_db):
         mock_db.get_all_tables.side_effect = RuntimeError("DB connection failed")
         await vm.init_tables()
-        assert vm.error_message is not None
+        assert vm.state.error_message is not None
         # get_error_message returns i18n translated message, not raw error string
 
     async def test_cancelled_error_propagates(self, vm, mock_db):
@@ -192,25 +222,24 @@ class TestLoadSchema:
         mock_db.get_table_schema.return_value = schema
         result = await vm.load_table_schema("stock_basic")
         assert result == schema
-        assert vm.table_columns == ["ts_code", "close"]
-        assert "close" in vm.numeric_cols
-        assert "ts_code" not in vm.numeric_cols
+        assert vm.state.table_columns == ("ts_code", "close")
+        assert "close" in vm.state.numeric_cols
+        assert "ts_code" not in vm.state.numeric_cols
 
     async def test_atomic_update_on_partial_schema(self, vm, mock_db):
         """If schema fetch returns partial data, columns and numeric_cols update atomically."""
-        vm.table_columns = ["old_col"]
-        vm.numeric_cols = {"old_col"}
+        vm._set_state(table_columns=("old_col",), numeric_cols=frozenset({"old_col"}))
         schema = [{"name": "new_col", "type": "INTEGER"}]
         mock_db.get_table_schema.return_value = schema
         await vm.load_table_schema("stock_basic")
-        assert vm.table_columns == ["new_col"]
-        assert vm.numeric_cols == {"new_col"}
+        assert vm.state.table_columns == ("new_col",)
+        assert vm.state.numeric_cols == frozenset({"new_col"})
 
     async def test_empty_schema(self, vm, mock_db):
         mock_db.get_table_schema.return_value = []
         await vm.load_table_schema("stock_basic")
-        assert vm.table_columns == []
-        assert vm.numeric_cols == set()
+        assert vm.state.table_columns == ()
+        assert vm.state.numeric_cols == frozenset()
 
     async def test_all_numeric_types_detected(self, vm, mock_db):
         schema = [
@@ -223,19 +252,21 @@ class TestLoadSchema:
         ]
         mock_db.get_table_schema.return_value = schema
         await vm.load_table_schema("stock_basic")
-        assert vm.numeric_cols == {
-            "c_int",
-            "c_real",
-            "c_float",
-            "c_double",
-            "c_numeric",
-            "c_decimal",
-        }
+        assert vm.state.numeric_cols == frozenset(
+            {
+                "c_int",
+                "c_real",
+                "c_float",
+                "c_double",
+                "c_numeric",
+                "c_decimal",
+            }
+        )
 
     async def test_db_error_sets_error_message(self, vm, mock_db):
         mock_db.get_table_schema.side_effect = RuntimeError("Schema error")
         await vm.load_table_schema("stock_basic")
-        assert vm.error_message is not None
+        assert vm.state.error_message is not None
         # get_error_message returns i18n translated message, not raw error string
 
 
@@ -253,8 +284,10 @@ class TestQueryData:
         mock_db.get_table_count.return_value = 100
         result = await vm.query_data()
         assert len(result) == 1
-        assert vm.total_rows == 100
-        assert vm.is_loading is False
+        assert vm.state.total_rows == 100
+        assert vm.state.is_loading is False
+        # dual-track: data_version 递增
+        assert vm.state.data_version == 1
 
     async def test_with_filter_override(self, vm, mock_db):
         df = pd.DataFrame({"ts_code": ["000001.SZ"]})
@@ -283,23 +316,25 @@ class TestQueryData:
         await vm.query_data(page=3)
         call_args = mock_db.query_table.call_args
         assert call_args[1].get("page") == 3 or call_args[0][1] == 3
+        # current_page 应更新为 3
+        assert vm.state.current_page == 3
 
     async def test_empty_result(self, vm, mock_db):
         mock_db.query_table.return_value = pd.DataFrame()
         mock_db.get_table_count.return_value = 0
         result = await vm.query_data()
         assert result.empty
-        assert vm.total_rows == 0
+        assert vm.state.total_rows == 0
 
     async def test_total_rows_updated(self, vm, mock_db):
         mock_db.query_table.return_value = pd.DataFrame({"a": [1, 2]})
         mock_db.get_table_count.return_value = 42
         await vm.query_data()
-        assert vm.total_rows == 42
+        assert vm.state.total_rows == 42
 
     async def test_concurrent_guard_returns_current_data(self, vm):
-        vm.is_loading = True
-        vm.current_data = pd.DataFrame({"existing": [1]})
+        vm._set_state(is_loading=True)
+        vm._current_data = pd.DataFrame({"existing": [1]})
         result = await vm.query_data()
         assert "existing" in result.columns
 
@@ -352,7 +387,7 @@ class TestExportData:
     async def test_with_filter_and_sort(self, vm, mock_db):
         vm.set_filter("ts_code", "=", "000001.SZ")
         vm.set_sort(0, True)
-        vm.table_columns = ["ts_code", "close"]
+        vm._set_state(table_columns=("ts_code", "close"))
         mock_db.query_table.return_value = pd.DataFrame({"ts_code": ["000001.SZ"]})
         mock_db.get_table_count.return_value = 1
         result = await vm.export_data()
@@ -360,7 +395,7 @@ class TestExportData:
 
     async def test_cancelled_error_propagates(self, vm, mock_db):
         mock_db.query_table.side_effect = asyncio.CancelledError()
-        vm.is_loading = False
+        vm._set_state(is_loading=False)
         with pytest.raises(asyncio.CancelledError):
             await vm.export_data()
 
@@ -371,15 +406,17 @@ class TestExecuteSQL:
         mock_db.execute_sql.return_value = expected
         result = await vm.execute_sql("SELECT * FROM stock_basic LIMIT 1")
         assert result["success"] is True
-        assert vm.sql_result == expected
-        assert vm.sql_is_executing is False
+        assert vm.sql_result == expected  # property 拉取
+        assert vm.state.sql_is_executing is False
+        # dual-track: sql_result_version 递增
+        assert vm.state.sql_result_version == 1
 
     async def test_error_result(self, vm, mock_db):
         expected = {"success": False, "data": None, "error": "Only SELECT allowed"}
         mock_db.execute_sql.return_value = expected
         result = await vm.execute_sql("DROP TABLE stock_basic")
         assert result["success"] is False
-        assert vm.sql_result == expected
+        assert vm.sql_result == expected  # property 拉取
 
     async def test_exception_handling(self, vm, mock_db):
         mock_db.execute_sql.side_effect = RuntimeError("Connection lost")
@@ -387,12 +424,16 @@ class TestExecuteSQL:
         assert result["success"] is False
         assert result["error"] is not None
         # get_error_message returns i18n translated message, not raw error string
-        assert vm.sql_is_executing is False
+        assert vm.state.sql_is_executing is False
+        # dual-track: 即使异常也递增 sql_result_version(因为 sql_result 被设为 error dict)
+        assert vm.state.sql_result_version == 1
 
     async def test_empty_sql_returns_error(self, vm):
         result = await vm.execute_sql("")
         assert result["success"] is False
         assert result["error"] is not None
+        # 不应触发 sql_result_version 递增(空 SQL 提前返回)
+        assert vm.state.sql_result_version == 0
 
     async def test_cancelled_error_propagates(self, vm, mock_db):
         mock_db.execute_sql.side_effect = asyncio.CancelledError()
@@ -403,79 +444,86 @@ class TestExecuteSQL:
 class TestStateManagement:
     def test_set_filter(self, vm):
         vm.set_filter("ts_code", "LIKE", "000001")
-        assert vm.filter_col == "ts_code"
-        assert vm.filter_op == "LIKE"
-        assert vm.filter_val == "000001"
+        assert vm.state.filter_col == "ts_code"
+        assert vm.state.filter_op == "LIKE"
+        assert vm.state.filter_val == "000001"
 
     def test_set_sort(self, vm):
-        vm.table_columns = ["ts_code", "close"]
+        vm._set_state(table_columns=("ts_code", "close"))
         vm.set_sort(1, False)
-        assert vm.sort_col_index == 1
-        assert vm.sort_asc is False
+        assert vm.state.sort_col_index == 1
+        assert vm.state.sort_asc is False
 
     def test_set_sort_toggle_direction(self, vm):
-        vm.table_columns = ["ts_code", "close"]
+        vm._set_state(table_columns=("ts_code", "close"))
         vm.set_sort(1, True)
-        assert vm.sort_col_index == 1
-        assert vm.sort_asc is True
+        assert vm.state.sort_col_index == 1
+        assert vm.state.sort_asc is True
         # Toggle direction on same column
         vm.set_sort(1, False)
-        assert vm.sort_asc is False
+        assert vm.state.sort_asc is False
 
     def test_set_sort_type_guard_ignores_non_int(self, vm):
-        vm.table_columns = ["ts_code", "close"]
-        vm.sort_col_index = 0
-        vm.sort_asc = True
+        vm._set_state(table_columns=("ts_code", "close"), sort_col_index=0, sort_asc=True)
         vm.set_sort("not_an_int", True)
         # Should not change sort state
-        assert vm.sort_col_index == 0
-        assert vm.sort_asc is True
+        assert vm.state.sort_col_index == 0
+        assert vm.state.sort_asc is True
 
     def test_reset_table_state(self, vm):
-        vm.current_page = 5
-        vm.sort_col_index = 2
-        vm.sort_asc = False
-        vm.filter_col = "close"
-        vm.filter_op = ">"
-        vm.filter_val = "10"
-        vm.error_message = "some error"
+        vm._set_state(
+            current_page=5,
+            sort_col_index=2,
+            sort_asc=False,
+            filter_col="close",
+            filter_op=">",
+            filter_val="10",
+            error_message="some error",
+        )
         vm.reset_table_state()
-        assert vm.current_page == 1
-        assert vm.sort_col_index is None
-        assert vm.sort_asc is True
-        assert vm.filter_col is None
-        assert vm.filter_op == "="
-        assert vm.filter_val == ""
-        assert vm.error_message is None
+        assert vm.state.current_page == 1
+        assert vm.state.sort_col_index is None
+        assert vm.state.sort_asc is True
+        assert vm.state.filter_col is None
+        assert vm.state.filter_op == "="
+        assert vm.state.filter_val == ""
+        assert vm.state.error_message is None
 
     def test_clear_error(self, vm):
-        vm.error_message = "Something went wrong"
+        vm._set_state(error_message="Something went wrong")
         vm.clear_error()
-        assert vm.error_message is None
+        assert vm.state.error_message is None
+
+    def test_set_table(self, vm):
+        """set_table 替代直接属性写入(供 View 调用)。"""
+        vm.set_table("daily_quotes")
+        assert vm.state.current_table == "daily_quotes"
+
+    def test_mark_tables_stale(self, vm):
+        """mark_tables_stale 标记 tables_loaded=False(broadcast 消息触发)。"""
+        vm._set_state(tables_loaded=True)
+        vm.mark_tables_stale()
+        assert vm.state.tables_loaded is False
 
 
 class TestResolveSortCol:
     def test_valid_index(self, vm):
-        vm.table_columns = ["ts_code", "close", "open"]
-        vm.sort_col_index = 1
+        vm._set_state(table_columns=("ts_code", "close", "open"), sort_col_index=1)
         result = vm._resolve_sort_col_name()
         assert result == "close"
 
     def test_none_index(self, vm):
-        vm.table_columns = ["ts_code", "close"]
-        vm.sort_col_index = None
+        vm._set_state(table_columns=("ts_code", "close"), sort_col_index=None)
         result = vm._resolve_sort_col_name()
         assert result is None
 
     def test_out_of_range_index(self, vm):
-        vm.table_columns = ["ts_code", "close"]
-        vm.sort_col_index = 5
+        vm._set_state(table_columns=("ts_code", "close"), sort_col_index=5)
         result = vm._resolve_sort_col_name()
         assert result is None
 
     def test_empty_columns(self, vm):
-        vm.table_columns = []
-        vm.sort_col_index = 0
+        vm._set_state(table_columns=(), sort_col_index=0)
         result = vm._resolve_sort_col_name()
         assert result is None
 
@@ -486,46 +534,34 @@ class TestBuildFilters:
         assert result == []
 
     def test_equal_filter(self, vm):
-        vm.filter_col = "ts_code"
-        vm.filter_op = "="
-        vm.filter_val = "000001.SZ"
+        vm._set_state(filter_col="ts_code", filter_op="=", filter_val="000001.SZ")
         result = vm._build_filters()
         assert result == [("ts_code", "=", "000001.SZ")]
 
     def test_like_filter(self, vm):
-        vm.filter_col = "ts_code"
-        vm.filter_op = "LIKE"
-        vm.filter_val = "000001"
+        vm._set_state(filter_col="ts_code", filter_op="LIKE", filter_val="000001")
         result = vm._build_filters()
         assert result == [("ts_code", "LIKE", "000001")]
 
     def test_range_filter_greater(self, vm):
-        vm.filter_col = "close"
-        vm.filter_op = ">"
-        vm.filter_val = "10.5"
+        vm._set_state(filter_col="close", filter_op=">", filter_val="10.5")
         result = vm._build_filters()
         assert result == [("close", ">", "10.5")]
 
     def test_date_column_converts_format(self, vm):
-        vm.filter_col = "trade_date"
-        vm.filter_op = "="
-        vm.filter_val = "2025-01-15"
+        vm._set_state(filter_col="trade_date", filter_op="=", filter_val="2025-01-15")
         result = vm._build_filters()
         # Date columns should convert format if needed
         assert len(result) == 1
         assert result[0][0] == "trade_date"
 
     def test_non_date_column_no_conversion(self, vm):
-        vm.filter_col = "ts_code"
-        vm.filter_op = "="
-        vm.filter_val = "000001.SZ"
+        vm._set_state(filter_col="ts_code", filter_op="=", filter_val="000001.SZ")
         result = vm._build_filters()
         assert result == [("ts_code", "=", "000001.SZ")]
 
     def test_date_column_non_standard_format_no_conversion(self, vm):
-        vm.filter_col = "trade_date"
-        vm.filter_op = "="
-        vm.filter_val = "not-a-date"
+        vm._set_state(filter_col="trade_date", filter_op="=", filter_val="not-a-date")
         result = vm._build_filters()
         # Non-standard format should still produce a filter (no crash)
         assert len(result) == 1

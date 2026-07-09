@@ -67,15 +67,15 @@ class TestDataExplorerView:
         set_page(view, mock_page)
         view._ui_built = True
         view._on_broadcast_message("cache_cleared")
-        assert view.vm.tables_loaded is False
+        view.vm.mark_tables_stale.assert_called_once()
 
     def test_on_broadcast_message_ignores_other(self, mock_page):
         view = self._make_view()
         set_page(view, mock_page)
         view._ui_built = True
-        view.vm.tables_loaded = True
+        view.vm.state.tables_loaded = True
         view._on_broadcast_message("other_message")
-        assert view.vm.tables_loaded is True
+        assert view.vm.state.tables_loaded is True
 
     def test_update_theme_propagates_to_tabs(self, mock_page):
         view = self._make_view()
@@ -214,42 +214,44 @@ class TestTableViewerTab:
         from ui.views.data_view import TableViewerTab
 
         mock_vm = MagicMock()
-        mock_vm.current_table = "stock_basic"
-        mock_vm.current_page = 1
-        mock_vm.page_size = 50
-        mock_vm.total_rows = 0
-        mock_vm.table_columns = []
-        mock_vm.numeric_cols = set()
-        mock_vm.sort_col_index = None
-        mock_vm.sort_asc = True
-        mock_vm.is_loading = False
-        mock_vm.tables_loaded = False
+        # 配置 mock_vm.state(View 通过 vm.state.xxx 访问轻量字段)
+        mock_vm.state.current_table = "stock_basic"
+        mock_vm.state.current_page = 1
+        mock_vm.state.page_size = 50
+        mock_vm.state.total_rows = 0
+        mock_vm.state.table_columns = ()
+        mock_vm.state.numeric_cols = frozenset()
+        mock_vm.state.sort_col_index = None
+        mock_vm.state.sort_asc = True
+        mock_vm.state.is_loading = False
+        mock_vm.state.tables_loaded = False
+        mock_vm.state.error_message = None
+        mock_vm.state.filter_col = None
+        mock_vm.state.filter_op = "="
+        mock_vm.state.filter_val = ""
+        # 大体积数据 property
         mock_vm.current_data = pd.DataFrame()
-        mock_vm.error_message = None
-        mock_vm.filter_col = None
-        mock_vm.filter_op = "="
-        mock_vm.filter_val = ""
         return TableViewerTab(mock_vm)
 
     def test_instantiation_default_table(self):
         tab = self._make_tab()
-        assert tab.vm.current_table == "stock_basic"
+        assert tab.vm.state.current_table == "stock_basic"
 
     def test_instantiation_default_page_size(self):
         tab = self._make_tab()
-        assert tab.vm.page_size == 50
+        assert tab.vm.state.page_size == 50
 
     def test_instantiation_initial_page(self):
         tab = self._make_tab()
-        assert tab.vm.current_page == 1
+        assert tab.vm.state.current_page == 1
 
     def test_instantiation_not_loading(self):
         tab = self._make_tab()
-        assert tab.vm.is_loading is False
+        assert tab.vm.state.is_loading is False
 
     def test_instantiation_tables_not_loaded(self):
         tab = self._make_tab()
-        assert tab.vm.tables_loaded is False
+        assert tab.vm.state.tables_loaded is False
 
     def test_did_mount_sets_flag(self, mock_page):
         tab = self._make_tab()
@@ -284,14 +286,14 @@ class TestTableViewerTab:
         set_page(tab, wrap_mock_page(mock_page))
 
         async def _mock_init_tables():
-            tab.vm.tables_loaded = True
+            tab.vm.state.tables_loaded = True
             return ["stock_basic", "daily_quotes"]
 
         tab.vm.init_tables = AsyncMock(side_effect=_mock_init_tables)
-        tab.vm.current_table = "stock_basic"
+        tab.vm.state.current_table = "stock_basic"
         tab._load_schema_and_data = AsyncMock()
         await tab.did_mount_async()
-        assert tab.vm.tables_loaded is True
+        assert tab.vm.state.tables_loaded is True
         assert tab.table_selector.value == "stock_basic"
 
     @pytest.mark.asyncio
@@ -300,13 +302,13 @@ class TestTableViewerTab:
         set_page(tab, wrap_mock_page(mock_page))
         tab.vm.init_tables = AsyncMock(side_effect=Exception("DB error"))
         await tab.did_mount_async()
-        assert tab.vm.tables_loaded is False
+        assert tab.vm.state.tables_loaded is False
 
     @pytest.mark.asyncio
     async def test_did_mount_async_skips_if_already_loaded(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.vm.tables_loaded = True
+        tab.vm.state.tables_loaded = True
         await tab.did_mount_async()
 
     @pytest.mark.asyncio
@@ -316,15 +318,15 @@ class TestTableViewerTab:
         tab.table_selector.value = "daily_quotes"
         tab._load_schema_and_data = AsyncMock()
         await tab._on_table_changed(None)
-        assert tab.vm.current_table == "daily_quotes"
-        assert tab.vm.current_page == 1
+        tab.vm.set_table.assert_called_once_with("daily_quotes")
+        tab.vm.reset_table_state.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_rebuild_table_rows_with_data(self, mock_page):
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.vm.table_columns = ["col1", "col2"]
-        tab.vm.numeric_cols = {"col1"}
+        tab.vm.state.table_columns = ("col1", "col2")
+        tab.vm.state.numeric_cols = frozenset({"col1"})
         tab.vm.current_data = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
         tab._rebuild_table_rows()
         assert len(tab.data_table.rows) == 2
@@ -336,7 +338,7 @@ class TestTableViewerTab:
         tab = self._make_tab()
         set_page(tab, mock_page)
         # 配置 tables_list 与 get_table_alias 返回，确保 table_selector.options 能重建
-        tab.vm.tables_list = ["stock_basic", "daily"]
+        tab.vm.state.tables_list = ("stock_basic", "daily")
         mod.MetaDataManager.get_table_alias.return_value = "alias"
         tab.table_selector.value = "stock_basic"
         tab.filter_op.value = "="
@@ -361,9 +363,9 @@ class TestTableViewerTab:
 
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.vm.tables_list = ["stock_basic", "daily"]
-        tab.vm.current_table = "stock_basic"
-        tab.vm.table_columns = ["col1", "col2"]
+        tab.vm.state.tables_list = ("stock_basic", "daily")
+        tab.vm.state.current_table = "stock_basic"
+        tab.vm.state.table_columns = ("col1", "col2")
         tab.vm.current_data = pd.DataFrame()
         mod.MetaDataManager.get_table_alias.return_value = "alias"
         mod.MetaDataManager.get_column_alias.return_value = "col_alias"
@@ -377,9 +379,9 @@ class TestTableViewerTab:
         """§6.3：新闻 cell 不应硬编码 width=400，应使用 expand=True 自适应宽度。"""
         tab = self._make_tab()
         set_page(tab, mock_page)
-        tab.vm.current_table = "market_news"
-        tab.vm.table_columns = ["content", "col2"]
-        tab.vm.numeric_cols = set()
+        tab.vm.state.current_table = "market_news"
+        tab.vm.state.table_columns = ("content", "col2")
+        tab.vm.state.numeric_cols = frozenset()
         tab.vm.current_data = pd.DataFrame({"content": ["新闻长文本内容"], "col2": ["a"]})
         tab._rebuild_table_rows()
 
@@ -430,7 +432,7 @@ class TestSQLConsoleTab:
 
         mock_vm = MagicMock()
         mock_vm.sql_result = None
-        mock_vm.sql_is_executing = False
+        mock_vm.state.sql_is_executing = False
         return SQLConsoleTab(mock_vm)
 
     def test_instantiation_creates_editor(self):
