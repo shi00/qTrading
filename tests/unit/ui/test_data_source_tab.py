@@ -139,6 +139,12 @@ def _make_tab() -> DataSourceTab:
     tab._storage_status_key = None
     tab._last_health_result = None
 
+    # VM subscribe state tracking (Phase 2 改造: bind/on_* → subscribe + state diff)
+    tab._vm_unsubscribe = None
+    tab._prev_state = MagicMock()  # DataSourceState mock
+    tab._health_result_received = False
+    tab._health_error_received = False
+
     tab.update = MagicMock()  # spec omitted: method mock on DataSourceTab instance
     return tab
 
@@ -625,13 +631,16 @@ class TestOnHistoryYearsChange:
 
 
 class TestOnMount:
-    def test_subscribes_and_binds(self, tab):
+    def test_subscribes_vm_and_i18n(self, tab):
         with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            unsubscribe = MagicMock()
+            tab.vm.subscribe.return_value = unsubscribe
             tab._on_mount()
             mock_i18n.subscribe.assert_called_once()
             tab.tushare_panel.reload_config.assert_called_once()
             tab._tm.subscribe.assert_called_once()
-            tab.vm.bind.assert_called_once()
+            tab.vm.subscribe.assert_called_once()
+            assert tab._vm_unsubscribe is unsubscribe
             tab.vm.recover_stale_state.assert_called_once()
 
 
@@ -641,9 +650,13 @@ class TestOnMount:
 class TestOnUnmount:
     def test_unsubscribes_and_disposes(self, tab):
         with patch("ui.views.settings_tabs.data_source_tab.I18n") as mock_i18n:
+            unsubscribe = MagicMock()
+            tab._vm_unsubscribe = unsubscribe
             tab._on_unmount()
             mock_i18n.unsubscribe.assert_called_once()
             tab._tm.unsubscribe.assert_called_once()
+            unsubscribe.assert_called_once()
+            assert tab._vm_unsubscribe is None
             tab.vm.dispose.assert_called_once()
 
 

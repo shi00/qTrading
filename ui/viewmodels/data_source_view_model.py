@@ -1,13 +1,18 @@
 """DataSourceViewModel — MVVM-002 fix.
 
 Extracts business logic from DataSourceTab into a pure ViewModel.
-Holds business state, calls services/data layer, notifies View via callbacks.
-No Flet control references.
+Holds business state, calls services/data layer, notifies View via
+frozen state snapshot + subscribe/_notify (Phase 2 改造).
+
+Phase 2 改造: 11 个 on_* 回调移除,改用 state + subscribe/_notify。
+- 状态型字段直接放入 frozen state (is_syncing/health_checking/init_sync_running 等)
+- 瞬态事件/大体积数据用 dual-track (§3.0.4): version 递增 + last_* property
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
@@ -25,21 +30,42 @@ class InitSyncError(Exception):
     """Raised when init sync fails with a known generic error (e.g. report is None)."""
 
 
+@dataclass(frozen=True)
+class DataSourceState:
+    """DataSourceViewModel 的不可变状态快照。View 通过 subscribe 接收。"""
+
+    # --- Sync state ---
+    is_syncing: bool = False
+    active_key: str | None = None
+    init_sync_cancellable: bool = False
+
+    # --- Health check phase ---
+    # health_checking: True during check_health() task lifecycle (checking → finished)
+    health_checking: bool = False
+
+    # --- Init sync phase ---
+    # init_sync_running: True while init sync task is active
+    init_sync_running: bool = False
+    # init_sync_final_status: set when init sync ends (COMPLETED/CANCELLED/FAILED)
+    init_sync_final_status: TaskStatus | None = None
+
+    # --- Progress ---
+    progress: float = 0.0
+    progress_message: str = ""
+
+    # --- Dual-track versions (View pulls last_* on version change, §3.0.4) ---
+    health_result_version: int = 0
+    snack_version: int = 0
+    cache_cleared_version: int = 0
+    health_error_version: int = 0
+
+
 class DataSourceViewModel:
     """ViewModel for DataSourceTab — manages data source business logic.
 
-    Callbacks (View binders):
-        on_show_snack(message, color_name) — color_name: "success"|"warning"|"error"|"info"
-        on_sync_busy_changed(is_busy, active_key) — active_key identifies the running operation
-        on_health_checking() — health check started
-        on_health_result(result_dict) — health check succeeded with raw data
-        on_health_error(error_msg) — health check failed
-        on_health_cancelled() — health check was cancelled
-        on_health_finished() — health check completed (success/error/cancel), re-enable button
-        on_init_sync_started() — init sync started, switch button to cancel mode
-        on_init_sync_reset(final_status) — init sync ended, reset button to normal
-        on_progress_update(progress, message) — progress update for init sync
-        on_cache_cleared() — cache cleared successfully, send pubsub
+    Phase 2 改造: 11 个 on_* 回调移除,改用 state + subscribe/_notify。
+    View 通过 ``subscribe(callback)`` 订阅 state 变化,通过 diff 判断哪些字段变化,
+    分派到对应处理方法。瞬态事件/大体积数据通过 dual-track (version + last_* property) 拉取。
     """
 
     def __init__(
@@ -57,80 +83,106 @@ class DataSourceViewModel:
         self._ai_service = ai_service or AIService()
         self._tm = TaskManager()
 
-        # Business state
-        self.is_syncing = False
-        self.init_sync_cancellable = False
+        # Business state (internal mutable tracking, not for View)
         self._active_task_ids: dict[str, str] = {}
 
-        # View callbacks
-        self.on_show_snack: Callable[[str, str], None] | None = None
-        self.on_sync_busy_changed: Callable[[bool, str | None], None] | None = None
-        self.on_health_checking: Callable[[], None] | None = None
-        self.on_health_result: Callable[[dict], None] | None = None
-        self.on_health_error: Callable[[str], None] | None = None
-        self.on_health_cancelled: Callable[[], None] | None = None
-        self.on_health_finished: Callable[[], None] | None = None
-        self.on_init_sync_started: Callable[[], None] | None = None
-        self.on_init_sync_reset: Callable[[TaskStatus], None] | None = None
-        self.on_progress_update: Callable[[float, str], None] | None = None
-        self.on_cache_cleared: Callable[[], None] | None = None
+        # --- State snapshot + subscribers ---
+        self._state: DataSourceState = DataSourceState()
+        self._subscribers: list[Callable[[DataSourceState], None]] = []
 
-    def bind(
-        self,
-        on_show_snack: Callable[[str, str], None],
-        on_sync_busy_changed: Callable[[bool, str | None], None],
-        on_health_checking: Callable[[], None],
-        on_health_result: Callable[[dict], None],
-        on_health_error: Callable[[str], None],
-        on_health_cancelled: Callable[[], None],
-        on_health_finished: Callable[[], None],
-        on_init_sync_started: Callable[[], None],
-        on_init_sync_reset: Callable[[TaskStatus], None],
-        on_progress_update: Callable[[float, str], None],
-        on_cache_cleared: Callable[[], None],
-    ):
-        self.on_show_snack = on_show_snack
-        self.on_sync_busy_changed = on_sync_busy_changed
-        self.on_health_checking = on_health_checking
-        self.on_health_result = on_health_result
-        self.on_health_error = on_health_error
-        self.on_health_cancelled = on_health_cancelled
-        self.on_health_finished = on_health_finished
-        self.on_init_sync_started = on_init_sync_started
-        self.on_init_sync_reset = on_init_sync_reset
-        self.on_progress_update = on_progress_update
-        self.on_cache_cleared = on_cache_cleared
+        # --- Dual-track internal storage (§3.0.4) ---
+        self._last_health_result: dict | None = None
+        self._last_snack: tuple[str, str] | None = None  # (message, color_name)
+        self._last_health_error: str | None = None
+
+    # ------------------------------------------------------------------
+    # State / subscribe / notify
+    # ------------------------------------------------------------------
+
+    @property
+    def state(self) -> DataSourceState:
+        return self._state
+
+    @property
+    def last_health_result(self) -> dict | None:
+        """最近一次健康检查结果 dict（dual-track,View 在 health_result_version 变化时拉取）。"""
+        return self._last_health_result
+
+    @property
+    def last_snack(self) -> tuple[str, str] | None:
+        """最近一次 snack 通知 (message, color_name)（dual-track,View 在 snack_version 变化时拉取）。"""
+        return self._last_snack
+
+    @property
+    def last_health_error(self) -> str | None:
+        """最近一次健康检查错误消息（dual-track,View 在 health_error_version 变化时拉取）。"""
+        return self._last_health_error
+
+    def subscribe(self, callback: Callable[[DataSourceState], None]) -> Callable[[], None]:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def _notify(self) -> None:
+        snapshot = self._state
+        for cb in list(self._subscribers):
+            cb(snapshot)
+
+    def _set_state(self, **changes) -> None:
+        self._state = replace(self._state, **changes)
+        self._notify()
 
     def dispose(self):
-        """Clear all callbacks and reset state."""
-        self.on_show_snack = None
-        self.on_sync_busy_changed = None
-        self.on_health_checking = None
-        self.on_health_result = None
-        self.on_health_error = None
-        self.on_health_cancelled = None
-        self.on_health_finished = None
-        self.on_init_sync_started = None
-        self.on_init_sync_reset = None
-        self.on_progress_update = None
-        self.on_cache_cleared = None
+        """Clear all subscribers and reset state."""
+        self._active_task_ids.clear()
+        self._last_health_result = None
+        self._last_snack = None
+        self._last_health_error = None
+        self._subscribers.clear()
+        self._state = DataSourceState()
+
+    # --- Dual-track emitters ---
+
+    def _emit_snack(self, message: str, color_name: str) -> None:
+        """Store snack and notify via snack_version (dual-track)."""
+        self._last_snack = (message, color_name)
+        self._set_state(snack_version=self._state.snack_version + 1)
+
+    def _emit_health_result(self, result: dict) -> None:
+        """Store health result and notify via health_result_version (dual-track)."""
+        self._last_health_result = result
+        self._set_state(health_result_version=self._state.health_result_version + 1)
+
+    def _emit_health_error(self, error_msg: str) -> None:
+        """Store health error and notify via health_error_version (dual-track)."""
+        self._last_health_error = error_msg
+        self._set_state(health_error_version=self._state.health_error_version + 1)
+
+    def _emit_cache_cleared(self) -> None:
+        """Notify cache cleared via cache_cleared_version (dual-track)."""
+        self._set_state(cache_cleared_version=self._state.cache_cleared_version + 1)
 
     # --- Internal helpers ---
 
     def _set_sync_busy(self, is_busy: bool, active_key: str | None = None):
         """Update sync busy state and notify View."""
-        self.is_syncing = is_busy
-        if self.on_sync_busy_changed:
-            self.on_sync_busy_changed(is_busy, active_key)
+        self._set_state(is_syncing=is_busy, active_key=active_key)
 
     def _reset_init_sync(self, final_status: TaskStatus = TaskStatus.COMPLETED):
         """Reset init sync state and notify View to reset UI."""
-        if not self.is_syncing:
+        if not self._state.is_syncing:
             return
-        self.init_sync_cancellable = False
-        self._set_sync_busy(False)
-        if self.on_init_sync_reset:
-            self.on_init_sync_reset(final_status)
+        self._set_state(
+            init_sync_cancellable=False,
+            is_syncing=False,
+            active_key=None,
+            init_sync_running=False,
+            init_sync_final_status=final_status,
+        )
 
     def _recover_after_task_terminated(
         self,
@@ -138,7 +190,7 @@ class DataSourceViewModel:
         final_status: TaskStatus,
     ):
         """Handle task termination — reset busy state only (snack handled by coroutine catch)."""
-        if not self.is_syncing:
+        if not self._state.is_syncing:
             return
         if unique_key == "system_init_sync":
             self._reset_init_sync(final_status)
@@ -149,8 +201,7 @@ class DataSourceViewModel:
 
     async def check_health(self):
         """Start health check task."""
-        if self.on_health_checking:
-            self.on_health_checking()
+        self._set_state(health_checking=True)
 
         async def _run_health_check(task_id: str, **kwargs):
             try:
@@ -162,24 +213,22 @@ class DataSourceViewModel:
                 if not self._tm.update_progress(task_id, 0.9, I18n.get("task_progress_analyzing")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
-                if self.on_health_result:
-                    self.on_health_result(result)
+                self._emit_health_result(result)
 
                 return I18n.get("task_result_health_done")
 
             except asyncio.CancelledError:
-                if self.on_health_cancelled:
-                    self.on_health_cancelled()
+                self._set_state(health_checking=False)
+                # health_cancelled: use a transient flag via state diff
+                # View detects health_checking False transition as "cancelled/finished"
                 raise
             except Exception as e:
                 logger.error("[DataSourceVM] Health check failed: %s", e, exc_info=True)
                 error_info = classify_error(e, context="general")
-                if self.on_health_error:
-                    self.on_health_error(get_error_message(error_info))
+                self._emit_health_error(get_error_message(error_info))
                 raise
             finally:
-                if self.on_health_finished:
-                    self.on_health_finished()
+                self._set_state(health_checking=False)
 
         task_id = self._tm.submit_task(
             name=I18n.get("task_name_health_check"),
@@ -190,8 +239,7 @@ class DataSourceViewModel:
         )
 
         if task_id is None:
-            if self.on_health_finished:
-                self.on_health_finished()
+            self._set_state(health_checking=False)
 
     # --- Full Daily Sync ---
 
@@ -208,26 +256,24 @@ class DataSourceViewModel:
 
             try:
                 await self._processor.run_daily_update(progress_callback=_progress)
-                if self.on_show_snack:
-                    self.on_show_snack(
-                        I18n.get("snack_full_sync_done_simple"),
-                        "success",
-                    )
+                self._emit_snack(
+                    I18n.get("snack_full_sync_done_simple"),
+                    "success",
+                )
                 return I18n.get("ds_daily_update_done")
             except asyncio.CancelledError:
-                if self.is_syncing and self.on_show_snack:
-                    self.on_show_snack(
+                if self._state.is_syncing:
+                    self._emit_snack(
                         I18n.get("settings_msg_sync_cancelled"),
                         "warning",
                     )
                 raise
             except Exception as ex:
                 classify_error(ex, context="general")
-                if self.on_show_snack:
-                    self.on_show_snack(
-                        I18n.get("common_op_fail"),
-                        "error",
-                    )
+                self._emit_snack(
+                    I18n.get("common_op_fail"),
+                    "error",
+                )
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -266,23 +312,21 @@ class DataSourceViewModel:
                     manual_trigger=True,
                     ai_service=self._ai_service,
                 )
-                if self.on_show_snack:
-                    self.on_show_snack(I18n.get("snack_ai_concept_done"), "success")
+                self._emit_snack(I18n.get("snack_ai_concept_done"), "success")
                 return I18n.get("ds_ai_concept_rebuild_done")
             except asyncio.CancelledError:
-                if self.is_syncing and self.on_show_snack:
-                    self.on_show_snack(
+                if self._state.is_syncing:
+                    self._emit_snack(
                         I18n.get("settings_msg_sync_cancelled"),
                         "warning",
                     )
                 raise
             except Exception as ex:
                 classify_error(ex, context="general")
-                if self.on_show_snack:
-                    self.on_show_snack(
-                        I18n.get("common_op_fail"),
-                        "error",
-                    )
+                self._emit_snack(
+                    I18n.get("common_op_fail"),
+                    "error",
+                )
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -308,8 +352,7 @@ class DataSourceViewModel:
             t for t in self._tm.get_all_tasks() if t.status == TaskStatus.RUNNING and t.unique_key != "cache_clear"
         ]
         if running:
-            if self.on_show_snack:
-                self.on_show_snack(I18n.get("ds_clear_cache_syncing"), "warning")
+            self._emit_snack(I18n.get("ds_clear_cache_syncing"), "warning")
             return
 
         self._set_sync_busy(True, "cache_clear")
@@ -317,18 +360,15 @@ class DataSourceViewModel:
         async def _clear_logic(task_id: str, **kwargs):
             try:
                 await self._cache.clear_all_cache()
-                if self.on_show_snack:
-                    self.on_show_snack(I18n.get("ds_cache_cleared"), "success")
-                if self.on_cache_cleared:
-                    self.on_cache_cleared()
+                self._emit_snack(I18n.get("ds_cache_cleared"), "success")
+                self._emit_cache_cleared()
                 return I18n.get("ds_cache_clear_done")
             except Exception as ex:
                 classify_error(ex, context="general")
-                if self.on_show_snack:
-                    self.on_show_snack(
-                        I18n.get("ds_clean_fail"),
-                        "error",
-                    )
+                self._emit_snack(
+                    I18n.get("ds_clean_fail"),
+                    "error",
+                )
                 raise
             finally:
                 self._set_sync_busy(False)
@@ -351,19 +391,14 @@ class DataSourceViewModel:
     def execute_init_historical_data(self):
         """Execute historical data initialization (called by View after user confirms)."""
         self._set_sync_busy(True, "system_init_sync")
-        self.init_sync_cancellable = True
-
-        if self.on_init_sync_started:
-            self.on_init_sync_started()
+        self._set_state(init_sync_cancellable=True, init_sync_running=True)
 
         async def _run_initial_sync(task_id: str, **kwargs):
             try:
-                if self.on_progress_update:
-                    self.on_progress_update(0, I18n.get("wizard_status_init"))
+                self._set_state(progress=0, progress_message=I18n.get("wizard_status_init"))
 
                 def _combined_progress(c, t, m):
-                    if self.on_progress_update:
-                        self.on_progress_update(c / t if t > 0 else 0, m)
+                    self._set_state(progress=c / t if t > 0 else 0, progress_message=m)
                     # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
                     # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
                     if not self._tm.update_progress(
@@ -384,8 +419,7 @@ class DataSourceViewModel:
                     raise InitSyncError(I18n.get("ds_init_fail_generic"))
 
                 self._reset_init_sync(TaskStatus.COMPLETED)
-                if self.on_show_snack:
-                    self.on_show_snack(I18n.get("settings_init_done"), "success")
+                self._emit_snack(I18n.get("settings_init_done"), "success")
 
                 return I18n.get("sys_init_success")
 
@@ -396,15 +430,13 @@ class DataSourceViewModel:
                 msg = str(e)
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
-                if self.on_show_snack:
-                    self.on_show_snack(msg, "error")
+                self._emit_snack(msg, "error")
                 raise RuntimeError(msg) from e
             except Exception as e:
                 msg = I18n.get("ds_init_fail_fmt")
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
-                if self.on_show_snack:
-                    self.on_show_snack(msg, "error")
+                self._emit_snack(msg, "error")
                 raise RuntimeError(msg) from e
 
         task_id = self._tm.submit_task(
@@ -416,7 +448,7 @@ class DataSourceViewModel:
         )
 
         if task_id is None:
-            self.init_sync_cancellable = False
+            self._set_state(init_sync_cancellable=False, init_sync_running=False)
             self._reset_init_sync(TaskStatus.FAILED)
         else:
             self._active_task_ids["system_init_sync"] = task_id
@@ -447,7 +479,7 @@ class DataSourceViewModel:
 
     def handle_task_update(self, current_tasks: list[AppTask]):
         """Handle TaskManager task state updates (called by View forwarding)."""
-        if not self.is_syncing and not self._active_task_ids:
+        if not self._state.is_syncing and not self._active_task_ids:
             return
 
         active_ids = set(self._active_task_ids.values())
@@ -464,13 +496,13 @@ class DataSourceViewModel:
                     None,
                 )
                 self._active_task_ids = {k: v for k, v in self._active_task_ids.items() if v != t.id}
-                if not self._active_task_ids and self.is_syncing and not recovered:
+                if not self._active_task_ids and self._state.is_syncing and not recovered:
                     self._recover_after_task_terminated(unique_key, t.status)
                     recovered = True
 
     def recover_stale_state(self):
         """Recover from stale task state (e.g. after page remount)."""
-        if not self.is_syncing and not self._active_task_ids:
+        if not self._state.is_syncing and not self._active_task_ids:
             return
         stale_keys = []
         for key, task_id in list(self._active_task_ids.items()):
@@ -484,7 +516,7 @@ class DataSourceViewModel:
                 stale_keys.append(key)
         for key in stale_keys:
             self._active_task_ids.pop(key, None)
-        if not self._active_task_ids and self.is_syncing:
+        if not self._active_task_ids and self._state.is_syncing:
             self._set_sync_busy(False)
 
     async def get_health_report(self) -> dict:

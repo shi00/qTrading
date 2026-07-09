@@ -1,6 +1,7 @@
 import inspect
 import logging
 import time
+from collections.abc import Callable
 
 import flet as ft
 
@@ -38,6 +39,14 @@ class DataSourceTab(ft.Container):
         self._health_status_key: str | None = None
         self._storage_status_key: str | None = None
         self._last_health_result: dict | None = None
+
+        # NOTE(lazy): VM subscribe 替代 bind/on_* 回调,Phase 4 声明式重写时移除。
+        # ceiling: Phase 4 DataSourceTab 重写. upgrade: Task 4.x DataSourceTab 声明式重写.
+        self._vm_unsubscribe: Callable[[], None] | None = None
+        self._prev_state = self.vm.state
+        # Health check session tracking (for cancelled detection)
+        self._health_result_received: bool = False
+        self._health_error_received: bool = False
 
         # --- UI Components ---
 
@@ -315,24 +324,18 @@ class DataSourceTab(ft.Container):
         I18n.subscribe(self.refresh_locale)
         self.tushare_panel.reload_config()
         self._tm.subscribe(self._on_task_update)
-        self.vm.bind(
-            on_show_snack=self._on_vm_show_snack,
-            on_sync_busy_changed=self._on_vm_sync_busy_changed,
-            on_health_checking=self._on_vm_health_checking,
-            on_health_result=self._on_vm_health_result,
-            on_health_error=self._on_vm_health_error,
-            on_health_cancelled=self._on_vm_health_cancelled,
-            on_health_finished=self._on_vm_health_finished,
-            on_init_sync_started=self._on_vm_init_sync_started,
-            on_init_sync_reset=self._on_vm_init_sync_reset,
-            on_progress_update=self._on_vm_progress_update,
-            on_cache_cleared=self._on_vm_cache_cleared,
-        )
+        # NOTE(lazy): subscribe 替代 bind/on_* 回调,Phase 4 声明式重写时移除。
+        # ceiling: Phase 4 DataSourceTab 重写. upgrade: Task 4.x DataSourceTab 声明式重写.
+        self._prev_state = self.vm.state
+        self._vm_unsubscribe = self.vm.subscribe(self._on_vm_state_changed)
         self.vm.recover_stale_state()
 
     def _on_unmount(self):
         I18n.unsubscribe(self.refresh_locale)
         self._tm.unsubscribe(self._on_task_update)
+        if self._vm_unsubscribe is not None:
+            self._vm_unsubscribe()
+            self._vm_unsubscribe = None
         self.vm.dispose()
 
     def _on_task_update(self, current_tasks: list[AppTask]):
@@ -486,7 +489,7 @@ class DataSourceTab(ft.Container):
 
         ensure_correlation_id()
         UILogger.log_action("DataSourceTab", "Click", "btn_full_sync")
-        if self.vm.is_syncing:
+        if self.vm.state.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
         await self._show_confirm_dialog(
@@ -502,7 +505,7 @@ class DataSourceTab(ft.Container):
 
         ensure_correlation_id()
         UILogger.log_action("DataSourceTab", "Click", "btn_ai_concept_rebuild")
-        if self.vm.is_syncing:
+        if self.vm.state.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
         await self._show_confirm_dialog(
@@ -518,7 +521,7 @@ class DataSourceTab(ft.Container):
 
         ensure_correlation_id()
         UILogger.log_action("DataSourceTab", "Click", "btn_clear_cache")
-        if self.vm.is_syncing:
+        if self.vm.state.is_syncing:
             self.show_snack(I18n.get("ds_clear_cache_syncing"), color=AppColors.WARNING)
             return
         await self._show_confirm_dialog(
@@ -533,14 +536,14 @@ class DataSourceTab(ft.Container):
         from utils.correlation import ensure_correlation_id
 
         ensure_correlation_id()
-        if self.vm.is_syncing and self.vm.init_sync_cancellable:
+        if self.vm.state.is_syncing and self.vm.state.init_sync_cancellable:
             UILogger.log_action("DataSourceTab", "Click", "btn_cancel_sync")
             self.page.run_task(self.vm.cancel_init_sync)
             self.sync_button.content = I18n.get("sys_init_cancel_wait")
             self.sync_button.disabled = True
             self._safe_update()
             return
-        if self.vm.is_syncing:
+        if self.vm.state.is_syncing:
             self.show_snack(I18n.get("ds_sync_in_progress"), color=AppColors.WARNING)
             return
         UILogger.log_action("DataSourceTab", "Click", "btn_init_historical")
@@ -551,6 +554,71 @@ class DataSourceTab(ft.Container):
             on_confirm_callback=self.vm.execute_init_historical_data,
             is_destructive=False,
         )
+
+    # --- ViewModel State Dispatch (Phase 2: subscribe + state diff) ---
+
+    def _on_vm_state_changed(self, state) -> None:
+        """VM state 变化回调: diff 判断哪些字段变化,分派到对应 _on_vm_* 方法。
+
+        NOTE(lazy): 混合态过渡实现,Phase 4 DataSourceTab 声明式重写时移除。
+        ceiling: Phase 4 DataSourceTab 重写. upgrade: Task 4.x DataSourceTab 声明式重写.
+        """
+        prev = self._prev_state
+
+        # 1. sync_busy_changed (is_syncing or active_key changed)
+        if state.is_syncing != prev.is_syncing or state.active_key != prev.active_key:
+            self._on_vm_sync_busy_changed(state.is_syncing, state.active_key)
+
+        # 2. health_checking transition
+        if state.health_checking != prev.health_checking:
+            if state.health_checking:
+                # Start of health check session: reset tracking
+                self._health_result_received = False
+                self._health_error_received = False
+                self._on_vm_health_checking()
+            else:
+                # End of health check session: always re-enable button (health_finished)
+                self._on_vm_health_finished()
+                # cancelled: no result/error emitted during this session
+                if not self._health_result_received and not self._health_error_received:
+                    self._on_vm_health_cancelled()
+
+        # 3. health_result (dual-track: version changed → pull last_health_result)
+        if state.health_result_version != prev.health_result_version:
+            self._health_result_received = True
+            result = self.vm.last_health_result
+            if result is not None:
+                self._on_vm_health_result(result)
+
+        # 4. health_error (dual-track: version changed → pull last_health_error)
+        if state.health_error_version != prev.health_error_version:
+            self._health_error_received = True
+            self._on_vm_health_error(self.vm.last_health_error or "")
+
+        # 5. init_sync_started (init_sync_running False→True)
+        if state.init_sync_running and not prev.init_sync_running:
+            self._on_vm_init_sync_started()
+
+        # 6. init_sync_reset (init_sync_running True→False + final_status set)
+        if not state.init_sync_running and prev.init_sync_running:
+            if state.init_sync_final_status is not None:
+                self._on_vm_init_sync_reset(state.init_sync_final_status)
+
+        # 7. progress_update (progress or progress_message changed)
+        if state.progress != prev.progress or state.progress_message != prev.progress_message:
+            self._on_vm_progress_update(state.progress, state.progress_message)
+
+        # 8. snack (dual-track: version changed → pull last_snack)
+        if state.snack_version != prev.snack_version:
+            snack = self.vm.last_snack
+            if snack is not None:
+                self._on_vm_show_snack(*snack)
+
+        # 9. cache_cleared (dual-track: version changed)
+        if state.cache_cleared_version != prev.cache_cleared_version:
+            self._on_vm_cache_cleared()
+
+        self._prev_state = state
 
     # --- ViewModel Callback Handlers ---
 

@@ -1218,12 +1218,12 @@ class TestDataSourceTab:
         tab._on_vm_sync_busy_changed(True, "daily_sync")
         assert tab.action_full_sync.disabled is True or tab.action_full_sync.opacity == 0.5
 
-    def test_did_mount_binds_vm(self, mock_page):
+    def test_did_mount_subscribes_vm(self, mock_page):
         tab = self._make_tab()
         tab.tushare_panel = MagicMock()
         tab._tm = MagicMock()
         tab._on_mount()
-        tab.vm.bind.assert_called_once()
+        tab.vm.subscribe.assert_called_once()
         self.mock_i18n.subscribe.assert_called_once()
 
     def test_will_unmount_disposes_vm(self, mock_page):
