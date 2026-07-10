@@ -2,7 +2,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import tests.unit.ui.mock_flet  # noqa: F401  # activate V1 compat Control.page/update patch
-from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
 import pytest
@@ -68,26 +67,6 @@ class TestScreenerViewCleanup(unittest.TestCase):
         self.assertNotIn(view.save_file_picker, page.services)
         self.assertIsNone(view.detail_dialog)
         page.update.assert_called_once()
-
-
-class TestDataExplorerViewCleanup(unittest.TestCase):
-    @patch("ui.views.data_view.DataExplorerViewModel")
-    def test_will_unmount_unsubscribes_pubsub_and_cancels_mount_task(self, mock_vm_cls):
-        view = DataExplorerView()
-        page = MagicMock()
-        page.pubsub = MagicMock()
-        view._mock_page = page  # type: ignore[attr-defined]
-        view._pubsub_subscribed = True
-        mock_mount_task = MagicMock()
-        view._mount_task = mock_mount_task
-
-        view.will_unmount()
-
-        mock_vm_cls.return_value.dispose.assert_called_once()
-        page.pubsub.unsubscribe.assert_called_once_with(view._on_broadcast_message)
-        mock_mount_task.cancel.assert_called_once()
-        self.assertFalse(view._pubsub_subscribed)
-        self.assertIsNone(view._mount_task)
 
 
 if __name__ == "__main__":

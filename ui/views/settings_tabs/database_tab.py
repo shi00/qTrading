@@ -1,14 +1,23 @@
-"""
-Database Configuration Tab for Settings View
+"""DatabaseTab — 声明式组件 (Phase 3.3).
 
-Uses the shared DatabaseConfigPanel component.
+从命令式容器子类重写为 @ft.component 范式
+(CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook 已实现).
+
+变更要点:
+- 旧命令式容器子类 → ``@ft.component def DatabaseTab(show_snack_callback)``
+- VM 通过 ``use_viewmodel(factory)`` 内部模式实例化,hook 管理 dispose
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+- 挂载时的 ``reload_config`` 改用 ``use_effect`` 执行
+- 移除命令式生命周期回调 / 手动刷新 / 手动重渲染
 """
 
 import logging
+from collections.abc import Callable
 
 import flet as ft
 
 from ui.components.config_panels import DatabaseConfigPanel
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n
 from ui.theme import AppColors
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
@@ -16,97 +25,86 @@ from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelVi
 logger = logging.getLogger(__name__)
 
 
-class DatabaseTab(ft.Container):
-    """Database configuration tab for settings page."""
+def _on_test_success(config: dict) -> None:
+    """Log successful connection test (module-level pure function)."""
+    logger.debug(
+        "Database connection test successful: %s:%s/%s",
+        config["host"],
+        config["port"],
+        config["database"],
+    )
 
-    def __init__(self, show_snack_callback):  # pragma: no cover
-        super().__init__()  # pragma: no cover
-        self.show_snack = show_snack_callback  # pragma: no cover
-        self.expand = True  # pragma: no cover
-        self._locale_subscription_id: object | None = None  # pragma: no cover
 
-        # NOTE(lazy): VM 由消费方实例化（声明式 DatabaseConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
-        # ceiling: Phase 3.3 DatabaseTab 声明式重写. upgrade: Task 3.3.3 DatabaseTab 声明式重写.
-        self.config_vm = DatabaseConfigPanelViewModel(  # pragma: no cover
-            on_save_callback=self._on_save,  # pragma: no cover
-            on_test_success_callback=self._on_test_success,  # pragma: no cover
-            load_password=True,  # pragma: no cover
-        )  # pragma: no cover
+@ft.component
+def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
+    """Database configuration tab for settings page (declarative).
 
-        self.title_text = ft.Text(  # pragma: no cover
-            I18n.get("settings_db_title"),  # pragma: no cover
-            size=24,  # pragma: no cover
-            weight=ft.FontWeight.W_500,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - VM 通过 ``use_viewmodel(factory)`` 内部模式实例化,hook 管理 dispose
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+    - ``reload_config`` 通过 ``use_effect`` 挂载时执行(替代命令式挂载回调)
+    - 无 page ref / 生命周期回调 / 手动刷新
 
-        self.content = self._build_ui()  # pragma: no cover
-        self.did_mount = self._on_mount  # pragma: no cover
-        self.will_unmount = self._on_unmount  # pragma: no cover
+    Args:
+        show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
+    """
 
-    def _build_ui(self):  # pragma: no cover
-        """Build the UI layout."""  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                ft.Row(  # pragma: no cover
-                    [  # pragma: no cover
-                        ft.Icon(ft.Icons.STORAGE, size=32, color=AppColors.PRIMARY),  # pragma: no cover
-                        self.title_text,  # pragma: no cover
-                    ],  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                ft.Card(  # pragma: no cover
-                    content=ft.Container(  # pragma: no cover
-                        content=DatabaseConfigPanel(  # pragma: no cover
-                            vm=self.config_vm,  # pragma: no cover
-                            show_header=True,  # pragma: no cover
-                            compact=False,  # pragma: no cover
-                            show_save_button=True,  # pragma: no cover
-                        ),  # pragma: no cover
-                        padding=20,  # pragma: no cover
-                        bgcolor=AppColors.SURFACE,  # pragma: no cover
-                        border_radius=12,  # pragma: no cover
-                    ),  # pragma: no cover
-                    elevation=2,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            scroll=ft.ScrollMode.AUTO,  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
+    def _make_vm() -> DatabaseConfigPanelViewModel:
+        def _on_save(config: dict) -> None:
+            show_snack_callback(I18n.get("settings_db_saved"), "success")
 
-    def _on_save(self, config: dict):
-        """Handle successful save."""
-        self.show_snack(I18n.get("settings_db_saved"), "success")
-
-    def _on_test_success(self, config: dict):
-        """Handle successful connection test."""
-        logger.debug(
-            "Database connection test successful: %s:%s/%s", config["host"], config["port"], config["database"]
+        return DatabaseConfigPanelViewModel(
+            on_save_callback=_on_save,
+            on_test_success_callback=_on_test_success,
+            load_password=True,
         )
 
-    def _on_mount(self):
-        self.config_vm.reload_config()
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+    # --- VM: 内部模式,hook 实例化一次,卸载时 dispose ---
+    _, vm = use_viewmodel(_make_vm)
 
-    def _on_unmount(self):
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-        self.config_vm.dispose()
+    # --- Subscribe to i18n + theme changes (auto-rerender on locale/theme switch) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-    def refresh_locale(self):
-        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
+    # --- Mount-time reload (替代命令式挂载回调的 reload_config) ---
+    ft.use_effect(vm.reload_config, dependencies=[])
 
-        注：DatabaseConfigPanel 已通过 ft.use_state(I18n.get_observable_state) 自动重渲染。
-        """
-        try:
-            self.title_text.value = I18n.get("settings_db_title")
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[DatabaseTab] refresh_locale error: %s", e, exc_info=True)
+    # --- Build UI ---
+    title_text = ft.Text(
+        I18n.get("settings_db_title"),
+        size=24,
+        weight=ft.FontWeight.W_500,
+        color=AppColors.TEXT_PRIMARY,
+    )
 
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
-        # No responsive adjustment needed
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Container(height=20),
+                ft.Row(
+                    [
+                        ft.Icon(ft.Icons.STORAGE, size=32, color=AppColors.PRIMARY),
+                        title_text,
+                    ],
+                ),
+                ft.Container(height=20),
+                ft.Card(
+                    content=ft.Container(
+                        content=DatabaseConfigPanel(
+                            vm=vm,
+                            show_header=True,
+                            compact=False,
+                            show_save_button=True,
+                        ),
+                        padding=20,
+                        bgcolor=AppColors.SURFACE,
+                        border_radius=12,
+                    ),
+                    elevation=2,
+                ),
+            ],
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+        ),
+        expand=True,
+    )

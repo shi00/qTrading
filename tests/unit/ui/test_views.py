@@ -3,7 +3,6 @@ import contextlib
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import flet as ft
 import pytest
 
 from tests.unit.ui.conftest import wrap_mock_page
@@ -12,137 +11,9 @@ from ui.views.home_view import logger as home_view_logger
 pytestmark = pytest.mark.unit
 
 
-class TestSettingsView:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.views.settings_view.I18n", self.mock_i18n),
-            patch("ui.views.settings_view.AppColors", self.mock_ac),
-            patch("ui.views.settings_view.DataSourceTab", MagicMock()),
-            patch("ui.views.settings_view.DatabaseTab", MagicMock()),
-            patch("ui.views.settings_view.AIBrainTab", MagicMock()),
-            patch("ui.views.settings_view.AutomationTab", MagicMock()),
-            patch("ui.views.settings_view.NotificationsTab", MagicMock()),
-            patch("ui.views.settings_view.SystemTab", MagicMock()),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_view(self):
-        from ui.views.settings_view import SettingsView
-
-        return SettingsView()
-
-    def test_instantiation_creates_tab_contents(self):
-        view = self._make_view()
-        assert len(view.tab_contents) == len(view.TAB_CONFIG)
-
-    def test_instantiation_creates_tab_buttons(self):
-        view = self._make_view()
-        assert len(view.tab_buttons) == len(view.TAB_CONFIG)
-
-    def test_initial_tab_index_is_zero(self):
-        view = self._make_view()
-        assert view.current_tab_index == 0
-
-    def test_on_tab_click_updates_current_tab_index(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        e = MagicMock()
-        e.control.data = "2"
-        view._on_tab_click(e)
-        assert view.current_tab_index == 2
-
-    def test_on_tab_click_with_invalid_index_does_nothing(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        original = view.current_tab_index
-        e = MagicMock()
-        e.control.data = "99"
-        view._on_tab_click(e)
-        assert view.current_tab_index == original
-
-    def test_on_tab_click_with_non_numeric_data_does_nothing(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        original = view.current_tab_index
-        e = MagicMock()
-        e.control.data = "abc"
-        view._on_tab_click(e)
-        assert view.current_tab_index == original
-
-    def test_show_snack_with_show_toast_info(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        view.show_snack("hello")
-        mock_page.show_toast.assert_called_once_with("hello", type="info")
-
-    def test_show_snack_with_show_toast_error(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        view.show_snack("fail", color=ft.Colors.RED)
-        mock_page.show_toast.assert_called_once_with("fail", type="error")
-
-    def test_show_snack_with_show_toast_success(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        view.show_snack("ok", color=ft.Colors.GREEN)
-        mock_page.show_toast.assert_called_once_with("ok", type="success")
-
-    def test_show_snack_with_show_toast_warning_amber(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        view.show_snack("warn", color=ft.Colors.AMBER)
-        mock_page.show_toast.assert_called_once_with("warn", type="warning")
-
-    def test_show_snack_with_show_toast_warning_orange(self, mock_page):
-        view = self._make_view()
-        view.page = wrap_mock_page(mock_page)
-        view.show_snack("warn", color=ft.Colors.ORANGE)
-        mock_page.show_toast.assert_called_once_with("warn", type="warning")
-
-    def test_show_snack_without_page_does_nothing(self):
-        view = self._make_view()
-        view.show_snack("hello")
-
-    def test_show_snack_fallback_snackbar(self):
-        view = self._make_view()
-        page = MagicMock(spec=["overlay", "update", "show_dialog"])
-        page.overlay = []
-        page.show_dialog.side_effect = lambda snack: page.overlay.append(snack)
-        view.page = page
-        view.show_snack("fallback", color=ft.Colors.RED)
-        assert any(isinstance(o, ft.SnackBar) for o in page.overlay)
-
-    def test_on_unmount_unsubscribes_i18n(self, mock_page):
-        view = self._make_view()
-        view.page = mock_page
-        view._on_unmount()
-        self.mock_i18n.unsubscribe.assert_called_with(view.refresh_locale)
-
-    def test_on_unmount_cascades_to_child_tabs(self, mock_page):
-        """§5.8 规范 6：_on_unmount 应级联调用子 tab 的 will_unmount（优先）或 _on_unmount（兼容）"""
-        view = self._make_view()
-        view.page = mock_page
-        mock_tab = MagicMock()
-        view.tab_contents = [mock_tab]
-        view._on_unmount()
-        # 优先调用 will_unmount（规范要求），MagicMock 同时具备两者，will_unmount 优先
-        mock_tab.will_unmount.assert_called_once()
-
-    def test_update_theme_propagates_to_tabs(self, mock_page):
-        view = self._make_view()
-        view.page = mock_page
-        mock_tab = MagicMock()
-        view.tab_contents = [mock_tab]
-        view.update_theme()
-        mock_tab.update_theme.assert_called_once()
+# TestSettingsView 已迁移至 tests/unit/ui/test_settings_view.py（Phase C.3 声明式重写后，
+# 旧命令式 API（tab_contents/tab_buttons/current_tab_index/_on_tab_click/show_snack/
+# update_theme/_on_unmount）全部移除，旧测试用例不再适用）。
 
 
 class TestHomeView:

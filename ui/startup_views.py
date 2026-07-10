@@ -234,7 +234,7 @@ class StartupViewRenderer:
         from ui.views.onboarding_wizard import OnboardingWizard
 
         self._page.controls.clear()
-        wizard = OnboardingWizard(self._page, on_complete=self._controller.onboarding_complete)
+        wizard = OnboardingWizard(on_complete=self._controller.onboarding_complete)
         self._page.add(
             ft.Container(
                 content=wizard,

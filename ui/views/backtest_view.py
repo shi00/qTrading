@@ -4,229 +4,65 @@
 - 策略选择
 - 参数配置
 - 结果展示
+
+变更要点（Phase C.2）：
+- 旧命令式 Container 子类 → ``@ft.component def BacktestView()``
+- VM 通过 ``use_viewmodel(BacktestViewModel)`` 消费（state snapshot + commands）
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+- 移除命令式生命周期回调 / 手动 locale 刷新 / 窗口尺寸回调 / 重新实例化推送 / 手动重绘
+- BacktestConfigPanel/BacktestResultPanel 作为子组件函数直接调用，props 从 VM state 推送
+- page 访问改用 ``ft.context.page``（try/except 守卫）
+- selected_strategy/no_strategy_error 为 UI 局部状态（use_state）
 """
 
-from __future__ import annotations
-
 import logging
-from typing import TYPE_CHECKING
 
 import flet as ft
 
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.components.resizable_splitter import ResizableSplitter
-from ui.i18n import I18n, refresh_dropdown_options
+from ui.hooks import use_viewmodel
+from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
 from utils.log_decorators import UILogger
 
-if TYPE_CHECKING:
-    from strategies.backtest.config import BacktestConfig, BacktestResult
-
 logger = logging.getLogger(__name__)
 
 
-class BacktestView(ft.Container):
-    """回测视图。"""
+@ft.component
+def BacktestView() -> ft.Container:
+    """回测视图（声明式）。
 
-    def __init__(self, page: ft.Page):
-        super().__init__(expand=True)
-        self._page_ref = page
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - state + commands via ``use_viewmodel(BacktestViewModel)``
+    - i18n/theme via ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - BacktestConfigPanel/BacktestResultPanel 子组件 props 从 VM state 推送，
+      state 变化自动重渲染（替代旧重新实例化推送模式）
+    - 无 page ref / 生命周期回调 / 手动刷新
+    """
+    state, vm = use_viewmodel(BacktestViewModel)
+    # 订阅 i18n + theme 变化（locale/theme 切换时自动重渲染）
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-        self.vm = BacktestViewModel()
-        self._selected_strategy: str | None = None
-        self._locale_subscription_id: object | None = None
+    # --- UI local state ---
+    strategies = ft.use_state(lambda: vm.get_available_strategies())[0]
+    selected_strategy, set_selected_strategy = ft.use_state(lambda: next(iter(strategies), None))
+    no_strategy_error, set_no_strategy_error = ft.use_state(False)
 
-        self.title_text = ft.Text(
-            I18n.get("backtest_view_title"),
-            size=24,
-            weight=ft.FontWeight.BOLD,
-            color=AppColors.TEXT_PRIMARY,
-        )
+    # --- Handlers ---
+    def _on_strategy_change(e: ft.ControlEvent) -> None:
+        UILogger.log_action("BacktestView", "Select", f"strategy={e.control.value}")
+        set_selected_strategy(e.control.value)
+        set_no_strategy_error(False)
 
-        self.strategy_dropdown = ft.Dropdown(
-            label=I18n.get("backtest_select_strategy"),
-            options=[],
-            on_select=self._on_strategy_change,
-            width=AppStyles.CONTROL_WIDTH_LG,
-            bgcolor=AppColors.INPUT_BG,
-            border_color=AppColors.INPUT_BORDER,
-            color=AppColors.INPUT_TEXT,
-        )
-
-        self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)
-        self.progress_bar = ft.ProgressBar(visible=False, expand=True)
-        self.progress_text = ft.Text("", size=12, color=AppColors.TEXT_SECONDARY)
-
-        self.cancel_button = ft.Button(
-            content=I18n.get("common_cancel"),
-            on_click=self._on_cancel_backtest,
-            visible=False,
-            bgcolor=AppColors.ERROR,
-            color=ft.Colors.WHITE,
-        )
-
-        self.config_panel = BacktestConfigPanel(on_run_backtest=self._on_run_backtest)
-        # NOTE(lazy): config_panel 已是声明式组件（Phase 3.2.5），通过
-        # ft.use_state(I18n.get_observable_state) 自动重渲染，无需 refresh_locale 级联。
-        # ceiling: Phase 3.6.3 BacktestView 声明式重写. upgrade: Task 3.6.3 完成.
-        # NOTE(lazy): result_panel 已是声明式组件（Phase 3.2.6），通过 props 推送
-        # result/chart_min_height（重新实例化模式），会重置内部 use_state(trades_page/selected_tab)；
-        # handle_resize 跨越 COMPACT_HEIGHT_THRESHOLD 阈值时触发重置，用户分页位置丢失。
-        # ceiling: Phase 3.6.3 BacktestView 声明式重写. upgrade: Task 3.6.3 完成.
-        self._result: BacktestResult | None = None
-        self._chart_min_height: int | None = None
-        self.result_panel = BacktestResultPanel(result=self._result, chart_min_height=self._chart_min_height)
-        # _result_container 包装 result_panel，重新实例化时只更新 container.content，
-        # 避免触及 ResizableSplitter 内部结构（微创原则）。
-        self._result_container = ft.Container(content=self.result_panel, expand=True)
-
-        # NOTE(lazy): vm.bind() removed — BacktestViewModel now uses state + subscribe/_notify
-        # (Phase 2 改造). BacktestView will be rewritten to use_viewmodel hook in Phase 4.
-        # ceiling: Phase 4 BacktestView 声明式重写. upgrade: Task 4.2 完成.
-
-        self.content = self._build_content()
-        self._load_strategies()
-
-    def did_mount(self):
-        super().did_mount()
-        if self.page:
-            try:
-                self.update()
-            except Exception as ex:
-                logger.warning("[BacktestView] did_mount update skipped: %s", ex, exc_info=True)
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
-
-    def will_unmount(self):
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-
-    def refresh_locale(self):
-        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
-        try:
-            self.title_text.value = I18n.get("backtest_view_title")
-            self.strategy_dropdown.label = I18n.get("backtest_select_strategy")
-            strategies = self.vm.get_available_strategies()
-            refresh_dropdown_options(
-                self.strategy_dropdown,
-                [ft.dropdown.Option(key, name) for key, name in strategies.items()],
-            )
-            self.cancel_button.content = I18n.get("common_cancel")
-            # config_panel/result_panel 已是声明式组件（Phase 3.2.5/3.2.6），通过
-            # ft.use_state(I18n.get_observable_state) 自动重渲染，无需级联 refresh_locale
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[BacktestView] refresh_locale error: %s", e, exc_info=True)
-
-    def _build_content(self) -> ft.Column:
-        return ft.Column(
-            [
-                ft.Row(
-                    [self.title_text],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-                ft.Divider(color=AppColors.DIVIDER),
-                ft.Row(
-                    [
-                        self.strategy_dropdown,
-                        self.status_text,
-                    ],
-                    spacing=16,
-                ),
-                ft.Row([self.progress_bar, self.progress_text, self.cancel_button], spacing=8),
-                ft.Container(height=16),
-                ResizableSplitter(
-                    left_content=self.config_panel,
-                    right_content=self._result_container,
-                    config_key="ui_splitter_backtest_config",
-                    default_width=360,
-                    min_width=280,
-                    max_width=600,
-                ),
-            ],
-            spacing=12,
-            expand=True,
-        )
-
-    def _fixed_vertical_chrome_height(self) -> int:
-        """估算视图固定纵向 chrome 高度（不含 splitter 内部内容）。
-
-        估算依据：
-        - nav_rail 高度 56
-        - tabs 高度 40
-        - body 上下 padding 32
-        - splitter 自身 padding 16
-        - 其他留白 16
-        合计 ≈ 160
-        """
-        return 160
-
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口尺寸变化时调整高度维度布局。
-
-        width 参数由 splitter 管理宽度维度，此处忽略；仅处理 height 维度：
-        根据 available_height 与 COMPACT_HEIGHT_THRESHOLD 的关系，调整图表最小高度。
-        """
-        if height <= 0:
-            return
-        try:
-            # 懒导入避免与 app_layout.py 的循环导入（app_layout 顶部导入 BacktestView）
-            from ui.app_layout import COMPACT_HEIGHT_THRESHOLD
-
-            available_height = max(0, height - self._fixed_vertical_chrome_height())
-            chart_min_height = 240 if available_height < COMPACT_HEIGHT_THRESHOLD else 360
-            # 只在 chart_min_height 实际变化时重新实例化 result_panel，避免重复 resize 不必要刷新
-            if self._chart_min_height != chart_min_height:
-                self._chart_min_height = chart_min_height
-                self._refresh_result_panel()
-        except Exception as e:
-            logger.debug("[BacktestView] handle_resize skipped: %s", e)
-
-    def _refresh_result_panel(self) -> None:
-        """重新实例化 result_panel 并更新到布局（props 推送模式）。
-
-        声明式组件通过 props 接收数据，BacktestView 重新实例化推送 result/chart_min_height。
-        过渡期方案：Task 3.6.3 BacktestView 声明式重写后改为父组件 state 驱动。
-        """
-        self.result_panel = BacktestResultPanel(
-            result=self._result,
-            chart_min_height=self._chart_min_height,
-        )
-        self._result_container.content = self.result_panel
-
-    def _load_strategies(self):
-        """加载可用策略列表。"""
-        strategies = self.vm.get_available_strategies()
-        self.strategy_dropdown.options = [ft.dropdown.Option(key, name) for key, name in strategies.items()]
-        if strategies:
-            first_key = next(iter(strategies.keys()))
-            self.strategy_dropdown.value = first_key
-            self._selected_strategy = first_key
-
-    def _on_strategy_change(self, e):
-        """策略选择变更。"""
-        self._selected_strategy = e.control.value
-        UILogger.log_action("BacktestView", "Select", f"strategy={self._selected_strategy}")
-
-    def _on_run_backtest(self, config: dict):
-        """运行回测按钮点击。"""
+    def _on_run_backtest(config: dict) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_run_backtest")
-        if not self._selected_strategy:
-            self.status_text.value = I18n.get("backtest_no_strategy")
-            self.status_text.color = AppColors.ERROR
-            self.update()
+        if not selected_strategy:
+            set_no_strategy_error(True)
             return
-
-        self.progress_bar.visible = True
-        self.progress_bar.value = 0
-        self.cancel_button.visible = True
-        self.status_text.value = I18n.get("backtest_starting")
-        self.status_text.color = AppColors.PRIMARY
-        self.update()
-
-        backtest_config = self.vm.create_config(
+        backtest_config = vm.create_config(
             start_date=config["start_date"],
             end_date=config["end_date"],
             initial_capital=config["initial_capital"],
@@ -236,54 +72,85 @@ class BacktestView(ft.Container):
             stamp_duty_rate=config["stamp_duty_rate"],
             slippage_bps=config["slippage_bps"],
         )
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.run_backtest, selected_strategy, backtest_config)
+        except RuntimeError:
+            logger.warning("[BacktestView] page not available for run_task")
 
-        self.page.run_task(
-            self._start_backtest,
-            self._selected_strategy,
-            backtest_config,
-        )
-
-    async def _start_backtest(self, strategy_key: str, config: BacktestConfig):
-        await self.vm.run_backtest(strategy_key, config)
-
-    def _on_vm_update(self):
-        """ViewModel 更新回调。"""
-        if self.page:
-            self.update()
-
-    def _on_vm_status(self, message: str, color: str):
-        self.status_text.value = message
-        self.status_text.color = color
-        if not self.vm.is_running:
-            self.cancel_button.visible = False
-        if self.page:
-            self.update()
-
-    def _on_cancel_backtest(self, e):
+    def _on_cancel_backtest(e: ft.ControlEvent) -> None:
         UILogger.log_action("BacktestView", "Click", "btn_cancel_backtest")
-        self.vm.cancel_backtest()
-        self.cancel_button.visible = False
-        self.status_text.value = I18n.get("common_cancelling")
-        self.status_text.color = AppColors.WARNING
-        if self.page:
-            self.update()
+        vm.cancel_backtest()
 
-    def _on_vm_progress(self, progress: float, message: str):
-        """进度更新回调。"""
-        self.progress_bar.value = progress
-        self.progress_text.value = message
-        if self.page:
-            self.update()
+    # --- Status / progress rendering (from VM state) ---
+    if no_strategy_error and not state.is_running:
+        status_value = I18n.get("backtest_no_strategy")
+        status_color = AppColors.ERROR
+    elif state.status_message is not None:
+        status_value = I18n.get(state.status_message.key, **state.status_message.params)
+        status_color = state.status_color or AppColors.TEXT_SECONDARY
+    else:
+        status_value = ""
+        status_color = AppColors.TEXT_SECONDARY
 
-    def _on_vm_result(self, result: BacktestResult):
-        self._result = result
-        self._refresh_result_panel()
-        self.progress_bar.visible = False
-        self.cancel_button.visible = False
-        if self.page:
-            self.update()
+    if state.progress_message is not None:
+        progress_text_value = I18n.get(state.progress_message.key, **state.progress_message.params)
+    else:
+        progress_text_value = ""
 
-    def dispose(self):
-        """清理资源。"""
-        self.will_unmount()
-        self.vm.dispose()
+    # --- Controls ---
+    title_text = ft.Text(
+        I18n.get("backtest_view_title"),
+        size=24,
+        weight=ft.FontWeight.BOLD,
+        color=AppColors.TEXT_PRIMARY,
+    )
+
+    strategy_dropdown = ft.Dropdown(
+        label=I18n.get("backtest_select_strategy"),
+        options=[ft.dropdown.Option(key, name) for key, name in strategies.items()],
+        value=selected_strategy,
+        on_select=_on_strategy_change,
+        width=AppStyles.CONTROL_WIDTH_LG,
+        bgcolor=AppColors.INPUT_BG,
+        border_color=AppColors.INPUT_BORDER,
+        color=AppColors.INPUT_TEXT,
+    )
+
+    status_text = ft.Text(status_value, color=status_color)
+    progress_bar = ft.ProgressBar(visible=state.is_running, value=state.progress, expand=True)
+    progress_text = ft.Text(progress_text_value, size=12, color=AppColors.TEXT_SECONDARY)
+    cancel_button = ft.Button(
+        content=I18n.get("common_cancel"),
+        on_click=_on_cancel_backtest,
+        visible=state.is_running,
+        bgcolor=AppColors.ERROR,
+        color=ft.Colors.WHITE,
+    )
+
+    # NOTE(lazy): chart_min_height 固定为 None（移除窗口尺寸命令式回调）。
+    # 图表容器 expand=True 自动填充，丢失紧凑模式(240)/标准模式(360)的高度切换。
+    # ceiling: 窗口尺寸响应式重设计. upgrade: Phase F.4 app_layout 声明式重写时引入 page 尺寸响应式 state.
+    return ft.Container(
+        content=ft.Column(
+            [
+                ft.Row([title_text], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Divider(color=AppColors.DIVIDER),
+                ft.Row([strategy_dropdown, status_text], spacing=16),
+                ft.Row([progress_bar, progress_text, cancel_button], spacing=8),
+                ft.Container(height=16),
+                ResizableSplitter(
+                    left_content=BacktestConfigPanel(on_run_backtest=_on_run_backtest),
+                    right_content=BacktestResultPanel(result=vm.result, chart_min_height=None),
+                    config_key="ui_splitter_backtest_config",
+                    default_width=360,
+                    min_width=280,
+                    max_width=600,
+                ),
+            ],
+            spacing=12,
+            expand=True,
+        ),
+        expand=True,
+    )

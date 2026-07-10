@@ -1,0 +1,196 @@
+"""ui/views/screener_view.py 声明式契约守护测试 (Phase F.3).
+
+声明式重写后 View 层测试聚焦:
+1. 契约守护 (grep 检查禁止的命令式模式: class 继承/did_mount/.update()/
+   _on_locale_change/refresh_locale/handle_resize/PageRefMixin/_page_ref/weakref/_ai_cards)
+2. 正向契约: @ft.component / use_viewmodel / Observable state 订阅 /
+   ft.context.page / FilePicker use_effect / PubSub use_effect+cleanup /
+   流式 ref buffer + 节流
+
+业务逻辑覆盖 (VM 交互 + 流式渲染 + 深度链接 + 模式切换) 由集成测试
+(flet_test_page fixture) 承担, 声明式组件含 use_state 在无 renderer 下抛 RuntimeError。
+"""
+
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+
+def _source_without_docstrings(source: str) -> str:
+    """移除模块/函数/类 docstring 后的源码,用于契约守护检查。
+
+    避免源码 docstring 中提及被禁止的方法名 (作为变更说明) 导致字符串匹配误判。
+    """
+    import ast
+
+    tree = ast.parse(source)
+    docstring_lines: set[int] = set()
+
+    def _collect(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Module) -> None:
+        body = getattr(node, "body", None)
+        if not body:
+            return
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            end_lineno = first.end_lineno or first.lineno
+            docstring_lines.update(range(first.lineno, end_lineno + 1))
+
+    _collect(tree)  # type: ignore[arg-type]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _collect(node)  # type: ignore[arg-type]
+
+    lines = source.splitlines()
+    code_lines = [line for i, line in enumerate(lines, 1) if i not in docstring_lines]
+    return "\n".join(code_lines)
+
+
+def _code_source() -> str:
+    """源码（去除 docstring），用于禁止模式检查。"""
+    import ui.views.screener_view as mod
+
+    return _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+
+
+def _raw_source() -> str:
+    """原始源码（含 docstring），用于正向契约检查。"""
+    import ui.views.screener_view as mod
+
+    return Path(mod.__file__).read_text(encoding="utf-8")
+
+
+# ============================================================================
+# 契约守护：声明式范式 (ScreenerView)
+# ============================================================================
+
+
+class TestScreenerViewContract:
+    """ScreenerView 声明式契约守护测试 (Phase F.3)。"""
+
+    def test_screener_view_is_ft_component(self):
+        """DoD: ScreenerView 必须被 @ft.component 装饰。"""
+        from ui.views.screener_view import ScreenerView
+
+        assert hasattr(ScreenerView, "__wrapped__"), "ScreenerView 必须用 @ft.component 装饰"
+
+    def test_screener_view_uses_ft_component(self):
+        """DoD: 必须使用 @ft.component 装饰。"""
+        assert "@ft.component" in _raw_source(), "ScreenerView 必须用 @ft.component 装饰"
+
+    def test_no_class_container(self):
+        """DoD: 禁止命令式 class 继承 ft.Container。"""
+        assert "class ScreenerView(" not in _code_source(), "ScreenerView 不应是 class (命令式)"
+
+    def test_signature_returns_container(self):
+        """DoD: 函数签名必须为 def ScreenerView(...) -> ft.Container。"""
+        assert "def ScreenerView(" in _code_source(), "必须是函数定义"
+        assert "-> ft.Container" in _code_source(), "返回类型必须为 ft.Container"
+
+    def test_no_did_mount(self):
+        """DoD: 禁止命令式 did_mount 生命周期回调。"""
+        assert "did_mount" not in _code_source(), "不应使用 did_mount (命令式)"
+
+    def test_no_will_unmount(self):
+        """DoD: 禁止命令式 will_unmount 生命周期回调。"""
+        assert "will_unmount" not in _code_source(), "不应使用 will_unmount (命令式)"
+
+    def test_no_on_locale_change(self):
+        """DoD: 禁止命令式 _on_locale_change (声明式用 ft.use_state 自动重渲染)。"""
+        assert "_on_locale_change" not in _code_source(), "不应使用 _on_locale_change (声明式自动重渲染)"
+
+    def test_no_update_theme(self):
+        """DoD: 禁止命令式 update_theme (声明式通过 Observable state 自动重渲染)。"""
+        assert "update_theme" not in _code_source(), "不应使用 update_theme (声明式自动重渲染)"
+
+    def test_no_refresh_locale(self):
+        """DoD: 禁止命令式 refresh_locale (声明式自动重渲染)。"""
+        assert "refresh_locale" not in _code_source(), "不应使用 refresh_locale (声明式自动重渲染)"
+
+    def test_no_handle_resize(self):
+        """DoD: 禁止命令式 handle_resize 级联 (子组件自管)。"""
+        assert "handle_resize" not in _code_source(), "不应使用 handle_resize (命令式)"
+
+    def test_no_safe_update(self):
+        """DoD: 禁止命令式 .update() / _safe_update()。"""
+        assert ".update()" not in _code_source(), "不应使用 .update() (命令式)"
+        assert "_safe_update" not in _code_source(), "不应使用 _safe_update (命令式)"
+
+    def test_no_page_ref(self):
+        """DoD: 禁止 PageRefMixin / _page_ref / weakref (用 ft.context.page)。"""
+        assert "PageRefMixin" not in _code_source(), "不应使用 PageRefMixin"
+        assert "_page_ref" not in _code_source(), "不应使用 _page_ref"
+        assert "weakref" not in _code_source(), "不应使用 weakref"
+
+    def test_no_ai_cards(self):
+        """DoD: 禁止命令式 _ai_cards 占位字典 (改用 state 驱动)。"""
+        assert "_ai_cards" not in _code_source(), "不应使用 _ai_cards (命令式占位字典)"
+
+    def test_subscribes_i18n(self):
+        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
+        assert "I18n.get_observable_state" in _raw_source(), "必须订阅 I18n.get_observable_state"
+
+    def test_subscribes_theme(self):
+        """DoD: 必须订阅 AppColors.get_observable_state (theme 自动重渲染)。"""
+        assert "AppColors.get_observable_state" in _raw_source(), "必须订阅 AppColors.get_observable_state"
+
+    def test_uses_ft_context_page(self):
+        """DoD: page 访问必须通过 ft.context.page (try/except 守卫)。"""
+        assert "ft.context.page" in _code_source(), "page 访问必须通过 ft.context.page"
+
+    def test_uses_use_viewmodel(self):
+        """DoD: 必须通过 use_viewmodel hook 消费 ScreenerViewModel。"""
+        assert "use_viewmodel" in _raw_source(), "必须使用 use_viewmodel hook"
+        assert "ScreenerViewModel" in _raw_source(), "必须消费 ScreenerViewModel"
+
+    def test_file_picker_uses_use_effect(self):
+        """DoD: FilePicker 必须通过 use_effect 注册到 page.services (含 cleanup)。"""
+        code = _code_source()
+        assert "ft.FilePicker()" in code, "必须实例化 ft.FilePicker"
+        assert "page.services" in code, "FilePicker 必须注册到 page.services"
+        # use_effect 携带 cleanup 参数 (注册/移除成对)
+        assert "cleanup=" in code, "FilePicker use_effect 必须含 cleanup"
+
+    def test_pubsub_uses_use_effect_with_cleanup(self):
+        """DoD: PubSub (TaskManager) 订阅必须通过 use_effect + cleanup 退订。"""
+        code = _code_source()
+        assert "use_effect" in code, "PubSub 必须用 use_effect 订阅"
+        # cleanup 函数成对出现 (订阅/退订)
+        assert code.count("cleanup=") >= 2, "PubSub + FilePicker 至少两处 cleanup"
+
+    def test_stream_ref_buffer_exists(self):
+        """DoD: LLM 流式 Markdown 卡片必须用 ref buffer + 节流 set_state。"""
+        code = _code_source()
+        assert "_STREAM_THROTTLE" in code, "必须定义流式节流常量 _STREAM_THROTTLE"
+        assert "stream_buffers" in code, "必须用 stream_buffers ref 缓存流式 chunks"
+        assert "set_log_cards" in code, "必须用 set_log_cards 触发重渲染"
+
+    def test_consumes_resizable_splitter(self):
+        """DoD: 必须函数调用消费 ResizableSplitter (props 推送)。"""
+        assert "ResizableSplitter(" in _code_source(), "必须函数调用 ResizableSplitter"
+
+    def test_consumes_paginated_table(self):
+        """DoD: 必须函数调用消费 PaginatedTable (props 推送)。"""
+        assert "PaginatedTable(" in _code_source(), "必须函数调用 PaginatedTable"
+
+    def test_consumes_stock_detail_dialog(self):
+        """DoD: 必须函数调用消费 StockDetailDialog (props 推送)。"""
+        assert "StockDetailDialog(" in _code_source(), "必须函数调用 StockDetailDialog"
+
+    def test_cancelled_error_propagated(self):
+        """DoD: asyncio.CancelledError 必须 raise (R2 红线)。"""
+        code = _code_source()
+        assert "asyncio.CancelledError" in code, "必须捕获 CancelledError"
+        assert "raise" in code, "CancelledError 必须 raise (R2)"
+
+    def test_no_page_param_in_signature(self):
+        """DoD: ScreenerView 签名不应包含 page 参数 (声明式用 ft.context.page)。"""
+        import inspect
+
+        from ui.views.screener_view import ScreenerView
+
+        sig = inspect.signature(ScreenerView.__wrapped__)
+        params = list(sig.parameters.keys())
+        assert "page" not in params, "ScreenerView 不应接收 page 参数"
+        assert "initial_strategy" in params, "ScreenerView 必须接收 initial_strategy 参数"

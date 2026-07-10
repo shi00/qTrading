@@ -153,6 +153,9 @@ class TestScreenerView:
         with contextlib.ExitStack() as stack:
             for p in self.patches:
                 stack.enter_context(p)
+            # Phase A.3: ResizableSplitter 是 @ft.component, 无 renderer 下会抛 RuntimeError;
+            # mock 为 MagicMock 供 ScreenerView 命令式构造 (Phase F.3 声明式重写后移除)
+            self.mock_splitter = stack.enter_context(patch("ui.views.screener_view.ResizableSplitter"))
             yield
 
     def _make_view(self, mock_page):
@@ -328,24 +331,27 @@ class TestScreenerView:
         view._main_splitter.set_left_collapsed.assert_called_once_with(True)
 
     # --- §6.2 ResizableSplitter integration ---
+    # Phase A.3: ResizableSplitter 是 @ft.component, 无 renderer 下被 mock;
+    # 集成契约通过 mock 调用参数验证 (声明式组件实例由集成测试覆盖)
 
     def test_main_body_uses_resizable_splitter(self, mock_page):
-        """§6.2: ScreenerView 主体分栏为 ResizableSplitter 实例。"""
-        from ui.components.resizable_splitter import ResizableSplitter
-
+        """§6.2: ScreenerView 构造期调用 ResizableSplitter。"""
         view = self._make_view(mock_page)
         assert hasattr(view, "_main_splitter")
-        assert isinstance(view._main_splitter, ResizableSplitter)
+        # mock_splitter 被调用 (ScreenerView 构造了 ResizableSplitter)
+        assert self.mock_splitter.called, "ScreenerView 应调用 ResizableSplitter"
 
     def test_main_splitter_collapsible_true(self, mock_page):
-        """§6.2: ResizableSplitter collapsible=True。"""
-        view = self._make_view(mock_page)
-        assert view._main_splitter._collapsible is True
+        """§6.2: ResizableSplitter 构造参数 collapsible=True。"""
+        self._make_view(mock_page)
+        kwargs = self.mock_splitter.call_args.kwargs
+        assert kwargs.get("collapsible") is True, "collapsible 应为 True"
 
     def test_main_splitter_on_resize_is_refresh_table_viewport(self, mock_page):
         """§6.2: on_resize 回调指向 _refresh_table_viewport。"""
         view = self._make_view(mock_page)
-        assert view._main_splitter._on_resize == view._refresh_table_viewport
+        kwargs = self.mock_splitter.call_args.kwargs
+        assert kwargs.get("on_resize") == view._refresh_table_viewport, "on_resize 应指向 _refresh_table_viewport"
 
     def test_refresh_table_viewport_calls_result_table_refresh(self, mock_page):
         """§6.2: _refresh_table_viewport 触发 result_table.refresh_viewport。"""
@@ -1547,6 +1553,8 @@ class TestStrategyTierHint:
         with contextlib.ExitStack() as stack:
             for p in self.patches:
                 stack.enter_context(p)
+            # Phase A.3: ResizableSplitter 是 @ft.component, 无 renderer 下会抛 RuntimeError
+            stack.enter_context(patch("ui.views.screener_view.ResizableSplitter"))
             yield
 
     def _make_view(self, mock_page):

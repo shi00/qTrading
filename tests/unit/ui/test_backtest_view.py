@@ -1,502 +1,98 @@
-"""BacktestView 单元测试"""
+"""BacktestView 声明式契约守护测试（Phase C.2）。
 
-import logging
-from datetime import date, datetime
-from unittest.mock import MagicMock, patch
+守护声明式契约（CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook）:
+- @ft.component 函数组件（非 class ft.Container 子类）
+- use_viewmodel 消费 VM（state snapshot + commands）
+- 无命令式 API（did_mount/will_unmount/refresh_locale/handle_resize/_refresh_result_panel/.update()）
+- page 访问用 ft.context.page（无 PageRefMixin/_page_ref）
+- BacktestConfigPanel/BacktestResultPanel 作为子组件函数调用（props 推送）
 
-import flet as ft
-import polars as pl
+View 组合（@ft.component + use_viewmodel）有状态，由集成测试覆盖，本文件只做契约守护。
+"""
+
+import inspect
+from pathlib import Path
+
 import pytest
 
-from strategies.backtest.config import BacktestConfig, BacktestResult
-from ui.views.backtest_view import BacktestView, logger as view_logger
+from ui.views import backtest_view as backtest_view_module
+from ui.views.backtest_view import BacktestView
 
 pytestmark = pytest.mark.unit
 
-
-@pytest.fixture
-def mock_page() -> MagicMock:
-    page = MagicMock(spec=ft.Page)
-    page.run_task = MagicMock()
-    page.update = MagicMock()
-    return page
+_SOURCE_FILE = Path(backtest_view_module.__file__)
 
 
-@pytest.fixture
-def mock_result() -> BacktestResult:
-    return BacktestResult(
-        config=BacktestConfig(
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 1, 31),
-        ),
-        strategy_name="test_strategy",
-        params_snapshot={},
-        nav_curve=pl.DataFrame(
-            {
-                "trade_date": [date(2024, 1, 1)],
-                "nav": [1_000_000.0],
-            }
-        ),
-        daily_returns=pl.Series([0.0]),
-        benchmark_returns=pl.Series([0.0]),
-        trades=pl.DataFrame(),
-        positions=pl.DataFrame(),
-        skipped_orders=pl.DataFrame(),
-        metrics={"sharpe_ratio": 1.5},
-        ic_series=pl.Series(),
-        period_stats=pl.DataFrame(),
-        data_warnings=(),
-        failed_signal_dates=(),
-        run_id="test_run",
-        executed_at=datetime.now(),
-        duration_ms=1000,
+def _source_text() -> str:
+    return _SOURCE_FILE.read_text(encoding="utf-8")
+
+
+class TestBacktestViewDeclarativeContract:
+    """守护 BacktestView 声明式契约，防止命令式回退。"""
+
+    def test_is_function_not_class(self):
+        """BacktestView 必须是函数组件，非 ft.Container 子类。"""
+        assert inspect.isfunction(BacktestView), "BacktestView 必须是函数（@ft.component），而非类"
+        assert not inspect.isclass(BacktestView)
+
+    def test_no_page_parameter(self):
+        """声明式组件无 page 参数（page 通过 ft.context.page 访问）。"""
+        params = list(inspect.signature(BacktestView).parameters.keys())
+        assert params == [], f"BacktestView 不应有参数，实际: {params}"
+
+    def test_source_has_ft_component_decorator(self):
+        """源码必须有 @ft.component 装饰器。"""
+        src = _source_text()
+        assert "@ft.component" in src
+        assert "def BacktestView() -> ft.Container:" in src
+
+    def test_uses_use_viewmodel(self):
+        """必须通过 use_viewmodel 消费 BacktestViewModel。"""
+        src = _source_text()
+        assert "from ui.hooks import use_viewmodel" in src
+        assert "use_viewmodel(BacktestViewModel)" in src
+
+    def test_subscribes_i18n_and_theme_observable_state(self):
+        """必须订阅 i18n + theme observable state 以自动重渲染。"""
+        src = _source_text()
+        assert "ft.use_state(I18n.get_observable_state)" in src
+        assert "ft.use_state(AppColors.get_observable_state)" in src
+
+    def test_uses_ft_context_page(self):
+        """page 访问必须用 ft.context.page（禁止 PageRefMixin/_page_ref）。"""
+        assert "ft.context.page" in _source_text()
+
+    def test_consumes_declarative_subcomponents(self):
+        """必须以函数调用方式消费声明式子组件（props 推送）。"""
+        src = _source_text()
+        assert "BacktestConfigPanel(" in src
+        assert "BacktestResultPanel(" in src
+        assert "ResizableSplitter(" in src
+
+    @pytest.mark.parametrize(
+        "forbidden",
+        [
+            "class BacktestView(",
+            "def did_mount(",
+            "def will_unmount(",
+            "def refresh_locale(",
+            "def handle_resize(",
+            "def _refresh_result_panel(",
+            "def _fixed_vertical_chrome_height(",
+            "_page_ref",
+            "PageRefMixin",
+            "self.update()",
+            "refresh_dropdown_options",
+        ],
     )
-
-
-class TestBacktestView:
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_init(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {"strategy1": "策略1"}
-
-        view = BacktestView(mock_page)
-
-        assert view.vm == mock_vm
-        assert view._selected_strategy == "strategy1"
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_build_content(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-
-        content = view._build_content()
-
-        assert isinstance(content, ft.Column)
-        assert len(content.controls) > 0
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_load_strategies(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {
-            "strategy1": "策略1",
-            "strategy2": "策略2",
-        }
-        mock_config_panel = MagicMock()
-        mock_config_panel_cls.return_value = mock_config_panel
-
-        view = BacktestView(mock_page)
-
-        assert len(view.strategy_dropdown.options) == 2
-        assert view._selected_strategy == "strategy1"
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_load_strategies_empty(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-
-        assert len(view.strategy_dropdown.options) == 0
-        assert view._selected_strategy is None
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_strategy_change(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {"strategy1": "策略1"}
-        mock_config_panel = MagicMock()
-        mock_config_panel_cls.return_value = mock_config_panel
-
-        view = BacktestView(mock_page)
-
-        mock_event = MagicMock()
-        mock_event.control.value = "strategy2"
-
-        view._on_strategy_change(mock_event)
-
-        assert view._selected_strategy == "strategy2"
-        # set_strategy_key 已在 Phase 3.2.5 声明式重写中删除（死代码），
-        # 声明式 config_panel 通过 on_run_backtest 回调一次性获取配置，无需策略 key 注入。
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_run_backtest_no_strategy(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view._on_run_backtest({"start_date": date(2024, 1, 1), "end_date": date(2024, 12, 31)})
-
-        assert view.status_text.value == "mock_text"
-        view.update.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_run_backtest_with_strategy(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {"strategy1": "策略1"}
-        mock_vm.create_config.return_value = BacktestConfig(
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 12, 31),
-        )
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        config = {
-            "start_date": date(2024, 1, 1),
-            "end_date": date(2024, 12, 31),
-            "initial_capital": 1_000_000.0,
-            "rebalance_freq": "signal",
-            "max_position_count": 50,
-            "commission_rate": 3e-4,
-            "stamp_duty_rate": 1e-3,
-            "slippage_bps": 5.0,
-        }
-
-        view._on_run_backtest(config)
-
-        assert view.progress_bar.visible is True
-        mock_vm.create_config.assert_called_once()
-        mock_page.run_task.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_vm_update(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view._on_vm_update()
-
-        view.update.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_vm_update_no_page(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-        view.page = None
-
-        view._on_vm_update()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_vm_status(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view._on_vm_status("Test Status", "blue")
-
-        assert view.status_text.value == "Test Status"
-        assert view.status_text.color == "blue"
-        view.update.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_vm_progress(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view._on_vm_progress(0.5, "Processing...")
-
-        assert view.progress_bar.value == 0.5
-        assert view.progress_text.value == "Processing..."
-        view.update.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_on_vm_result(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-        mock_result: BacktestResult,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-        mock_result_panel = MagicMock()
-        mock_result_panel_cls.return_value = mock_result_panel
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view._on_vm_result(mock_result)
-
-        # Phase 3.2.6: result_panel 已是声明式组件，通过 props 推送（_result 字段 + 重新实例化）
-        assert view._result == mock_result
-        mock_result_panel_cls.assert_called_with(result=mock_result, chart_min_height=None)
-        assert view.progress_bar.visible is False
-        view.update.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_dispose(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-
-        view.dispose()
-
-        mock_vm.dispose.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_refresh_locale_cascades_to_sub_panels(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        """§5.8 规范 6：refresh_locale 不再级联声明式子面板。
-
-        config_panel（Phase 3.2.5）和 result_panel（Phase 3.2.6）均已重写为声明式组件，
-        通过 ft.use_state(I18n.get_observable_state) 自动重渲染，不再参与级联。
-        """
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        mock_config_panel = MagicMock()
-        mock_config_panel_cls.return_value = mock_config_panel
-        mock_result_panel = MagicMock()
-        mock_result_panel_cls.return_value = mock_result_panel
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view.refresh_locale()
-
-        # config_panel/result_panel 已是声明式组件，不再级联
-        mock_config_panel.refresh_locale.assert_not_called()
-        mock_result_panel.refresh_locale.assert_not_called()
-        view.update.assert_called_once()
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_refresh_locale_swallows_exception(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-        caplog,
-    ) -> None:
-        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {}
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        # 实例化完成后再让 I18n.get 抛异常，触发 refresh_locale 的 try/except
-        mock_i18n.side_effect = RuntimeError("i18n boom")
-
-        with caplog.at_level(logging.WARNING, logger=view_logger.name):
-            # 不应抛出异常
-            view.refresh_locale()
-
-        assert any("refresh_locale error" in r.message and "i18n boom" in r.message for r in caplog.records)
-
-    @patch("ui.views.backtest_view.BacktestViewModel")
-    @patch("ui.views.backtest_view.BacktestConfigPanel")
-    @patch("ui.views.backtest_view.BacktestResultPanel")
-    @patch("ui.views.backtest_view.I18n.get")
-    def test_refresh_locale_preserves_dropdown_value(
-        self,
-        mock_i18n: MagicMock,
-        mock_result_panel_cls: MagicMock,
-        mock_config_panel_cls: MagicMock,
-        mock_vm_cls: MagicMock,
-        mock_page: MagicMock,
-    ) -> None:
-        """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""
-        mock_i18n.return_value = "mock_text"
-        mock_vm = MagicMock()
-        mock_vm_cls.return_value = mock_vm
-        mock_vm.get_available_strategies.return_value = {"strategy1": "策略1"}
-
-        view = BacktestView(mock_page)
-        view.page = mock_page
-        view.update = MagicMock()
-
-        view.strategy_dropdown.value = "strategy1"
-        original_value = view.strategy_dropdown.value
-        view.refresh_locale()
-
-        assert view.strategy_dropdown.value == original_value
-        assert view.strategy_dropdown.options is not None
-        assert len(view.strategy_dropdown.options) > 0
+    def test_no_imperative_api_in_source(self, forbidden: str):
+        """源码不得残留任何命令式 API（防止回退）。"""
+        assert forbidden not in _source_text(), f"命令式 API 残留: {forbidden}"
+
+    def test_no_run_backtest_inline_in_view(self):
+        """回测执行委托 VM（View 不直接持有 _start_backtest 异步方法）。"""
+        assert "def _start_backtest(" not in _source_text()
+        assert "_on_vm_update" not in _source_text()
+        assert "_on_vm_status" not in _source_text()
+        assert "_on_vm_progress" not in _source_text()
+        assert "_on_vm_result" not in _source_text()

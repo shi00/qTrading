@@ -24,55 +24,49 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# Sub-Components
+# Sub-Components (模块级纯函数，由旧命令式 class 转换)
 # ==============================================================================
 
+# HealthScoreCard 状态映射 (status -> (color, icon, i18n_key))
+_HEALTH_STATUS_MAP = {
+    "green": (AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE, "health_status_excellent"),
+    "yellow": (
+        AppColors.WARNING,
+        ft.Icons.WARNING_ROUNDED,
+        "health_status_warning",
+    ),
+}
+_HEALTH_DEFAULT_STATUS = (
+    AppColors.ERROR,
+    ft.Icons.ERROR_OUTLINE,
+    "health_status_critical",
+)
 
-class HealthScoreCard(ft.Container):
-    """
-    Shows the overall health score and status banner.
-    L1 Visual Hierarchy: Big visual impact.
-    """
 
-    # Status -> (color, icon, i18n_key) mapping
-    _STATUS_MAP = {
-        "green": (AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE, "health_status_excellent"),
-        "yellow": (
-            AppColors.WARNING,
-            ft.Icons.WARNING_ROUNDED,
-            "health_status_warning",
-        ),
-    }
-    _DEFAULT_STATUS = (
-        AppColors.ERROR,
-        ft.Icons.ERROR_OUTLINE,
-        "health_status_critical",
+def _make_gradient(color: str) -> ft.LinearGradient:
+    """构建状态卡片渐变背景（纯函数）。"""
+    return ft.LinearGradient(
+        begin=ft.Alignment.TOP_LEFT,
+        end=ft.Alignment.BOTTOM_RIGHT,
+        colors=[
+            ft.Colors.with_opacity(0.2, color),
+            ft.Colors.with_opacity(0.05, color),
+        ],
     )
 
-    @staticmethod
-    def _make_gradient(color: str) -> ft.LinearGradient:  # pragma: no cover
-        return ft.LinearGradient(
-            begin=ft.Alignment.TOP_LEFT,
-            end=ft.Alignment.BOTTOM_RIGHT,
-            colors=[
-                ft.Colors.with_opacity(0.2, color),
-                ft.Colors.with_opacity(0.05, color),
-            ],
-        )
 
-    def __init__(self, status: str, tables_count: int):  # pragma: no cover
-        super().__init__()
+def _build_health_score_card(status: str, tables_count: int) -> ft.Container:
+    """构建健康状态卡片（L1 视觉层级，纯函数）。
 
-        self.color, self.icon, i18n_key = self._STATUS_MAP.get(
-            status,
-            self._DEFAULT_STATUS,
-        )
-        self.text = I18n.get(i18n_key)
-        self.bg_gradient = self._make_gradient(self.color)
+    由旧 ``HealthScoreCard(ft.Container)`` class 转换。
+    """
+    color, icon, i18n_key = _HEALTH_STATUS_MAP.get(status, _HEALTH_DEFAULT_STATUS)
+    text = I18n.get(i18n_key)
 
-        self.content = ft.Row(
+    return ft.Container(
+        content=ft.Row(
             controls=[
-                ft.Icon(self.icon, color=self.color, size=48),
+                ft.Icon(icon, color=color, size=48),
                 ft.Column(
                     controls=[
                         ft.Text(
@@ -81,10 +75,10 @@ class HealthScoreCard(ft.Container):
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(
-                            self.text,
+                            text,
                             size=24,
                             weight=ft.FontWeight.BOLD,
-                            color=self.color,
+                            color=color,
                         ),
                     ],
                     spacing=2,
@@ -102,71 +96,66 @@ class HealthScoreCard(ft.Container):
                 ),
             ],
             alignment=ft.MainAxisAlignment.START,
-        )
-        self.padding = 20
-        self.border_radius = 8
-        self.gradient = self.bg_gradient
-        self.border = ft.Border.all(1, ft.Colors.with_opacity(0.3, self.color))
+        ),
+        padding=20,
+        border_radius=8,
+        gradient=_make_gradient(color),
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.3, color)),
+    )
 
 
-class MetricTile(ft.Container):
+def _build_metric_tile(
+    label: str,
+    value: str,
+    trend_color: str = AppColors.TEXT_PRIMARY,
+    sub_text: str | None = None,
+) -> ft.Container:
+    """构建单个指标 tile（纯函数）。
+
+    由旧 ``MetricTile(ft.Container)`` class 转换。
     """
-    A single metric tile for the grid.
-    """
+    controls: list[ft.Control] = [
+        ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
+        ft.Text(
+            str(value),
+            size=18,
+            weight=ft.FontWeight.BOLD,
+            color=trend_color,
+        ),
+    ]
+    if sub_text:
+        controls.append(ft.Text(sub_text, size=10, color=AppColors.TEXT_HINT))
 
-    def __init__(  # pragma: no cover
-        self,
-        label: str,
-        value: str,
-        trend_color: str = AppColors.TEXT_PRIMARY,
-        sub_text: str | None = None,  # type: ignore[untyped]
-    ):
-        super().__init__()
-        self.content = ft.Column(
-            controls=[
-                ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
-                ft.Text(
-                    str(value),
-                    size=18,
-                    weight=ft.FontWeight.BOLD,
-                    color=trend_color,
-                ),
-            ],
+    return ft.Container(
+        content=ft.Column(
+            controls=controls,
             spacing=4,
             alignment=ft.MainAxisAlignment.CENTER,
-        )
-        if sub_text:
-            self.content.controls.append(
-                ft.Text(sub_text, size=10, color=AppColors.TEXT_HINT),
-            )
-
-        self.padding = 15
-        self.bgcolor = AppColors.SURFACE_VARIANT
-        self.border_radius = 6
-        self.expand = True
+        ),
+        padding=15,
+        bgcolor=AppColors.SURFACE_VARIANT,
+        border_radius=6,
+        expand=True,
+    )
 
 
-class KeyMetricsGrid(ft.Column):
+def _build_key_metrics_grid(market: dict, fundamentals: dict) -> ft.Column:
+    """构建关键指标网格（L2 视觉层级，纯函数）。
+
+    由旧 ``KeyMetricsGrid(ft.Column)`` class 转换。
     """
-    L2 Visual Hierarchy: Key indicators (Lag, Gaps).
-    """
+    lag_days = market.get("lag_days", 0)
+    gap_count = fundamentals.get("gap_count", 0)
+    sanity_errors = fundamentals.get("sanity_errors", 0)
+    latest_date = market.get("latest_local", "N/A")
 
-    def __init__(self, market: dict, fundamentals: dict):
-        super().__init__()
+    lag_color = AppColors.ERROR if lag_days > 0 else AppColors.SUCCESS
+    gap_color = AppColors.ERROR if gap_count > 0 else AppColors.SUCCESS
+    sanity_color = AppColors.ERROR if sanity_errors > 0 else AppColors.SUCCESS
 
-        # Parse Data
-        lag_days = market.get("lag_days", 0)
-        gap_count = fundamentals.get("gap_count", 0)
-        sanity_errors = fundamentals.get("sanity_errors", 0)
-        latest_date = market.get("latest_local", "N/A")
-
-        # Colors
-        lag_color = AppColors.ERROR if lag_days > 0 else AppColors.SUCCESS
-        gap_color = AppColors.ERROR if gap_count > 0 else AppColors.SUCCESS
-        sanity_color = AppColors.ERROR if sanity_errors > 0 else AppColors.SUCCESS
-
-        self.spacing = 10
-        self.controls = [
+    return ft.Column(
+        spacing=10,
+        controls=[
             ft.Text(
                 I18n.get("health_market_ts"),
                 weight=ft.FontWeight.BOLD,
@@ -175,13 +164,13 @@ class KeyMetricsGrid(ft.Column):
             ),
             ft.Row(
                 [
-                    MetricTile(
+                    _build_metric_tile(
                         I18n.get("health_lag_days"),
                         f"{lag_days} {I18n.get('common_suffix_day')}",
                         lag_color,
                     ),
-                    MetricTile(I18n.get("health_gap_count"), str(gap_count), gap_color),
-                    MetricTile(
+                    _build_metric_tile(I18n.get("health_gap_count"), str(gap_count), gap_color),
+                    _build_metric_tile(
                         I18n.get("health_sanity_err"),
                         str(sanity_errors),
                         sanity_color,
@@ -190,235 +179,221 @@ class KeyMetricsGrid(ft.Column):
             ),
             ft.Row(
                 [
-                    MetricTile(
+                    _build_metric_tile(
                         I18n.get("health_sync_latest"),
                         str(latest_date),
                         AppColors.TEXT_PRIMARY,
                     ),
                 ],
             ),
-        ]
+        ],
+    )
 
 
-class CoverageDetailTable(ft.Column):
-    """
-    L3 Visual Hierarchy: Detailed list, grouped by type (Global vs Stock).
-    """
+def _build_section_header(i18n_key: str) -> ft.Container:
+    """构建分节标题（纯函数）。"""
+    return ft.Container(
+        padding=ft.Padding.symmetric(vertical=5),
+        content=ft.Row(
+            [
+                ft.Icon(ft.Icons.SUBTITLES, size=16, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get(i18n_key),
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.PRIMARY,
+                ),
+            ],
+            spacing=5,
+        ),
+    )
 
-    def __init__(self, tables: dict):
-        controls = []
 
-        # Split tables into groups based on 'type' field
-        global_tables = []
-        stock_tables = []
-
-        # Strict ordering based on constants
-        sorted_keys = [k for k in HEALTH_REPORT_ORDER if k in tables]
-        # Append any extras
-        sorted_keys += [k for k in tables if k not in HEALTH_REPORT_ORDER]
-
-        for k in sorted_keys:
-            t_data = tables[k]
-            t_type = t_data.get("type", "stock")
-            if t_type == "global":
-                global_tables.append(k)
-            else:
-                stock_tables.append(k)
-
-        # 1. Global Section
-        if global_tables:
-            controls.append(self._build_section_header("health_section_global"))
-            for k in global_tables:
-                controls.append(self._create_row(k, tables[k]))
-
-        # 2. Stock Section
-        if stock_tables:
-            if global_tables:
-                controls.append(ft.Divider(height=20, color=ft.Colors.TRANSPARENT))
-            controls.append(self._build_section_header("health_section_stock"))
-            for k in stock_tables:
-                controls.append(self._create_row(k, tables[k]))
-
-        super().__init__(controls=controls, spacing=10)
-
-    def _build_section_header(self, i18n_key):  # pragma: no cover
-        return ft.Container(
-            padding=ft.Padding.symmetric(vertical=5),
-            content=ft.Row(
-                [
-                    ft.Icon(ft.Icons.SUBTITLES, size=16, color=AppColors.PRIMARY),
-                    ft.Text(
-                        I18n.get(i18n_key),
-                        weight=ft.FontWeight.BOLD,
-                        color=AppColors.PRIMARY,
-                    ),
-                ],
-                spacing=5,
+def _build_depth_breadth_items(stats: dict) -> list[ft.Text]:
+    """构建可选 Depth/Breadth 指标项（纯函数，仅在非 None 时显示）。"""
+    items: list[ft.Text] = []
+    depth_ratio = stats.get("depth_ratio")
+    breadth_ratio = stats.get("breadth_ratio")
+    if depth_ratio is not None:
+        items.append(
+            ft.Text(
+                I18n.get("health_depth", ratio=f"{depth_ratio * 100:.0f}%"),
+                size=10,
+                color=AppColors.WARNING if depth_ratio < HEALTH_DEPTH_WARNING_RATIO else AppColors.TEXT_HINT,
             ),
         )
+    if breadth_ratio is not None:
+        items.append(
+            ft.Text(
+                I18n.get("health_breadth", ratio=f"{breadth_ratio * 100:.0f}%"),
+                size=10,
+                color=AppColors.WARNING if breadth_ratio < HEALTH_THRESHOLD_BREADTH else AppColors.TEXT_HINT,
+            ),
+        )
+    return items
 
-    def _create_row(self, table_key, stats):
-        # Get display name
-        key = f"tab_{table_key}"
-        name = I18n.get(key)
-        if name == key:
-            name = HEALTH_CHECK_TABLES.get(table_key, {}).get("desc", table_key)
 
-        ratio = stats.get("ratio", 0)
-        fresh_ratio = stats.get("fresh_ratio", 0)
-        is_global = stats.get("type") == "global"
+def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
+    """构建单行覆盖详情（纯函数）。
 
-        # Color Logic
-        if ratio >= HEALTH_THRESHOLD_FINANCIAL_EXCELLENT:
-            bar_color = AppColors.SUCCESS
-            status_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
-            icon_color = AppColors.SUCCESS
-        elif ratio >= HEALTH_THRESHOLD_FINANCIAL_COVERAGE:
-            bar_color = AppColors.WARNING
-            status_icon = ft.Icons.INFO_OUTLINE
-            icon_color = AppColors.WARNING
-        else:
-            bar_color = AppColors.ERROR
-            status_icon = ft.Icons.HIGHLIGHT_OFF
-            icon_color = AppColors.ERROR
+    由旧 ``CoverageDetailTable._create_row`` 实例方法转换。
+    """
+    key = f"tab_{table_key}"
+    name = I18n.get(key)
+    if name == key:
+        name = HEALTH_CHECK_TABLES.get(table_key, {}).get("desc", table_key)
 
-        # Adaptive display for Global vs Stock
-        if is_global:
-            # Global: Show presence status badge instead of coverage bar
-            cnt = stats.get("covered", 0)
-            value_text = (
-                I18n.get("health_global_count", count=f"{cnt:,}") if ratio > 0 else I18n.get("health_global_no_data")
-            )
-            return ft.Container(
-                padding=ft.Padding.symmetric(vertical=5),
-                content=ft.Row(
-                    [
-                        ft.Row(
-                            [
-                                ft.Icon(status_icon, size=14, color=icon_color),
-                                ft.Text(
-                                    name,
-                                    width=120,
-                                    size=12,
-                                    weight=ft.FontWeight.BOLD,
-                                    color=AppColors.TEXT_PRIMARY,
-                                    no_wrap=True,
-                                ),
-                            ],
-                            spacing=5,
-                            width=140,
-                        ),
-                        ft.Container(
-                            content=ft.Text(
-                                value_text,
-                                size=11,
-                                color=icon_color,
-                                weight=ft.FontWeight.BOLD,
-                            ),
-                            bgcolor=ft.Colors.with_opacity(0.1, icon_color),
-                            padding=ft.Padding.symmetric(horizontal=10, vertical=3),
-                            border_radius=12,
-                            expand=True,
-                            alignment=ft.Alignment.CENTER,
-                        ),
-                        ft.Container(width=10),
-                        ft.Text(
-                            "✓" if ratio > 0 else "✗",
-                            size=16,
-                            weight=ft.FontWeight.BOLD,
-                            color=icon_color,
-                            width=60,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                ),
-            )
+    ratio = stats.get("ratio", 0)
+    fresh_ratio = stats.get("fresh_ratio", 0)
+    is_global = stats.get("type") == "global"
 
-        # Stock: Standard coverage bar
+    if ratio >= HEALTH_THRESHOLD_FINANCIAL_EXCELLENT:
+        bar_color = AppColors.SUCCESS
+        status_icon = ft.Icons.CHECK_CIRCLE_OUTLINE
+        icon_color = AppColors.SUCCESS
+    elif ratio >= HEALTH_THRESHOLD_FINANCIAL_COVERAGE:
+        bar_color = AppColors.WARNING
+        status_icon = ft.Icons.INFO_OUTLINE
+        icon_color = AppColors.WARNING
+    else:
+        bar_color = AppColors.ERROR
+        status_icon = ft.Icons.HIGHLIGHT_OFF
+        icon_color = AppColors.ERROR
+
+    name_row = ft.Row(
+        [
+            ft.Icon(status_icon, size=14, color=icon_color),
+            ft.Text(
+                name,
+                width=120,
+                size=12,
+                weight=ft.FontWeight.BOLD,
+                color=AppColors.TEXT_PRIMARY,
+                no_wrap=True,
+            ),
+        ],
+        spacing=5,
+        width=140,
+    )
+
+    if is_global:
+        # Global: 显示存在数量徽标，不显示覆盖进度条
+        cnt = stats.get("covered", 0)
+        value_text = (
+            I18n.get("health_global_count", count=f"{cnt:,}") if ratio > 0 else I18n.get("health_global_no_data")
+        )
         return ft.Container(
             padding=ft.Padding.symmetric(vertical=5),
             content=ft.Row(
                 [
-                    # Name & Icon
-                    ft.Row(
-                        [
-                            ft.Icon(status_icon, size=14, color=icon_color),
-                            ft.Text(
-                                name,
-                                width=120,
-                                size=12,
-                                weight=ft.FontWeight.BOLD,
-                                color=AppColors.TEXT_PRIMARY,
-                                no_wrap=True,
-                            ),
-                        ],
-                        spacing=5,
-                        width=140,
-                    ),
-                    # Progress Bar
-                    ft.ProgressBar(
-                        value=ratio,
-                        color=bar_color,
-                        bgcolor=AppColors.SURFACE_VARIANT,
-                        height=6,
+                    name_row,
+                    ft.Container(
+                        content=ft.Text(
+                            value_text,
+                            size=11,
+                            color=icon_color,
+                            weight=ft.FontWeight.BOLD,
+                        ),
+                        bgcolor=ft.Colors.with_opacity(0.1, icon_color),
+                        padding=ft.Padding.symmetric(horizontal=10, vertical=3),
+                        border_radius=12,
                         expand=True,
+                        alignment=ft.Alignment.CENTER,
                     ),
-                    # Values
                     ft.Container(width=10),
-                    ft.Column(
-                        [
-                            ft.Text(
-                                f"{ratio * 100:.1f}%",
-                                size=12,
-                                weight=ft.FontWeight.BOLD,
-                                color=AppColors.TEXT_PRIMARY,
-                            ),
-                            ft.Text(
-                                I18n.get(
-                                    "health_freshness",
-                                    ratio=f"{fresh_ratio * 100:.0f}%",
-                                ),
-                                size=10,
-                                color=AppColors.TEXT_HINT,
-                            ),
-                        ]
-                        + self._build_depth_breadth_items(stats),
-                        spacing=0,
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        width=70,
+                    ft.Text(
+                        "✓" if ratio > 0 else "✗",
+                        size=16,
+                        weight=ft.FontWeight.BOLD,
+                        color=icon_color,
+                        width=60,
+                        text_align=ft.TextAlign.CENTER,
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             ),
         )
 
-    def _build_depth_breadth_items(self, stats):  # pragma: no cover
-        """Build optional Depth/Breadth indicator items (only shown when not None)."""
-        items = []
-        depth_ratio = stats.get("depth_ratio")
-        breadth_ratio = stats.get("breadth_ratio")
-        if depth_ratio is not None:
-            items.append(
-                ft.Text(
-                    I18n.get("health_depth", ratio=f"{depth_ratio * 100:.0f}%"),
-                    size=10,
-                    color=AppColors.WARNING if depth_ratio < HEALTH_DEPTH_WARNING_RATIO else AppColors.TEXT_HINT,
+    # Stock: 标准覆盖进度条
+    return ft.Container(
+        padding=ft.Padding.symmetric(vertical=5),
+        content=ft.Row(
+            [
+                name_row,
+                ft.ProgressBar(
+                    value=ratio,
+                    color=bar_color,
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                    height=6,
+                    expand=True,
                 ),
-            )
-        if breadth_ratio is not None:
-            items.append(
-                ft.Text(
-                    I18n.get("health_breadth", ratio=f"{breadth_ratio * 100:.0f}%"),
-                    size=10,
-                    color=AppColors.WARNING if breadth_ratio < HEALTH_THRESHOLD_BREADTH else AppColors.TEXT_HINT,
+                ft.Container(width=10),
+                ft.Column(
+                    [
+                        ft.Text(
+                            f"{ratio * 100:.1f}%",
+                            size=12,
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.TEXT_PRIMARY,
+                        ),
+                        ft.Text(
+                            I18n.get(
+                                "health_freshness",
+                                ratio=f"{fresh_ratio * 100:.0f}%",
+                            ),
+                            size=10,
+                            color=AppColors.TEXT_HINT,
+                        ),
+                    ]
+                    + _build_depth_breadth_items(stats),
+                    spacing=0,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    width=70,
                 ),
-            )
-        return items
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        ),
+    )
+
+
+def _build_coverage_detail_table(tables: dict) -> ft.Column:
+    """构建覆盖详情表格（L3 视觉层级，纯函数）。
+
+    由旧 ``CoverageDetailTable(ft.Column)`` class 转换。
+    按 type 分组（Global / Stock），严格按 HEALTH_REPORT_ORDER 排序。
+    """
+    controls: list[ft.Control] = []
+
+    global_tables: list[str] = []
+    stock_tables: list[str] = []
+
+    sorted_keys = [k for k in HEALTH_REPORT_ORDER if k in tables]
+    sorted_keys += [k for k in tables if k not in HEALTH_REPORT_ORDER]
+
+    for k in sorted_keys:
+        t_data = tables[k]
+        t_type = t_data.get("type", "stock")
+        if t_type == "global":
+            global_tables.append(k)
+        else:
+            stock_tables.append(k)
+
+    if global_tables:
+        controls.append(_build_section_header("health_section_global"))
+        for k in global_tables:
+            controls.append(_create_coverage_row(k, tables[k]))
+
+    if stock_tables:
+        if global_tables:
+            controls.append(ft.Divider(height=20, color=ft.Colors.TRANSPARENT))
+        controls.append(_build_section_header("health_section_stock"))
+        for k in stock_tables:
+            controls.append(_create_coverage_row(k, tables[k]))
+
+    return ft.Column(controls=controls, spacing=10)
 
 
 # ==============================================================================
-# Main Dialog
+# HealthReportDialog (已声明式 V1，Phase 3.2.7 完成，保留)
 # ==============================================================================
 
 
@@ -460,9 +435,9 @@ def _build_health_content(report: dict, width: int, height: int) -> ft.Container
     tables = fundamentals.get("tables", {})
     reasons = report.get("reasons", [])
 
-    header = HealthScoreCard(status, len(tables))
-    metrics = KeyMetricsGrid(market, fundamentals)
-    coverage = CoverageDetailTable(tables)
+    header = _build_health_score_card(status, len(tables))
+    metrics = _build_key_metrics_grid(market, fundamentals)
+    coverage = _build_coverage_detail_table(tables)
 
     issues_section: ft.Control = ft.Container()
     if reasons:
@@ -534,8 +509,8 @@ def HealthReportDialog(
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
     - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
     - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
-    - 深度扫描通过 ``on_deep_scan`` 回调通知消费方（HealthScanDialog 仍命令式，Task 4.3 重写）
-    - 无 ``did_mount``/``will_unmount``/手动 update/``show_dialog``/``pop_dialog``
+    - 深度扫描通过 ``on_deep_scan`` 回调通知消费方（HealthScanDialog 声明式，Task E.3 重写）
+    - 无命令式生命周期回调/手动刷新/``show_dialog``/``pop_dialog``
 
     Args:
         report: 健康报告字典
@@ -548,7 +523,13 @@ def HealthReportDialog(
     open_, set_open = ft.use_state(open_state)
 
     width, height = _health_dialog_size(page)
-    _log_report_summary(report)
+
+    # 报告摘要日志仅在 open 变为 True 时记录一次（避免每次渲染重复打日志）。
+    def _log_effect() -> None:
+        if open_:
+            _log_report_summary(report)
+
+    ft.use_effect(_log_effect, dependencies=[open_])
 
     def _close(_e=None) -> None:
         set_open(False)
@@ -592,139 +573,40 @@ def HealthReportDialog(
     return ft.Container(width=0, height=0)
 
 
-class HealthScanDialog(ft.AlertDialog):
-    """
-    Dialog for Deep Health Scan (Tier 2/3).
-    Shows progress then results.
-    """
+# ==============================================================================
+# HealthScanDialog (声明式 V1，Phase E.3 重写)
+# ==============================================================================
 
-    def __init__(self, page, data_processor: DataProcessor):  # pragma: no cover
-        self.page_ref = page
-        self._data_processor = data_processor
-        self._locale_subscription_id: object | None = None
-        self._last_result: dict | None = None
-        self._progress_futures: set = set()
-        # 缓存对话框尺寸
-        self._cached_width, self._cached_height = self._dialog_size()
-        self.progress_bar = ft.ProgressBar(
-            width=400,
-            color=AppColors.PRIMARY,
-            bgcolor=AppColors.SURFACE_VARIANT,
-        )
-        self.status_text = ft.Text(
-            I18n.get("scan_step_init"),
-            size=12,
-            color=AppColors.TEXT_SECONDARY,
-        )
-        self.result_content = ft.Column(visible=False)
-        self._title_text = ft.Text(I18n.get("scan_title"), size=16, weight=ft.FontWeight.BOLD)
-        self._close_btn = ft.TextButton(I18n.get("common_close"), on_click=self.close_dialog)
 
-        super().__init__(
-            modal=True,
-            title=self._title_text,
-            content=ft.Container(
-                width=self._cached_width,
-                height=self._cached_height,
-                content=ft.Column(
-                    [
-                        ft.Container(height=20),
-                        self.status_text,
-                        self.progress_bar,
-                        self.result_content,
-                    ],
-                ),
-            ),
-            actions=[self._close_btn],
-            actions_padding=10,
-        )
+def _scan_dialog_size(page: ft.Page | None) -> tuple[int, int]:
+    """基于窗口尺寸计算扫描对话框宽高，加上限约束（纯函数）。"""
+    if not page:
+        return 450, 300
+    win_w = int(page.window.width or 1280)
+    win_h = int(page.window.height or 800)
+    w = min(max(win_w - 80, 360), 450)
+    h = min(max(win_h - 80, 240), 300)
+    return w, h
 
-    def _dialog_size(self) -> tuple[int, int]:
-        """基于窗口尺寸计算对话框宽高，加上限约束。"""
-        if not self.page_ref:
-            return 450, 300
-        win_w = int(self.page_ref.window.width or 1280)
-        win_h = int(self.page_ref.window.height or 800)
-        w = min(max(win_w - 80, 360), 450)
-        h = min(max(win_h - 80, 240), 300)
-        return w, h
 
-    def close_dialog(self, e=None):  # pragma: no cover
-        self.page_ref.pop_dialog()
+def _build_scan_result(result: dict) -> ft.Column:
+    """构建扫描结果内容（纯函数，由旧 ``HealthScanDialog.show_results`` 转换）。"""
+    score = result.get("score", 0)
+    tier = result.get("tier", 1)
+    avg_lag = result.get("avg_lag", 99)
+    avg_cont = result.get("avg_continuity", 0)
 
-    def did_mount(self):  # pragma: no cover
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+    color = AppColors.SUCCESS if score > 80 else (AppColors.WARNING if score > 50 else AppColors.ERROR)
+    avg_fundamental = result.get("avg_fundamental", 0)
+    fundamental_color = (
+        AppColors.SUCCESS
+        if avg_fundamental > 0.7
+        else (AppColors.WARNING if avg_fundamental > 0.5 else AppColors.ERROR)
+    )
+    fin_recency_ok = result.get("fin_recency_ok", False)
 
-    def will_unmount(self):  # pragma: no cover
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-        for f in list(self._progress_futures):
-            if not f.done():
-                f.cancel()
-        self._progress_futures.clear()
-
-    def refresh_locale(self):
-        """Refresh i18n text on locale change (pure UI)."""
-        try:
-            self._title_text.value = I18n.get("scan_title")
-            self._close_btn.content = I18n.get("common_close")
-            if self.status_text.visible:
-                self.status_text.value = I18n.get("scan_step_init")
-            # 结果区域可见时，用缓存的扫描结果重建以刷新所有 i18n 文案
-            if self._last_result is not None and self.result_content.visible:
-                self.show_results(self._last_result)
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[HealthScanDialog] refresh_locale failed: %s", e, exc_info=True)
-
-    async def start_scan(self):
-        """Start async scan"""
-        loop = asyncio.get_running_loop()
-
-        try:
-
-            def on_progress(current, total, msg):
-                # Schedule UI update on main event loop instead of direct cross-thread call
-                fut = asyncio.run_coroutine_threadsafe(self._update_progress(current, total, msg), loop)
-                self._progress_futures.add(fut)
-                fut.add_done_callback(self._progress_futures.discard)
-
-            result = await self._data_processor.run_quality_scan(
-                sample_size=50,
-                progress_callback=on_progress,
-            )
-            self.show_results(result)
-        except Exception as ex:
-            logger.error("[HealthScanDialog] Scan failed: %s", ex, exc_info=True)
-            for f in list(self._progress_futures):
-                if not f.done():
-                    f.cancel()
-            self._progress_futures.clear()
-            self.status_text.value = I18n.get("db_err_format")
-            self.page_ref.update()
-
-    async def _update_progress(self, current, total, msg):
-        """Update progress UI on the main event loop (thread-safe)."""
-        self.progress_bar.value = current / total
-        self.status_text.value = msg
-        self.page_ref.update()
-
-    def show_results(self, result):  # pragma: no cover
-        """Display results."""
-        self._last_result = result
-        score = result.get("score", 0)
-        tier = result.get("tier", 1)
-        avg_lag = result.get("avg_lag", 99)
-        avg_cont = result.get("avg_continuity", 0)
-
-        color = AppColors.SUCCESS if score > 80 else (AppColors.WARNING if score > 50 else AppColors.ERROR)
-
-        self.progress_bar.visible = False
-        self.status_text.visible = False
-
-        self.result_content.controls = [
+    return ft.Column(
+        [
             ft.Container(height=20),
             ft.Row(
                 [
@@ -806,12 +688,10 @@ class HealthScanDialog(ft.AlertDialog):
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             ft.Text(
-                                f"{result.get('avg_fundamental', 0) * 100:.1f}%",
+                                f"{avg_fundamental * 100:.1f}%",
                                 size=16,
                                 weight=ft.FontWeight.BOLD,
-                                color=AppColors.SUCCESS
-                                if result.get("avg_fundamental", 0) > 0.7
-                                else (AppColors.WARNING if result.get("avg_fundamental", 0) > 0.5 else AppColors.ERROR),
+                                color=fundamental_color,
                             ),
                         ],
                     ),
@@ -823,16 +703,198 @@ class HealthScanDialog(ft.AlertDialog):
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             ft.Text(
-                                "✓" if result.get("fin_recency_ok", False) else "✗",
+                                "✓" if fin_recency_ok else "✗",
                                 size=16,
                                 weight=ft.FontWeight.BOLD,
-                                color=AppColors.SUCCESS if result.get("fin_recency_ok", False) else AppColors.ERROR,
+                                color=AppColors.SUCCESS if fin_recency_ok else AppColors.ERROR,
                             ),
                         ],
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_AROUND,
             ),
-        ]
-        self.result_content.visible = True
-        self.page_ref.update()
+        ],
+    )
+
+
+def _build_scan_content(
+    scan_state: str,
+    progress: float,
+    status_text: str,
+    result: dict | None,
+    width: int,
+    height: int,
+) -> ft.Container:
+    """构建扫描弹窗内容（纯函数，状态驱动渲染）。
+
+    Args:
+        scan_state: 扫描状态 ("idle" | "scanning" | "done" | "error")
+        progress: 进度 0.0~1.0
+        status_text: 状态文本（i18n 已解析）
+        result: 扫描结果字典（scan_state="done" 时非 None）
+        width: 对话框宽度
+        height: 对话框高度
+    """
+    if scan_state == "done" and result is not None:
+        return ft.Container(
+            width=width,
+            height=height,
+            content=_build_scan_result(result),
+        )
+
+    # 进度阶段：idle / scanning / error
+    status_display = I18n.get("db_err_format") if scan_state == "error" else status_text
+    progress_value: float | None = progress if scan_state == "scanning" else None
+
+    return ft.Container(
+        width=width,
+        height=height,
+        content=ft.Column(
+            [
+                ft.Container(height=20),
+                ft.Text(status_display, size=12, color=AppColors.TEXT_SECONDARY),
+                ft.ProgressBar(
+                    value=progress_value,
+                    width=400,
+                    color=AppColors.PRIMARY,
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                ),
+            ],
+        ),
+    )
+
+
+@ft.component
+def HealthScanDialog(
+    data_processor: DataProcessor | None = None,
+    page: ft.Page | None = None,
+    open_state: bool = False,
+    on_close: Callable[[], None] | None = None,
+) -> ft.Container:
+    """深度健康扫描弹窗（声明式 V1）。
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
+    - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
+    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - 扫描状态/进度/状态文本/结果均由 ``use_state`` 驱动渲染
+    - 扫描任务通过 ``use_effect(setup, [open_], cleanup=cleanup)`` 启动，
+      ``open_=True`` 时自动触发（替代旧消费方 ``page.run_task(scan_dlg.start_scan)``）
+    - 跨线程 ``on_progress`` 回调通过 ``asyncio.run_coroutine_threadsafe`` 调度回主 loop
+      更新 state（替代旧命令式 progress_bar.value 直接赋值 + page 刷新）
+    - cleanup 中取消 pending futures（R2 兼容：CancelledError 在 future.cancel() 内部消化，
+      不重新抛出，符合关机清理语义）
+    - 无命令式生命周期回调/手动刷新/``show_dialog``/``pop_dialog``
+
+    Args:
+        data_processor: DataProcessor 实例（用于执行 ``run_quality_scan``）
+        page: ft.Page 引用（用于计算对话框尺寸）
+        open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
+        on_close: 关闭回调（消费方用于清理引用）
+    """
+    # --- i18n 订阅（locale 切换自动重渲染）---
+    ft.use_state(I18n.get_observable_state)
+
+    # --- dialog 显隐 state（从 prop 初始化）---
+    open_, set_open = ft.use_state(open_state)
+
+    # --- 扫描状态 state ---
+    # scan_state: "idle" | "scanning" | "done" | "error"
+    scan_state, set_scan_state = ft.use_state("idle")
+    progress, set_progress = ft.use_state(0.0)
+    status_text, set_status_text = ft.use_state(lambda: I18n.get("scan_step_init"))
+    _initial_result: dict | None = None
+    result, set_result = ft.use_state(_initial_result)
+
+    width, height = _scan_dialog_size(page)
+
+    # --- 跨线程 future 持久化（use_ref 缓存数据，非命令式实例，符合声明式红线）---
+    futures_ref = ft.use_ref(lambda: set())
+
+    async def _update_progress(current: int, total: int, msg: str) -> None:
+        """主 loop 上更新进度 state（跨线程通过 run_coroutine_threadsafe 调度）。"""
+        set_progress(current / total)
+        set_status_text(msg)
+
+    async def _start_scan_effect() -> None:
+        """open_=True 时启动扫描任务（use_effect 触发）。"""
+        if not open_:
+            return
+        if data_processor is None:
+            set_scan_state("error")
+            return
+
+        loop = asyncio.get_running_loop()
+        futures = futures_ref.current
+        assert futures is not None  # use_ref factory 首次渲染已执行，current 保证非 None
+
+        def on_progress(current: int, total: int, msg: str) -> None:
+            """工作线程回调：调度 _update_progress 到主 loop（线程安全）。"""
+            fut = asyncio.run_coroutine_threadsafe(
+                _update_progress(current, total, msg),
+                loop,
+            )
+            futures.add(fut)
+            fut.add_done_callback(futures.discard)
+
+        set_scan_state("scanning")
+        try:
+            scan_result = await data_processor.run_quality_scan(
+                sample_size=50,
+                progress_callback=on_progress,
+            )
+            set_result(scan_result)
+            set_scan_state("done")
+        except asyncio.CancelledError:
+            raise  # R2: CancelledError 必须传播以配合优雅停机
+        except Exception as ex:
+            logger.error("[HealthScanDialog] Scan failed: %s", ex, exc_info=True)
+            set_scan_state("error")
+
+    async def _cleanup_scan() -> None:
+        """卸载/open 变化时取消 pending futures（R2 兼容）。
+
+        ``future.cancel()`` 在 future 已完成时返回 False，未完成时触发
+        ``CancelledError`` 由 future 内部消化（run_coroutine_threadsafe 的 coroutine
+        收到 CancelledError），不向调用方传播——符合关机清理语义。
+        """
+        futures = futures_ref.current
+        assert futures is not None  # use_ref factory 首次渲染已执行，current 保证非 None
+        for f in list(futures):
+            if not f.done():
+                f.cancel()
+        futures.clear()
+
+    ft.use_effect(_start_scan_effect, dependencies=[open_], cleanup=_cleanup_scan)
+
+    def _close(_e=None) -> None:
+        set_open(False)
+        if on_close is not None:
+            on_close()
+
+    # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
+    content = _build_scan_content(
+        scan_state=scan_state,
+        progress=progress,
+        status_text=status_text,
+        result=result,
+        width=width,
+        height=height,
+    )
+
+    dialog = (
+        ft.AlertDialog(
+            modal=True,
+            title=ft.Text(I18n.get("scan_title"), size=16, weight=ft.FontWeight.BOLD),
+            content=content,
+            actions=[
+                ft.TextButton(I18n.get("common_close"), on_click=_close),
+            ],
+            actions_padding=10,
+        )
+        if open_
+        else None
+    )
+    ft.use_dialog(dialog)
+
+    # 宿主容器（不可见，仅承载 use_dialog hook）
+    return ft.Container(width=0, height=0)

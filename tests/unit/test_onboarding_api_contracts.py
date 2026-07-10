@@ -368,15 +368,12 @@ class TestLocaleChangeSignature:
         assert params == ["self"]
 
     def test_ai_brain_tab_locale_change_is_zero_arg(self):
-        """AIBrainTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """AIBrainTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 
-        sig = inspect.signature(AIBrainTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(AIBrainTab, "__wrapped__"), "AIBrainTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(AIBrainTab, "_on_locale_change"), "声明式 AIBrainTab 不应有 _on_locale_change"
 
     # --- 零参签名（§5.8 规范 2：回调方法签名无参数）---
 

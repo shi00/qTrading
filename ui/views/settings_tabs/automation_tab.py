@@ -1,10 +1,25 @@
+"""automation_tab — 声明式组件 (Phase D.4).
+
+从命令式容器子类重写为 ``@ft.component`` 函数组件范式
+(CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
+
+变更要点:
+- 2 个命令式容器子类 → 2 个 ``@ft.component`` 函数组件
+  (AutomationTab / NotificationsTab)
+- 移除命令式生命周期回调 / 手动刷新 / 手动重渲染 / page 引用持有
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+- 状态驱动: ConfigHandler 读写用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
+- page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+- 异步任务: ``page.run_task`` 调度; R2 CancelledError 不被 ``except Exception`` 捕获
+"""
+
 import logging
-import weakref
+from collections.abc import Callable
 
 import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SettingRow
-from ui.i18n import I18n, refresh_dropdown_options
+from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -20,639 +35,518 @@ _FONT_SIZE_SMALL = 12
 _FONT_SIZE_HINT = 11
 _ICON_SIZE_SMALL = 16
 _DROPDOWN_WIDTH = AppStyles.CONTROL_WIDTH_MD
-_CARD_PADDING = 15
-_CARD_BORDER_RADIUS = 8
 _SPACING_DEFAULT = 20
 _SPACING_SMALL = 10
 
 
-class AutomationTab(ft.Container):
-    """自动化任务设置标签页"""
+# ============================================================================
+# Module-level pure helpers
+# ============================================================================
 
-    def __init__(self, show_snack_callback):
-        super().__init__()
-        self.show_snack = show_snack_callback
-        self._locale_subscription_id = None
 
-        auto_update_enabled = ConfigHandler.is_auto_update_enabled()
-        auto_update_time = ConfigHandler.get_auto_update_time()
+def _build_time_options() -> list[ft.dropdown.Option]:
+    """构建时间选项列表"""
+    return [
+        ft.dropdown.Option("15:30", I18n.get("settings_opt_1530")),
+        ft.dropdown.Option("16:00", I18n.get("settings_opt_1600")),
+        ft.dropdown.Option("16:30", I18n.get("settings_opt_1630")),
+        ft.dropdown.Option("17:00", I18n.get("settings_opt_1700")),
+        ft.dropdown.Option("18:00", I18n.get("settings_opt_1800")),
+        ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
+    ]
 
-        self.schedule_enabled = ft.Switch(
-            label=I18n.get("settings_auto_update"),
-            value=auto_update_enabled,
-            on_change=self.on_schedule_toggle,
-        )
-        self.schedule_time = ft.Dropdown(
-            label=I18n.get("settings_update_time"),
-            width=_DROPDOWN_WIDTH,
-            value=auto_update_time,
-            options=self._build_time_options(),
-            on_select=self.on_schedule_time_change,
-            disabled=not auto_update_enabled,
-        )
 
-        self.schedule_status = ft.Text(
-            self._get_schedule_status_text(auto_update_enabled),
-            size=_FONT_SIZE_SMALL,
-            color=AppColors.SUCCESS if auto_update_enabled else AppColors.TEXT_HINT,
-        )
+def _build_search_engine_options() -> list[ft.dropdown.Option]:
+    """构建搜索引擎选项列表"""
+    return [
+        ft.dropdown.Option("search_std", I18n.get("settings_ai_concept_search_std")),
+        ft.dropdown.Option("search_pro", I18n.get("settings_ai_concept_search_pro")),
+    ]
 
-        ai_concept_enabled = ConfigHandler.is_ai_concept_schedule_enabled()
-        ai_concept_time = ConfigHandler.get_ai_concept_schedule_time()
 
-        self.ai_concept_enabled = ft.Switch(
-            label=I18n.get("settings_ai_concept_update"),
-            value=ai_concept_enabled,
-            on_change=self.on_ai_concept_toggle,
-        )
-        self.ai_concept_time = ft.Dropdown(
-            label=I18n.get("settings_update_time"),
-            width=_DROPDOWN_WIDTH,
-            value=ai_concept_time,
-            options=self._build_time_options(),
-            on_select=self.on_ai_concept_time_change,
-            disabled=not ai_concept_enabled,
-        )
+def _build_interval_options() -> list[ft.dropdown.Option]:
+    """构建新闻拉取间隔选项列表"""
+    return [
+        ft.dropdown.Option("30", I18n.get("settings_news_interval_30s")),
+        ft.dropdown.Option("60", I18n.get("settings_news_interval_60s")),
+        ft.dropdown.Option("300", I18n.get("settings_news_interval_5m")),
+        ft.dropdown.Option("900", I18n.get("settings_news_interval_15m")),
+    ]
 
-        self.ai_concept_status = ft.Text(
-            self._get_schedule_status_text(ai_concept_enabled),
-            size=_FONT_SIZE_SMALL,
-            color=AppColors.SUCCESS if ai_concept_enabled else AppColors.TEXT_HINT,
-        )
 
-        ai_concept_search_engine = ConfigHandler.get_ai_concept_search_engine()
-        self.ai_concept_search_engine = ft.Dropdown(
-            label=I18n.get("settings_ai_concept_search_engine"),
-            width=_DROPDOWN_WIDTH,
-            value=ai_concept_search_engine,
-            options=self._build_search_engine_options(),
-            on_select=self.on_ai_concept_search_engine_change,
-            disabled=not ai_concept_enabled,
-        )
+def _get_schedule_status_text(enabled: bool) -> str:
+    return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
 
-        self._build_content()
 
-    def _build_time_options(self):
-        """构建时间选项列表"""
-        return [
-            ft.dropdown.Option("15:30", I18n.get("settings_opt_1530")),
-            ft.dropdown.Option("16:00", I18n.get("settings_opt_1600")),
-            ft.dropdown.Option("16:30", I18n.get("settings_opt_1630")),
-            ft.dropdown.Option("17:00", I18n.get("settings_opt_1700")),
-            ft.dropdown.Option("18:00", I18n.get("settings_opt_1800")),
-            ft.dropdown.Option("20:00", I18n.get("settings_opt_2000")),
-        ]
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
 
-    def _build_search_engine_options(self):
-        """构建搜索引擎选项列表"""
-        return [
-            ft.dropdown.Option("search_std", I18n.get("settings_ai_concept_search_std")),
-            ft.dropdown.Option("search_pro", I18n.get("settings_ai_concept_search_pro")),
-        ]
 
-    def _build_content(self):
-        """构建 UI 内容"""
-        self.txt_title_main = ft.Text(
-            I18n.get("settings_auto_update"),
-            size=_FONT_SIZE_TITLE,
-            weight=ft.FontWeight.BOLD,
-            color=AppColors.TEXT_PRIMARY,
-        )
-        self.txt_desc_main = ft.Text(
-            I18n.get("settings_auto_desc"),
-            size=_FONT_SIZE_BODY,
-            color=AppColors.TEXT_SECONDARY,
-        )
+# ============================================================================
+# AutomationTab
+# ============================================================================
 
-        self.row_schedule = SettingRow(
-            icon=ft.Icons.SCHEDULE,
-            title=I18n.get("settings_auto_update"),
-            subtitle=I18n.get("settings_auto_desc"),
-            control=self.schedule_enabled,
-            icon_color=AppColors.PRIMARY,
-            title_key="settings_auto_update",
-            subtitle_key="settings_auto_desc",
-        )
 
-        self.row_time = SettingRow(
-            icon=ft.Icons.ACCESS_TIME,
-            title=I18n.get("settings_update_time"),
-            subtitle=I18n.get("settings_trading_days"),
-            control=self.schedule_time,
-            icon_color=AppColors.ACCENT,
-            title_key="settings_update_time",
-            subtitle_key="settings_trading_days",
-        )
+@ft.component
+def AutomationTab(show_snack_callback: Callable) -> ft.Container:
+    """自动化任务设置标签页 (声明式).
 
-        self.card_main = DashboardCard(
-            content=ft.Column(
-                [
-                    self.row_schedule,
-                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    self.row_time,
-                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    ft.Row(
-                        [
-                            ft.Icon(
-                                ft.Icons.INFO_OUTLINE,
-                                size=_ICON_SIZE_SMALL,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            self.schedule_status,
-                        ],
-                    ),
-                ],
-            ),
-        )
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - ConfigHandler 全局单例, 直接调用 (YAGNI 不建 VM)
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - 状态驱动: switch/dropdown value 用 ``use_state`` (声明式自动重渲染)
+    - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+    - 异步保存: ``page.run_task`` 调度, 失败时回滚 state
 
-        self.row_ai_concept_schedule = SettingRow(
-            icon=ft.Icons.AUTO_AWESOME,
-            title=I18n.get("settings_ai_concept_update"),
-            subtitle=I18n.get(
-                "settings_ai_concept_desc",
-            ),
-            control=self.ai_concept_enabled,
-            icon_color=AppColors.PRIMARY,
-            title_key="settings_ai_concept_update",
-            subtitle_key="settings_ai_concept_desc",
-        )
+    Args:
+        show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
+    """
+    # --- Subscribe to i18n + theme changes (auto-rerender) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-        self.row_ai_concept_time = SettingRow(
-            icon=ft.Icons.ACCESS_TIME,
-            title=I18n.get("settings_update_time"),
-            subtitle=I18n.get("settings_saturdays"),
-            control=self.ai_concept_time,
-            icon_color=AppColors.ACCENT,
-            title_key="settings_update_time",
-            subtitle_key="settings_saturdays",
-        )
+    # --- Pure UI state (ConfigHandler 读写) ---
+    auto_enabled, set_auto_enabled = ft.use_state(ConfigHandler.is_auto_update_enabled())
+    auto_time, set_auto_time = ft.use_state(ConfigHandler.get_auto_update_time())
+    ai_enabled, set_ai_enabled = ft.use_state(ConfigHandler.is_ai_concept_schedule_enabled())
+    ai_time, set_ai_time = ft.use_state(ConfigHandler.get_ai_concept_schedule_time())
+    ai_engine, set_ai_engine = ft.use_state(ConfigHandler.get_ai_concept_search_engine())
 
-        self.row_ai_concept_search_engine = SettingRow(
-            icon=ft.Icons.MANAGE_SEARCH,
-            title=I18n.get("settings_ai_concept_search_engine"),
-            subtitle=I18n.get("settings_ai_concept_search_engine_desc"),
-            control=self.ai_concept_search_engine,
-            icon_color=AppColors.ACCENT,
-            title_key="settings_ai_concept_search_engine",
-            subtitle_key="settings_ai_concept_search_engine_desc",
-        )
-
-        self.card_ai_concept = DashboardCard(
-            content=ft.Column(
-                [
-                    self.row_ai_concept_schedule,
-                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    self.row_ai_concept_time,
-                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    self.row_ai_concept_search_engine,
-                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    ft.Row(
-                        [
-                            ft.Icon(
-                                ft.Icons.INFO_OUTLINE,
-                                size=_ICON_SIZE_SMALL,
-                                color=AppColors.TEXT_SECONDARY,
-                            ),
-                            self.ai_concept_status,
-                        ],
-                    ),
-                ],
-            ),
-        )
-
-        self.txt_hint_bg = ft.Text(
-            I18n.get("settings_hint_bg_run"),
-            size=_FONT_SIZE_HINT,
-            color=AppColors.TEXT_HINT,
-        )
-
-        self.inner_container = ft.Container(
-            content=ft.Column(
-                scroll=ft.ScrollMode.AUTO,
-                controls=[
-                    self.txt_title_main,
-                    self.txt_desc_main,
-                    ft.Container(height=_SPACING_SMALL),
-                    self.card_main,
-                    self.card_ai_concept,
-                    self.txt_hint_bg,
-                ],
-                spacing=_SPACING_DEFAULT,
-            ),
-            **AppStyles.card(),
-        )
-        self.content = self.inner_container
-
-    def update_theme(self):
-        """Update styles on theme change — only Layer 2 custom colors."""
-        # Input fields
-        self.schedule_time.bgcolor = AppColors.INPUT_BG
-        self.schedule_time.color = AppColors.INPUT_TEXT
-        self.schedule_time.border_color = AppColors.INPUT_BORDER
-
-        # Status color (custom)
-        enabled = self.schedule_enabled.value
-        self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-
-        self.ai_concept_time.bgcolor = AppColors.INPUT_BG
-        self.ai_concept_time.color = AppColors.INPUT_TEXT
-        self.ai_concept_time.border_color = AppColors.INPUT_BORDER
-        self.ai_concept_search_engine.bgcolor = AppColors.INPUT_BG
-        self.ai_concept_search_engine.color = AppColors.INPUT_TEXT
-        self.ai_concept_search_engine.border_color = AppColors.INPUT_BORDER
-        ai_concept_enabled = self.ai_concept_enabled.value
-        self.ai_concept_status.color = AppColors.SUCCESS if ai_concept_enabled else ft.Colors.ON_SURFACE_VARIANT
-
-        if self.page:
-            self.update()
-
-    def did_mount(self):
-        """组件挂载后订阅语言变更"""
-        if getattr(self, "_mounted", False):
-            return
-        self._mounted = True
-        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
-        logger.debug("[AutomationTab] Subscribed to locale changes")
-
-    def will_unmount(self):
-        """组件卸载前取消订阅"""
-        self._mounted = False
-        if self._locale_subscription_id:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-            logger.debug("[AutomationTab] Unsubscribed from locale changes")
-
-    def _on_locale_change(self):
-        """语言变更回调
-
-        Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
-        """
+    # --- Async save handlers (R2: except Exception 不捕获 CancelledError) ---
+    async def _do_schedule_toggle(new_enabled: bool) -> None:
         try:
-            # 更新静态文本
-            self.schedule_enabled.label = I18n.get("settings_auto_update")
-            self.schedule_time.label = I18n.get("settings_update_time")
-            refresh_dropdown_options(self.schedule_time, self._build_time_options())
-            self.schedule_status.value = self._get_schedule_status_text(
-                self.schedule_enabled.value,
-            )
-
-            self.ai_concept_enabled.label = I18n.get(
-                "settings_ai_concept_update",
-            )
-            self.ai_concept_time.label = I18n.get("settings_update_time")
-            refresh_dropdown_options(self.ai_concept_time, self._build_time_options())
-            self.ai_concept_status.value = self._get_schedule_status_text(
-                self.ai_concept_enabled.value,
-            )
-
-            self.ai_concept_search_engine.label = I18n.get("settings_ai_concept_search_engine")
-            refresh_dropdown_options(self.ai_concept_search_engine, self._build_search_engine_options())
-
-            for row in [
-                self.row_schedule,
-                self.row_time,
-                self.row_ai_concept_schedule,
-                self.row_ai_concept_time,
-                self.row_ai_concept_search_engine,
-            ]:
-                row.update_locale()
-
-            # 重建整个内容以确保所有文本更新
-            self._build_content()
-            self._safe_update()
-        except Exception as e:
-            logger.warning("[AutomationTab] Failed to update locale: %s", e, exc_info=True)
-
-    def _safe_update(self):
-        """线程安全的 UI 更新，处理页面未附加的情况"""
-        try:
-            if self.page:
-                self.update()
-        except Exception as exc:
-            logger.debug("[AutomationTab] UI update skipped: %s", exc, exc_info=True)
-
-    def _get_schedule_status_text(self, enabled):
-        return I18n.get("settings_status_auto_on") if enabled else I18n.get("settings_status_auto_off")
-
-    def on_schedule_toggle(self, e):
-        """处理自动更新开关切换"""
-        if self.page:
-            self.page.run_task(self._do_schedule_toggle_async)
-
-    async def _do_schedule_toggle_async(self):
-        try:
-            enabled = self.schedule_enabled.value
             await ThreadPoolManager().run_async(
-                TaskType.IO, ConfigHandler.save_config, {"auto_update_enabled": enabled}
+                TaskType.IO, ConfigHandler.save_config, {"auto_update_enabled": new_enabled}
             )
-            self.schedule_status.value = self._get_schedule_status_text(enabled)
-            self.schedule_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-            self.schedule_time.disabled = not enabled
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(
-                    I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
+            if show_snack_callback:
+                show_snack_callback(
+                    I18n.get("settings_snack_auto_on") if new_enabled else I18n.get("settings_snack_auto_off"),
                 )
         except Exception as ex:
             logger.error("[AutomationTab] schedule toggle save failed: %s", ex, exc_info=True)
-            self.schedule_enabled.value = not enabled
-            self.schedule_time.disabled = enabled
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            set_auto_enabled(not new_enabled)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def on_schedule_time_change(self, e):
-        """处理更新时间变更"""
-        if self.page:
-            self.page.run_task(self._do_schedule_time_change_async)
-
-    async def _do_schedule_time_change_async(self):
+    async def _do_schedule_time_change(new_time: str) -> None:
         try:
-            selected_time = self.schedule_time.value
-            await ThreadPoolManager().run_async(
-                TaskType.IO, ConfigHandler.save_config, {"auto_update_time": selected_time}
-            )
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(
-                    I18n.get("settings_snack_time_set").format(time=selected_time),
-                )
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"auto_update_time": new_time})
+            if show_snack_callback:
+                show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
         except Exception as ex:
             logger.error("[AutomationTab] schedule time save failed: %s", ex, exc_info=True)
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def on_ai_concept_toggle(self, e):
-        if self.page:
-            self.page.run_task(self._do_ai_concept_toggle_async)
-
-    async def _do_ai_concept_toggle_async(self):
+    async def _do_ai_concept_toggle(new_enabled: bool) -> None:
         try:
-            enabled = self.ai_concept_enabled.value
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_ai_concept_schedule_enabled, enabled)
-            self.ai_concept_status.value = self._get_schedule_status_text(enabled)
-            self.ai_concept_status.color = AppColors.SUCCESS if enabled else ft.Colors.ON_SURFACE_VARIANT
-            self.ai_concept_time.disabled = not enabled
-            self.ai_concept_search_engine.disabled = not enabled
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(
-                    I18n.get("settings_snack_auto_on") if enabled else I18n.get("settings_snack_auto_off"),
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_ai_concept_schedule_enabled, new_enabled)
+            if show_snack_callback:
+                show_snack_callback(
+                    I18n.get("settings_snack_auto_on") if new_enabled else I18n.get("settings_snack_auto_off"),
                 )
         except Exception as ex:
             logger.error("[AutomationTab] ai concept toggle save failed: %s", ex, exc_info=True)
-            self.ai_concept_enabled.value = not enabled
-            self.ai_concept_time.disabled = enabled
-            self.ai_concept_search_engine.disabled = enabled
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            set_ai_enabled(not new_enabled)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def on_ai_concept_time_change(self, e):
-        if self.page:
-            self.page.run_task(self._do_ai_concept_time_change_async)
-
-    async def _do_ai_concept_time_change_async(self):
+    async def _do_ai_concept_time_change(new_time: str) -> None:
         try:
-            selected_time = self.ai_concept_time.value
             await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.set_ai_concept_schedule_time,
-                selected_time,  # type: ignore[untyped]
+                new_time,
             )
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(
-                    I18n.get("settings_snack_time_set").format(time=selected_time),
-                )
+            if show_snack_callback:
+                show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
         except Exception as ex:
             logger.error("[AutomationTab] ai concept time save failed: %s", ex, exc_info=True)
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def on_ai_concept_search_engine_change(self, e):
-        if self.page:
-            self.page.run_task(self._do_ai_concept_search_engine_change_async)
-
-    async def _do_ai_concept_search_engine_change_async(self):
+    async def _do_ai_concept_engine_change(new_engine: str) -> None:
         try:
-            selected_engine = self.ai_concept_search_engine.value
             await ThreadPoolManager().run_async(
                 TaskType.IO,
                 ConfigHandler.set_ai_concept_search_engine,
-                selected_engine,  # type: ignore[untyped]
+                new_engine,
             )
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(I18n.get("common_saved"))
+            if show_snack_callback:
+                show_snack_callback(I18n.get("common_saved"))
         except Exception as ex:
             logger.error("[AutomationTab] ai concept search engine save failed: %s", ex, exc_info=True)
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
-        # No responsive adjustment needed
+    # --- Event handlers (乐观更新 + 后台保存) ---
+    def _on_schedule_toggle(e: ft.ControlEvent) -> None:
+        new_enabled = e.control.value
+        set_auto_enabled(new_enabled)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_schedule_toggle, new_enabled)
+
+    def _on_schedule_time_change(e: ft.ControlEvent) -> None:
+        new_time = e.control.value
+        set_auto_time(new_time)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_schedule_time_change, new_time)
+
+    def _on_ai_concept_toggle(e: ft.ControlEvent) -> None:
+        new_enabled = e.control.value
+        set_ai_enabled(new_enabled)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_ai_concept_toggle, new_enabled)
+
+    def _on_ai_concept_time_change(e: ft.ControlEvent) -> None:
+        new_time = e.control.value
+        set_ai_time(new_time)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_ai_concept_time_change, new_time)
+
+    def _on_ai_concept_engine_change(e: ft.ControlEvent) -> None:
+        new_engine = e.control.value
+        set_ai_engine(new_engine)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_ai_concept_engine_change, new_engine)
+
+    # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
+    schedule_status_color = AppColors.SUCCESS if auto_enabled else AppColors.TEXT_HINT
+    ai_status_color = AppColors.SUCCESS if ai_enabled else AppColors.TEXT_HINT
+
+    schedule_enabled_switch = ft.Switch(
+        label=I18n.get("settings_auto_update"),
+        value=auto_enabled,
+        on_change=_on_schedule_toggle,
+    )
+    schedule_time_dropdown = ft.Dropdown(
+        label=I18n.get("settings_update_time"),
+        width=_DROPDOWN_WIDTH,
+        value=auto_time,
+        options=_build_time_options(),
+        on_select=_on_schedule_time_change,
+        disabled=not auto_enabled,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+    )
+    schedule_status = ft.Text(
+        _get_schedule_status_text(auto_enabled),
+        size=_FONT_SIZE_SMALL,
+        color=schedule_status_color,
+    )
+
+    ai_concept_enabled_switch = ft.Switch(
+        label=I18n.get("settings_ai_concept_update"),
+        value=ai_enabled,
+        on_change=_on_ai_concept_toggle,
+    )
+    ai_concept_time_dropdown = ft.Dropdown(
+        label=I18n.get("settings_update_time"),
+        width=_DROPDOWN_WIDTH,
+        value=ai_time,
+        options=_build_time_options(),
+        on_select=_on_ai_concept_time_change,
+        disabled=not ai_enabled,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+    )
+    ai_concept_status = ft.Text(
+        _get_schedule_status_text(ai_enabled),
+        size=_FONT_SIZE_SMALL,
+        color=ai_status_color,
+    )
+    ai_concept_engine_dropdown = ft.Dropdown(
+        label=I18n.get("settings_ai_concept_search_engine"),
+        width=_DROPDOWN_WIDTH,
+        value=ai_engine,
+        options=_build_search_engine_options(),
+        on_select=_on_ai_concept_engine_change,
+        disabled=not ai_enabled,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+    )
+
+    # --- SettingRows ---
+    row_schedule = SettingRow(
+        icon=ft.Icons.SCHEDULE,
+        title=I18n.get("settings_auto_update"),
+        subtitle=I18n.get("settings_auto_desc"),
+        control=schedule_enabled_switch,
+        icon_color=AppColors.PRIMARY,
+        title_key="settings_auto_update",
+        subtitle_key="settings_auto_desc",
+    )
+    row_time = SettingRow(
+        icon=ft.Icons.ACCESS_TIME,
+        title=I18n.get("settings_update_time"),
+        subtitle=I18n.get("settings_trading_days"),
+        control=schedule_time_dropdown,
+        icon_color=AppColors.ACCENT,
+        title_key="settings_update_time",
+        subtitle_key="settings_trading_days",
+    )
+    card_main = DashboardCard(
+        content=ft.Column(
+            [
+                row_schedule,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                row_time,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.INFO_OUTLINE,
+                            size=_ICON_SIZE_SMALL,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        schedule_status,
+                    ],
+                ),
+            ],
+        ),
+    )
+
+    row_ai_schedule = SettingRow(
+        icon=ft.Icons.AUTO_AWESOME,
+        title=I18n.get("settings_ai_concept_update"),
+        subtitle=I18n.get("settings_ai_concept_desc"),
+        control=ai_concept_enabled_switch,
+        icon_color=AppColors.PRIMARY,
+        title_key="settings_ai_concept_update",
+        subtitle_key="settings_ai_concept_desc",
+    )
+    row_ai_time = SettingRow(
+        icon=ft.Icons.ACCESS_TIME,
+        title=I18n.get("settings_update_time"),
+        subtitle=I18n.get("settings_saturdays"),
+        control=ai_concept_time_dropdown,
+        icon_color=AppColors.ACCENT,
+        title_key="settings_update_time",
+        subtitle_key="settings_saturdays",
+    )
+    row_ai_engine = SettingRow(
+        icon=ft.Icons.MANAGE_SEARCH,
+        title=I18n.get("settings_ai_concept_search_engine"),
+        subtitle=I18n.get("settings_ai_concept_search_engine_desc"),
+        control=ai_concept_engine_dropdown,
+        icon_color=AppColors.ACCENT,
+        title_key="settings_ai_concept_search_engine",
+        subtitle_key="settings_ai_concept_search_engine_desc",
+    )
+    card_ai = DashboardCard(
+        content=ft.Column(
+            [
+                row_ai_schedule,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                row_ai_time,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                row_ai_engine,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.INFO_OUTLINE,
+                            size=_ICON_SIZE_SMALL,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ai_concept_status,
+                    ],
+                ),
+            ],
+        ),
+    )
+
+    txt_title = ft.Text(
+        I18n.get("settings_auto_update"),
+        size=_FONT_SIZE_TITLE,
+        weight=ft.FontWeight.BOLD,
+        color=AppColors.TEXT_PRIMARY,
+    )
+    txt_desc = ft.Text(
+        I18n.get("settings_auto_desc"),
+        size=_FONT_SIZE_BODY,
+        color=AppColors.TEXT_SECONDARY,
+    )
+    txt_hint = ft.Text(
+        I18n.get("settings_hint_bg_run"),
+        size=_FONT_SIZE_HINT,
+        color=AppColors.TEXT_HINT,
+    )
+
+    return ft.Container(
+        content=ft.Column(
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                txt_title,
+                txt_desc,
+                ft.Container(height=_SPACING_SMALL),
+                card_main,
+                card_ai,
+                txt_hint,
+            ],
+            spacing=_SPACING_DEFAULT,
+        ),
+        **AppStyles.card(),
+    )
 
 
-class NotificationsTab(ft.Container):
-    """通知设置标签页"""
+# ============================================================================
+# NotificationsTab
+# ============================================================================
 
-    def __init__(self, show_snack_callback, page_ref):
-        super().__init__()
-        self.show_snack = show_snack_callback
-        # 使用弱引用避免闭包持有强引用导致的问题
-        self._page_ref = weakref.ref(page_ref) if page_ref else None
-        self._locale_subscription_id = None
 
-        enable_news = ConfigHandler.get_config("enable_news_alerts", True)
-        news_interval = ConfigHandler.get_config("news_poll_interval", 60)
+@ft.component
+def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
+    """通知设置标签页 (声明式).
 
-        self.news_alerts_enabled = ft.Switch(
-            label=I18n.get("settings_news_alerts"),
-            value=enable_news,
-            on_change=self.on_news_toggle,
-        )
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - ConfigHandler 全局单例, 直接调用 (YAGNI 不建 VM)
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - 状态驱动: switch/dropdown value 用 ``use_state``
+    - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+    - 异步保存: ``page.run_task`` 调度, 失败时回滚 state
 
-        self.news_interval = ft.Dropdown(
-            label=I18n.get("settings_news_interval"),
-            width=AppStyles.CONTROL_WIDTH_MD,
-            value=str(news_interval),
-            options=self._build_interval_options(),
-            on_select=self.on_interval_change,
-            disabled=not enable_news,
-        )
+    Args:
+        show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
+    """
+    # --- Subscribe to i18n + theme changes ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-        self._build_content()
+    # --- Pure UI state ---
+    enable_news = ConfigHandler.get_config("enable_news_alerts", True)
+    news_interval = ConfigHandler.get_config("news_poll_interval", 60)
+    news_enabled, set_news_enabled = ft.use_state(bool(enable_news))
+    interval_val, set_interval_val = ft.use_state(str(news_interval))
 
-    def _build_interval_options(self):
-        return [
-            ft.dropdown.Option("30", I18n.get("settings_news_interval_30s")),
-            ft.dropdown.Option("60", I18n.get("settings_news_interval_60s")),
-            ft.dropdown.Option("300", I18n.get("settings_news_interval_5m")),
-            ft.dropdown.Option("900", I18n.get("settings_news_interval_15m")),
-        ]
-
-    def _build_content(self):
-        """构建 UI 内容"""
-        self.txt_notify_title = ft.Text(
-            I18n.get("settings_notify_title"),
-            size=_FONT_SIZE_TITLE,
-            weight=ft.FontWeight.BOLD,
-            color=AppColors.TEXT_PRIMARY,
-        )
-
-        self.row_alerts = SettingRow(
-            icon=ft.Icons.NOTIFICATIONS_ACTIVE,
-            title=I18n.get("settings_news_alerts"),
-            subtitle=I18n.get("settings_notify_desc"),
-            control=self.news_alerts_enabled,
-            icon_color=AppColors.WARNING,
-            title_key="settings_news_alerts",
-            subtitle_key="settings_notify_desc",
-        )
-
-        self.row_interval = SettingRow(
-            icon=ft.Icons.TIMER,
-            title=I18n.get("settings_news_interval"),
-            subtitle=I18n.get("settings_news_interval_desc"),
-            control=self.news_interval,
-            icon_color=AppColors.INFO,
-            title_key="settings_news_interval",
-            subtitle_key="settings_news_interval_desc",
-        )
-
-        self.card_notify = DashboardCard(
-            content=ft.Column(
-                [
-                    self.row_alerts,
-                    ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
-                    self.row_interval,
-                ],
-            ),
-        )
-
-        self.txt_notify_desc = ft.Text(
-            I18n.get("settings_notify_desc"),
-            size=_FONT_SIZE_BODY,
-            color=AppColors.TEXT_SECONDARY,
-        )
-
-        self.inner_container = ft.Container(
-            content=ft.Column(
-                scroll=ft.ScrollMode.AUTO,
-                controls=[
-                    self.txt_notify_title,
-                    ft.Container(height=_SPACING_SMALL),
-                    self.card_notify,
-                    self.txt_notify_desc,
-                ],
-                spacing=_SPACING_DEFAULT,
-            ),
-            **AppStyles.card(),
-        )
-        self.content = self.inner_container
-
-    def update_theme(self):
-        """Update styles on theme change — only Layer 2 custom colors."""
-        # Input fields
-        self.news_interval.bgcolor = AppColors.INPUT_BG
-        self.news_interval.color = AppColors.INPUT_TEXT
-        self.news_interval.border_color = AppColors.INPUT_BORDER
-
-        if self.page:
-            self.update()
-
-    def did_mount(self):
-        """组件挂载后订阅语言变更"""
-        if getattr(self, "_mounted2", False):
-            return
-        self._mounted2 = True
-        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
-        logger.debug("[NotificationsTab] Subscribed to locale changes")
-
-    def will_unmount(self):
-        """组件卸载前取消订阅"""
-        self._mounted2 = False
-        if self._locale_subscription_id:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-            logger.debug("[NotificationsTab] Unsubscribed from locale changes")
-
-    def _on_locale_change(self):
-        """语言变更回调
-
-        Note: 此回调可能在非主线程触发，使用 _safe_update 确保线程安全
-        """
+    # --- Async save handlers (R2: except Exception 不捕获 CancelledError) ---
+    async def _do_news_toggle(new_enabled: bool) -> None:
         try:
-            self.news_alerts_enabled.label = I18n.get("settings_news_alerts")
-            self.news_interval.label = I18n.get("settings_news_interval")
-            refresh_dropdown_options(self.news_interval, self._build_interval_options())
-            for row in [self.row_alerts, self.row_interval]:
-                row.update_locale()
-            self._build_content()
-            self._safe_update()
-        except Exception as e:
-            logger.warning("[NotificationsTab] Failed to update locale: %s", e, exc_info=True)
-
-    def _safe_update(self):
-        """线程安全的 UI 更新，处理页面未附加的情况"""
-        try:
-            if self.page:
-                self.update()
-        except Exception as exc:
-            logger.debug("[NotificationsTab] UI update skipped: %s", exc, exc_info=True)
-
-    def on_news_toggle(self, e):
-        """处理新闻推送开关切换"""
-        page = self._page_ref() if self._page_ref else None
-        if page:
-            page.run_task(self._do_news_toggle_async)
-
-    async def _do_news_toggle_async(self):
-        try:
-            enabled = self.news_alerts_enabled.value
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"enable_news_alerts": enabled})
-            # Update visibility -> disabled state for UI consistency
-            self.news_interval.disabled = not enabled
-            self._safe_update()
-
-            if enabled:
-                if self.show_snack:
-                    self.show_snack(I18n.get("settings_snack_news_on"))
-            elif self.show_snack:
-                self.show_snack(I18n.get("settings_snack_news_off"))
+            await ThreadPoolManager().run_async(
+                TaskType.IO, ConfigHandler.save_config, {"enable_news_alerts": new_enabled}
+            )
+            if new_enabled:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("settings_snack_news_on"))
+            elif show_snack_callback:
+                show_snack_callback(I18n.get("settings_snack_news_off"))
         except Exception as ex:
             logger.error("[NotificationsTab] news toggle save failed: %s", ex, exc_info=True)
-            self.news_alerts_enabled.value = not enabled
-            self.news_interval.disabled = enabled
-            self._safe_update()
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            set_news_enabled(not new_enabled)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def on_interval_change(self, e):
-        """处理拉取间隔变更"""
-        page = self._page_ref() if self._page_ref else None
-        if page:
-            page.run_task(self._do_interval_change_async)
-
-    async def _do_interval_change_async(self):
+    async def _do_interval_change(new_val: str) -> None:
         try:
-            val = int(self.news_interval.value)  # type: ignore[untyped]
+            val = int(new_val)
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"news_poll_interval": val})
-            if self.show_snack:
-                self.show_snack(
-                    I18n.get("settings_snack_interval_set").format(interval=val),
-                )
+            if show_snack_callback:
+                show_snack_callback(I18n.get("settings_snack_interval_set").format(interval=val))
         except ValueError:
-            logger.warning("[NotificationsTab] interval invalid value: %s", self.news_interval.value)
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+            logger.warning("[NotificationsTab] interval invalid value: %s", new_val)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
         except Exception as ex:
             logger.error("[NotificationsTab] interval save failed: %s", ex, exc_info=True)
-            if self.show_snack:
-                self.show_snack(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+            if show_snack_callback:
+                show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
-        # No responsive adjustment needed
+    # --- Event handlers (乐观更新 + 后台保存) ---
+    def _on_news_toggle(e: ft.ControlEvent) -> None:
+        new_enabled = e.control.value
+        set_news_enabled(new_enabled)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_news_toggle, new_enabled)
+
+    def _on_interval_change(e: ft.ControlEvent) -> None:
+        new_val = e.control.value
+        set_interval_val(new_val)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_interval_change, new_val)
+
+    # --- Build controls (状态驱动) ---
+    news_switch = ft.Switch(
+        label=I18n.get("settings_news_alerts"),
+        value=news_enabled,
+        on_change=_on_news_toggle,
+    )
+    interval_dropdown = ft.Dropdown(
+        label=I18n.get("settings_news_interval"),
+        width=AppStyles.CONTROL_WIDTH_MD,
+        value=interval_val,
+        options=_build_interval_options(),
+        on_select=_on_interval_change,
+        disabled=not news_enabled,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+    )
+
+    # --- SettingRows ---
+    row_alerts = SettingRow(
+        icon=ft.Icons.NOTIFICATIONS_ACTIVE,
+        title=I18n.get("settings_news_alerts"),
+        subtitle=I18n.get("settings_notify_desc"),
+        control=news_switch,
+        icon_color=AppColors.WARNING,
+        title_key="settings_news_alerts",
+        subtitle_key="settings_notify_desc",
+    )
+    row_interval = SettingRow(
+        icon=ft.Icons.TIMER,
+        title=I18n.get("settings_news_interval"),
+        subtitle=I18n.get("settings_news_interval_desc"),
+        control=interval_dropdown,
+        icon_color=AppColors.INFO,
+        title_key="settings_news_interval",
+        subtitle_key="settings_news_interval_desc",
+    )
+    card_notify = DashboardCard(
+        content=ft.Column(
+            [
+                row_alerts,
+                ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                row_interval,
+            ],
+        ),
+    )
+
+    txt_title = ft.Text(
+        I18n.get("settings_notify_title"),
+        size=_FONT_SIZE_TITLE,
+        weight=ft.FontWeight.BOLD,
+        color=AppColors.TEXT_PRIMARY,
+    )
+    txt_desc = ft.Text(
+        I18n.get("settings_notify_desc"),
+        size=_FONT_SIZE_BODY,
+        color=AppColors.TEXT_SECONDARY,
+    )
+
+    return ft.Container(
+        content=ft.Column(
+            scroll=ft.ScrollMode.AUTO,
+            controls=[
+                txt_title,
+                ft.Container(height=_SPACING_SMALL),
+                card_notify,
+                txt_desc,
+            ],
+            spacing=_SPACING_DEFAULT,
+        ),
+        **AppStyles.card(),
+    )

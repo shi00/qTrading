@@ -18,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from services.task_manager import AppTask, TaskManager, TaskStatus
-from ui.components.settings_widgets import MetricCard
 from ui.theme import AppColors
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
@@ -74,8 +73,8 @@ def _make_mock_button():
 
 
 def _make_mock_metric_card():
-    card = MagicMock(spec=MetricCard)
-    # set_value / update_theme auto-mocked by spec; no manual assignment needed
+    # MetricCard 现为 @ft.component 函数，spec 会破坏 set_value 等属性访问
+    card = MagicMock()
     return card
 
 

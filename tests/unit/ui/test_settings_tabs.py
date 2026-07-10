@@ -1,5 +1,4 @@
 import contextlib
-import logging
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import flet as ft
@@ -1155,6 +1154,20 @@ class TestSystemTab:
             assert len(dropdown.options) > 0
 
 
+class _FakeActionChip:
+    """Fake ActionChip class — 消费方有 isinstance(ctrl, ActionChip) 检查，需用类而非 MagicMock。"""
+
+    def __init__(self, *args, **kwargs):
+        self.opacity = 1.0
+        self.disabled = False
+        self.set_text = MagicMock()
+        self.set_loading = MagicMock(side_effect=self._set_loading_impl)
+
+    def _set_loading_impl(self, is_loading: bool) -> None:
+        self.disabled = is_loading
+        self.opacity = 0.8 if is_loading else 1.0
+
+
 class TestDataSourceTab:
     patches: list
 
@@ -1164,8 +1177,9 @@ class TestDataSourceTab:
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
         self.mock_ch = mock_config_handler
-        from ui.components.settings_widgets import ActionChip, MetricCard
-
+        # MetricCard/ActionChip 现为 @ft.component 函数，patch 为 MagicMock/类
+        # 避免声明式组件在 __init__ 中构造时触发 Renderer 上下文要求
+        # ActionChip 需用类（_FakeActionChip）因消费方有 isinstance 检查
         self.patches = [
             patch("ui.views.settings_tabs.data_source_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.data_source_tab.AppColors", self.mock_ac),
@@ -1177,8 +1191,8 @@ class TestDataSourceTab:
             patch("ui.views.settings_tabs.data_source_tab.DashboardCard", MagicMock()),
             patch("ui.views.settings_tabs.data_source_tab.SectionHeader", MagicMock()),
             patch("ui.views.settings_tabs.data_source_tab.SettingRow", MagicMock()),
-            patch("ui.views.settings_tabs.data_source_tab.ActionChip", ActionChip),
-            patch("ui.views.settings_tabs.data_source_tab.MetricCard", MetricCard),
+            patch("ui.views.settings_tabs.data_source_tab.ActionChip", _FakeActionChip),
+            patch("ui.views.settings_tabs.data_source_tab.MetricCard", MagicMock()),
             patch("ui.views.settings_tabs.data_source_tab.UILogger"),
         ]
         with contextlib.ExitStack() as stack:
@@ -1270,53 +1284,6 @@ class TestDataSourceTab:
         assert tab.history_years_dropdown.value == "3"
         assert tab.history_years_dropdown.options is not None
         assert len(tab.history_years_dropdown.options) > 0
-
-
-class TestDatabaseTab:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
-            patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
-            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_tab(self):
-        from ui.views.settings_tabs.database_tab import DatabaseTab
-
-        return DatabaseTab(show_snack_callback=MagicMock())
-
-    def test_instantiation_creates_config_vm(self, mock_page):
-        tab = self._make_tab()
-        assert tab.config_vm is not None
-
-    def test_on_save_calls_show_snack_with_success(self, mock_page):
-        snack = MagicMock()
-        tab = self._make_tab()
-        tab.show_snack = snack
-        tab._on_save({"host": "localhost"})
-        # mock_i18n.get 返回 key 本身，I18n.get("settings_db_saved") → "settings_db_saved"
-        snack.assert_called_once_with("settings_db_saved", "success")
-
-    def test_on_test_success_logs_debug(self, mock_page, caplog):
-        tab = self._make_tab()
-        with caplog.at_level(logging.DEBUG, logger="ui.views.settings_tabs.database_tab"):
-            tab._on_test_success({"host": "localhost", "port": 5432, "database": "test"})
-        assert any("Database connection test successful" in r.message for r in caplog.records)
-
-    def test_on_mount_calls_reload_config(self, mock_page):
-        tab = self._make_tab()
-        tab.config_vm = MagicMock()
-        tab._on_mount()
-        tab.config_vm.reload_config.assert_called_once()
 
 
 class TestNotificationsTab:

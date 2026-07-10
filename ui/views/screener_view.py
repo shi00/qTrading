@@ -1,8 +1,26 @@
+"""screener_view — 声明式组件 (Phase F.3).
+
+从命令式容器子类重写为 ``@ft.component def ScreenerView(...) -> ft.Container``
+(CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook 已实现).
+
+变更要点:
+- 命令式 ``class ScreenerView(ft.Container)`` → ``@ft.component def ScreenerView(...)``
+- VM 通过 ``use_viewmodel(factory=lambda: ScreenerViewModel())`` 内部模式消费
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+- FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``, cleanup 时移除
+- PubSub (TaskManager) 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
+- LLM 流式 Markdown 卡片用 ref buffer + 节流 ``set_state`` (<50ms/帧)
+- page 访问用 ``ft.context.page`` (try/except 守卫 RuntimeError)
+- 移除全部命令式生命周期/主题/locale/resize/page_ref/占位字典 API (改用 state 驱动)
+- 消费声明式 ResizableSplitter/PaginatedTable/StockDetailDialog (函数调用, props 推送)
+"""
+
+import asyncio
 import datetime
 import logging
 import os
 import time
-
+from collections.abc import Callable
 from decimal import Decimal
 
 import flet as ft
@@ -13,7 +31,8 @@ from ui.components._markdown_safe import safe_open_url
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
-from ui.i18n import I18n, refresh_dropdown_options, translate_strategy_name
+from ui.hooks import use_viewmodel
+from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 from utils.log_decorators import UILogger
@@ -74,6 +93,12 @@ _VOLUME_COLS = frozenset({"vol", "volume", "amount"})
 
 _DATE_COLS = frozenset({"list_date", "trade_date"})
 
+# 流式卡片节流间隔 (秒) — <50ms/帧性能要求
+_STREAM_THROTTLE = 0.05
+
+# 流式卡片最大显示数 (防止内存爆炸)
+_MAX_LOG_CARDS = 10
+
 
 def _format_cell_value(col: str, val) -> str:
     if pd.isna(val):
@@ -115,799 +140,494 @@ def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
     return vt_columns, formatted_rows
 
 
-class ScreenerView(ft.Container):
-    def __init__(self, page: ft.Page):
-        super().__init__(expand=True)
-        self._page_ref = page
-        self._locale_subscription_id: object | None = None
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
 
-        # ViewModel
-        self.vm = ScreenerViewModel()
 
-        # UI State
-        self.selected_strategy = None
-        self._pending_strategy_key = None  # For deep linking
-        # Phase 2A.1 Task 2A.1.11：策略显示名缓存，供 refresh_locale 重建 tier_hint 文案
-        self._strategy_display_names: dict[str, str] = {}
+def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.dropdown.Option]:
+    """构建策略下拉框选项 (翻译策略名 + missing_apis 标记)。"""
+    options = []
+    for key, info in strategies_with_dep.items():
+        strategy_obj = strategy_mgr.get_strategy(key)
+        if strategy_obj and hasattr(strategy_obj, "name_key"):
+            name = I18n.get(strategy_obj.name_key)
+        else:
+            name = info["name"]
+        if info.get("missing_apis"):
+            name = f"{name} ⚠️"
+        options.append(ft.dropdown.Option(key, name))
+    return options
 
-        self.save_file_picker = ft.FilePicker()  # pragma: no cover
 
-        # --- UI Components ---
-        # 1. Controls
-        self.strategy_dropdown = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("select_strategy"),  # pragma: no cover
-            options=[],  # pragma: no cover
-            on_select=self._on_strategy_change,  # pragma: no cover
-            width=AppStyles.CONTROL_WIDTH_MD,  # pragma: no cover
-            text_size=14,  # pragma: no cover
-            bgcolor=AppColors.INPUT_BG,  # pragma: no cover
-            border_color=AppColors.INPUT_BORDER,  # pragma: no cover
-            color=AppColors.INPUT_TEXT,  # pragma: no cover
-            focused_border_color=AppColors.PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-        self.strategy_desc_text = ft.Text(  # pragma: no cover
-            I18n.get("screener_no_strategy_hint"),  # pragma: no cover
-            size=13,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-            no_wrap=False,  # pragma: no cover
-        )  # pragma: no cover
-        # Phase 2A.1 Task 2A.1.11：策略档位不足提示（非阻断，仅提示 AI 置信度可能偏低）
-        self.tier_hint_text = ft.Text(  # pragma: no cover
-            "",  # pragma: no cover
-            size=12,  # pragma: no cover
-            color=AppColors.WARNING,  # pragma: no cover
-            visible=False,  # pragma: no cover
-            no_wrap=False,  # pragma: no cover
-        )  # pragma: no cover
+def _build_page_size_options() -> list[ft.dropdown.Option]:
+    """构建每页大小下拉框选项。"""
+    per_page = I18n.get("screener_per_page")
+    return [ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50", "100")]
 
-        self.run_btn = ft.Button(  # pragma: no cover
-            content=I18n.get("run_screening"),  # pragma: no cover
-            icon=ft.Icons.PLAY_ARROW,  # pragma: no cover
-            on_click=self._on_run_click,  # pragma: no cover
-            disabled=True,  # pragma: no cover
-            style=AppStyles.primary_button(),  # pragma: no cover
-            height=45,  # pragma: no cover
-        )  # pragma: no cover
-        self.export_btn = ft.Button(  # pragma: no cover
-            content=I18n.get("screener_export"),  # pragma: no cover
-            icon=ft.Icons.DOWNLOAD,  # pragma: no cover
-            on_click=self._on_export_click,  # pragma: no cover
-            disabled=True,  # pragma: no cover
-            style=AppStyles.outline_button(),  # pragma: no cover
-            height=45,  # pragma: no cover
-        )  # pragma: no cover
-        self.status_text = ft.Text("", color=AppColors.TEXT_SECONDARY)  # pragma: no cover
-        self.progress_ring = ft.ProgressRing(  # pragma: no cover
-            visible=False,  # pragma: no cover
-            width=20,  # pragma: no cover
-            height=20,  # pragma: no cover
-            color=AppColors.ACCENT,  # pragma: no cover
-        )  # pragma: no cover
 
-        self.result_table = PaginatedTable(on_sort=self._on_virtual_sort)
+def _resolve_group_title(group_name: str, label_key: str | None = None) -> str:
+    """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
+    from ui.theme import DEFAULT_GROUP_LABELS
 
-        # 3. Dynamic Strategy Parameters Panel
-        self.params_container = ft.Column(spacing=8)  # pragma: no cover
+    if label_key:
+        return I18n.get(label_key)
+    if group_name in DEFAULT_GROUP_LABELS:
+        return DEFAULT_GROUP_LABELS[group_name]
+    return group_name
 
-        # 4. Logs (Virtualized via Column for auto-scrolling)
-        self.log_view = ft.Column(  # pragma: no cover
-            expand=True,  # pragma: no cover
-            spacing=4,  # pragma: no cover
-            scroll=ft.ScrollMode.ALWAYS,  # pragma: no cover
-            auto_scroll=True,  # pragma: no cover
-        )  # pragma: no cover
 
-        # 5. AI 占位卡登记（并发模式下用于"分析中"占位 → 结果替换）
-        self._ai_cards: dict[str, dict] = {}  # pragma: no cover
+def _compute_tier_hint(selected_strategy: str | None) -> str | None:
+    """检查策略档位是否足够，不足时返回提示文案 key，否则 None。"""
+    if not selected_strategy:
+        return None
+    try:
+        from data.external.tushare_client import TushareClient
+        from services.ai_service import get_strategy_min_tier
+        from utils.config_handler import ConfigHandler
 
-        # 5. Pagination
-        self.page_info_text = ft.Text(  # pragma: no cover
-            I18n.get("screener_page_info").format(current=1, total=1),  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-        self.prev_btn = ft.IconButton(  # pragma: no cover
-            ft.Icons.CHEVRON_LEFT,  # pragma: no cover
-            on_click=lambda e: self.vm.change_page(-1),  # pragma: no cover
-            icon_color=AppColors.PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-        self.next_btn = ft.IconButton(  # pragma: no cover
-            ft.Icons.CHEVRON_RIGHT,  # pragma: no cover
-            on_click=lambda e: self.vm.change_page(1),  # pragma: no cover
-            icon_color=AppColors.PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
+        current_tier = ConfigHandler.get_tushare_point_tier()
+        min_tier = get_strategy_min_tier(selected_strategy)
+        client = TushareClient()
+        if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
+            return I18n.get("sys_strategy_tier_hint")
+    except Exception as e:
+        logger.debug("[ScreenerView] tier hint check skipped: %s", e, exc_info=True)
+    return None
 
-        # Page size dropdown
-        self.page_size_dropdown = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("screener_page_size"),  # pragma: no cover
-            options=[  # pragma: no cover
-                ft.dropdown.Option(  # pragma: no cover
-                    "10",  # pragma: no cover
-                    text=f"10 {I18n.get('screener_per_page')}",  # pragma: no cover
-                ),  # pragma: no cover
-                ft.dropdown.Option(  # pragma: no cover
-                    "20",  # pragma: no cover
-                    text=f"20 {I18n.get('screener_per_page')}",  # pragma: no cover
-                ),  # pragma: no cover
-                ft.dropdown.Option(  # pragma: no cover
-                    "50",  # pragma: no cover
-                    text=f"50 {I18n.get('screener_per_page')}",  # pragma: no cover
-                ),  # pragma: no cover
-                ft.dropdown.Option(  # pragma: no cover
-                    "100",  # pragma: no cover
-                    text=f"100 {I18n.get('screener_per_page')}",  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            value="50",  # pragma: no cover
-            width=120,  # pragma: no cover
-            dense=True,  # pragma: no cover
-            text_size=13,  # pragma: no cover
-            on_select=self._on_page_size_change,  # pragma: no cover
-        )  # pragma: no cover
 
-        # 6. Detail Dialog
-        self.detail_dialog = None
+def _build_strategy_desc(
+    selected_strategy: str | None,
+    vm: ScreenerViewModel,
+) -> tuple[str, str]:
+    """构建策略描述文本和颜色 (desc, color)。"""
+    if not selected_strategy:
+        return "", AppColors.TEXT_PRIMARY
 
-        # 7. Mode Toggle (Realtime / History)
-        self.mode_toggle = ft.SegmentedButton(  # pragma: no cover
-            segments=[  # pragma: no cover
-                ft.Segment(  # pragma: no cover
-                    value="REALTIME",  # pragma: no cover
-                    label=ft.Text(I18n.get("screener_mode_run")),  # pragma: no cover
-                    icon=ft.Icon(ft.Icons.ELECTRIC_BOLT),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Segment(  # pragma: no cover
-                    value="HISTORY",  # pragma: no cover
-                    label=ft.Text(I18n.get("screener_mode_history")),  # pragma: no cover
-                    icon=ft.Icon(ft.Icons.HISTORY),  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            selected=["REALTIME"],  # V1: list[str]（非 set，msgpack 不支持 set 序列化）
-            on_change=self._on_mode_change,  # pragma: no cover
-        )  # pragma: no cover
+    strategy_obj = vm.strategy_mgr.get_strategy(selected_strategy)
+    strategies_with_dep = vm.strategy_mgr.get_all_with_dependencies()
+    dep_info = strategies_with_dep.get(selected_strategy, {})
 
-        # 8. History Tree (left sidebar, hidden by default)
-        self.history_tree_list = ft.ListView(  # pragma: no cover
-            expand=True,  # pragma: no cover
-            spacing=0,  # pragma: no cover
-        )  # pragma: no cover
-        self.history_load_more_btn = ft.TextButton(  # pragma: no cover
-            content=I18n.get("history_load_more"),  # pragma: no cover
-            icon=ft.Icons.EXPAND_MORE,  # pragma: no cover
-            on_click=self._on_load_more_history,  # pragma: no cover
-            visible=False,  # pragma: no cover
-        )  # pragma: no cover
-        self.history_tree_title_text = ft.Text(  # pragma: no cover
-            I18n.get("screener_mode_history"),  # pragma: no cover
-            weight=ft.FontWeight.BOLD,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-            size=14,  # pragma: no cover
-        )  # pragma: no cover
-        self.history_tree_container = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    ft.Container(  # pragma: no cover
-                        content=self.history_tree_title_text,  # pragma: no cover
-                        padding=ft.Padding.only(left=12, top=10, bottom=5),  # pragma: no cover
-                    ),  # pragma: no cover
-                    ft.Divider(height=1, color=AppColors.DIVIDER),  # pragma: no cover
-                    self.history_tree_list,  # pragma: no cover
-                    self.history_load_more_btn,  # pragma: no cover
-                ],  # pragma: no cover
-                spacing=0,  # pragma: no cover
-                expand=True,  # pragma: no cover
-            ),  # pragma: no cover
-            bgcolor=ft.Colors.SURFACE,  # pragma: no cover
-            border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),  # pragma: no cover
-        )  # pragma: no cover
-        self._history_tree_offset = 0  # For pagination
+    if strategy_obj:
+        defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
+        desc = strategy_obj.get_dynamic_description(defaults)
+    else:
+        desc = vm.get_strategy_desc(selected_strategy)
 
-        # Layout
-        self._setup_layout()
+    if dep_info.get("missing_apis"):
+        warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
+        desc = f"{desc}{warning_suffix}"
+        color = AppColors.WARNING
+    else:
+        color = AppColors.TEXT_PRIMARY
 
-    def did_mount(self):  # pragma: no cover
-        if getattr(self, "_mounted", False):
-            return
-        self._mounted = True
-        if self.page:
-            self.page.services.append(self.save_file_picker)
-            self.page.update()
+    return desc, color
 
-        # Initialize ViewModel and Bindings
-        self.vm.bind(
-            on_update=self._update_ui,
-            on_log=self._append_log,
-            on_status=self._update_status,
-            on_progress=self._toggle_progress,
-            on_log_stream_start=self._on_log_stream_start,
-            on_ai_card_start=self._on_ai_card_start,
-            on_task_unlock=self._on_task_unlock,
-        )
 
-        # Subscribe to TaskManager via ViewModel to unlock UI on background task completion
-        self.vm.subscribe_task_manager()
+def _format_history_date(date_str) -> tuple[str, str]:
+    """格式化历史树日期: 返回 (display_date, internal_key)。"""
+    if isinstance(date_str, (datetime.date, datetime.datetime)):
+        display = date_str.strftime("%Y-%m-%d")
+        key = display
+    else:
+        s = str(date_str)
+        display = f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 and s.isdigit() else s
+        key = s
+    return display, key
 
-        # Load Strategies Async
-        self.page.run_task(self._load_strategies)  # type: ignore[untyped]
 
-        # Subscribe to I18n locale changes
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
+@ft.component
+def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
+    """选股视图 (声明式).
 
-    def _refresh_table_viewport(self) -> None:
-        """splitter 拖动 / 模式切换时的唯一表格视口刷新入口。"""
-        table = getattr(self, "result_table", None)
-        if table and hasattr(table, "refresh_viewport"):
-            table.refresh_viewport()
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - ``use_viewmodel(factory=lambda: ScreenerViewModel())`` 内部模式实例化
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``
+    - PubSub (TaskManager) 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
+    - LLM 流式 Markdown 卡片用 ref buffer + 节流 ``set_state`` (<50ms/帧)
+    - page 访问用 ``ft.context.page`` (try/except 守卫)
 
-    def handle_resize(self, width: float = 0, height: float = 0):
-        """窗口 resize 通知 — 刷新虚拟表格视口。
+    Args:
+        initial_strategy: 深度链接策略 key (可选, 策略加载后自动执行)
+    """
+    # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
+    state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
 
-        Args:
-            width: 当前窗口宽度 (来自 WindowResizeEvent)，0 表示未知
-            height: 当前窗口高度 (来自 WindowResizeEvent)，0 表示未知
-        """
-        self._refresh_table_viewport()
+    # --- i18n / theme 订阅 (自动重渲染) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-    def will_unmount(self):  # pragma: no cover
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-        self.vm.unsubscribe_task_manager()
-        self.vm.dispose()
+    # --- 本地 UI 状态 ---
+    selected_strategy, set_selected_strategy = ft.use_state(None)
+    strategy_desc, set_strategy_desc = ft.use_state("")
+    strategy_desc_color, set_strategy_desc_color = ft.use_state(AppColors.TEXT_PRIMARY)
+    tier_hint, set_tier_hint = ft.use_state(None)
+    status_msg, set_status_msg = ft.use_state("")
+    status_color, set_status_color = ft.use_state(AppColors.TEXT_SECONDARY)
+    progress_visible, set_progress_visible = ft.use_state(False)
+    run_disabled, set_run_disabled = ft.use_state(True)
+    export_disabled, set_export_disabled = ft.use_state(True)
+    mode, set_mode = ft.use_state("REALTIME")
+    strategies_loaded, set_strategies_loaded = ft.use_state(False)
+    strategy_options, set_strategy_options = ft.use_state(())
+    page_size, set_page_size = ft.use_state(50)
+    history_tree_offset, set_history_tree_offset = ft.use_state(0)
+    history_tree_items, set_history_tree_items = ft.use_state(())
+    history_load_more_visible, set_history_load_more_visible = ft.use_state(False)
+    detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
+    pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
+    # params_version 触发重渲染; params_ref 持久化参数值 (避免 stale closure)
+    params_ref = ft.use_ref(lambda: {})
+    _params_version, bump_params = ft.use_state(0)
 
-        if self.page and getattr(self, "save_file_picker", None) in self.page.services:
-            self.page.services.remove(self.save_file_picker)
-            self.page.update()
+    # --- 流式卡片 (ref buffer + state 驱动渲染) ---
+    stream_buffers = ft.use_ref(lambda: {})
+    log_cards, set_log_cards = ft.use_state(())
+    log_cards_ref = ft.use_ref(lambda: ())
 
-        # Detach Flet Row references inside PaginatedTable to prevent memory leak
-        # IMPORTANT: use clear() instead of list_view.controls.clear() — the new
-        # virtualized table keeps a single _canvas Stack inside list_view.controls;
-        # clearing that would break re-mount (blank table on tab switch back).
-        if hasattr(self, "result_table") and self.result_table:
-            self.result_table.clear()
+    # --- FilePicker 生命周期 (use_ref 持有 + use_effect 注册/移除) ---
+    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
-        # Cleanup dialog reference
-        # NOTE(lazy): detail_dialog 已是声明式组件（Phase 3.2.7），dialog 生命周期由
-        # ft.use_dialog 自动管理（卸载时自动从 overlay 移除）。过渡期命令式消费方仅清理引用。
-        # ceiling: Phase 3.6.2 ScreenerView 声明式重写. upgrade: Task 3.6.2 完成.
-        self.detail_dialog = None
+    def _setup_file_picker() -> None:
+        page = _get_page()
+        if page is not None and file_picker not in page.services:
+            page.services.append(file_picker)
 
-        # U-1 fix: Reset mounted state for proper re-mount handling
-        self._mounted = False
+    def _cleanup_file_picker() -> None:
+        page = _get_page()
+        if page is not None and file_picker in page.services:
+            page.services.remove(file_picker)
 
-    def refresh_locale(self):
-        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作，禁止 IO）。"""
-        try:
-            # 顶部标题
-            if hasattr(self, "title_text"):
-                self.title_text.value = I18n.get("screener_title")
+    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
 
-            # 策略下拉框：label + options（重建策略名翻译，保留 missing_apis 标记与当前选择）
-            self.strategy_dropdown.label = I18n.get("select_strategy")
-            try:
-                # 复用依赖缓存，避免语言切换触发 IO（§5.8 规范：refresh_locale 纯 UI）
-                strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
-                options = []
-                for key, info in strategies_with_dep.items():
-                    strategy_obj = self.vm.strategy_mgr.get_strategy(key)
-                    if strategy_obj and hasattr(strategy_obj, "name_key"):
-                        name = I18n.get(strategy_obj.name_key)
-                    else:
-                        name = info["name"]
-                    if info.get("missing_apis"):
-                        name = f"{name} ⚠️"
-                    options.append(ft.dropdown.Option(key, name))
-                refresh_dropdown_options(self.strategy_dropdown, options)
-            except Exception as ex:
-                logger.debug("[ScreenerView] strategy dropdown rebuild skipped: %s", ex, exc_info=True)
+    # --- VM 流式回调绑定 (on_log_stream_start / on_ai_card_start) ---
 
-            # 策略描述
-            if self.selected_strategy:
-                strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
-                if strategy_obj and hasattr(strategy_obj, "get_dynamic_description"):
-                    defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
-                    self.strategy_desc_text.value = strategy_obj.get_dynamic_description(defaults)
-                else:
-                    self.strategy_desc_text.value = self.vm.get_strategy_desc(self.selected_strategy)
-            else:
-                self.strategy_desc_text.value = I18n.get("screener_no_strategy_hint")
+    def _on_log_stream_start(name: str) -> Callable:
+        """创建流式 Markdown 卡片, 返回节流 ``_on_chunk`` 闭包。"""
+        stream_buffers.current[name] = {
+            "reasoning": "",
+            "content": "",
+            "last_flush": 0.0,
+            "pending": False,
+        }
+        # 添加卡片 (若不存在)
+        current = log_cards_ref.current or ()
+        if not any(c["name"] == name for c in current):
+            new_cards = current + ({"name": name, "reasoning": "", "content": "", "is_analyzing": False},)
+            if len(new_cards) > _MAX_LOG_CARDS:
+                new_cards = new_cards[-_MAX_LOG_CARDS:]
+            log_cards_ref.current = new_cards
+            set_log_cards(new_cards)
 
-            # 按钮
-            self.run_btn.content = I18n.get("run_screening")
-            self.export_btn.content = I18n.get("screener_export")
-
-            # 分页信息
-            self.page_info_text.value = I18n.get("screener_page_info").format(
-                current=self.vm.page_no,
-                total=getattr(self.vm, "total_pages", 0),
-            )
-
-            # 每页大小下拉框：重建 options 以严格符合 §5.8 规范 4
-            self.page_size_dropdown.label = I18n.get("screener_page_size")
-            per_page = I18n.get("screener_per_page")
-            refresh_dropdown_options(
-                self.page_size_dropdown,
-                [ft.dropdown.Option(k, text=f"{k} {per_page}") for k in ("10", "20", "50", "100")],
-            )
-
-            # 模式切换 Segments
-            segments = self.mode_toggle.segments
-            if len(segments) >= 2:
-                if isinstance(segments[0].label, ft.Text):
-                    segments[0].label.value = I18n.get("screener_mode_run")
-                if isinstance(segments[1].label, ft.Text):
-                    segments[1].label.value = I18n.get("screener_mode_history")
-
-            # 历史加载更多按钮
-            self.history_load_more_btn.content = I18n.get("history_load_more")
-
-            # 历史树标题
-            if hasattr(self, "history_tree_title_text"):
-                self.history_tree_title_text.value = I18n.get("screener_mode_history")
-
-            # AI 分析报告标题
-            if hasattr(self, "log_title_text"):
-                self.log_title_text.value = I18n.get("ai_analysis_report")
-
-            # AI 占位卡：刷新"分析中"文本（in-flight 占位卡，已完成的卡片由 _append_log pop 移除）
-            for entry in self._ai_cards.values():
-                entry["content_md"].value = I18n.get("ai_card_analyzing")
-
-            # 结果表格列：失效列别名缓存后重建表头与行（label 来自 MetaDataManager）
-            try:
-                MetaDataManager.invalidate_cache()
-                df = self.vm.get_current_page_data()
-                if df is not None and not df.empty:
-                    vt_columns, formatted_rows = _build_table_data(df)
-                    self.result_table.set_columns(vt_columns)
-                    self.result_table.set_rows(
-                        formatted_rows,
-                        sort_col=self.vm.sort_column,
-                        sort_asc=self.vm.sort_ascending,
-                    )
-            except Exception as table_ex:
-                logger.debug("[ScreenerView] refresh_locale table rebuild skipped: %s", table_ex, exc_info=True)
-
-            # 策略参数面板
-            if self.selected_strategy:
-                self._render_strategy_params()
-
-            # Phase 2A.1 Task 2A.1.11：语言切换后重建策略档位提示文案（§5.8 规范：纯 UI 操作）
-            self._update_tier_hint_text()
-
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[ScreenerView] refresh_locale error: %s", e, exc_info=True)
-
-    def _on_task_unlock(self):  # pragma: no cover
-        """Called by ViewModel when strategy task completes."""
-        if not self.page:
-            return
-
-        async def _unlock():
-            if self.run_btn.disabled:
-                self.run_btn.disabled = False
-                self.run_btn.update()
-
-            if self.progress_ring.visible:
-                self.progress_ring.visible = False
-                self.progress_ring.update()
-
-        self.page.run_task(_unlock)
-
-    async def _load_strategies(self):  # pragma: no cover
-        try:
-            strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
-            if not self.page:
+        def _flush() -> None:
+            buf = stream_buffers.current.get(name)
+            if not buf:
                 return
+            snap_reas = buf["reasoning"]
+            snap_cont = buf["content"]
+            current_cards = log_cards_ref.current or ()
+            new_cards = tuple(
+                {**c, "reasoning": snap_reas, "content": snap_cont, "is_analyzing": False} if c["name"] == name else c
+                for c in current_cards
+            )
+            log_cards_ref.current = new_cards
+            set_log_cards(new_cards)
+            buf["last_flush"] = time.time()
+            buf["pending"] = False
 
-            options = []
-            # Phase 2A.1 Task 2A.1.11：同步维护显示名缓存，供 refresh_locale 重建 tier_hint
-            self._strategy_display_names.clear()
-            for key, info in strategies_with_dep.items():
-                strategy_obj = self.vm.strategy_mgr.get_strategy(key)
-                if strategy_obj and hasattr(strategy_obj, "name_key"):
-                    name = I18n.get(strategy_obj.name_key)
-                else:
-                    name = info["name"]
-                if info.get("missing_apis"):
-                    name = f"{name} ⚠️"
-                self._strategy_display_names[key] = name
-                options.append(ft.dropdown.Option(key, name))
+        def _on_chunk(chunk_text: str, is_reasoning: bool = False) -> None:
+            buf = stream_buffers.current.get(name)
+            if not buf:
+                return
+            if is_reasoning:
+                buf["reasoning"] += chunk_text
+            else:
+                buf["content"] += chunk_text
+            now = time.time()
+            if now - buf["last_flush"] >= _STREAM_THROTTLE:
+                _flush()
+            else:
+                buf["pending"] = True
 
-            self.strategy_dropdown.options = options
-            self.strategy_dropdown.update()
+        _on_chunk.final_flush = lambda: (
+            _flush() if (stream_buffers.current or {}).get(name, {}).get("pending") else None
+        )  # type: ignore[attr-defined]  # [reason: 动态挂载 final_flush 属性供 VM 终结调用]
+        return _on_chunk
+
+    def _on_ai_card_start(name: str) -> None:
+        """并发模式: 插入'分析中'占位卡。"""
+        current = log_cards_ref.current or ()
+        if not any(c["name"] == name for c in current):
+            new_cards = current + ({"name": name, "reasoning": "", "content": "", "is_analyzing": True},)
+            if len(new_cards) > _MAX_LOG_CARDS:
+                new_cards = new_cards[-_MAX_LOG_CARDS:]
+            log_cards_ref.current = new_cards
+            set_log_cards(new_cards)
+        return None
+
+    def _setup_vm_callbacks() -> None:
+        vm.on_log_stream_start = _on_log_stream_start
+        vm.on_ai_card_start = _on_ai_card_start
+
+    def _cleanup_vm_callbacks() -> None:
+        vm.on_log_stream_start = None
+        vm.on_ai_card_start = None
+
+    ft.use_effect(_setup_vm_callbacks, dependencies=[], cleanup=_cleanup_vm_callbacks)
+
+    # --- PubSub (TaskManager) 订阅/退订 ---
+
+    def _setup_task_manager() -> None:
+        vm.subscribe_task_manager()
+
+    def _cleanup_task_manager() -> None:
+        vm.unsubscribe_task_manager()
+
+    ft.use_effect(_setup_task_manager, dependencies=[], cleanup=_cleanup_task_manager)
+
+    # --- 策略加载 (mount 时执行一次) ---
+
+    async def _load_strategies_async() -> None:
+        try:
+            strategies_with_dep = vm.strategy_mgr.get_all_with_dependencies()
+            options = _build_strategy_options(strategies_with_dep, vm.strategy_mgr)
+            set_strategy_options(tuple(options))
+            set_strategies_loaded(True)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
-            logger.error(
-                "[ScreenerView] Strategy | Failed to load strategies: %s",
-                e,
-                exc_info=True,
-            )
-            self.status_text.value = I18n.get("screener_load_failed")
-            self.status_text.color = AppColors.ERROR
-            self.status_text.update()
+            logger.error("[ScreenerView] Failed to load strategies: %s", e, exc_info=True)
+            set_status_msg(I18n.get("screener_load_failed"))
+            set_status_color(AppColors.ERROR)
+
+    ft.use_effect(_load_strategies_async, dependencies=[])
+
+    # --- task_unlocked 响应 (VM state.task_unlocked 变化触发) ---
+
+    def _on_task_unlocked() -> None:
+        if state.task_unlocked:
+            set_progress_visible(False)
+            set_run_disabled(False)
+
+    ft.use_effect(_on_task_unlocked, dependencies=[state.task_unlocked])
+
+    # --- 深度链接 (策略加载后执行 pending_strategy) ---
+
+    async def _execute_pending_strategy() -> None:
+        if not strategies_loaded or not pending_strategy:
             return
-
-        # Handle Pending Deep Link
-        if self._pending_strategy_key:
-            logger.debug(
-                "[ScreenerView] Executing pending strategy: %s",
-                self._pending_strategy_key,
-            )
-            await self.select_and_run_strategy(self._pending_strategy_key)
-            self._pending_strategy_key = None
-
-    async def select_and_run_strategy(self, strategy_key: str):  # pragma: no cover
-        """Public API to select and run a strategy (Deep Link)"""
-        if not self.strategy_dropdown.options:
-            logger.debug(
-                "[ScreenerView] Strategies not loaded yet. Queuing %s",
-                strategy_key,
-            )
-            self._pending_strategy_key = strategy_key
+        key = pending_strategy
+        set_pending_strategy(None)
+        # 验证策略存在
+        if not any(opt.key == key for opt in strategy_options):
+            logger.warning("[ScreenerView] Pending strategy %s not found.", key)
             return
+        # 选中策略
+        set_selected_strategy(key)
+        desc, color = _build_strategy_desc(key, vm)
+        set_strategy_desc(desc)
+        set_strategy_desc_color(color)
+        set_tier_hint(_compute_tier_hint(key))
+        set_run_disabled(False)
+        # 默认参数
+        params_def = vm.get_strategy_params(key)
+        for p in params_def:
+            if p.get("name") == "ai_system_prompt":
+                from strategies.strategy_prompts import get_base_prompt
 
-        # Validate existence
-        exists = any(opt.key == strategy_key for opt in self.strategy_dropdown.options)
-        if not exists:
-            logger.warning("[ScreenerView] Strategy %s not found.", strategy_key)
+                params_ref.current[p["name"]] = get_base_prompt(key) or p.get("default", "")
+            else:
+                params_ref.current[p["name"]] = p.get("default")
+        bump_params(_params_version + 1)
+        # 清空旧卡片
+        log_cards_ref.current = ()
+        set_log_cards(())
+        # 执行
+        try:
+            await vm.run_strategy(key, params=dict(params_ref.current or {}))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("[ScreenerView] Pending strategy execution failed: %s", e, exc_info=True)
+
+    ft.use_effect(_execute_pending_strategy, dependencies=[strategies_loaded, pending_strategy])
+
+    # --- 事件 handler ---
+
+    def _on_strategy_change(e: ft.ControlEvent) -> None:
+        new_val = e.control.value if e and e.control else None
+        UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
+        set_selected_strategy(new_val)
+        set_run_disabled(not new_val)
+        desc, color = _build_strategy_desc(new_val, vm)
+        set_strategy_desc(desc)
+        set_strategy_desc_color(color)
+        set_tier_hint(_compute_tier_hint(new_val))
+        # 初始化参数默认值
+        if new_val:
+            params_def = vm.get_strategy_params(new_val)
+            for p in params_def:
+                if p.get("name") == "ai_system_prompt":
+                    from strategies.strategy_prompts import get_base_prompt
+
+                    params_ref.current[p["name"]] = get_base_prompt(new_val) or p.get("default", "")
+                else:
+                    params_ref.current[p["name"]] = p.get("default")
+            bump_params(_params_version + 1)
+
+    async def _on_run_click(e: ft.ControlEvent) -> None:
+        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={selected_strategy}")
+        if not selected_strategy:
             return
+        set_run_disabled(True)
+        # 清空旧卡片
+        log_cards_ref.current = ()
+        set_log_cards(())
+        try:
+            await vm.run_strategy(selected_strategy, params=dict(params_ref.current or {}))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("[ScreenerView] Run strategy failed: %s", exc, exc_info=True)
 
-        self.strategy_dropdown.value = strategy_key
-        self.selected_strategy = strategy_key
-        # Update description manually for deep link
-        desc = self.vm.get_strategy_desc(strategy_key)
-        self.strategy_desc_text.value = desc
-        self.strategy_desc_text.update()
-        self.strategy_dropdown.update()
+    def _on_run_click_sync(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_on_run_click, e)
 
-        # Unlock button
-        self.run_btn.disabled = False
-        self.run_btn.update()
+    async def _on_sort(col_id: str, new_asc: bool) -> None:
+        try:
+            await vm.sort_data(col_id, new_asc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("[ScreenerView] Sort failed: %s", e, exc_info=True)
 
-        # Render strategy params (so defaults are available for deep link)
-        self._render_strategy_params()
+    def _on_virtual_sort(col_id: str, new_asc: bool) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_on_sort, col_id, new_asc)
 
-        # Execute with default params
-        self.log_view.controls.clear()
-        self.log_view.update()
-        params = self._collect_params()
-        await self.vm.run_strategy(strategy_key, params=params)
-
-    def _setup_layout(self):  # pragma: no cover
-        # ==========================================
-        # 1. Top Control Deck (Card Layout)
-        # ==========================================
-        # Left side: Title + Mode Toggle + Dropdown + Desc
-        self.title_text = ft.Text(  # pragma: no cover
-            I18n.get("screener_title"),  # pragma: no cover
-            size=20,  # pragma: no cover
-            weight=ft.FontWeight.BOLD,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-        title_row = ft.Row(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),  # pragma: no cover
-                self.title_text,  # pragma: no cover
-                ft.Container(width=20),  # pragma: no cover
-                self.mode_toggle,  # pragma: no cover
-            ],  # pragma: no cover
-            alignment=ft.MainAxisAlignment.START,  # pragma: no cover
-            spacing=10,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.realtime_controls = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Row([self.strategy_dropdown], spacing=10),  # pragma: no cover
-                self.strategy_desc_text,  # pragma: no cover
-                self.tier_hint_text,  # pragma: no cover
-                self.params_container,  # pragma: no cover
-            ],  # pragma: no cover
-            spacing=10,  # pragma: no cover
-            visible=True,  # pragma: no cover
-        )  # pragma: no cover
-
-        left_controls = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                title_row,  # pragma: no cover
-                self.realtime_controls,  # pragma: no cover
-            ],  # pragma: no cover
-            spacing=10,  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
-
-        status_row = ft.Row(  # pragma: no cover
-            [self.progress_ring, self.status_text],  # pragma: no cover
-            alignment=ft.MainAxisAlignment.END,  # pragma: no cover
-            spacing=10,  # pragma: no cover
-        )  # pragma: no cover
-
-        right_controls = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                status_row,  # pragma: no cover
-                ft.Row(  # pragma: no cover
-                    [self.export_btn, self.run_btn],  # pragma: no cover
-                    spacing=15,  # pragma: no cover
-                    alignment=ft.MainAxisAlignment.END,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.END,  # pragma: no cover
-        )  # pragma: no cover
-
-        control_card = ft.Container(  # pragma: no cover
-            content=ft.Row(  # pragma: no cover
-                [left_controls, right_controls],  # pragma: no cover
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
-                vertical_alignment=ft.CrossAxisAlignment.START,  # pragma: no cover
-            ),  # pragma: no cover
-            **AppStyles.dashboard_card(padding=20),  # pragma: no cover
-        )  # pragma: no cover
-
-        # ==========================================
-        # 2. Middle Data Grid
-        # ==========================================
-        pagination_row = ft.Row(  # pragma: no cover
-            [  # pragma: no cover
-                self.prev_btn,  # pragma: no cover
-                self.page_info_text,  # pragma: no cover
-                self.next_btn,  # pragma: no cover
-                ft.Container(width=20),  # pragma: no cover
-                self.page_size_dropdown,  # pragma: no cover
-            ],  # pragma: no cover
-            alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-        table_card = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    self.result_table,  # pragma: no cover
-                    ft.Divider(height=1, color=AppColors.DIVIDER),  # pragma: no cover
-                    pagination_row,  # pragma: no cover
-                ],  # pragma: no cover
-                spacing=0,  # pragma: no cover
-                expand=True,  # pragma: no cover
-            ),  # pragma: no cover
-            **AppStyles.dashboard_card(padding=0),  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
-
-        # ==========================================
-        # 3. Bottom AI Analysis View (Streamed Cards)
-        # ==========================================
-        self.log_title_text = ft.Text(  # pragma: no cover
-            I18n.get("ai_analysis_report"),  # pragma: no cover
-            font_family="Roboto",  # pragma: no cover
-            weight=ft.FontWeight.BOLD,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.log_view_container = ft.Container(  # pragma: no cover
-            content=self.log_view,  # pragma: no cover
-            border_radius=8,  # pragma: no cover
-            padding=5,  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.log_card = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [self.log_title_text, self.log_view_container],  # pragma: no cover
-                spacing=5,  # pragma: no cover
-            ),  # pragma: no cover
-            expand=True,  # pragma: no cover
-            padding=ft.Padding.only(top=10),  # pragma: no cover
-        )  # pragma: no cover
-
-        # ==========================================
-        # 4. Right content column (table + log)
-        # ==========================================
-        right_content = ft.Column([table_card, self.log_card], expand=True, spacing=10)  # pragma: no cover
-
-        # ==========================================
-        # 5. Main Layout: ResizableSplitter(left_tree + right_content)
-        # ==========================================
-        self._main_splitter = ResizableSplitter(  # pragma: no cover
-            left_content=self.history_tree_container,  # pragma: no cover
-            right_content=right_content,  # pragma: no cover
-            config_key="ui_splitter_screener_history",  # pragma: no cover
-            default_width=250,  # pragma: no cover
-            min_width=220,  # pragma: no cover
-            max_width=420,  # pragma: no cover
-            collapsible=True,  # pragma: no cover
-            on_resize=self._refresh_table_viewport,  # pragma: no cover
-        )  # pragma: no cover
-        # 初始为 REALTIME 模式，折叠历史树侧栏
-        self._main_splitter.set_left_collapsed(True)  # pragma: no cover
-        main_body = self._main_splitter  # pragma: no cover
-
-        # ==========================================
-        # Final Assembly
-        # ==========================================
-        self.content = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                control_card,  # pragma: no cover
-                main_body,  # pragma: no cover
-            ],  # pragma: no cover
-            expand=True,  # pragma: no cover
-            spacing=15,  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,  # pragma: no cover
-        )  # pragma: no cover
-
-    # --- Mode Switching & History ---
-
-    def _on_mode_change(self, e):  # pragma: no cover
-        """Handle SegmentedButton mode toggle.
-        NOTE: This event handler runs in Flet's worker thread.
-        All UI mutations must be routed through page.run_task() to avoid
-        cross-thread races with _do_update() on the async event loop.
-        """
-        UILogger.log_action(
-            "ScreenerView",
-            "Toggle",
-            f"mode={list(e.control.selected)[0] if e.control.selected else 'unknown'}",
+    async def _on_export_click(e: ft.ControlEvent) -> None:
+        UILogger.log_action("ScreenerView", "Click", "btn_export")
+        df = vm.get_export_data()
+        if df is None:
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("data_export_no_data"), "error")
+            return
+        timestamp = get_now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"screener_results_{timestamp}.csv"
+        filepath = await file_picker.save_file(
+            dialog_title=I18n.get("data_export_save_title"),
+            file_name=default_filename,
+            allowed_extensions=["csv"],
         )
-        selected = e.control.selected
+        if not filepath:
+            return
+        set_export_disabled(True)
+        try:
+            path, error = await vm.export_results(filepath)
+            page = _get_page()
+            if path:
+                filename = os.path.basename(filepath)
+                if page is not None and hasattr(page, "show_toast"):
+                    page.show_toast(I18n.get("data_export_success", file=filename), "success")
+            elif page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("data_export_fail"), "error")
+        except Exception as ex:
+            logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("data_export_fail"), "error")
+        finally:
+            set_export_disabled(False)
+
+    def _on_export_click_sync(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_on_export_click, e)
+
+    def _on_page_size_change(e: ft.ControlEvent) -> None:
+        try:
+            new_size = int(e.control.value if e and e.control else 50)
+            vm.change_page_size(new_size)
+            set_page_size(new_size)
+        except (ValueError, TypeError):
+            pass
+
+    def _on_prev_page(e: ft.ControlEvent) -> None:
+        vm.change_page(-1)
+
+    def _on_next_page(e: ft.ControlEvent) -> None:
+        vm.change_page(1)
+
+    def _on_mode_change(e: ft.ControlEvent) -> None:
+        selected = e.control.selected if e and e.control else []
         if not selected:
             return
-        mode = list(selected)[0]
-        if mode == "HISTORY":
-            self.page.run_task(self._switch_to_history_mode)  # type: ignore[untyped]
+        new_mode = list(selected)[0]
+        UILogger.log_action("ScreenerView", "Toggle", f"mode={new_mode}")
+        if new_mode == mode:
+            return
+        set_mode(new_mode)
+        if new_mode == "HISTORY":
+            vm.switch_to_history()
+            # 清空表格
+            set_history_tree_offset(0)
+            set_history_tree_items(())
+            page = _get_page()
+            if page is not None:
+                page.run_task(_load_history_tree, False)
         else:
-            self.page.run_task(self._switch_to_realtime_mode)  # type: ignore[untyped]
+            vm.switch_to_realtime()
 
-    async def _switch_to_history_mode(self):  # pragma: no cover
-        """Activate history viewing mode."""
-        self.vm.switch_to_history()
-        # Show tree, hide realtime controls and log card
-        self._main_splitter.set_left_collapsed(False)
-        self.realtime_controls.visible = False
-        self.log_card.visible = False
-        self.run_btn.visible = False
-        # Clear table
-        self.result_table.set_columns([])
-        self.result_table.set_rows([], sort_col=None, sort_asc=True)
-        # Load tree
-        self._history_tree_offset = 0
-        if self.page:
-            self.page.update()
-        await self._load_history_tree(append=False)
-
-    async def _switch_to_realtime_mode(self):  # pragma: no cover
-        """Activate realtime execution mode."""
-        self.vm.switch_to_realtime()
-        # Hide tree, show realtime controls and log card
-        self._main_splitter.set_left_collapsed(True)
-        self.realtime_controls.visible = True
-        self.log_card.visible = True
-        self.run_btn.visible = True
-        self._render_table_sync()
-        if self.page:
-            self.page.update()
-
-    async def _load_history_tree(self, append=False):  # pragma: no cover
-        """Fetch and render the history tree from DB."""
+    async def _load_history_tree(append: bool) -> None:
+        """加载历史树数据。"""
         try:
-            tree_data = await self.vm.load_history_tree(
-                offset=self._history_tree_offset,
-            )
-            if not self.page:
-                return
-
-            if not append:
-                self.history_tree_list.controls.clear()
-
+            tree_data = await vm.load_history_tree(offset=history_tree_offset)
             if not tree_data:
                 if not append:
-                    self.history_tree_list.controls.append(
-                        ft.Container(
-                            content=ft.Text(
-                                I18n.get("screener_no_results"),
-                                color=AppColors.TEXT_SECONDARY,
-                                size=13,
-                            ),
-                            padding=20,
-                        ),
-                    )
-                self.history_load_more_btn.visible = False
+                    set_history_tree_items(())
+                set_history_load_more_visible(False)
+                return
+            items = []
+            for date_str, strategies in tree_data.items():
+                display_date, d_key = _format_history_date(date_str)
+                total_cnt = sum(s["cnt"] for s in strategies)
+                items.append(
+                    {
+                        "display_date": display_date,
+                        "d_key": d_key,
+                        "total_cnt": total_cnt,
+                        "strategies": strategies,
+                    }
+                )
+            if append:
+                set_history_tree_items(history_tree_items + tuple(items))
             else:
-                for date_str, strategies in tree_data.items():
-                    total_cnt = sum(s["cnt"] for s in strategies)
-                    # Format date for display
-                    if isinstance(date_str, (datetime.date, datetime.datetime)):
-                        display_date = date_str.strftime("%Y-%m-%d")
-                        d_key = date_str.strftime("%Y-%m-%d")  # Use ISO format for internal key tracking
-                    else:
-                        date_str_s = str(date_str)
-                        display_date = (
-                            f"{date_str_s[:4]}-{date_str_s[4:6]}-{date_str_s[6:]}"
-                            if len(date_str_s) == 8 and date_str_s.isdigit()
-                            else date_str_s
-                        )
-                        d_key = date_str_s
-
-                    # Build subtiles (strategy items)
-                    subtiles = []
-                    # "All strategies" option
-                    subtiles.append(
-                        ft.ListTile(
-                            leading=ft.Icon(
-                                ft.Icons.SELECT_ALL,
-                                size=18,
-                                color=AppColors.ACCENT,
-                            ),
-                            title=ft.Text(
-                                f"{I18n.get('screener_all_strategies')} ({total_cnt})",
-                                size=13,
-                            ),
-                            on_click=lambda e, d=d_key: self._on_tree_item_click(
-                                d,
-                                run_id=None,
-                            ),
-                            dense=True,
-                        ),
-                    )
-                    for s in strategies:
-                        strategy_display = translate_strategy_name(s["strategy_name"])
-                        run_suffix = f" [{s['run_id'][:8]}]" if len(strategies) > 1 else ""
-                        subtiles.append(
-                            ft.ListTile(
-                                leading=ft.Icon(
-                                    ft.Icons.TRENDING_UP,
-                                    size=16,
-                                    color=AppColors.TEXT_SECONDARY,
-                                ),
-                                title=ft.Text(
-                                    f"{strategy_display}{run_suffix} ({s['cnt']})",
-                                    size=13,
-                                ),
-                                on_click=lambda e, d=d_key, rid=s["run_id"]: self._on_tree_item_click(d, run_id=rid),
-                                dense=True,
-                            ),
-                        )
-
-                    tile = ft.ExpansionTile(
-                        title=ft.Text(
-                            f"📅 {display_date}",
-                            size=14,
-                            weight=ft.FontWeight.W_500,
-                        ),
-                        subtitle=ft.Text(
-                            I18n.get("history_total").format(
-                                count=total_cnt,
-                            ),
-                            size=11,
-                            color=AppColors.TEXT_SECONDARY,
-                        ),
-                        controls=subtiles,
-                        expanded=(self._history_tree_offset == 0 and self.history_tree_list.controls.__len__() == 0),
-                        collapsed_icon_color=AppColors.TEXT_SECONDARY,
-                    )
-                    self.history_tree_list.controls.append(tile)
-
-                self.history_load_more_btn.visible = len(tree_data) >= 5  # Show if likely more data
-                self._history_tree_offset += len(tree_data) * 5  # Advance offset
-
-            self.history_tree_list.update()
-            self.history_load_more_btn.update()
-
+                set_history_tree_items(tuple(items))
+            set_history_load_more_visible(len(tree_data) >= 5)
+            set_history_tree_offset(history_tree_offset + len(tree_data) * 5)
+        except asyncio.CancelledError:
+            raise
         except Exception as ex:
-            logger.error(
-                "[ScreenerView] History | ❌ Failed to load history tree: %s",
-                ex,
-                exc_info=True,
-            )
-            if self.page and hasattr(self.page, "show_toast"):
-                self.page.show_toast(I18n.get("screener_load_failed"), "error")  # type: ignore[untyped]
+            logger.error("[ScreenerView] History tree load failed: %s", ex, exc_info=True)
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("screener_load_failed"), "error")
 
-    def _on_tree_item_click(self, trade_date: str, strategy_name=None, run_id=None):  # pragma: no cover
-        """Handle click on a tree node to load historical records."""
-        if not self.page:
-            return
-        self.page.run_task(self._load_history_for_date, trade_date, strategy_name, run_id)
+    def _on_load_more_history(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_load_history_tree, True)
 
-    async def _load_history_for_date(self, trade_date, strategy_name=None, run_id=None):
-        """Load historical data for a specific run_id or date/strategy and refresh table."""
-        self._toggle_progress(True)
+    async def _load_history_for_date(trade_date: str, strategy_name: str | None, run_id: str | None) -> None:
+        set_progress_visible(True)
         if isinstance(trade_date, (datetime.date, datetime.datetime)):
             display = trade_date.strftime("%Y-%m-%d")
             trade_date = display
@@ -918,123 +638,264 @@ class ScreenerView(ft.Container):
             label = f"#{run_id[:8]}"
         else:
             label = translate_strategy_name(strategy_name) if strategy_name else I18n.get("screener_all_strategies")
-        self._update_status(f"{display} / {label}", "blue")
-        await self.vm.load_history_data(trade_date, strategy_name, run_id)  # type: ignore[arg-type]
-        self._toggle_progress(False)
-
-    def _on_load_more_history(self, e):
-        """Load more history tree entries."""
-        if self.page:
-            self.page.run_task(self._load_history_tree, append=True)
-
-    # --- Event Handlers ---
-
-    def _on_strategy_change(self, e):
-        UILogger.log_action(
-            "ScreenerView",
-            "Select",
-            f"strategy={self.strategy_dropdown.value}",
-        )
-        self.selected_strategy = self.strategy_dropdown.value
-        self.run_btn.disabled = not self.selected_strategy
-
-        if self.selected_strategy:
-            strategy_obj = self.vm.strategy_mgr.get_strategy(self.selected_strategy)
-
-            strategies_with_dep = self.vm.strategy_mgr.get_all_with_dependencies()
-            dep_info = strategies_with_dep.get(self.selected_strategy, {})
-
-            if strategy_obj:
-                defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
-                desc = strategy_obj.get_dynamic_description(defaults)
-            else:
-                desc = self.vm.get_strategy_desc(self.selected_strategy)
-
-            if dep_info.get("missing_apis"):
-                warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
-                desc = f"{desc}{warning_suffix}"
-                self.strategy_desc_text.color = AppColors.WARNING
-            else:
-                self.strategy_desc_text.color = AppColors.TEXT_PRIMARY
-
-            self.strategy_desc_text.value = desc
-        else:
-            self.strategy_desc_text.value = ""
-            self.strategy_desc_text.color = AppColors.TEXT_PRIMARY
-
-        # Phase 2A.1 Task 2A.1.11：策略档位不足提示（非阻断，仅文本提示）
-        self._update_tier_hint_text()
-
-        self.strategy_desc_text.update()
-        self.tier_hint_text.update()
-        self.run_btn.update()
-
-        self._render_strategy_params()
-
-    def _update_tier_hint_text(self) -> None:
-        """Phase 2A.1 Task 2A.1.11：根据当前策略与档位更新 tier_hint_text。
-
-        比较当前档位与 ``get_strategy_min_tier(selected_strategy)``，低于时显示
-        ``sys_strategy_tier_hint`` 本地化提示（非阻断，仅提示 AI 置信度可能偏低）。
-        refresh_locale 也会调用本方法重建提示文案。
-        """
-        if not self.selected_strategy:
-            self.tier_hint_text.visible = False
-            return
-
+        set_status_msg(f"{display} / {label}")
+        set_status_color("blue")
         try:
-            # lazy import 避免循环依赖；services/ 与 data/ 都是 ui/ 的合法下游层（§4.1）
-            from data.external.tushare_client import TushareClient
-            from services.ai_service import get_strategy_min_tier
+            await vm.load_history_data(trade_date, strategy_name, run_id)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            set_progress_visible(False)
+
+    def _on_tree_item_click(trade_date: str, strategy_name: str | None = None, run_id: str | None = None) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_load_history_for_date, trade_date, strategy_name, run_id)
+
+    def _on_row_click(row_data: dict) -> None:
+        """行点击 → 打开详情对话框。"""
+        ts_code = row_data.get("ts_code", "")
+        raw_data = _raw_row_lookup.get(ts_code, row_data)
+        set_detail_dialog_data(raw_data)
+
+    def _on_detail_close() -> None:
+        set_detail_dialog_data(None)
+
+    # --- 参数面板 helper ---
+
+    def _update_param(name: str, value) -> None:
+        params_ref.current = {**(params_ref.current or {}), name: value}
+        bump_params(_params_version + 1)
+
+    def _on_slider_change(name: str, e: ft.ControlEvent) -> None:
+        val = e.control.value if e and e.control else 0
+        _update_param(name, val)
+        # 动态更新策略描述
+        if selected_strategy:
+            strategy_obj = vm.strategy_mgr.get_strategy(selected_strategy)
+            if strategy_obj and hasattr(strategy_obj, "get_dynamic_description"):
+                set_strategy_desc(strategy_obj.get_dynamic_description(dict(params_ref.current or {})))
+
+    async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
+        try:
+            from strategies.strategy_prompts import get_base_prompt
             from utils.config_handler import ConfigHandler
 
-            current_tier = ConfigHandler.get_tushare_point_tier()
-            min_tier = get_strategy_min_tier(self.selected_strategy)
-            client = TushareClient()
-            if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
-                self.tier_hint_text.value = I18n.get("sys_strategy_tier_hint")
-                self.tier_hint_text.visible = True
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
+            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, get_base_prompt, strat))
+            _update_param("ai_system_prompt", new_val)
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("ai_settings_restored"), "info")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Restore default prompt failed: %s", ex, exc_info=True)
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("sys_snack_save_err"), "error")
+
+    async def _do_save_prompt_async(strat: str) -> None:
+        try:
+            from utils.config_handler import ConfigHandler
+            from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
+
+            prompt_val = params_ref.current.get("ai_system_prompt", "") or ""
+            is_valid, warning = validate_prompt(prompt_val)
+            if not is_valid:
+                page = _get_page()
+                if page is not None and hasattr(page, "show_toast"):
+                    msg = I18n.get(warning, warning)
+                    if warning == "prompt_err_length":
+                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+                    page.show_toast(f"⚠ {msg}", "warning")
+                return
+            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, prompt_val)
+            UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("ai_settings_saved"), "success")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error("[ScreenerView] Save prompt failed: %s", ex, exc_info=True)
+            page = _get_page()
+            if page is not None and hasattr(page, "show_toast"):
+                page.show_toast(I18n.get("sys_snack_save_err"), "error")
+
+    def _on_restore_prompt(strat: str) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_restore_default_async, strat, None)
+
+    def _on_save_prompt(strat: str) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_save_prompt_async, strat)
+
+    # --- 派生渲染数据 ---
+
+    # 状态栏: 从 VM state.status_message 渲染
+    if state.status_message:
+        status_text_value = I18n.get(state.status_message.key, **state.status_message.params)
+        status_text_color = state.status_color or AppColors.TEXT_SECONDARY
+    else:
+        status_text_value = status_msg
+        status_text_color = status_color
+
+    # 表格数据: 从 VM 读取当前页
+    df = vm.get_current_page_data()
+    if df is not None and not df.empty:
+        _raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
+        vt_columns, formatted_rows = _build_table_data(df)
+    else:
+        _raw_row_lookup = {}
+        vt_columns = []
+        formatted_rows = []
+
+    # 分页信息
+    page_no = state.page_no
+    total_pages = state.total_pages
+    total_items = state.total_items
+
+    # 导出按钮: 有数据时启用
+    export_btn_disabled = export_disabled or (total_items == 0)
+
+    # --- 构建参数面板 ---
+
+    def _build_param_control(p: dict) -> ft.Control | None:
+        """构建单个参数控件。"""
+        label = I18n.get(p.get("label_key", p["name"]))
+        p_type = p.get("type", "number")
+        p_name = p["name"]
+
+        if p_type == "slider":
+            min_val = p.get("min", 0)
+            max_val = p.get("max", 100)
+            default = p.get("default", min_val)
+            step = p.get("step", 1)
+            divisions = int((max_val - min_val) / step) if step > 0 else 10
+            current_val = params_ref.current.get(p_name, default)
+            init_display = int(current_val) if current_val == int(current_val) else round(current_val, 1)
+            return ft.Column(
+                [
+                    ft.Text(f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Slider(
+                        min=min_val,
+                        max=max_val,
+                        value=current_val,
+                        divisions=divisions,
+                        label="{value}",
+                        active_color=AppColors.PRIMARY,
+                        tooltip=str(init_display),
+                        on_change=lambda e, n=p_name: _on_slider_change(n, e),
+                    ),
+                ],
+                spacing=2,
+                width=200,
+            )
+
+        if p_type == "number":
+            current_val = params_ref.current.get(p_name, p.get("default", ""))
+            return ft.TextField(
+                label=label,
+                value=str(current_val),
+                keyboard_type=ft.KeyboardType.NUMBER,
+                dense=True,
+                border_color=AppColors.DIVIDER,
+                focused_border_color=AppColors.PRIMARY,
+                text_size=13,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                width=200,
+                on_change=lambda e, n=p_name: _update_param(n, _parse_num(e.control.value if e and e.control else "")),
+            )
+
+        if p_type == "dropdown":
+            options = p.get("options", [])
+            current_val = params_ref.current.get(p_name, p.get("default", ""))
+            return ft.Dropdown(
+                label=label,
+                value=str(current_val),
+                options=[ft.dropdown.Option(str(o)) for o in options],
+                dense=True,
+                border_color=AppColors.DIVIDER,
+                focused_border_color=AppColors.PRIMARY,
+                text_size=13,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
+                width=200,
+                on_select=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
+            )
+
+        if p_type == "textarea":
+            if p_name == "ai_system_prompt" and selected_strategy:
+                from strategies.strategy_prompts import get_base_prompt
+
+                current_val = (
+                    params_ref.current.get(p_name) or get_base_prompt(selected_strategy) or p.get("default", "")
+                )
             else:
-                self.tier_hint_text.visible = False
-        except Exception as e:
-            # 单例未初始化或档位读取失败时降级隐藏，避免阻塞 UI（§5.8 规范 9 异常降级）
-            logger.debug("[ScreenerView] tier hint update skipped: %s", e, exc_info=True)
-            self.tier_hint_text.visible = False
+                current_val = params_ref.current.get(p_name, p.get("default", ""))
+            ctrl = ft.TextField(
+                label=label,
+                value=str(current_val),
+                multiline=True,
+                min_lines=6,
+                max_lines=15,
+                border_color=AppColors.DIVIDER,
+                focused_border_color=AppColors.PRIMARY,
+                text_size=12,
+                content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
+                on_change=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
+            )
+            if p_name == "ai_system_prompt":
+                ctrl.label = None
+                return ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Row(
+                                [
+                                    ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
+                                    ft.Container(expand=True),
+                                    ft.TextButton(
+                                        content=I18n.get("ai_save_prompt"),
+                                        icon=ft.Icons.SAVE,
+                                        style=ft.ButtonStyle(color=AppColors.PRIMARY),
+                                        height=30,
+                                        on_click=lambda e, s=selected_strategy: _on_save_prompt(s),
+                                    ),
+                                    ft.TextButton(
+                                        content=I18n.get("ai_reset_default"),
+                                        icon=ft.Icons.RESTORE,
+                                        style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
+                                        height=30,
+                                        on_click=lambda e, s=selected_strategy: _on_restore_prompt(s),
+                                    ),
+                                ],
+                            ),
+                            ctrl,
+                        ],
+                        spacing=5,
+                    ),
+                    margin=ft.Margin.only(top=10, bottom=5),
+                )
+            return ft.Container(content=ctrl, margin=ft.Margin.only(top=10, bottom=5))
 
-    async def _on_run_click(self, e):
-        UILogger.log_action(
-            "ScreenerView",
-            "Click",
-            f"btn_run | strategy={self.selected_strategy}",
-        )
-        if not self.selected_strategy:
-            return
-        self.run_btn.disabled = True
-        self.run_btn.update()
-        self.log_view.controls.clear()
-        self.log_view.update()  # Refresh immediately to clear stale cards
-        # Collect dynamic params from UI controls
-        params = self._collect_params()
-        self.page.run_task(self.vm.run_strategy, self.selected_strategy, params=params)  # type: ignore[untyped]
+        return None
 
-    def _render_strategy_params(self):  # pragma: no cover
-        """Dynamically render UI controls based on the selected strategy's parameter definitions."""
+    def _build_params_panel() -> list[ft.Control]:
+        """构建策略参数面板。"""
         from ui.theme import PARAM_GROUP_ORDER
 
-        self.params_container.controls.clear()
+        if not selected_strategy:
+            return []
 
-        if not self.selected_strategy:
-            self.params_container.update()
-            return
-
-        params_def = self.vm.get_strategy_params(self.selected_strategy)
+        params_def = vm.get_strategy_params(selected_strategy)
         if not params_def:
-            self.params_container.update()
-            return
+            return []
 
-        groups = {g: [] for g in PARAM_GROUP_ORDER}
-        custom_groups = {}
-        group_labels = {}
+        groups: dict[str, list] = {g: [] for g in PARAM_GROUP_ORDER}
+        custom_groups: dict[str, str | None] = {}
+        group_labels: dict[str, str | None] = {}
 
         for p in params_def:
             group = p.get("group", "default")
@@ -1045,819 +906,472 @@ class ScreenerView(ft.Container):
             if group not in group_labels:
                 group_labels[group] = p.get("group_label_key")
 
-        rendered_groups = []
+        rendered_groups: list[tuple[str, str, list[ft.Control]]] = []
 
         for group_name in PARAM_GROUP_ORDER:
             if group_name == "default":
                 continue
             if groups[group_name]:
-                group_controls = self._build_param_controls(groups[group_name])
-                if group_controls:
-                    title = self._resolve_group_title(
-                        group_name,
-                        group_labels.get(group_name),  # type: ignore[untyped]
-                    )
-                    rendered_groups.append((group_name, title, group_controls))
+                controls = [c for c in (_build_param_control(p) for p in groups[group_name]) if c is not None]
+                if controls:
+                    title = _resolve_group_title(group_name, group_labels.get(group_name))
+                    rendered_groups.append((group_name, title, controls))
 
         if groups["default"]:
-            default_controls = self._build_param_controls(groups["default"])
-            if default_controls:
-                title = self._resolve_group_title(
-                    "default",
-                    group_labels.get("default"),  # type: ignore[untyped]
-                )
-                rendered_groups.append(("default", title, default_controls))
+            controls = [c for c in (_build_param_control(p) for p in groups["default"]) if c is not None]
+            if controls:
+                title = _resolve_group_title("default", group_labels.get("default"))
+                rendered_groups.append(("default", title, controls))
 
         for group_name in custom_groups:
             if groups[group_name]:
-                group_controls = self._build_param_controls(groups[group_name])
-                if group_controls:
-                    title = self._resolve_group_title(group_name, custom_groups[group_name])
-                    rendered_groups.append((group_name, title, group_controls))
+                controls = [c for c in (_build_param_control(p) for p in groups[group_name]) if c is not None]
+                if controls:
+                    title = _resolve_group_title(group_name, custom_groups[group_name])
+                    rendered_groups.append((group_name, title, controls))
 
+        result: list[ft.Control] = []
         for group_name, title, controls in rendered_groups:
             if group_name == "advanced":
                 continue
-            group_card = ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            title,
-                            size=13,
-                            weight=ft.FontWeight.W_500,
-                            color=AppColors.TEXT_PRIMARY,
-                        ),
-                        ft.Divider(height=1, color=AppColors.DIVIDER),
-                        ft.Row(controls, wrap=True, spacing=15),
-                    ],
-                    spacing=8,
-                ),
-                padding=ft.Padding.all(12),
-                bgcolor=AppColors.SURFACE_VARIANT,
-                border_radius=8,
-                margin=ft.Margin.only(bottom=8),
+            result.append(
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text(title, size=13, weight=ft.FontWeight.W_500, color=AppColors.TEXT_PRIMARY),
+                            ft.Divider(height=1, color=AppColors.DIVIDER),
+                            ft.Row(controls, wrap=True, spacing=15),
+                        ],
+                        spacing=8,
+                    ),
+                    padding=ft.Padding.all(12),
+                    bgcolor=AppColors.SURFACE_VARIANT,
+                    border_radius=8,
+                    margin=ft.Margin.only(bottom=8),
+                )
             )
-            self.params_container.controls.append(group_card)
 
         if groups["advanced"]:
-            advanced_controls = self._build_param_controls(groups["advanced"])
-            if advanced_controls:
-                exp_tile = ft.ExpansionTile(
-                    title=ft.Text(
-                        I18n.get("ai_advanced_settings"),
-                        size=14,
-                        weight=ft.FontWeight.W_500,
-                    ),
-                    subtitle=ft.Text(
-                        I18n.get(
-                            "ai_advanced_settings_desc",
+            controls = [c for c in (_build_param_control(p) for p in groups["advanced"]) if c is not None]
+            if controls:
+                result.append(
+                    ft.ExpansionTile(
+                        title=ft.Text(I18n.get("ai_advanced_settings"), size=14, weight=ft.FontWeight.W_500),
+                        subtitle=ft.Text(
+                            I18n.get("ai_advanced_settings_desc"), size=12, color=AppColors.TEXT_SECONDARY
                         ),
-                        size=12,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    controls=advanced_controls,
-                    collapsed_text_color=AppColors.TEXT_PRIMARY,
-                    text_color=AppColors.PRIMARY,
-                    expanded=False,
-                )
-                self.params_container.controls.append(exp_tile)
-
-        self.params_container.update()
-
-    def _resolve_group_title(self, group_name: str, label_key: str | None = None) -> str:  # type: ignore[untyped]
-        """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
-        from ui.theme import DEFAULT_GROUP_LABELS
-
-        if label_key:
-            return I18n.get(label_key)
-        if group_name in DEFAULT_GROUP_LABELS:
-            return DEFAULT_GROUP_LABELS[group_name]
-        return group_name
-
-    def _build_param_controls(self, params: list) -> list:  # pragma: no cover
-        """Build UI controls for a list of parameter definitions."""
-        controls = []
-
-        for p in params:
-            label = I18n.get(p.get("label_key", p["name"]))
-            p_type = p.get("type", "number")
-
-            if p_type == "slider":
-                min_val = p.get("min", 0)
-                max_val = p.get("max", 100)
-                default = p.get("default", min_val)
-                step = p.get("step", 1)
-                divisions = int((max_val - min_val) / step) if step > 0 else 10
-
-                init_display = int(default) if default == int(default) else round(default, 1)
-                value_text = ft.Text(
-                    f"{label}: {init_display}",
-                    size=12,
-                    color=AppColors.TEXT_SECONDARY,
-                )
-
-                def make_on_change(vt, lbl):
-                    def handler(e):
-                        val = e.control.value
-                        display = int(val) if val == int(val) else round(val, 1)
-                        vt.value = f"{lbl}: {display}"
-                        e.control.tooltip = str(display)
-                        vt.update()
-                        e.control.update()
-
-                        if self.selected_strategy:
-                            strategy_obj = self.vm.strategy_mgr.get_strategy(
-                                self.selected_strategy,
-                            )
-                            if strategy_obj and hasattr(
-                                strategy_obj,
-                                "get_dynamic_description",
-                            ):
-                                params = self._collect_params()
-                                self.strategy_desc_text.value = strategy_obj.get_dynamic_description(params)
-                                self.strategy_desc_text.update()
-
-                    return handler
-
-                slider = ft.Slider(
-                    min=min_val,
-                    max=max_val,
-                    value=default,
-                    divisions=divisions,
-                    label="{value}",
-                    active_color=AppColors.PRIMARY,
-                    tooltip=str(init_display),
-                    on_change=make_on_change(value_text, label),
-                )
-                slider.data = p["name"]
-
-                # Group label and slider vertically in a compact Column with width 200
-                param_group = ft.Column(
-                    [value_text, slider],
-                    spacing=2,
-                    width=200,
-                )
-                controls.append(param_group)
-
-            elif p_type == "number":
-                ctrl = ft.TextField(
-                    label=label,
-                    value=str(p.get("default", "")),
-                    keyboard_type=ft.KeyboardType.NUMBER,
-                    dense=True,
-                    border_color=AppColors.DIVIDER,
-                    focused_border_color=AppColors.PRIMARY,
-                    text_size=13,
-                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                    width=200,
-                )
-                ctrl.data = p["name"]
-                controls.append(ctrl)
-
-            elif p_type == "dropdown":
-                options = p.get("options", [])
-                ctrl = ft.Dropdown(
-                    label=label,
-                    value=str(p.get("default", "")),
-                    options=[ft.dropdown.Option(str(o)) for o in options],
-                    dense=True,
-                    border_color=AppColors.DIVIDER,
-                    focused_border_color=AppColors.PRIMARY,
-                    text_size=13,
-                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
-                    width=200,
-                )
-                ctrl.data = p["name"]
-                controls.append(ctrl)
-
-            elif p_type == "textarea":
-                if p["name"] == "ai_system_prompt" and self.selected_strategy:
-                    from strategies.strategy_prompts import get_base_prompt
-
-                    current_val = get_base_prompt(self.selected_strategy) or p.get(
-                        "default",
-                        "",
+                        controls=controls,
+                        collapsed_text_color=AppColors.TEXT_PRIMARY,
+                        text_color=AppColors.PRIMARY,
+                        expanded=False,
                     )
-                else:
-                    current_val = p.get("default", "")
-
-                ctrl = ft.TextField(
-                    label=label,
-                    value=str(current_val),
-                    multiline=True,
-                    min_lines=6,
-                    max_lines=15,
-                    border_color=AppColors.DIVIDER,
-                    focused_border_color=AppColors.PRIMARY,
-                    text_size=12,
-                    content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
                 )
 
-                reset_btn = None
-                if p["name"] == "ai_system_prompt":
-                    ctrl.label = None
-
-                    def make_restore_default(strat, ctrl_field):
-                        def restore_default(e):
-                            if self.page:
-                                self.page.run_task(self._do_restore_default_async, strat, ctrl_field)
-
-                        return restore_default
-
-                    def make_save_prompt(strat, ctrl_field):
-                        def save_prompt(e):
-                            if self.page:
-                                self.page.run_task(self._do_save_prompt_async, strat, ctrl_field)
-
-                        return save_prompt
-
-                    reset_btn = ft.TextButton(
-                        content=I18n.get("ai_reset_default"),
-                        icon=ft.Icons.RESTORE,
-                        style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
-                        height=30,
-                        on_click=make_restore_default(self.selected_strategy, ctrl),
-                    )
-
-                    save_btn = ft.TextButton(
-                        content=I18n.get("ai_save_prompt"),
-                        icon=ft.Icons.SAVE,
-                        style=ft.ButtonStyle(color=AppColors.PRIMARY),
-                        height=30,
-                        on_click=make_save_prompt(self.selected_strategy, ctrl),
-                    )
-
-                ctrl.data = p["name"]
-                if p["name"] == "ai_system_prompt" and reset_btn:
-                    wrapper = ft.Container(
-                        content=ft.Column(
-                            [
-                                ft.Row(
-                                    [
-                                        ft.Text(
-                                            label,
-                                            size=12,
-                                            color=AppColors.TEXT_SECONDARY,
-                                        ),
-                                        ft.Container(expand=True),
-                                        save_btn,
-                                        reset_btn,
-                                    ],
-                                ),
-                                ctrl,
-                            ],
-                            spacing=5,
-                        ),
-                        margin=ft.Margin.only(top=10, bottom=5),
-                    )
-                    controls.append(wrapper)
-                else:
-                    wrapper = ft.Container(
-                        content=ctrl,
-                        margin=ft.Margin.only(top=10, bottom=5),
-                    )
-                    controls.append(wrapper)
-
-        return controls
-
-    def _collect_params(self) -> dict:
-        """Collect current parameter values from dynamic UI controls."""
-        params = {}
-
-        def extract(controls_list):
-            for ctrl in controls_list:
-                if isinstance(ctrl, ft.ExpansionTile):
-                    # Recursive extraction for nested ExpansionTile
-                    extract(ctrl.controls)
-                    continue
-                if isinstance(ctrl, ft.Container) and ctrl.content:
-                    # Parse into Container wrappers (e.g. margin/padding wrappers)
-                    extract([ctrl.content])
-                    continue
-                if isinstance(ctrl, (ft.Column, ft.Row)):
-                    # Ensure we traverse layout groupings (like the custom Restore button layout)
-                    extract(ctrl.controls)
-                    continue
-
-                if not hasattr(ctrl, "data") or ctrl.data is None:
-                    continue  # Skip labels/decorators
-
-                name = ctrl.data
-                if isinstance(ctrl, ft.Slider):
-                    val = ctrl.value
-                    if val is not None:
-                        params[name] = int(val) if val == int(val) else round(val, 2)
-                elif isinstance(ctrl, ft.TextField):
-                    if ctrl.multiline:
-                        params[name] = ctrl.value
-                    else:
-                        try:
-                            params[name] = float(ctrl.value)  # type: ignore[untyped]
-                        except (ValueError, TypeError):
-                            params[name] = ctrl.value
-                elif isinstance(ctrl, ft.Dropdown):
-                    params[name] = ctrl.value
-
-        extract(self.params_container.controls)
-        return params
-
-    async def _do_restore_default_async(self, strat, ctrl_field):
-        try:
-            from strategies.strategy_prompts import get_base_prompt
-            from utils.config_handler import ConfigHandler
-
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
-            # get_base_prompt 内部调用 ConfigHandler.load_config() (同步文件/keyring IO)，必须 offload
-            ctrl_field.value = str(await ThreadPoolManager().run_async(TaskType.IO, get_base_prompt, strat))
-            ctrl_field.update()
-            if self.page and hasattr(self.page, "show_toast"):
-                self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get(
-                        "ai_settings_restored",
-                    ),
-                    "info",
-                )
-        except Exception as ex:
-            logger.error("[ScreenerView] Restore default prompt failed: %s", ex, exc_info=True)
-            if self.page and hasattr(self.page, "show_toast"):
-                self.page.show_toast(I18n.get("sys_snack_save_err"), "error")  # type: ignore[untyped]
-
-    async def _do_save_prompt_async(self, strat, ctrl_field):
-        try:
-            from utils.config_handler import ConfigHandler
-            from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
-
-            prompt_val = ctrl_field.value or ""
-            is_valid, warning = validate_prompt(prompt_val)
-            if not is_valid:
-                if self.page and hasattr(self.page, "show_toast"):
-                    msg = I18n.get(warning, warning)
-                    if warning == "prompt_err_length":
-                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                    self.page.show_toast(  # type: ignore[attr-defined]
-                        f"⚠ {msg}",
-                        "warning",
-                    )
-                return
-
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, prompt_val)
-            UILogger.log_action(
-                "ScreenerView",
-                "SavePrompt",
-                f"strategy={strat}",
-            )
-            if self.page and hasattr(self.page, "show_toast"):
-                self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get("ai_settings_saved"),
-                    "success",
-                )
-        except Exception as ex:
-            logger.error("[ScreenerView] Save prompt failed: %s", ex, exc_info=True)
-            if self.page and hasattr(self.page, "show_toast"):
-                self.page.show_toast(I18n.get("sys_snack_save_err"), "error")  # type: ignore[untyped]
-
-    def _toggle_progress(self, visible):
-        if not self.page:
-            return
-
-        async def _do_toggle():
-            self.progress_ring.visible = visible
-            self.run_btn.disabled = visible
-            self.strategy_dropdown.disabled = visible
-            self.progress_ring.update()
-            self.run_btn.update()
-            self.strategy_dropdown.update()
-
-        self.page.run_task(_do_toggle)
-
-    def _on_virtual_sort(self, col_id, ascending):
-        self.page.run_task(self.vm.sort_data, col_id, ascending)  # type: ignore[union-attr]
-
-    async def _on_export_click(self, e):
-        """Export current results"""
-        UILogger.log_action("ScreenerView", "Click", "btn_export")
-
-        df = self.vm.get_export_data()
-        if df is None:
-            if hasattr(self.page, "show_toast"):
-                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore[untyped]
-            return
-
-        timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-        default_filename = f"screener_results_{timestamp}.csv"
-
-        filepath = await self.save_file_picker.save_file(
-            dialog_title=I18n.get("data_export_save_title"),
-            file_name=default_filename,
-            allowed_extensions=["csv"],
-        )
-        if not filepath or not self.page:
-            return
-
-        self.export_btn.disabled = True
-        self.export_btn.update()
-
-        try:
-            path, error = await self.vm.export_results(filepath)
-            if path:
-                filename = os.path.basename(filepath)
-                if hasattr(self.page, "show_toast"):
-                    self.page.show_toast(  # type: ignore[untyped]
-                        I18n.get("data_export_success", file=filename),
-                        "success",
-                    )
-            elif hasattr(self.page, "show_toast"):
-                self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get("data_export_fail"),
-                    "error",
-                )
-        except Exception as ex:
-            logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
-            logger.debug("[ScreenerView] Export | Failed traceback", exc_info=True)
-            if self.page and hasattr(self.page, "show_toast"):
-                self.page.show_toast(I18n.get("data_export_fail"), "error")  # type: ignore[untyped]
-        finally:
-            self.export_btn.disabled = False
-            self.export_btn.update()
-
-    def _on_page_size_change(self, e):
-        try:
-            new_size = int(self.page_size_dropdown.value)  # type: ignore[untyped]
-            self.vm.change_page_size(new_size)
-        except ValueError:
-            pass
-
-    def _on_row_click(self, row_data):
-        """Handler passed down to PaginatedTable for row clicks.
-        row_data here is the FORMATTED dict (for display). We look up the
-        RAW dict (with numeric values) for StockDetailDialog."""
-        if not self.page:
-            return
-
-        # Look up raw row data by ts_code for the detail dialog
-        ts_code = row_data.get("ts_code", "")
-        raw_data = getattr(self, "_raw_row_lookup", {}).get(ts_code, row_data)
-
-        # NOTE(lazy): detail_dialog 已是声明式组件（Phase 3.2.7），通过 props 推送
-        # （重新实例化模式），K 线图由组件内部 use_effect 自动触发，dialog 由
-        # ft.use_dialog 自动挂载/卸载。不再调 page.show_dialog / load_chart。
-        # ceiling: Phase 3.6.2 ScreenerView 声明式重写. upgrade: Task 3.6.2 完成.
-        self.detail_dialog = StockDetailDialog(
-            stock_data=raw_data,
-            data_processor=self.vm.data_processor,
-            page=self.page,
-            open_state=True,
-            on_close=self._on_detail_close,
-        )
-
-    def _on_detail_close(self):
-        """Detail dialog 关闭回调（声明式组件 on_close prop，清理引用）。"""
-        self.detail_dialog = None
-
-    # --- UI Update Callbacks ---
-
-    def _update_ui(self):
-        if not self.page:
-            return
-
-        async def _do_update():
-            # 1. Update Table
-            self._render_table_sync()
-
-            # 2. Update Pagination
-            self.page_info_text.value = I18n.get("screener_page_info").format(
-                current=self.vm.page_no,
-                total=getattr(self.vm, "total_pages", 0),
-            )
-            self.prev_btn.disabled = self.vm.page_no <= 1
-            self.next_btn.disabled = self.vm.page_no >= getattr(
-                self.vm,
-                "total_pages",
-                0,
-            )
-
-            # 3. Enable Export if data exists
-            self.export_btn.disabled = getattr(self.vm, "total_items", 0) == 0
-
-            self.page.update()  # type: ignore[untyped]
-
-        self.page.run_task(_do_update)
-
-    async def _render_table_async(self):
-        """Re-render table based on VM current page data (CPU work offloaded)"""
-        from utils.thread_pool import ThreadPoolManager, TaskType
-
-        df = self.vm.get_current_page_data()
-
-        if df is None or df.empty:
-            self.result_table.set_columns([])
-            self.result_table.set_rows(
-                [],
-                sort_col=self.vm.sort_column,
-                sort_asc=self.vm.sort_ascending,
-            )
-            self._raw_row_lookup = {}
-            return
-
-        self._raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
-
-        vt_columns, formatted_rows = await ThreadPoolManager().run_async(
-            TaskType.CPU,
-            _build_table_data,
-            df,
-        )
-
-        self.result_table.on_row_click = self._on_row_click  # type: ignore[assignment]
-        self.result_table.set_columns(vt_columns)
-        self.result_table.set_rows(
-            formatted_rows,
-            sort_col=self.vm.sort_column,
-            sort_asc=self.vm.sort_ascending,
-        )
-
-    def _render_table_sync(self):
-        """Synchronous fallback for non-async callers (e.g. update_theme)"""
-        df = self.vm.get_current_page_data()
-        if df is None or df.empty:
-            self.result_table.set_columns([])
-            self.result_table.set_rows(
-                [],
-                sort_col=self.vm.sort_column,
-                sort_asc=self.vm.sort_ascending,
-            )
-            self._raw_row_lookup = {}
-            return
-
-        self._raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
-        vt_columns, formatted_rows = _build_table_data(df)
-        self.result_table.on_row_click = self._on_row_click  # type: ignore[assignment]
-        self.result_table.set_columns(vt_columns)
-        self.result_table.set_rows(
-            formatted_rows,
-            sort_col=self.vm.sort_column,
-            sort_asc=self.vm.sort_ascending,
-        )
-
-    def _append_log(self, name, score, thinking):  # pragma: no cover
-        if not self.page:
-            return
-
-        async def _do_log():
-            # 并发占位卡：若存在则就地替换为结果摘要
-            entry = self._ai_cards.pop(name, None)
-            if entry and entry["card"].page:
-                # 替换占位卡内容为结果摘要
-                entry["content_md"].value = f"**{I18n.get('screener_score')}: {score}**\n\n{thinking[:200]}"
-                # 移除 ProgressRing
-                row_ctrl = entry["card_content"].controls[0]
-                if isinstance(row_ctrl, ft.Row) and len(row_ctrl.controls) > 1:
-                    row_ctrl.controls.pop()
-                self.log_view.update()
-                return
-
-            # 无占位卡时走原有逻辑（串行模式或降级）
-            line = f"[{name}] {I18n.get('screener_score')}: {score} | {thinking[:80]}..."
-
-            # Colors based on score
-            color = AppColors.ACCENT if score > 80 else "#FFB86C" if score > 50 else "#FF5555"
-
-            # Limit total logs to avoid memory leak (aligned with stream card cap)
-            if len(self.log_view.controls) > 10:
-                self.log_view.controls.pop(0)
-
-            self.log_view.controls.append(
-                ft.Text(  # pragma: no cover
-                    line,  # pragma: no cover
-                    color=color,  # pragma: no cover
-                    size=12,  # pragma: no cover
-                    no_wrap=False,  # pragma: no cover
-                    font_family="Roboto Mono, Consolas, monospace",  # pragma: no cover
-                ),  # pragma: no cover
-            )
-            self.log_view.update()
-
-        self.page.run_task(_do_log)
-
-    def _on_log_stream_start(self, name):  # pragma: no cover
-        """Creates a streaming Markdown card and returns a throttled chunk receiver closure."""
-        if not self.page:
-            return None
-
-        # 1. Component initialization
-        reasoning_md = ft.Markdown(  # pragma: no cover
-            "",  # pragma: no cover
-            selectable=True,  # pragma: no cover
-            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,  # pragma: no cover
-            code_theme="atom-one-dark",  # type: ignore[arg-type]  # pragma: no cover
-            on_tap_link=safe_open_url,  # pragma: no cover
-        )  # pragma: no cover
-
-        content_md = ft.Markdown(  # pragma: no cover
-            "",  # pragma: no cover
-            selectable=True,  # pragma: no cover
-            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,  # pragma: no cover
-            code_theme="atom-one-dark",  # type: ignore[arg-type]  # pragma: no cover
-            on_tap_link=safe_open_url,  # pragma: no cover
-        )  # pragma: no cover
-
-        reasoning_tile = ft.ExpansionTile(  # pragma: no cover
-            title=ft.Text(f"💡 {I18n.get('ai_thinking')}..."),  # pragma: no cover
-            subtitle=ft.Text(  # pragma: no cover
-                I18n.get("ai_expand_reasoning"),  # pragma: no cover
-                size=10,  # pragma: no cover
-                color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-            ),  # pragma: no cover
-            controls=[  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=reasoning_md,  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                    bgcolor=AppColors.BACKGROUND,  # pragma: no cover
-                    border_radius=4,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            expanded=True,  # pragma: no cover
-            visible=False,  # pragma: no cover
-        )  # pragma: no cover
-
-        card_content = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),  # pragma: no cover
-                reasoning_tile,  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=content_md,  # pragma: no cover
-                    padding=ft.Padding.only(left=5, right=5),  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            spacing=10,  # pragma: no cover
-        )  # pragma: no cover
-
-        card = ft.Container(  # pragma: no cover
-            content=card_content,  # pragma: no cover
-            border=ft.Border.all(1, AppColors.DIVIDER),  # pragma: no cover
-            border_radius=8,  # pragma: no cover
-            padding=15,  # pragma: no cover
-            bgcolor=AppColors.SURFACE,  # pragma: no cover
-            margin=ft.Margin.only(bottom=10),  # pragma: no cover
-        )  # pragma: no cover
-
-        async def _add_line_task():
-            # optional: limit max cards to avoid memory explosion if analyzing 100 stocks
-            if len(self.log_view.controls) > 10:
-                self.log_view.controls.pop(0)
-            self.log_view.controls.append(card)
-            self.log_view.update()
-
-        self.page.run_task(_add_line_task)
-
-        state = {"reasoning": "", "content": "", "last_flush": 0.0, "pending": False}
-        THROTTLE_INTERVAL = 0.15  # 150ms — smooth but not flooding
-
-        def _flush_display():
-            """Snapshot current text and schedule a UI update."""
-
-            # Snapshots for closure safety
-            snap_reas = state["reasoning"]
-            snap_cont = state["content"]
-
-            async def _update_line_task():
-                if not card.page:
-                    return
-
-                # Update reasoning
-                if snap_reas:
-                    reasoning_md.value = snap_reas
-                    reasoning_tile.visible = True
-
-                # Update content
-                if snap_cont:
-                    content_md.value = snap_cont
-
-                self.log_view.update()
-
-            if self.page:
-                self.page.run_task(_update_line_task)
-            state["last_flush"] = time.time()
-            state["pending"] = False
-
-        def _on_chunk(chunk_text, is_reasoning=False):
-            if not self.page:
-                return
-            if is_reasoning:
-                state["reasoning"] += chunk_text
-            else:
-                state["content"] += chunk_text
-
-            now = time.time()
-            if now - state["last_flush"] >= THROTTLE_INTERVAL:
-                _flush_display()
-            else:
-                state["pending"] = True
-
-        # Attach final_flush so caller can drain last pending chunk
-        _on_chunk.final_flush = lambda: _flush_display() if state["pending"] else None
-
-        return _on_chunk
-
-    def _on_ai_card_start(self, name):  # pragma: no cover
-        """并发模式：插入一张'分析中'占位卡，登记到 _ai_cards 以便结果回推时替换。"""
-        if not self.page:
-            return None
-
-        content_md = ft.Markdown(
-            I18n.get("ai_card_analyzing"),
-            selectable=True,
-            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-            on_tap_link=safe_open_url,
-        )
-        progress_ring = ft.ProgressRing(width=14, height=14, stroke_width=2)
-        card_content = ft.Column(
-            [
-                ft.Row(
+        return result
+
+    # --- 构建流式卡片控件 ---
+
+    def _build_log_card(card: dict) -> ft.Container:
+        """构建单张流式/AI 占位卡。"""
+        name = card["name"]
+        if card.get("is_analyzing"):
+            return ft.Container(
+                content=ft.Column(
                     [
-                        ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
-                        progress_ring,
+                        ft.Row(
+                            [
+                                ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
+                                ft.ProgressRing(width=14, height=14, stroke_width=2),
+                            ],
+                            spacing=8,
+                        ),
+                        ft.Container(
+                            content=ft.Markdown(
+                                I18n.get("ai_card_analyzing"),
+                                selectable=True,
+                                extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                                on_tap_link=safe_open_url,
+                            ),
+                            padding=ft.Padding.only(left=5, right=5),
+                        ),
                     ],
                     spacing=8,
                 ),
-                ft.Container(content=content_md, padding=ft.Padding.only(left=5, right=5)),
-            ],
-            spacing=8,
-        )
-        card = ft.Container(
-            content=card_content,
+                border=ft.Border.all(1, AppColors.DIVIDER),
+                border_radius=8,
+                padding=15,
+                bgcolor=AppColors.SURFACE,
+                margin=ft.Margin.only(bottom=10),
+            )
+
+        reasoning = card.get("reasoning", "")
+        content = card.get("content", "")
+        reasoning_visible = bool(reasoning)
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
+                    ft.ExpansionTile(
+                        title=ft.Text(f"💡 {I18n.get('ai_thinking')}..."),
+                        subtitle=ft.Text(I18n.get("ai_expand_reasoning"), size=10, color=AppColors.TEXT_SECONDARY),
+                        controls=[
+                            ft.Container(
+                                content=ft.Markdown(
+                                    reasoning,
+                                    selectable=True,
+                                    extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                                    code_theme="atom-one-dark",  # type: ignore[arg-type]
+                                    on_tap_link=safe_open_url,
+                                ),
+                                padding=10,
+                                bgcolor=AppColors.BACKGROUND,
+                                border_radius=4,
+                            )
+                        ],
+                        expanded=True,
+                        visible=reasoning_visible,
+                    ),
+                    ft.Container(
+                        content=ft.Markdown(
+                            content,
+                            selectable=True,
+                            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+                            code_theme="atom-one-dark",  # type: ignore[arg-type]
+                            on_tap_link=safe_open_url,
+                        ),
+                        padding=ft.Padding.only(left=5, right=5),
+                    ),
+                ],
+                spacing=10,
+            ),
             border=ft.Border.all(1, AppColors.DIVIDER),
             border_radius=8,
             padding=15,
             bgcolor=AppColors.SURFACE,
             margin=ft.Margin.only(bottom=10),
         )
-        self._ai_cards[name] = {
-            "card": card,
-            "content_md": content_md,
-            "card_content": card_content,
-            "progress_ring": progress_ring,
-        }
 
-        async def _add():
-            if len(self.log_view.controls) > 10:
-                self.log_view.controls.pop(0)
-            self.log_view.controls.append(card)
-            self.log_view.update()
+    # --- 构建历史树控件 ---
 
-        self.page.run_task(_add)
-        return None
+    def _build_history_tree() -> ft.Control:
+        """构建历史树侧栏。"""
+        tree_controls: list[ft.Control] = []
+        if not history_tree_items:
+            tree_controls.append(
+                ft.Container(
+                    content=ft.Text(I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=13),
+                    padding=20,
+                )
+            )
+        else:
+            first_expand = history_tree_offset <= 5 and len(history_tree_items) <= 5
+            for idx, item in enumerate(history_tree_items):
+                display_date = item["display_date"]
+                d_key = item["d_key"]
+                total_cnt = item["total_cnt"]
+                strategies = item["strategies"]
 
-    def _update_status(self, msg, color=None):  # pragma: no cover
-        if not self.page:
-            return
+                subtiles: list[ft.Control] = [
+                    ft.ListTile(
+                        leading=ft.Icon(ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT),
+                        title=ft.Text(f"{I18n.get('screener_all_strategies')} ({total_cnt})", size=13),
+                        on_click=lambda e, d=d_key: _on_tree_item_click(d, run_id=None),
+                        dense=True,
+                    )
+                ]
+                for s in strategies:
+                    strategy_display = translate_strategy_name(s["strategy_name"])
+                    run_suffix = f" [{s['run_id'][:8]}]" if len(strategies) > 1 else ""
+                    subtiles.append(
+                        ft.ListTile(
+                            leading=ft.Icon(ft.Icons.TRENDING_UP, size=16, color=AppColors.TEXT_SECONDARY),
+                            title=ft.Text(f"{strategy_display}{run_suffix} ({s['cnt']})", size=13),
+                            on_click=lambda e, d=d_key, rid=s["run_id"]: _on_tree_item_click(d, run_id=rid),
+                            dense=True,
+                        )
+                    )
 
-        async def _do_status():
-            self.status_text.value = msg
-            self.status_text.color = color or AppColors.TEXT_PRIMARY
-            self.status_text.update()
-
-        self.page.run_task(_do_status)
-
-    def update_theme(self):  # pragma: no cover
-        """Update styles on theme change"""
-
-        # 1. Controls (Update props always)
-        self.strategy_dropdown.bgcolor = AppColors.INPUT_BG
-        self.strategy_dropdown.border_color = AppColors.INPUT_BORDER
-        self.strategy_dropdown.color = AppColors.INPUT_TEXT
-        self.strategy_dropdown.focused_border_color = AppColors.PRIMARY
-
-        self.run_btn.style = AppStyles.primary_button()
-        self.export_btn.style = AppStyles.outline_button()
-
-        self.status_text.color = AppColors.TEXT_SECONDARY
-        self.progress_ring.color = AppColors.ACCENT
-
-        # 2. Result Table (Update props always, PaginatedTable.update_theme checks self.page for UI)
-        self.result_table.update_theme()
-
-        # 3. Logs (Use modern card style)
-        try:
-            if hasattr(self, "log_title_text"):
-                self.log_title_text.color = AppColors.TEXT_PRIMARY
-        except Exception as e:
-            logger.warning("Failed to update log area theme: %s", e, exc_info=True)
-
-        # 4. Pagination
-        self.page_info_text.color = AppColors.TEXT_PRIMARY
-        self.prev_btn.icon_color = AppColors.PRIMARY
-        self.next_btn.icon_color = AppColors.PRIMARY
-
-        # 5. UI Refresh (Only if mounted)
-        if self.page:
-            # Re-render table data to update cell colors
-            try:
-                self._render_table_sync()
-            except Exception as e:
-                logger.error(
-                    "[ScreenerView] Theme | ❌ Re-render failed: %s",
-                    e,
-                    exc_info=True,
+                tree_controls.append(
+                    ft.ExpansionTile(
+                        title=ft.Text(f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500),
+                        subtitle=ft.Text(
+                            I18n.get("history_total").format(count=total_cnt), size=11, color=AppColors.TEXT_SECONDARY
+                        ),
+                        controls=subtiles,
+                        expanded=(first_expand and idx == 0),
+                        collapsed_icon_color=AppColors.TEXT_SECONDARY,
+                    )
                 )
 
-            self.page.update()
+        load_more_btn = ft.TextButton(
+            content=I18n.get("history_load_more"),
+            icon=ft.Icons.EXPAND_MORE,
+            on_click=_on_load_more_history,
+            visible=history_load_more_visible,
+        )
+
+        return ft.Container(
+            content=ft.Column(
+                [
+                    ft.Container(
+                        content=ft.Text(
+                            I18n.get("screener_mode_history"),
+                            weight=ft.FontWeight.BOLD,
+                            color=AppColors.TEXT_PRIMARY,
+                            size=14,
+                        ),
+                        padding=ft.Padding.only(left=12, top=10, bottom=5),
+                    ),
+                    ft.Divider(height=1, color=AppColors.DIVIDER),
+                    ft.ListView(tree_controls, expand=True, spacing=0),
+                    load_more_btn,
+                ],
+                spacing=0,
+                expand=True,
+            ),
+            bgcolor=ft.Colors.SURFACE,
+            border=ft.Border.only(right=ft.BorderSide(1, AppColors.DIVIDER)),
+        )
+
+    # --- 构建 UI ---
+
+    is_realtime = mode == "REALTIME"
+
+    # 1. 顶部控制区
+    title_row = ft.Row(
+        [
+            ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),
+            ft.Text(I18n.get("screener_title"), size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+            ft.Container(width=20),
+            ft.SegmentedButton(
+                segments=[
+                    ft.Segment(
+                        value="REALTIME",
+                        label=ft.Text(I18n.get("screener_mode_run")),
+                        icon=ft.Icon(ft.Icons.ELECTRIC_BOLT),
+                    ),
+                    ft.Segment(
+                        value="HISTORY",
+                        label=ft.Text(I18n.get("screener_mode_history")),
+                        icon=ft.Icon(ft.Icons.HISTORY),
+                    ),
+                ],
+                selected=[mode],
+                on_change=_on_mode_change,
+            ),
+        ],
+        alignment=ft.MainAxisAlignment.START,
+        spacing=10,
+    )
+
+    strategy_dropdown = ft.Dropdown(
+        label=I18n.get("select_strategy"),
+        options=list(strategy_options),
+        value=selected_strategy,
+        on_select=_on_strategy_change,
+        width=AppStyles.CONTROL_WIDTH_MD,
+        text_size=14,
+        bgcolor=AppColors.INPUT_BG,
+        border_color=AppColors.INPUT_BORDER,
+        color=AppColors.INPUT_TEXT,
+        focused_border_color=AppColors.PRIMARY,
+    )
+
+    realtime_controls = ft.Column(
+        [
+            ft.Row([strategy_dropdown], spacing=10),
+            ft.Text(
+                strategy_desc or I18n.get("screener_no_strategy_hint"),
+                size=13,
+                color=strategy_desc_color,
+                no_wrap=False,
+            ),
+            ft.Text(tier_hint or "", size=12, color=AppColors.WARNING, visible=tier_hint is not None, no_wrap=False),
+            *_build_params_panel(),
+        ],
+        spacing=10,
+        visible=is_realtime,
+    )
+
+    left_controls = ft.Column([title_row, realtime_controls], spacing=10, expand=True)
+
+    status_row = ft.Row(
+        [
+            ft.ProgressRing(visible=progress_visible, width=20, height=20, color=AppColors.ACCENT),
+            ft.Text(status_text_value, color=status_text_color),
+        ],
+        alignment=ft.MainAxisAlignment.END,
+        spacing=10,
+    )
+
+    run_btn = ft.Button(
+        content=I18n.get("run_screening"),
+        icon=ft.Icons.PLAY_ARROW,
+        on_click=_on_run_click_sync,
+        disabled=run_disabled,
+        style=AppStyles.primary_button(),
+        height=45,
+        visible=is_realtime,
+    )
+    export_btn = ft.Button(
+        content=I18n.get("screener_export"),
+        icon=ft.Icons.DOWNLOAD,
+        on_click=_on_export_click_sync,
+        disabled=export_btn_disabled,
+        style=AppStyles.outline_button(),
+        height=45,
+    )
+
+    right_controls = ft.Column(
+        [
+            status_row,
+            ft.Row([export_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
+        ],
+        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        horizontal_alignment=ft.CrossAxisAlignment.END,
+    )
+
+    control_card = ft.Container(
+        content=ft.Row(
+            [left_controls, right_controls],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.START,
+        ),
+        **AppStyles.dashboard_card(padding=20),
+    )
+
+    # 2. 表格区
+    pagination_row = ft.Row(
+        [
+            ft.IconButton(
+                ft.Icons.CHEVRON_LEFT, on_click=_on_prev_page, icon_color=AppColors.PRIMARY, disabled=page_no <= 1
+            ),
+            ft.Text(
+                I18n.get("screener_page_info").format(current=page_no, total=total_pages), color=AppColors.TEXT_PRIMARY
+            ),
+            ft.IconButton(
+                ft.Icons.CHEVRON_RIGHT,
+                on_click=_on_next_page,
+                icon_color=AppColors.PRIMARY,
+                disabled=page_no >= total_pages,
+            ),
+            ft.Container(width=20),
+            ft.Dropdown(
+                label=I18n.get("screener_page_size"),
+                options=_build_page_size_options(),
+                value=str(page_size),
+                width=120,
+                dense=True,
+                text_size=13,
+                on_select=_on_page_size_change,
+            ),
+        ],
+        alignment=ft.MainAxisAlignment.CENTER,
+    )
+
+    table_card = ft.Container(
+        content=ft.Column(
+            [
+                PaginatedTable(
+                    rows=formatted_rows,
+                    columns=vt_columns,
+                    sort_col=state.sort_column,
+                    sort_asc=state.sort_ascending,
+                    on_sort=_on_virtual_sort,
+                    on_row_click=_on_row_click,
+                ),
+                ft.Divider(height=1, color=AppColors.DIVIDER),
+                pagination_row,
+            ],
+            spacing=0,
+            expand=True,
+        ),
+        **AppStyles.dashboard_card(padding=0),
+        expand=True,
+    )
+
+    # 3. AI 分析报告区 (仅 REALTIME 模式)
+    log_card = ft.Container(
+        content=ft.Column(
+            [
+                ft.Text(
+                    I18n.get("ai_analysis_report"),
+                    font_family="Roboto",
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(
+                    content=ft.Column(
+                        [_build_log_card(c) for c in log_cards],
+                        expand=True,
+                        spacing=4,
+                        scroll=ft.ScrollMode.ALWAYS,
+                        auto_scroll=True,
+                    ),
+                    border_radius=8,
+                    padding=5,
+                    expand=True,
+                ),
+            ],
+            spacing=5,
+        ),
+        expand=True,
+        padding=ft.Padding.only(top=10),
+        visible=is_realtime,
+    )
+
+    # 4. 右侧内容 (表格 + 日志)
+    right_content = ft.Column(
+        [table_card, log_card] if is_realtime else [table_card],
+        expand=True,
+        spacing=10,
+    )
+
+    # 5. 主布局: REALTIME 模式无侧栏; HISTORY 模式 ResizableSplitter(历史树 + 右侧)
+    if is_realtime:
+        main_body = right_content
+    else:
+        main_body = ResizableSplitter(
+            left_content=_build_history_tree(),
+            right_content=right_content,
+            config_key="ui_splitter_screener_history",
+            default_width=250,
+            min_width=220,
+            max_width=420,
+            collapsible=True,
+            collapsed=False,
+        )
+
+    # 6. 详情对话框 (条件渲染)
+    dialog_control: ft.Control | None = None
+    if detail_dialog_data is not None:
+        page = _get_page()
+        dialog_control = StockDetailDialog(
+            stock_data=detail_dialog_data,
+            data_processor=vm.data_processor,
+            page=page,
+            open_state=True,
+            on_close=_on_detail_close,
+        )
+
+    content_controls = [control_card, main_body]
+    if dialog_control is not None:
+        content_controls.append(dialog_control)
+
+    return ft.Container(
+        content=ft.Column(
+            content_controls,
+            expand=True,
+            spacing=15,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        ),
+        expand=True,
+    )
+
+
+def _parse_num(val):
+    """尝试解析数值, 失败时返回原字符串。"""
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return val

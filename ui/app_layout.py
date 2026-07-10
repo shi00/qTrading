@@ -281,9 +281,9 @@ class AppLayout(PageRefMixin, ft.Container):
         if index == NavTabs.MARKET:
             view = HomeView(on_run_strategy=self.run_strategy_from_home)
         elif index == NavTabs.SCREENER:
-            view = ScreenerView(self.page)  # type: ignore[untyped]
+            view = ScreenerView()  # type: ignore[untyped]  # [reason: Phase F.3 声明式重写, 无 page 参数]
         elif index == NavTabs.BACKTEST:
-            view = BacktestView(self.page)  # type: ignore[untyped]
+            view = BacktestView()  # type: ignore[untyped]
         elif index == NavTabs.DATA:
             view = DataExplorerView()
         elif index == NavTabs.TASKS:

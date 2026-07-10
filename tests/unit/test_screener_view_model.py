@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from ui.components.virtual_table import PaginatedTable
+from ui.components.virtual_table import next_sort_state
 from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
 
 pytestmark = pytest.mark.unit
@@ -141,13 +141,10 @@ class TestSortDirectionConsistency:
         assert vm.state.sort_ascending is True
 
     def test_paginated_table_new_column_defaults_ascending(self):
-        table = PaginatedTable()
-        table.sort_col = "A"
-        table.sort_asc = False
-
-        table._handle_sort_click("B")
-
-        assert table.sort_asc is True
+        # PaginatedTable 已声明式重写 (Phase B.3), 排序逻辑抽为纯函数 next_sort_state
+        new_col, new_asc = next_sort_state("A", False, "B")
+        assert new_col == "B"
+        assert new_asc is True
 
 
 class TestScreenerViewModelDispose:

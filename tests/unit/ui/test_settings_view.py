@@ -1,491 +1,339 @@
+"""ui/views/settings_view.py 声明式契约守护测试 (Phase C.3).
+
+View 组合（@ft.component + use_state）由集成测试覆盖（flet_test_page fixture）。
+本单元测试聚焦：
+- 契约守护（grep 检查禁止的命令式模式）
+- 纯辅助函数（_get_tab_button_style / _show_snack / _build_tabs）行为
+参照 test_settings_widgets.py / test_task_center_view.py 模式。
+"""
+
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import flet as ft
-
-from ui.views.settings_view import SettingsView
 import pytest
-
 
 pytestmark = pytest.mark.unit
 
 
-class _FakePage:
-    def __init__(self):
-        self.toast_messages = []
-        self.overlay = []
-        self._update_count = 0
-
-    def show_toast(self, message, type="info"):
-        self.toast_messages.append((message, type))
-
-    def update(self):
-        self._update_count += 1
-
-
-class TestSettingsView:
-    def test_on_tab_click_valid_index(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view.page = _FakePage()
-
-                event = MagicMock()
-                event.control.data = "1"
-
-                view._on_tab_click(event)
-
-                assert view.current_tab_index == 1
-
-    def test_on_tab_click_invalid_index_string(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-
-                event = MagicMock()
-                event.control.data = "invalid"
-
-                view._on_tab_click(event)
-
-                assert view.current_tab_index == 0
-
-    def test_on_tab_click_index_out_of_range(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-
-                event = MagicMock()
-                event.control.data = "100"
-
-                view._on_tab_click(event)
-
-                assert view.current_tab_index == 0
-
-    def test_show_snack_with_show_toast(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                page = _FakePage()
-                view.page = page
-
-                view.show_snack("test message")
-
-                assert len(page.toast_messages) == 1
-                assert page.toast_messages[0] == ("test message", "info")
-
-    def test_show_snack_with_error_color(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                page = _FakePage()
-                view.page = page
-
-                view.show_snack("error message", color=ft.Colors.RED)
-
-                assert len(page.toast_messages) == 1
-                assert page.toast_messages[0] == ("error message", "error")
-
-    def test_show_snack_with_success_color(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                page = _FakePage()
-                view.page = page
-
-                view.show_snack("success message", color=ft.Colors.GREEN)
-
-                assert len(page.toast_messages) == 1
-                assert page.toast_messages[0] == ("success message", "success")
-
-    def test_show_snack_with_warning_color(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                page = _FakePage()
-                view.page = page
-
-                view.show_snack("warning message", color=ft.Colors.ORANGE)
-
-                assert len(page.toast_messages) == 1
-                assert page.toast_messages[0] == ("warning message", "warning")
-
-    def test_show_snack_without_page(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view.page = None
-
-                result = view.show_snack("test message")
-
-                assert result is None
-
-    def test_page_ref_property(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                page = _FakePage()
-                view.page = page
-
-                assert view.page_ref is page
-
-    def test_on_mount_subscribes_to_locale(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view._on_mount()
-
-                mock_i18n.subscribe.assert_called_once_with(view.refresh_locale)
-
-    def test_on_unmount_unsubscribes_and_cascades(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            mock_tab_with_cleanup = MagicMock()
-            mock_tab_with_cleanup._on_unmount = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = mock_tab_with_cleanup
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view._on_unmount()
-
-                mock_i18n.unsubscribe.assert_called_once()
-
-    def test_on_unmount_handles_exception(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            mock_tab_with_error = MagicMock()
-            mock_tab_with_error._on_unmount.side_effect = RuntimeError("cleanup error")
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = mock_tab_with_error
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view._on_unmount()
-
-                mock_i18n.unsubscribe.assert_called_once()
-
-    def test_show_snack_with_snackbar_fallback(self):
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab") as mock_data_tab,
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_data_tab.return_value = MagicMock()
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-
-                class _PageWithoutShowToast:
-                    def __init__(self):
-                        self.overlay = []
-                        self._update_count = 0
-
-                    def update(self):
-                        self._update_count += 1
-
-                    def show_dialog(self, dlg):
-                        self.overlay.append(dlg)
-
-                page = _PageWithoutShowToast()
-                view.page = page
-
-                view.show_snack("test message", color=ft.Colors.BLUE)
-
-                assert len(page.overlay) == 1
-                assert isinstance(page.overlay[0], ft.SnackBar)
-
-    def test_on_tab_click_invokes_refresh_locale_fallback(self):
-        """切换到延迟挂载的 Tab 时，必须显式调用 refresh_locale 兜底（§5.8 规范 7）。"""
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            mock_tab_with_refresh = MagicMock()
-            mock_tab_with_refresh.refresh_locale = MagicMock()
-            mock_tab_no_refresh = MagicMock()
-            # 删除 refresh_locale 属性以模拟旧组件，验证 _on_locale_change 兜底分支
-            del mock_tab_no_refresh.refresh_locale
-            mock_tab_no_refresh._on_locale_change = MagicMock()
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab", return_value=mock_tab_with_refresh),
-                patch("ui.views.settings_view.DatabaseTab", return_value=mock_tab_no_refresh),
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view.page = _FakePage()
-
-                # 切到 idx=0（DataSourceTab，有 refresh_locale）
-                event0 = MagicMock()
-                event0.control.data = "0"
-                view._on_tab_click(event0)
-                mock_tab_with_refresh.refresh_locale.assert_called_once()
-
-                # 切到 idx=1（DatabaseTab，仅有 _on_locale_change）
-                event1 = MagicMock()
-                event1.control.data = "1"
-                view._on_tab_click(event1)
-                mock_tab_no_refresh._on_locale_change.assert_called_once()
-
-    def test_on_tab_click_refresh_locale_swallows_exception(self):
-        """refresh_locale 抛异常时不应中断 tab 切换流程（§5.8 规范 9）。"""
-        with patch("ui.views.settings_view.I18n") as mock_i18n:
-            mock_i18n.get.return_value = "test"
-            mock_i18n.subscribe = MagicMock()
-            mock_i18n.unsubscribe = MagicMock()
-
-            mock_tab_with_error = MagicMock()
-            mock_tab_with_error.refresh_locale.side_effect = RuntimeError("refresh failed")
-
-            with (
-                patch("ui.views.settings_view.DataSourceTab", return_value=mock_tab_with_error),
-                patch("ui.views.settings_view.DatabaseTab") as mock_db_tab,
-                patch("ui.views.settings_view.AIBrainTab") as mock_ai_tab,
-                patch("ui.views.settings_view.AutomationTab") as mock_auto_tab,
-                patch("ui.views.settings_view.NotificationsTab") as mock_notify_tab,
-                patch("ui.views.settings_view.SystemTab") as mock_system_tab,
-            ):
-                mock_db_tab.return_value = MagicMock()
-                mock_ai_tab.return_value = MagicMock()
-                mock_auto_tab.return_value = MagicMock()
-                mock_notify_tab.return_value = MagicMock()
-                mock_system_tab.return_value = MagicMock()
-
-                view = SettingsView()
-                view.page = _FakePage()
-
-                event = MagicMock()
-                event.control.data = "0"
-                # 不应抛出异常
-                view._on_tab_click(event)
-                assert view.current_tab_index == 0
-                mock_tab_with_error.refresh_locale.assert_called_once()
+def _source_without_docstrings(source: str) -> str:
+    """移除模块/函数/类 docstring 后的源码，用于契约守护检查。"""
+    import ast
+
+    tree = ast.parse(source)
+    docstring_lines: set[int] = set()
+
+    def _collect(
+        node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Module,
+    ) -> None:
+        body = getattr(node, "body", None)
+        if not body:
+            return
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            end_lineno = first.end_lineno or first.lineno
+            docstring_lines.update(range(first.lineno, end_lineno + 1))
+
+    _collect(tree)  # type: ignore[arg-type]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _collect(node)
+
+    lines = source.splitlines()
+    code_lines = [line for i, line in enumerate(lines, 1) if i not in docstring_lines]
+    return "\n".join(code_lines)
+
+
+def _code_source() -> str:
+    """源码（去除 docstring），用于禁止模式检查。"""
+    import ui.views.settings_view as mod
+
+    return _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+
+
+def _raw_source() -> str:
+    """原始源码（含 docstring），用于正向契约检查。"""
+    import ui.views.settings_view as mod
+
+    return Path(mod.__file__).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 契约守护：声明式范式
+# ---------------------------------------------------------------------------
+
+
+class TestSettingsViewContract:
+    """声明式契约守护：禁止命令式 API + 强制声明式范式。"""
+
+    def test_settings_view_is_ft_component(self):
+        """DoD: SettingsView 必须 @ft.component 装饰。"""
+        from ui.views.settings_view import SettingsView
+
+        assert hasattr(SettingsView, "__wrapped__"), "SettingsView 必须用 @ft.component 装饰"
+
+    def test_no_class_inheritance(self):
+        """DoD: 禁止命令式 class 继承 Flet 控件。"""
+        assert "class SettingsView(" not in _code_source()
+
+    def test_no_did_mount(self):
+        """DoD: 禁止命令式 did_mount 生命周期回调。"""
+        assert "did_mount" not in _code_source()
+
+    def test_no_will_unmount(self):
+        """DoD: 禁止命令式 will_unmount 生命周期回调。"""
+        assert "will_unmount" not in _code_source()
+
+    def test_no_update_call(self):
+        """DoD: 禁止命令式 .update()。"""
+        assert ".update()" not in _code_source()
+
+    def test_no_safe_update(self):
+        """DoD: 禁止命令式 _safe_update。"""
+        assert "_safe_update" not in _code_source()
+
+    def test_no_refresh_locale(self):
+        """DoD: 禁止命令式 refresh_locale（声明式自动重渲染）。"""
+        assert "refresh_locale" not in _code_source()
+
+    def test_no_handle_resize(self):
+        """DoD: 禁止命令式 handle_resize 级联（子组件自管）。"""
+        assert "handle_resize" not in _code_source()
+
+    def test_no_on_locale_change(self):
+        """DoD: 禁止命令式 _on_locale_change（声明式自动重渲染）。"""
+        assert "on_locale_change" not in _code_source()
+
+    def test_no_on_theme_change(self):
+        """DoD: 禁止命令式 on_theme_change（声明式自动重渲染）。"""
+        assert "on_theme_change" not in _code_source()
+
+    def test_no_update_theme(self):
+        """DoD: 禁止命令式 update_theme（声明式通过 Observable state 自动重渲染）。"""
+        assert "update_theme" not in _code_source()
+
+    def test_subscribes_i18n(self):
+        """DoD: SettingsView 必须订阅 I18n.get_observable_state（i18n 自动重渲染）。"""
+        assert "I18n.get_observable_state" in _raw_source()
+
+    def test_uses_use_state_for_tab(self):
+        """DoD: Tab 切换必须用 use_state 驱动（条件渲染）。"""
+        assert "ft.use_state(0)" in _code_source() or "use_state(0)" in _code_source()
+
+    def test_no_use_ref_cache(self):
+        """DoD: 禁止 use_ref cache 命令式实例（直接调用子组件函数）。"""
+        assert "use_ref" not in _code_source()
+
+    def test_no_page_ref_property(self):
+        """DoD: 禁止命令式 page_ref property（声明式用 ft.context.page）。"""
+        assert "@property" not in _code_source()
+        assert "def page_ref" not in _code_source()
+
+    def test_uses_ft_context_page(self):
+        """DoD: page 访问必须通过 ft.context.page（try/except 守卫）。"""
+        assert "ft.context.page" in _code_source()
+
+
+# ---------------------------------------------------------------------------
+# 纯函数测试：_get_tab_button_style
+# ---------------------------------------------------------------------------
+
+
+class TestGetTabButtonStyle:
+    """Tab 按钮样式工厂：选中/未选中两种状态。"""
+
+    def test_selected_returns_button_style(self):
+        style = _get_tab_button_style_safe(is_selected=True)
+        assert isinstance(style, ft.ButtonStyle)
+
+    def test_unselected_returns_button_style(self):
+        style = _get_tab_button_style_safe(is_selected=False)
+        assert isinstance(style, ft.ButtonStyle)
+
+
+def _get_tab_button_style_safe(is_selected: bool) -> ft.ButtonStyle:
+    """Wrap _get_tab_button_style to handle AppColors token resolution in tests."""
+    from ui.views.settings_view import _get_tab_button_style
+
+    return _get_tab_button_style(is_selected=is_selected)
+
+
+# ---------------------------------------------------------------------------
+# 纯函数测试：_show_snack
+# ---------------------------------------------------------------------------
+
+
+class TestShowSnack:
+    """_show_snack：通过 ft.context.page 触发 toast/snackbar fallback。"""
+
+    def test_show_snack_no_page_returns_silently(self):
+        """ft.context.page 抛 RuntimeError 时静默返回。"""
+        from ui.views.settings_view import _show_snack
+
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            mock_ctx.page.__class__ = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
+            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
+            # 应静默返回，不抛异常
+            _show_snack("msg")
+            # 验证未到达 page 访问后续代码
+
+    def test_show_snack_with_show_toast_info(self):
+        """page.show_toast 存在时按默认 info 类型触发。"""
+        from ui.views.settings_view import _show_snack
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _show_snack("hello")
+            mock_page.show_toast.assert_called_once_with("hello", type="info")
+
+    def test_show_snack_with_red_color_calls_error(self):
+        """color=RED → msg_type=error。"""
+        from ui.views.settings_view import _show_snack
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _show_snack("err", color=ft.Colors.RED)
+            mock_page.show_toast.assert_called_once_with("err", type="error")
+
+    def test_show_snack_with_green_color_calls_success(self):
+        """color=GREEN → msg_type=success。"""
+        from ui.views.settings_view import _show_snack
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _show_snack("ok", color=ft.Colors.GREEN)
+            mock_page.show_toast.assert_called_once_with("ok", type="success")
+
+    def test_show_snack_with_orange_color_calls_warning(self):
+        """color=ORANGE → msg_type=warning。"""
+        from ui.views.settings_view import _show_snack
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _show_snack("warn", color=ft.Colors.ORANGE)
+            mock_page.show_toast.assert_called_once_with("warn", type="warning")
+
+    def test_show_snack_with_amber_color_calls_warning(self):
+        """color=AMBER → msg_type=warning。"""
+        from ui.views.settings_view import _show_snack
+
+        mock_page = MagicMock()
+        mock_page.show_toast = MagicMock()
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _show_snack("warn", color=ft.Colors.AMBER)
+            mock_page.show_toast.assert_called_once_with("warn", type="warning")
+
+    def test_show_snack_fallback_to_snackbar_when_no_show_toast(self):
+        """page 无 show_toast 方法时，回退到 SnackBar + show_dialog。"""
+        from ui.views.settings_view import _show_snack
+
+        mock_page = MagicMock()
+        del mock_page.show_toast  # 删除属性，使 hasattr 返回 False
+        mock_page.show_dialog = MagicMock()
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: mock_page)
+            _show_snack("fallback", color=ft.Colors.BLUE)
+            mock_page.show_dialog.assert_called_once()
+            snack_arg = mock_page.show_dialog.call_args[0][0]
+            assert isinstance(snack_arg, ft.SnackBar)
+
+    def test_show_snack_none_page_returns_silently(self):
+        """page 为 None 时静默返回。"""
+        from ui.views.settings_view import _show_snack
+
+        with patch("ui.views.settings_view.ft.context") as mock_ctx:
+            type(mock_ctx).page = property(lambda self: None)
+            # 应静默返回，不抛异常
+            _show_snack("msg")
+
+
+# ---------------------------------------------------------------------------
+# 纯函数测试：_build_tabs
+# ---------------------------------------------------------------------------
+
+
+class TestBuildTabs:
+    """_build_tabs：实例化 6 个 tabs（patch 命令式 tabs 避免真实实例化）。"""
+
+    @pytest.fixture(autouse=True)
+    def _patch_all_tabs(self):
+        """Patch 5 个命令式 tabs + 1 个声明式 DatabaseTab，避免真实实例化。"""
+        with (
+            patch("ui.views.settings_view.DataSourceTab") as self.mock_data,
+            patch("ui.views.settings_view.DatabaseTab") as self.mock_db,
+            patch("ui.views.settings_view.AIBrainTab") as self.mock_ai,
+            patch("ui.views.settings_view.AutomationTab") as self.mock_auto,
+            patch("ui.views.settings_view.NotificationsTab") as self.mock_notify,
+            patch("ui.views.settings_view.SystemTab") as self.mock_system,
+        ):
+            self.mock_data.return_value = MagicMock(name="DataSourceTab")
+            self.mock_db.return_value = MagicMock(name="DatabaseTab")
+            self.mock_ai.return_value = MagicMock(name="AIBrainTab")
+            self.mock_auto.return_value = MagicMock(name="AutomationTab")
+            self.mock_notify.return_value = MagicMock(name="NotificationsTab")
+            self.mock_system.return_value = MagicMock(name="SystemTab")
+            yield
+
+    def test_build_tabs_returns_6_tabs(self):
+        from ui.views.settings_view import _build_tabs
+
+        tabs = _build_tabs(MagicMock())
+        assert len(tabs) == 6
+
+    def test_build_tabs_calls_each_tab_constructor(self):
+        from ui.views.settings_view import _build_tabs
+
+        show_snack = MagicMock()
+        _build_tabs(show_snack)
+
+        self.mock_data.assert_called_once_with(show_snack)
+        self.mock_db.assert_called_once_with(show_snack)
+        self.mock_ai.assert_called_once_with(show_snack)
+        self.mock_auto.assert_called_once_with(show_snack)
+        # NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)
+        self.mock_notify.assert_called_once_with(show_snack)
+        self.mock_system.assert_called_once_with(show_snack)
+
+    def test_build_tabs_notifications_tab_receives_only_show_snack(self):
+        """NotificationsTab 声明式重写后只接收 show_snack (Phase D.4, 无 page_ref)。"""
+        from ui.views.settings_view import _build_tabs
+
+        _build_tabs(MagicMock())
+
+        self.mock_notify.assert_called_once()
+        args = self.mock_notify.call_args[0]
+        assert len(args) == 1, "NotificationsTab 声明式重写后不应接收 page_ref"
+
+
+# ---------------------------------------------------------------------------
+# _TAB_CONFIG 配置守护
+# ---------------------------------------------------------------------------
+
+
+class TestTabConfig:
+    """_TAB_CONFIG 顺序与 _build_tabs 返回顺序一致。"""
+
+    def test_tab_config_has_6_entries(self):
+        from ui.views.settings_view import _TAB_CONFIG
+
+        assert len(_TAB_CONFIG) == 6
+
+    def test_tab_config_entries_are_tuples(self):
+        from ui.views.settings_view import _TAB_CONFIG
+
+        for entry in _TAB_CONFIG:
+            assert isinstance(entry, tuple)
+            assert len(entry) == 2
+            key, icon = entry
+            assert isinstance(key, str)
+            # ft.Icons 是 IntEnum 成员
+            assert isinstance(icon, int)  # ft.Icons 是 IntEnum
