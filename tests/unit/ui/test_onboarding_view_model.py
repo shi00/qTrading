@@ -1017,8 +1017,10 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         wizard.wizard_language_dropdown.value = "en_US"
         await wizard._do_language_change_wizard_async()
         # 验证回调已更新为新面板的方法
+        # 注：DatabaseConfigPanel 已重写为声明式组件，回调绑定到 database_vm.save_config
+        # 绑定方法每次访问创建新对象，用 == 比较（比较 __self__ 和 __func__）
         assert wizard.vm.fn_validate_database is not None
-        assert wizard.vm.fn_validate_database is wizard.database_panel.save_config
+        assert wizard.vm.fn_validate_database == wizard.database_vm.save_config
         assert wizard.vm.fn_validate_token is wizard.tushare_panel.verify_token
 
 
@@ -1093,10 +1095,13 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
     """OnboardingWizard 语言切换重建行为测试（§5.8 规范 3/6）。"""
 
     def test_rebuild_cascades_panel_locale_refresh(self, mock_page):
-        """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）"""
+        """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）
+
+        注：DatabaseConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
+        自动重渲染，不再需要级联调用 _on_locale_change。
+        """
         wizard = self._make_wizard(mock_page)
         panels_and_methods = [
-            (wizard.database_panel, "_on_locale_change"),
             (wizard.tushare_panel, "refresh_locale"),
             (wizard.llm_config_panel, "_on_locale_change"),
             (wizard.local_model_panel, "_on_locale_change"),
@@ -1113,7 +1118,7 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
         """§5.8 规范 3 纯 UI：语言切换后子面板实例必须保持不变（构造函数会触发 keyring IO）"""
         wizard = self._make_wizard(mock_page)
         original_panels = {
-            "database_panel": wizard.database_panel,
+            "database_vm": wizard.database_vm,
             "tushare_panel": wizard.tushare_panel,
             "llm_config_panel": wizard.llm_config_panel,
             "local_model_panel": wizard.local_model_panel,

@@ -11,6 +11,7 @@ import flet as ft
 from ui.components.config_panels import DatabaseConfigPanel
 from ui.i18n import I18n
 from ui.theme import AppColors
+from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +25,10 @@ class DatabaseTab(ft.Container):
         self.expand = True  # pragma: no cover
         self._locale_subscription_id: object | None = None  # pragma: no cover
 
-        self.config_panel = DatabaseConfigPanel(  # pragma: no cover
+        # VM 由消费方实例化（声明式 DatabaseConfigPanel 接收 vm 参数）
+        self.config_vm = DatabaseConfigPanelViewModel(  # pragma: no cover
             on_save_callback=self._on_save,  # pragma: no cover
             on_test_success_callback=self._on_test_success,  # pragma: no cover
-            show_header=True,  # pragma: no cover
-            compact=False,  # pragma: no cover
             load_password=True,  # pragma: no cover
         )  # pragma: no cover
 
@@ -57,7 +57,12 @@ class DatabaseTab(ft.Container):
                 ft.Container(height=20),  # pragma: no cover
                 ft.Card(  # pragma: no cover
                     content=ft.Container(  # pragma: no cover
-                        content=self.config_panel,  # pragma: no cover
+                        content=DatabaseConfigPanel(  # pragma: no cover
+                            vm=self.config_vm,  # pragma: no cover
+                            show_header=True,  # pragma: no cover
+                            compact=False,  # pragma: no cover
+                            show_save_button=True,  # pragma: no cover
+                        ),  # pragma: no cover
                         padding=20,  # pragma: no cover
                         bgcolor=AppColors.SURFACE,  # pragma: no cover
                         border_radius=12,  # pragma: no cover
@@ -80,18 +85,19 @@ class DatabaseTab(ft.Container):
         )
 
     def _on_mount(self):
-        self.config_panel.reload_config()
+        self.config_vm.reload_config()
         self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
 
     def _on_unmount(self):
         if self._locale_subscription_id is not None:
             I18n.unsubscribe(self._locale_subscription_id)
             self._locale_subscription_id = None
+        self.config_vm.dispose()
 
     def refresh_locale(self):
         """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
 
-        注：DatabaseConfigPanel 已自行订阅 I18n，由 I18n.set_locale 自动触发。
+        注：DatabaseConfigPanel 已通过 ft.use_state(I18n.get_observable_state) 自动重渲染。
         """
         try:
             self.title_text.value = I18n.get("settings_db_title")

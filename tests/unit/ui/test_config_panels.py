@@ -1,9 +1,9 @@
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
 
-from ui.components.config_panels.database_config_panel import DatabaseConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
@@ -21,20 +21,17 @@ async def _run_async_passthrough(task_type, func, *args, **kwargs):
 
 @pytest.fixture(autouse=True)
 def _mock_thread_pool_for_panels():
-    """Patch tushare/database/local_model config panel 模块级 ThreadPoolManager，run_async 直接同步执行。
+    """Patch tushare/local_model config panel 模块级 ThreadPoolManager，run_async 直接同步执行。
 
     autouse：所有 verify_token / save_config / _on_save_click 路径均经 ThreadPoolManager offload，
-    需统一 mock 避免触达真实线程池单例。仅作用于此三个模块，不影响 LLM 面板。
+    需统一 mock 避免触达真实线程池单例。仅作用于此两个模块，不影响 LLM 面板。
+    DatabaseConfigPanel 已重写为声明式组件，ThreadPoolManager 由 VM 层处理，不再需要此处 patch。
     """
     mock_tpm = MagicMock()
     mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
     with (
         patch(
             "ui.components.config_panels.tushare_config_panel.ThreadPoolManager",
-            return_value=mock_tpm,
-        ),
-        patch(
-            "ui.components.config_panels.database_config_panel.ThreadPoolManager",
             return_value=mock_tpm,
         ),
         patch(
@@ -84,20 +81,6 @@ def mock_config_handler_local():
 
 
 @pytest.fixture
-def mock_config_handler_db():
-    with patch("ui.components.config_panels.database_config_panel.ConfigHandler") as m:
-        m.get_db_config.return_value = {
-            "host": "localhost",
-            "port": 5432,
-            "user": "postgres",
-            "database": "astock",
-        }
-        m.get_db_password.return_value = ""
-        m.save_db_config.return_value = True
-        yield m
-
-
-@pytest.fixture
 def mock_i18n():
     with patch("ui.components.config_panels.tushare_config_panel.I18n") as m:
         m.get.side_effect = lambda key, **kw: key
@@ -118,15 +101,6 @@ def mock_i18n_llm():
 @pytest.fixture
 def mock_i18n_local():
     with patch("ui.components.config_panels.local_model_config_panel.I18n") as m:
-        m.get.side_effect = lambda key, **kw: key
-        m.subscribe.return_value = "sub_id"
-        m.unsubscribe.return_value = None
-        yield m
-
-
-@pytest.fixture
-def mock_i18n_db():
-    with patch("ui.components.config_panels.database_config_panel.I18n") as m:
         m.get.side_effect = lambda key, **kw: key
         m.subscribe.return_value = "sub_id"
         m.unsubscribe.return_value = None
@@ -192,12 +166,6 @@ def _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, 
 def _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, **kwargs):
     kwargs.setdefault("on_verify_model", AsyncMock(return_value=True))
     panel = LocalModelConfigPanel(**kwargs)
-    panel.page = mock_page
-    return panel
-
-
-def _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, **kwargs):
-    panel = DatabaseConfigPanel(**kwargs)
     panel.page = mock_page
     return panel
 
@@ -852,306 +820,117 @@ class TestLocalModelConfigPanel:
         assert panel.threads_input.value == 2
 
 
-class TestDatabaseConfigPanel:
-    def test_load_config_populates_fields(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        mock_config_handler_db.get_db_config.return_value = {
-            "host": "db.example.com",
-            "port": 3306,
-            "user": "admin",
-            "database": "mydb",
-        }
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        assert panel.db_host_input.value == "db.example.com"
-        assert panel.db_port_input.value == "3306"
-        assert panel.db_user_input.value == "admin"
-        assert panel.db_name_input.value == "mydb"
+def _source_without_docstrings(source: str) -> str:
+    """移除模块/函数/类 docstring 后的源码，用于契约守护检查。
 
-    def test_load_config_defaults(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        mock_config_handler_db.get_db_config.return_value = {}
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        assert panel.db_host_input.value == "localhost"
-        assert panel.db_port_input.value == "5432"
-        assert panel.db_user_input.value == "postgres"
-        assert panel.db_name_input.value == "astock"
+    避免源码 docstring 中提及被禁止的方法名（作为变更说明）导致字符串匹配误判。
+    """
+    import ast
 
-    def test_get_config_returns_all_fields(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "myhost"
-        panel.db_port_input.value = "5433"
-        panel.db_user_input.value = "myuser"
-        panel.db_password_input.value = "mypass"
-        panel.db_name_input.value = "mydb"
-        panel.db_create_checkbox.value = True
+    tree = ast.parse(source)
+    docstring_lines: set[int] = set()
 
-        config = panel.get_config()
+    def _collect_docstring_lines(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Module) -> None:
+        body = getattr(node, "body", None)
+        if not body:
+            return
+        first = body[0]
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+            end_lineno = first.end_lineno or first.lineno
+            docstring_lines.update(range(first.lineno, end_lineno + 1))
 
-        assert config["host"] == "myhost"
-        assert config["port"] == 5433
-        assert config["user"] == "myuser"
-        assert config["password"] == "mypass"
-        assert config["database"] == "mydb"
-        assert config["create_if_not_exists"] is True
+    _collect_docstring_lines(tree)  # type: ignore[arg-type]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _collect_docstring_lines(node)
 
-    def test_set_config_updates_fields(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.set_config(
-            {
-                "host": "newhost",
-                "port": 3306,
-                "user": "newuser",
-                "password": "newpass",
-                "database": "newdb",
-                "create_if_not_exists": False,
-            }
-        )
-        assert panel.db_host_input.value == "newhost"
-        assert panel.db_port_input.value == "3306"
-        assert panel.db_user_input.value == "newuser"
-        assert panel.db_password_input.value == "newpass"
-        assert panel.db_name_input.value == "newdb"
-        assert panel.db_create_checkbox.value is False
+    lines = source.splitlines()
+    code_lines = [line for i, line in enumerate(lines, 1) if i not in docstring_lines]
+    return "\n".join(code_lines)
 
-    def test_validate_empty_host_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = ""
-        is_valid, error = panel.validate()
-        assert is_valid is False
 
-    def test_validate_empty_user_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_user_input.value = ""
-        is_valid, error = panel.validate()
-        assert is_valid is False
+class TestDatabaseConfigPanelContract:
+    """DatabaseConfigPanel 声明式契约守护测试（Phase 3.2.1）。
 
-    def test_validate_empty_database_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_user_input.value = "postgres"
-        panel.db_name_input.value = ""
-        is_valid, error = panel.validate()
-        assert is_valid is False
+    业务逻辑由 VM 单元测试覆盖（test_database_config_panel_view_model.py）。
+    View 层测试聚焦于：
+    1. 纯函数测试（_render_message）
+    2. 契约守护（grep 检查禁止的命令式模式：did_mount/.update()/refresh_locale）
+    """
 
-    def test_validate_invalid_port_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "abc"
-        panel.db_user_input.value = "postgres"
-        panel.db_name_input.value = "astock"
-        is_valid, error = panel.validate()
-        assert is_valid is False
+    def test_database_config_panel_is_ft_component(self):
+        """DoD: DatabaseConfigPanel 必须被 @ft.component 装饰。"""
+        from ui.components.config_panels.database_config_panel import DatabaseConfigPanel
 
-    def test_validate_port_out_of_range_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "99999"
-        panel.db_user_input.value = "postgres"
-        panel.db_name_input.value = "astock"
-        is_valid, error = panel.validate()
-        assert is_valid is False
+        assert hasattr(DatabaseConfigPanel, "__wrapped__"), "DatabaseConfigPanel 必须用 @ft.component 装饰"
 
-    def test_validate_valid_config_returns_true(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_name_input.value = "astock"
-        is_valid, error = panel.validate()
-        assert is_valid is True
+    def test_database_config_panel_no_did_mount(self):
+        """DoD: 禁止命令式 did_mount 生命周期回调。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-    @pytest.mark.asyncio
-    async def test_test_connection_success(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        from data.persistence.db_config_service import ConnectionStatus
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "did_mount" not in source, "DatabaseConfigPanel 不应使用 did_mount（命令式）"
 
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
+    def test_database_config_panel_no_will_unmount(self):
+        """DoD: 禁止命令式 will_unmount 生命周期回调。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.SUCCESS
-        mock_result.message = "Connection successful"
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "will_unmount" not in source, "DatabaseConfigPanel 不应使用 will_unmount（命令式）"
 
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            mock_svc.get_database_info = AsyncMock(return_value=None)
-            result = await panel.test_connection()
+    def test_database_config_panel_no_safe_update(self):
+        """DoD: 禁止命令式 .update() / _safe_update()。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-        assert result is True
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert ".update()" not in source, "DatabaseConfigPanel 不应使用 .update()（命令式）"
+        assert "_safe_update" not in source, "DatabaseConfigPanel 不应使用 _safe_update（命令式）"
 
-    @pytest.mark.asyncio
-    async def test_test_connection_database_not_found_with_create(
-        self, mock_config_handler_db, mock_i18n_db, mock_page
-    ):
-        from data.persistence.db_config_service import ConnectionStatus
+    def test_database_config_panel_no_refresh_locale(self):
+        """DoD: 禁止命令式 refresh_locale / _on_locale_change（声明式用 ft.use_state 自动重渲染）。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
-        panel.db_create_checkbox.value = True
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "refresh_locale" not in source, "DatabaseConfigPanel 不应使用 refresh_locale（声明式自动重渲染）"
+        assert "_on_locale_change" not in source, "DatabaseConfigPanel 不应使用 _on_locale_change（声明式自动重渲染）"
 
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.DATABASE_NOT_FOUND
-        mock_result.message = "Database not found"
+    def test_database_config_panel_uses_ft_component(self):
+        """DoD: 必须使用 @ft.component 装饰。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            result = await panel.test_connection()
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "@ft.component" in source, "DatabaseConfigPanel 必须用 @ft.component 装饰"
 
-        assert result is True
+    def test_database_config_panel_uses_i18n_observable_state(self):
+        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-    @pytest.mark.asyncio
-    async def test_test_connection_database_not_found_without_create(
-        self, mock_config_handler_db, mock_i18n_db, mock_page
-    ):
-        from data.persistence.db_config_service import ConnectionStatus
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "I18n.get_observable_state" in source, "DatabaseConfigPanel 必须订阅 I18n.get_observable_state"
 
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
-        panel.db_create_checkbox.value = False
+    def test_database_config_panel_no_class_container(self):
+        """DoD: 禁止命令式 class 继承 ft.Container。"""
+        import ui.components.config_panels.database_config_panel as mod
 
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.DATABASE_NOT_FOUND
-        mock_result.message = "Database not found"
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "class DatabaseConfigPanel(" not in source, "DatabaseConfigPanel 不应是 class（命令式）"
 
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            result = await panel.test_connection()
 
-        assert result is False
+class TestRenderMessage:
+    """_render_message 纯函数测试。"""
 
-    @pytest.mark.asyncio
-    async def test_test_connection_failure_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        from data.persistence.db_config_service import ConnectionStatus
+    def test_render_message_none_returns_empty(self):
+        from ui.components.config_panels.database_config_panel import _render_message
 
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
+        assert _render_message(None) == ""
 
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.AUTHENTICATION_ERROR
-        mock_result.message = "Auth failed"
+    def test_render_message_with_default_param(self):
+        from ui.components.config_panels.database_config_panel import _render_message
+        from ui.viewmodels import Message
 
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            result = await panel.test_connection()
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_save_config_success_calls_config_handler(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        from data.persistence.db_config_service import ConnectionStatus
-
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
-        panel.db_create_checkbox.value = True
-
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.SUCCESS
-
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, "OK"))
-            result = await panel.save_config()
-
-        assert result is True
-        mock_config_handler_db.save_db_config.assert_called_once_with(
-            host="localhost",
-            port=5432,
-            user="postgres",
-            password="pass",
-            database="astock",
-        )
-
-    @pytest.mark.asyncio
-    async def test_save_config_creates_database_when_not_found(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        from data.persistence.db_config_service import ConnectionStatus
-
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
-        panel.db_create_checkbox.value = True
-
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.DATABASE_NOT_FOUND
-
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            mock_svc.create_database = AsyncMock(return_value=(True, "Created"))
-            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, "OK"))
-            result = await panel.save_config()
-
-        assert result is True
-        mock_svc.create_database.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_save_config_validation_failure_returns_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = ""
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_name_input.value = "astock"
-
-        result = await panel.save_config()
-
-        assert result is False
-        mock_config_handler_db.save_db_config.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_save_config_calls_on_save_callback(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        from data.persistence.db_config_service import ConnectionStatus
-
-        on_save = MagicMock()
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, on_save_callback=on_save)
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
-        panel.db_create_checkbox.value = False
-
-        mock_result = MagicMock()
-        mock_result.status = ConnectionStatus.SUCCESS
-
-        with patch("ui.components.config_panels.database_config_panel.DatabaseConfigService") as mock_svc:
-            mock_svc.test_connection = AsyncMock(return_value=mock_result)
-            mock_svc.ensure_tables_exist = AsyncMock(return_value=(True, "OK"))
-            await panel.save_config()
-
-        on_save.assert_called_once()
-
-    def test_reload_config_refreshes_from_config_handler(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        mock_config_handler_db.get_db_config.return_value = {
-            "host": "newhost",
-            "port": 3306,
-            "user": "newuser",
-            "database": "newdb",
-        }
-        panel.reload_config()
-        assert panel.db_host_input.value == "newhost"
-        assert panel.db_port_input.value == "3306"
-        assert panel.db_user_input.value == "newuser"
-        assert panel.db_name_input.value == "newdb"
+        msg = Message("_raw_msg_", {"default": "raw error text"})
+        result = _render_message(msg)
+        assert result == "raw error text"
 
 
 class TestLLMConfigPanelExtended:
@@ -1745,104 +1524,6 @@ class TestLLMConfigPanelExtended:
         assert panel.model_dropdown.value == "deepseek-chat"
         assert panel.model_dropdown.options is not None
         assert len(panel.model_dropdown.options) > 0
-
-
-class TestDatabaseConfigPanelExtended:
-    def test_load_password_enabled(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        mock_config_handler_db.get_db_password.return_value = "saved_password"
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, load_password=True)
-        assert panel.db_password_input.value == "saved_password"
-
-    def test_load_password_disabled(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        mock_config_handler_db.get_db_password.return_value = "saved_password"
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, load_password=False)
-        assert panel.db_password_input.value == ""
-
-    def test_did_mount_subscribes_locale(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.did_mount()
-        mock_i18n_db.subscribe.assert_called_once()
-        assert panel._locale_subscription_id == "sub_id"
-
-    def test_will_unmount_unsubscribes_locale(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel._locale_subscription_id = "sub_id"
-        panel.will_unmount()
-        mock_i18n_db.unsubscribe.assert_called_once_with("sub_id")
-        assert panel._locale_subscription_id is None
-
-    def test_will_unmount_no_subscription(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel._locale_subscription_id = None
-        panel.will_unmount()
-        mock_i18n_db.unsubscribe.assert_not_called()
-
-    def test_on_locale_change_preserves_values(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel.db_host_input.value = "myhost"
-        panel.db_port_input.value = "5433"
-        panel.db_user_input.value = "myuser"
-        panel.db_password_input.value = "mypass"
-        panel.db_name_input.value = "mydb"
-        panel.db_create_checkbox.value = False
-        panel._on_locale_change()
-        assert panel.db_host_input.value == "myhost"
-        assert panel.db_port_input.value == "5433"
-        assert panel.db_user_input.value == "myuser"
-        assert panel.db_password_input.value == "mypass"
-        assert panel.db_name_input.value == "mydb"
-        assert panel.db_create_checkbox.value is False
-
-    def test_on_locale_change_exception_handled(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        mock_i18n_db.get.side_effect = RuntimeError("i18n error")
-        panel._on_locale_change()
-
-    def test_on_input_change_calls_callback(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        on_change = MagicMock()
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, on_change=on_change)
-        panel._on_input_change(None)
-        on_change.assert_called_once()
-
-    def test_test_connection_already_verifying(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel._is_verifying = True
-        panel.db_host_input.value = "localhost"
-        panel.db_port_input.value = "5432"
-        panel.db_user_input.value = "postgres"
-        panel.db_password_input.value = "pass"
-        panel.db_name_input.value = "astock"
-        import asyncio
-
-        result = asyncio.run(panel.test_connection())
-        assert result is False
-
-    def test_show_success_updates_status(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel._show_success("Success message")
-        assert panel.status_text.value == "Success message"
-
-    def test_show_error_updates_status(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel._show_error("Error message")
-        assert panel.status_text.value == "Error message"
-
-    def test_show_warning_updates_status(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page)
-        panel._show_warning("Warning message")
-        assert panel.status_text.value == "Warning message"
-
-    def test_compact_mode(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, compact=True)
-        assert panel.compact is True
-
-    def test_show_header_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, show_header=False)
-        assert panel.show_header is False
-
-    def test_show_save_button_false(self, mock_config_handler_db, mock_i18n_db, mock_page):
-        panel = _make_db_panel(mock_config_handler_db, mock_i18n_db, mock_page, show_save_button=False)
-        assert panel._show_save_button is False
 
 
 class TestLocalModelConfigPanelExtended:

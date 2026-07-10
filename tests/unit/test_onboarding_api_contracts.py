@@ -273,27 +273,33 @@ class TestPasswordLoading:
     """Tests for password loading functionality - Issue 2.1"""
 
     def test_database_panel_accepts_load_password_parameter(self):
-        """Test that DatabaseConfigPanel accepts load_password parameter"""
+        """Test that DatabaseConfigPanelViewModel accepts load_password parameter.
+
+        注：DatabaseConfigPanel 已重写为声明式组件，load_password 移至 VM 构造参数。
+        """
         import inspect
 
-        from ui.components.config_panels.database_config_panel import (
-            DatabaseConfigPanel,
+        from ui.viewmodels.database_config_panel_view_model import (
+            DatabaseConfigPanelViewModel,
         )
 
-        sig = inspect.signature(DatabaseConfigPanel.__init__)
+        sig = inspect.signature(DatabaseConfigPanelViewModel.__init__)
         params = list(sig.parameters.keys())
 
         assert "load_password" in params
 
     def test_database_panel_load_password_defaults_to_false(self):
-        """Test that load_password defaults to False for security"""
+        """Test that load_password defaults to False for security.
+
+        注：DatabaseConfigPanel 已重写为声明式组件，load_password 移至 VM 构造参数。
+        """
         import inspect
 
-        from ui.components.config_panels.database_config_panel import (
-            DatabaseConfigPanel,
+        from ui.viewmodels.database_config_panel_view_model import (
+            DatabaseConfigPanelViewModel,
         )
 
-        sig = inspect.signature(DatabaseConfigPanel.__init__)
+        sig = inspect.signature(DatabaseConfigPanelViewModel.__init__)
         load_password_param = sig.parameters.get("load_password")
 
         assert load_password_param is not None
@@ -385,17 +391,16 @@ class TestLocaleChangeSignature:
     # --- 零参签名（§5.8 规范 2：回调方法签名无参数）---
 
     def test_database_config_panel_locale_change_is_zero_arg(self):
-        """DatabaseConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """DatabaseConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.components.config_panels.database_config_panel import (
             DatabaseConfigPanel,
         )
 
-        sig = inspect.signature(DatabaseConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(DatabaseConfigPanel, "__wrapped__"), "DatabaseConfigPanel 必须是 @ft.component 声明式组件"
+        assert not hasattr(DatabaseConfigPanel, "_on_locale_change"), (
+            "声明式 DatabaseConfigPanel 不应有 _on_locale_change"
+        )
 
     def test_failover_config_panel_locale_change_is_zero_arg(self):
         """FailoverConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""

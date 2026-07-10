@@ -18,10 +18,12 @@ class TestDatabaseTabInit:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -33,9 +35,9 @@ class TestDatabaseTabInit:
 
         return DatabaseTab(show_snack_callback=MagicMock())
 
-    def test_instantiation_creates_config_panel(self):
+    def test_instantiation_creates_config_vm(self):
         tab = self._make_tab()
-        assert tab.config_panel is not None
+        assert tab.config_vm is not None
 
     def test_instantiation_sets_expand_true(self):
         tab = self._make_tab()
@@ -48,20 +50,14 @@ class TestDatabaseTabInit:
         assert tab.show_snack is callback
 
     def test_instantiation_passes_on_save_callback(self):
-        from ui.views.settings_tabs.database_tab import DatabaseTab
-
-        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel") as mock_panel:
-            DatabaseTab(show_snack_callback=MagicMock())
-            call_kwargs = mock_panel.call_args
-            assert call_kwargs.kwargs.get("on_save_callback") is not None
+        self._make_tab()
+        call_kwargs = self.mock_vm.call_args.kwargs
+        assert call_kwargs.get("on_save_callback") is not None
 
     def test_instantiation_passes_on_test_success_callback(self):
-        from ui.views.settings_tabs.database_tab import DatabaseTab
-
-        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel") as mock_panel:
-            DatabaseTab(show_snack_callback=MagicMock())
-            call_kwargs = mock_panel.call_args
-            assert call_kwargs.kwargs.get("on_test_success_callback") is not None
+        self._make_tab()
+        call_kwargs = self.mock_vm.call_args.kwargs
+        assert call_kwargs.get("on_test_success_callback") is not None
 
     def test_instantiation_passes_show_header_true(self):
         from ui.views.settings_tabs.database_tab import DatabaseTab
@@ -80,12 +76,9 @@ class TestDatabaseTabInit:
             assert call_kwargs.kwargs.get("compact") is False
 
     def test_instantiation_passes_load_password_true(self):
-        from ui.views.settings_tabs.database_tab import DatabaseTab
-
-        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel") as mock_panel:
-            DatabaseTab(show_snack_callback=MagicMock())
-            call_kwargs = mock_panel.call_args
-            assert call_kwargs.kwargs.get("load_password") is True
+        self._make_tab()
+        call_kwargs = self.mock_vm.call_args.kwargs
+        assert call_kwargs.get("load_password") is True
 
     def test_instantiation_sets_did_mount(self):
         tab = self._make_tab()
@@ -105,10 +98,12 @@ class TestDatabaseTabOnSave:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -165,10 +160,12 @@ class TestDatabaseTabOnTestSuccess:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -220,10 +217,12 @@ class TestDatabaseTabLifecycle:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -238,12 +237,12 @@ class TestDatabaseTabLifecycle:
     def test_on_mount_calls_reload_config(self):
         tab = self._make_tab()
         tab._on_mount()
-        tab.config_panel.reload_config.assert_called_once()
+        tab.config_vm.reload_config.assert_called_once()
 
     def test_on_mount_calls_reload_config_only_once(self):
         tab = self._make_tab()
         tab._on_mount()
-        tab.config_panel.reload_config.assert_called_once()
+        tab.config_vm.reload_config.assert_called_once()
 
     def test_on_unmount_does_not_raise(self):
         tab = self._make_tab()
@@ -253,7 +252,7 @@ class TestDatabaseTabLifecycle:
     def test_did_mount_delegates_to_on_mount(self):
         tab = self._make_tab()
         tab.did_mount()
-        tab.config_panel.reload_config.assert_called_once()
+        tab.config_vm.reload_config.assert_called_once()
 
     def test_will_unmount_delegates_to_on_unmount(self):
         tab = self._make_tab()
@@ -270,10 +269,12 @@ class TestDatabaseTabBuildUI:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -315,10 +316,12 @@ class TestDatabaseTabEdgeCases:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -332,7 +335,7 @@ class TestDatabaseTabEdgeCases:
 
     def test_on_mount_reload_config_exception_propagates(self):
         tab = self._make_tab()
-        tab.config_panel.reload_config.side_effect = RuntimeError("config load error")
+        tab.config_vm.reload_config.side_effect = RuntimeError("config load error")
         with pytest.raises(RuntimeError, match="config load error"):
             tab._on_mount()
 
@@ -343,16 +346,13 @@ class TestDatabaseTabEdgeCases:
         assert any("9999" in r.message for r in caplog.records)
         assert any("analytics" in r.message for r in caplog.records)
 
-    def test_config_panel_callback_wiring(self):
-        """验证 _on_save 和 _on_test_success 被正确传入 DatabaseConfigPanel"""
-        from ui.views.settings_tabs.database_tab import DatabaseTab
-
-        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel") as mock_panel:
-            DatabaseTab(show_snack_callback=MagicMock())
-            call_kwargs = mock_panel.call_args.kwargs
-            # 验证传入的回调是 tab 实例的方法
-            assert callable(call_kwargs["on_save_callback"])
-            assert callable(call_kwargs["on_test_success_callback"])
+    def test_config_vm_callback_wiring(self):
+        """验证 _on_save 和 _on_test_success 被正确传入 DatabaseConfigPanelViewModel"""
+        self._make_tab()
+        call_kwargs = self.mock_vm.call_args.kwargs
+        # 验证传入的回调是 tab 实例的方法
+        assert callable(call_kwargs["on_save_callback"])
+        assert callable(call_kwargs["on_test_success_callback"])
 
 
 class TestDatabaseTabOnUnmountWithSubscription:
@@ -364,10 +364,12 @@ class TestDatabaseTabOnUnmountWithSubscription:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -415,10 +417,12 @@ class TestDatabaseTabRefreshLocale:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
+        self.mock_vm = MagicMock()
         self.patches = [
             patch("ui.views.settings_tabs.database_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.database_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanel", MagicMock()),
+            patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", self.mock_vm),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
