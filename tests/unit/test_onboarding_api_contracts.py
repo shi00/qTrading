@@ -406,17 +406,16 @@ class TestLocaleChangeSignature:
         assert params == ["self"]
 
     def test_local_model_config_panel_locale_change_is_zero_arg(self):
-        """LocalModelConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """LocalModelConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.components.config_panels.local_model_config_panel import (
             LocalModelConfigPanel,
         )
 
-        sig = inspect.signature(LocalModelConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(LocalModelConfigPanel, "__wrapped__"), "LocalModelConfigPanel 必须是 @ft.component 声明式组件"
+        assert not hasattr(LocalModelConfigPanel, "_on_locale_change"), (
+            "声明式 LocalModelConfigPanel 不应有 _on_locale_change"
+        )
 
     def test_system_tab_locale_change_is_zero_arg(self):
         """SystemTab._on_locale_change 必须零参（§5.8 规范 2）"""
@@ -485,51 +484,46 @@ class TestLLMProviderSwitch:
 
 
 class TestLocalModelAsyncVerification:
-    """Tests for local model async verification"""
+    """Tests for local model async verification.
 
-    def test_local_model_panel_has_async_verify_model(self):
-        """Test that LocalModelConfigPanel has async_verify_model method"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    注：LocalModelConfigPanel 已重写为声明式组件（Phase 3.2.4），
+    验证/保存逻辑收敛进 VM.verify_model / VM.save_config commands，
+    loading 状态收敛进 VM state.is_verifying。
+    旧命令式 API 测试（async_verify_model/_set_loading_state/progress_indicator）已移除。
+    """
+
+    def test_local_model_vm_has_verify_model(self):
+        """DoD: VM 暴露 verify_model command（声明式，替代旧 async_verify_model）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigPanelViewModel,
         )
 
-        assert hasattr(LocalModelConfigPanel, "async_verify_model")
+        assert hasattr(LocalModelConfigPanelViewModel, "verify_model"), "VM 必须暴露 verify_model command"
 
-    def test_local_model_panel_has_progress_indicator(self):
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_local_model_vm_has_save_config(self):
+        """DoD: VM 暴露 save_config command（声明式）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigPanelViewModel,
         )
 
-        panel = LocalModelConfigPanel.__new__(LocalModelConfigPanel)
-        panel.progress_indicator = None
-        assert hasattr(panel, "progress_indicator")
+        assert hasattr(LocalModelConfigPanelViewModel, "save_config"), "VM 必须暴露 save_config command"
 
-    def test_local_model_panel_has_set_loading_state(self):
-        """Test that LocalModelConfigPanel has _set_loading_state method"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_local_model_vm_state_has_is_verifying_flag(self):
+        """DoD: VM state 包含 is_verifying flag（声明式，替代旧 _set_loading_state）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigState,
         )
 
-        assert hasattr(LocalModelConfigPanel, "_set_loading_state")
+        assert hasattr(LocalModelConfigState, "__dataclass_fields__"), "LocalModelConfigState 必须是 dataclass"
+        assert "is_verifying" in LocalModelConfigState.__dataclass_fields__, "state 必须包含 is_verifying"
 
-    @pytest.mark.asyncio
-    async def test_async_verify_model_returns_false_for_empty_path(self):
-        """Test that async_verify_model returns False for empty path"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_local_model_vm_has_reload_config(self):
+        """DoD: VM 暴露 reload_config command（替代旧 _load_config）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigPanelViewModel,
         )
 
-        # 用 __new__ 跳过 __init__（避免 Flet 控件初始化副作用）
-        panel = LocalModelConfigPanel.__new__(LocalModelConfigPanel)
-        panel.model_path_input = MagicMock()
-        panel.model_path_input.value = ""
-        panel._show_error = MagicMock()
-
-        result = await panel.async_verify_model()
-
-        assert result is False
-        # 空路径应触发错误提示
-        panel._show_error.assert_called_once()
+        assert hasattr(LocalModelConfigPanelViewModel, "reload_config"), "VM 必须暴露 reload_config command"
 
 
 class TestLocalModelManagerIntegration:

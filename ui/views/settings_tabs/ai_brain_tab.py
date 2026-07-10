@@ -13,6 +13,7 @@ from ui.components.config_panels.failover_config_panel import FailoverConfigPane
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
+from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
@@ -176,9 +177,12 @@ class AIBrainTab(ft.Container):
             ),  # pragma: no cover
         )  # pragma: no cover
 
-        self.local_model_panel = LocalModelConfigPanel(  # pragma: no cover
+        self.local_model_vm = LocalModelConfigPanelViewModel(  # pragma: no cover
             on_verify_model=self._on_verify_local_model,  # pragma: no cover
             on_save=self._on_local_model_saved,  # pragma: no cover
+        )  # pragma: no cover
+        self.local_model_panel = LocalModelConfigPanel(  # pragma: no cover
+            vm=self.local_model_vm,  # pragma: no cover
             show_save_button=False,  # pragma: no cover
         )  # pragma: no cover
 
@@ -385,7 +389,7 @@ class AIBrainTab(ft.Container):
         logger.debug("[AIBrainTab] Subscribed to locale changes")  # pragma: no cover
         self.llm_vm.reload_config()  # pragma: no cover
         self.failover_panel.reload_config()  # pragma: no cover
-        self.local_model_panel.reload_config()  # pragma: no cover
+        self.local_model_vm.reload_config()  # pragma: no cover
 
     def will_unmount(self):  # pragma: no cover
         """组件卸载前取消订阅"""  # pragma: no cover
@@ -394,10 +398,9 @@ class AIBrainTab(ft.Container):
             I18n.unsubscribe(self._locale_subscription_id)  # pragma: no cover
             self._locale_subscription_id = None  # pragma: no cover
             logger.debug("[AIBrainTab] Unsubscribed from locale changes")  # pragma: no cover
-        # 清理未提交的验证状态
-        from services.local_model_manager import LocalModelManager
-
-        LocalModelManager.cancel_verification_if_active()  # pragma: no cover
+        # local_model_vm.dispose 由声明式 LocalModelConfigPanel 的 use_effect cleanup
+        # 调用 LocalModelManager.cancel_verification_if_active() 处理
+        self.local_model_vm.dispose()  # pragma: no cover
         self.llm_vm.dispose()  # pragma: no cover
 
     # =========================================================================
@@ -635,7 +638,7 @@ class AIBrainTab(ft.Container):
 
             # ========== 阶段 2: 提取 UI 值（必须在事件循环中，避免跨线程 UI 访问） ==========
 
-            local_config = self.local_model_panel.get_current_config()
+            local_config = self.local_model_vm.get_current_config()
 
             # 构建 LocalModel 保存参数
             local_save_kwargs = {

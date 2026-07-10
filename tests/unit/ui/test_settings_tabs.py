@@ -674,8 +674,8 @@ class TestAIBrainTab:
         tab.ai_news_prompt_input.value = "news prompt"
         tab.llm_vm = MagicMock()
         tab.llm_vm.save_config = AsyncMock(return_value=True)
-        tab.local_model_panel = MagicMock()
-        tab.local_model_panel.get_current_config.return_value = {"model_path": ""}
+        tab.local_model_vm = MagicMock()
+        tab.local_model_vm.get_current_config.return_value = {"model_path": ""}
         self.mock_ch.set_ai_max_candidates.side_effect = Exception("save error")
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
             await tab._save_ai_settings(None)
@@ -692,8 +692,8 @@ class TestAIBrainTab:
         tab.ai_news_prompt_input.value = "news prompt"
         tab.llm_vm = MagicMock()
         tab.llm_vm.save_config = AsyncMock(return_value=True)
-        tab.local_model_panel = MagicMock()
-        tab.local_model_panel.get_current_config.return_value = {"model_path": "/nonexistent/model.gguf"}
+        tab.local_model_vm = MagicMock()
+        tab.local_model_vm.get_current_config.return_value = {"model_path": "/nonexistent/model.gguf"}
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
             with patch("os.path.exists", return_value=False):
                 with patch("services.ai_service.AIService") as mock_ai:
@@ -712,8 +712,8 @@ class TestAIBrainTab:
         tab.ai_news_prompt_input.value = "news prompt"
         tab.llm_vm = MagicMock()
         tab.llm_vm.save_config = AsyncMock(return_value=True)
-        tab.local_model_panel = MagicMock()
-        tab.local_model_panel.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
+        tab.local_model_vm = MagicMock()
+        tab.local_model_vm.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
             with patch("os.path.exists", return_value=True):
                 with patch("services.ai_service.AIService") as mock_ai:
@@ -741,8 +741,8 @@ class TestAIBrainTab:
         tab.ai_news_prompt_input.value = "news prompt"
         tab.llm_vm = MagicMock()
         tab.llm_vm.save_config = AsyncMock(return_value=True)
-        tab.local_model_panel = MagicMock()
-        tab.local_model_panel.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
+        tab.local_model_vm = MagicMock()
+        tab.local_model_vm.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
             with patch("os.path.exists", return_value=True):
                 with patch("services.ai_service.AIService") as mock_ai:

@@ -31,6 +31,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
+from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.config_handler import ConfigHandler
@@ -218,11 +219,11 @@ class OnboardingWizard(ft.Container):
         return False
 
     async def _validate_local_model_via_panel(self) -> bool:  # pragma: no cover
-        model_path = self.local_model_panel.model_path_input.value.strip()
+        model_path = self.local_model_vm.state.model_path.strip()
         if not model_path:
             return True
-        if await self.local_model_panel.async_verify_model():
-            if not await ThreadPoolManager().run_async(TaskType.IO, self.local_model_panel.save_config):
+        if await self.local_model_vm.verify_model():
+            if not await self.local_model_vm.save_config():
                 logger.error("[OnboardingWizard] Failed to save local model config")
                 self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
                 return False
@@ -299,13 +300,17 @@ class OnboardingWizard(ft.Container):
         )
 
     def _init_local_model_controls(self):  # pragma: no cover
-        self.local_model_panel = LocalModelConfigPanel(
+        self.local_model_vm = LocalModelConfigPanelViewModel(
             on_verify_model=self._on_verify_local_model,
+            on_change=lambda: self._on_input_change("local_model"),
+            on_loading_change=self._on_panel_loading_change,
+            show_internal_loading=False,
+        )
+        self.local_model_panel = LocalModelConfigPanel(
+            vm=self.local_model_vm,
             show_save_button=False,
             compact=True,
             show_internal_loading=False,
-            on_change=lambda: self._on_input_change("local_model"),
-            on_loading_change=self._on_panel_loading_change,
         )
 
     def _on_panel_loading_change(self, loading: bool):  # pragma: no cover
@@ -1054,6 +1059,7 @@ class OnboardingWizard(ft.Container):
         self.database_vm.dispose()
         self.tushare_vm.dispose()
         self.llm_vm.dispose()
+        self.local_model_vm.dispose()
         self.vm.dispose()
 
     def _on_locale_change(self):
@@ -1089,29 +1095,14 @@ class OnboardingWizard(ft.Container):
             logger.warning("[OnboardingWizard] _on_locale_change failed: %s", e, exc_info=True)
 
     def _rebuild_steps_after_locale_change(self):
-        """语言切换后刷新 steps_content 并级联调用子面板 locale 刷新方法。
+        """语言切换后刷新 steps_content。
 
         不重建子面板实例：构造函数会触发 keyring IO（如 DatabaseConfigPanel._load_config），
-        违反 §5.8 纯 UI 规范。子面板已通过各自 did_mount() 订阅 I18n 通知，此处显式
-        级联调用作为兜底，确保刷新生效。schedule 控件不重建，用户输入自然保留。
-
-        注：DatabaseConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
-        自动重渲染，无需级联调用 _on_locale_change。
+        违反 §5.8 纯 UI 规范。所有子面板（DatabaseConfigPanel / TushareConfigPanel /
+        LLMConfigPanel / LocalModelConfigPanel）均已重写为声明式组件，通过
+        ``ft.use_state(I18n.get_observable_state)`` 自动重渲染，无需级联调用
+        ``_on_locale_change``。schedule 控件不重建，用户输入自然保留。
         """
-        # 级联调用子面板的 locale 刷新方法（纯 UI 文本更新，不触发 keyring IO）
-        # DatabaseConfigPanel / TushareConfigPanel / LLMConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
-        for panel_attr, method_name in (("local_model_panel", "_on_locale_change"),):
-            panel = getattr(self, panel_attr, None)
-            if panel is None:
-                continue
-            method = getattr(panel, method_name, None)
-            if method is None:
-                continue
-            try:
-                method()
-            except Exception as e:
-                logger.debug("Onboarding panel %s locale refresh failed: %s", panel_attr, e, exc_info=True)
-
         # 重建 steps_content 以更新步骤标题/描述等纯 UI 文本（子面板实例保持不变）
         self.steps_content = [
             self._build_welcome_step(),

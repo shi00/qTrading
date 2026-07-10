@@ -176,8 +176,8 @@ class TestAIBrainTabSaveAISettings:
         tab.show_snack = MagicMock()
         tab.llm_vm = MagicMock()
         tab.llm_vm.save_config = AsyncMock(return_value=True)
-        tab.local_model_panel = MagicMock()
-        tab.local_model_panel.get_current_config.return_value = (
+        tab.local_model_vm = MagicMock()
+        tab.local_model_vm.get_current_config.return_value = (
             local_model_config if local_model_config is not None else {}
         )
         tab.ai_prompt_input = MagicMock()

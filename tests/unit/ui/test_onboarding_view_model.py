@@ -1117,25 +1117,12 @@ class TestOnboardingWizardLoading(_OnboardingWizardBase):
 
 
 class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
-    """OnboardingWizard 语言切换重建行为测试（§5.8 规范 3/6）。"""
+    """OnboardingWizard 语言切换重建行为测试（§5.8 规范 3/6）。
 
-    def test_rebuild_cascades_panel_locale_refresh(self, mock_page):
-        """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）
-
-        注：DatabaseConfigPanel / TushareConfigPanel / LLMConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
-        自动重渲染，不再需要级联调用 _on_locale_change / refresh_locale。
-        """
-        wizard = self._make_wizard(mock_page)
-        panels_and_methods = [
-            (wizard.local_model_panel, "_on_locale_change"),
-        ]
-        for panel, method_name in panels_and_methods:
-            setattr(panel, method_name, MagicMock())
-
-        wizard._rebuild_steps_after_locale_change()
-
-        for panel, method_name in panels_and_methods:
-            getattr(panel, method_name).assert_called_once()
+    注：所有子面板（DatabaseConfigPanel / TushareConfigPanel / LLMConfigPanel /
+    LocalModelConfigPanel）均已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
+    自动重渲染，不再需要级联调用 _on_locale_change / refresh_locale（§5.8 规范 6 由声明式范式替代）。
+    """
 
     def test_rebuild_does_not_recreate_panels(self, mock_page):
         """§5.8 规范 3 纯 UI：语言切换后子面板实例必须保持不变（构造函数会触发 keyring IO）"""
@@ -1146,6 +1133,7 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
             "tushare_panel": wizard.tushare_panel,
             "llm_vm": wizard.llm_vm,
             "llm_config_panel": wizard.llm_config_panel,
+            "local_model_vm": wizard.local_model_vm,
             "local_model_panel": wizard.local_model_panel,
         }
 
