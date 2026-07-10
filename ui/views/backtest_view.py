@@ -70,8 +70,10 @@ class BacktestView(ft.Container):
         # NOTE(lazy): config_panel 已是声明式组件（Phase 3.2.5），通过
         # ft.use_state(I18n.get_observable_state) 自动重渲染，无需 refresh_locale 级联。
         # ceiling: Phase 3.6.3 BacktestView 声明式重写. upgrade: Task 3.6.3 完成.
-        # result_panel 已是声明式组件（Phase 3.2.6），通过 props 推送 result/chart_min_height。
-        # BacktestView 重新实例化推送 props（过渡期，Task 3.6.3 后改父组件 state 驱动）。
+        # NOTE(lazy): result_panel 已是声明式组件（Phase 3.2.6），通过 props 推送
+        # result/chart_min_height（重新实例化模式），会重置内部 use_state(trades_page/selected_tab)；
+        # handle_resize 跨越 COMPACT_HEIGHT_THRESHOLD 阈值时触发重置，用户分页位置丢失。
+        # ceiling: Phase 3.6.3 BacktestView 声明式重写. upgrade: Task 3.6.3 完成.
         self._result: BacktestResult | None = None
         self._chart_min_height: int | None = None
         self.result_panel = BacktestResultPanel(result=self._result, chart_min_height=self._chart_min_height)
