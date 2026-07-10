@@ -1165,6 +1165,7 @@ class TestDataSourceTab:
             patch("ui.views.settings_tabs.data_source_tab.DataSourceViewModel"),
             patch("ui.views.settings_tabs.data_source_tab.TaskManager"),
             patch("ui.views.settings_tabs.data_source_tab.TushareConfigPanel", MagicMock()),
+            patch("ui.viewmodels.tushare_config_panel_view_model.ConfigHandler", self.mock_ch),
             patch("ui.views.settings_tabs.data_source_tab.DashboardCard", MagicMock()),
             patch("ui.views.settings_tabs.data_source_tab.SectionHeader", MagicMock()),
             patch("ui.views.settings_tabs.data_source_tab.SettingRow", MagicMock()),
@@ -1220,7 +1221,7 @@ class TestDataSourceTab:
 
     def test_did_mount_subscribes_vm(self, mock_page):
         tab = self._make_tab()
-        tab.tushare_panel = MagicMock()
+        tab.tushare_vm = MagicMock()
         tab._tm = MagicMock()
         tab._on_mount()
         tab.vm.subscribe.assert_called_once()
@@ -1228,14 +1229,16 @@ class TestDataSourceTab:
 
     def test_will_unmount_disposes_vm(self, mock_page):
         tab = self._make_tab()
+        tab.tushare_vm = MagicMock()
         tab._tm = MagicMock()
         tab._on_unmount()
+        tab.tushare_vm.dispose.assert_called_once()
         tab.vm.dispose.assert_called_once()
         self.mock_i18n.unsubscribe.assert_called_once()
 
     def test_vm_recover_stale_state_called_on_mount(self, mock_page):
         tab = self._make_tab()
-        tab.tushare_panel = MagicMock()
+        tab.tushare_vm = MagicMock()
         tab._tm = MagicMock()
         tab._on_mount()
         tab.vm.recover_stale_state.assert_called_once()
@@ -1283,9 +1286,9 @@ class TestDatabaseTab:
 
         return DatabaseTab(show_snack_callback=MagicMock())
 
-    def test_instantiation_creates_config_panel(self, mock_page):
+    def test_instantiation_creates_config_vm(self, mock_page):
         tab = self._make_tab()
-        assert tab.config_panel is not None
+        assert tab.config_vm is not None
 
     def test_on_save_calls_show_snack_with_success(self, mock_page):
         snack = MagicMock()
@@ -1303,8 +1306,9 @@ class TestDatabaseTab:
 
     def test_on_mount_calls_reload_config(self, mock_page):
         tab = self._make_tab()
+        tab.config_vm = MagicMock()
         tab._on_mount()
-        tab.config_panel.reload_config.assert_called_once()
+        tab.config_vm.reload_config.assert_called_once()
 
 
 class TestNotificationsTab:

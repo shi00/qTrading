@@ -1,12 +1,10 @@
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import flet as ft
 import pytest
 
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
-from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 
 pytestmark = pytest.mark.unit
 
@@ -21,33 +19,22 @@ async def _run_async_passthrough(task_type, func, *args, **kwargs):
 
 @pytest.fixture(autouse=True)
 def _mock_thread_pool_for_panels():
-    """Patch tushare/local_model config panel 模块级 ThreadPoolManager，run_async 直接同步执行。
+    """Patch local_model config panel 模块级 ThreadPoolManager，run_async 直接同步执行。
 
-    autouse：所有 verify_token / save_config / _on_save_click 路径均经 ThreadPoolManager offload，
-    需统一 mock 避免触达真实线程池单例。仅作用于此两个模块，不影响 LLM 面板。
-    DatabaseConfigPanel 已重写为声明式组件，ThreadPoolManager 由 VM 层处理，不再需要此处 patch。
+    autouse：所有 save_config / verify_model 路径均经 ThreadPoolManager offload，
+    需统一 mock 避免触达真实线程池单例。仅作用于 local_model 模块，不影响 LLM 面板。
+    DatabaseConfigPanel / TushareConfigPanel 已重写为声明式组件，ThreadPoolManager 由 VM 层处理，
+    不再需要此处 patch。
     """
     mock_tpm = MagicMock()
     mock_tpm.run_async = AsyncMock(side_effect=_run_async_passthrough)
     with (
-        patch(
-            "ui.components.config_panels.tushare_config_panel.ThreadPoolManager",
-            return_value=mock_tpm,
-        ),
         patch(
             "ui.components.config_panels.local_model_config_panel.ThreadPoolManager",
             return_value=mock_tpm,
         ),
     ):
         yield mock_tpm
-
-
-@pytest.fixture
-def mock_ch_for_panels():
-    with patch("ui.components.config_panels.tushare_config_panel.ConfigHandler") as m:
-        m.get_token.return_value = ""
-        m.save_token.return_value = True
-        yield m
 
 
 @pytest.fixture
@@ -77,15 +64,6 @@ def mock_config_handler_local():
         }
         m.get_local_ai_timeout.return_value = 300
         m.save_local_ai_config.return_value = True
-        yield m
-
-
-@pytest.fixture
-def mock_i18n():
-    with patch("ui.components.config_panels.tushare_config_panel.I18n") as m:
-        m.get.side_effect = lambda key, **kw: key
-        m.subscribe.return_value = "sub_id"
-        m.unsubscribe.return_value = None
         yield m
 
 
@@ -150,12 +128,6 @@ def mock_llm_providers():
                 yield
 
 
-def _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, **kwargs):
-    panel = TushareConfigPanel(**kwargs)
-    panel.page = mock_page
-    return panel
-
-
 def _make_llm_panel(mock_config_handler_llm, mock_i18n_llm, mock_llm_providers, mock_page, **kwargs):
     kwargs.setdefault("on_test_connection", AsyncMock(return_value={"success": True}))
     panel = LLMConfigPanel(**kwargs)
@@ -168,124 +140,6 @@ def _make_local_panel(mock_config_handler_local, mock_i18n_local, mock_page, **k
     panel = LocalModelConfigPanel(**kwargs)
     panel.page = mock_page
     return panel
-
-
-class TestTushareConfigPanel:
-    def test_load_config_populates_token_from_saved(self, mock_ch_for_panels, mock_i18n, mock_page):
-        mock_ch_for_panels.get_token.return_value = "saved_token_123"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        assert panel.token_input.value == "saved_token_123"
-
-    def test_load_config_defaults_empty_token(self, mock_ch_for_panels, mock_i18n, mock_page):
-        mock_ch_for_panels.get_token.return_value = None
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        assert panel.token_input.value == ""
-
-    def test_save_click_calls_on_save_with_config(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_save = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_save=on_save)
-        panel.token_input.value = "my_token"
-        panel._on_save_click(MagicMock())
-        on_save.assert_called_once_with({"token": "my_token"})
-
-    def test_get_current_config_returns_token(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.token_input.value = "  abc  "
-        config = panel.get_current_config()
-        assert config == {"token": "abc"}
-
-    def test_set_config_updates_token_input(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.set_config({"token": "new_token"})
-        assert panel.token_input.value == "new_token"
-
-    def test_reload_config_refreshes_from_config_handler(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        mock_ch_for_panels.get_token.return_value = "refreshed_token"
-        panel.reload_config()
-        assert panel.token_input.value == "refreshed_token"
-
-    @pytest.mark.asyncio
-    async def test_verify_token_empty_shows_error(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.token_input.value = ""
-        result = await panel.verify_token()
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_verify_token_success_saves_and_notifies(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_verify = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
-        panel.token_input.value = "valid_token"
-
-        with (
-            patch("tushare.set_token"),
-            patch("tushare.pro_api") as mock_pro_api,
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-        ):
-            mock_pro = MagicMock()
-            mock_pro_api.return_value = mock_pro
-            mock_pro.trade_cal.return_value = MagicMock()
-
-            mock_client_instance = MagicMock()
-            mock_client_instance.set_token.return_value = False
-            mock_client_cls.return_value = mock_client_instance
-
-            result = await panel.verify_token()
-
-        assert result is True
-        mock_ch_for_panels.save_token.assert_called_once_with("valid_token")
-        on_verify.assert_called_once_with("valid_token")
-
-    @pytest.mark.asyncio
-    async def test_verify_token_failure_returns_false(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.token_input.value = "bad_token"
-
-        with (
-            patch("tushare.set_token"),
-            patch("tushare.pro_api", side_effect=Exception("invalid token")),
-        ):
-            result = await panel.verify_token()
-
-        assert result is False
-        mock_ch_for_panels.save_token.assert_not_called()
-
-    def test_on_input_change_calls_on_change(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_change = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_change=on_change)
-        panel._on_input_change(MagicMock())
-        on_change.assert_called_once()
-
-    def test_save_button_visibility(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=True)
-        assert panel.save_button.visible is True
-
-    def test_save_button_hidden_when_disabled(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=False)
-        assert panel.save_button.visible is False
-
-    def test_standard_ui_inner_row_has_wrap_true(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """standard UI 模式下包含 token_input 和按钮的 Row 必须 wrap=True"""
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=False)
-        # _build_standard_ui 返回 ft.Row，其 controls[0] 是 ft.Column
-        # Column.controls[0] 是包含 token_input + buttons 的 ft.Row
-        outer_row = panel.content
-        inner_col = outer_row.controls[0]
-        token_buttons_row = inner_col.controls[0]
-        assert token_buttons_row.wrap is True
-
-    def test_compact_ui_not_affected_by_standard_ui_change(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """compact 模式下 _build_compact_ui 不应包含 wrap=True 的 token+按钮 Row（确保智能向导不受影响）"""
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)
-        # compact 模式 content 是 ft.Column
-        assert isinstance(panel.content, ft.Column)
-        # token_input 应直接作为 Column 子项（不在 wrap=True 的 Row 中）
-        assert panel.token_input in panel.content.controls
-        # 遍历所有 Row 子项，确认没有 wrap=True 的 token+按钮组合 Row
-        for ctrl in panel.content.controls:
-            if isinstance(ctrl, ft.Row):
-                assert ctrl.wrap is False or ctrl.wrap is None
 
 
 class TestLLMConfigPanel:
@@ -926,6 +780,90 @@ class TestRenderMessage:
 
     def test_render_message_with_default_param(self):
         from ui.components.config_panels.database_config_panel import _render_message
+        from ui.viewmodels import Message
+
+        msg = Message("_raw_msg_", {"default": "raw error text"})
+        result = _render_message(msg)
+        assert result == "raw error text"
+
+
+class TestTushareConfigPanelContract:
+    """TushareConfigPanel 声明式契约守护测试（Phase 3.2.2）。
+
+    业务逻辑由 VM 单元测试覆盖（test_tushare_config_panel_view_model.py）。
+    View 层测试聚焦于：
+    1. 纯函数测试（_render_message / _build_tier_options）
+    2. 契约守护（grep 检查禁止的命令式模式：did_mount/.update()/refresh_locale/class 继承）
+    """
+
+    def test_tushare_config_panel_is_ft_component(self):
+        """DoD: TushareConfigPanel 必须被 @ft.component 装饰。"""
+        from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
+
+        assert hasattr(TushareConfigPanel, "__wrapped__"), "TushareConfigPanel 必须用 @ft.component 装饰"
+
+    def test_tushare_config_panel_no_did_mount(self):
+        """DoD: 禁止命令式 did_mount 生命周期回调。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "did_mount" not in source, "TushareConfigPanel 不应使用 did_mount（命令式）"
+
+    def test_tushare_config_panel_no_will_unmount(self):
+        """DoD: 禁止命令式 will_unmount 生命周期回调。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "will_unmount" not in source, "TushareConfigPanel 不应使用 will_unmount（命令式）"
+
+    def test_tushare_config_panel_no_safe_update(self):
+        """DoD: 禁止命令式 .update() / _safe_update()。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert ".update()" not in source, "TushareConfigPanel 不应使用 .update()（命令式）"
+        assert "_safe_update" not in source, "TushareConfigPanel 不应使用 _safe_update（命令式）"
+
+    def test_tushare_config_panel_no_refresh_locale(self):
+        """DoD: 禁止命令式 refresh_locale / _on_locale_change（声明式用 ft.use_state 自动重渲染）。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "refresh_locale" not in source, "TushareConfigPanel 不应使用 refresh_locale（声明式自动重渲染）"
+        assert "_on_locale_change" not in source, "TushareConfigPanel 不应使用 _on_locale_change（声明式自动重渲染）"
+
+    def test_tushare_config_panel_uses_ft_component(self):
+        """DoD: 必须使用 @ft.component 装饰。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "@ft.component" in source, "TushareConfigPanel 必须用 @ft.component 装饰"
+
+    def test_tushare_config_panel_uses_i18n_observable_state(self):
+        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "I18n.get_observable_state" in source, "TushareConfigPanel 必须订阅 I18n.get_observable_state"
+
+    def test_tushare_config_panel_no_class_container(self):
+        """DoD: 禁止命令式 class 继承 ft.Container。"""
+        import ui.components.config_panels.tushare_config_panel as mod
+
+        source = _source_without_docstrings(Path(mod.__file__).read_text(encoding="utf-8"))
+        assert "class TushareConfigPanel(" not in source, "TushareConfigPanel 不应是 class（命令式）"
+
+
+class TestTushareRenderMessage:
+    """TushareConfigPanel._render_message 纯函数测试。"""
+
+    def test_render_message_none_returns_empty(self):
+        from ui.components.config_panels.tushare_config_panel import _render_message
+
+        assert _render_message(None) == ""
+
+    def test_render_message_with_default_param(self):
+        from ui.components.config_panels.tushare_config_panel import _render_message
         from ui.viewmodels import Message
 
         msg = Message("_raw_msg_", {"default": "raw error text"})
@@ -1629,442 +1567,6 @@ class TestLocalModelConfigPanelExtended:
         assert panel.progress_indicator.visible is True
         assert panel.verify_button.disabled is True
         on_loading.assert_called_with(True)
-
-
-class TestTushareConfigPanelExtended:
-    def test_compact_mode(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)
-        assert panel._compact is True
-
-    def test_show_save_button_false(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_save_button=False)
-        assert panel.save_button.visible is False
-
-    def test_show_register_link_false(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, show_register_link=False)
-        assert panel._show_register_link is False
-
-    def test_on_register_click(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        with patch("webbrowser.open_new_tab") as mock_open:
-            panel._on_register_click(None)
-            mock_open.assert_called_once()
-
-    def test_did_mount_subscribes_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.did_mount()
-        mock_i18n.subscribe.assert_called_once()
-
-    def test_will_unmount_unsubscribes_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._locale_subscription_id = "sub_id"
-        panel.will_unmount()
-        mock_i18n.unsubscribe.assert_called_once_with("sub_id")
-
-    def test_will_unmount_no_subscription(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._locale_subscription_id = None
-        panel.will_unmount()
-        mock_i18n.unsubscribe.assert_not_called()
-
-    def test_set_loading_state(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_loading = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_loading_change=on_loading)
-        panel._set_loading_state(True)
-        assert panel.verify_button.disabled is True
-        on_loading.assert_called_with(True)
-
-    def test_set_loading_state_internal_disabled(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_loading = MagicMock()
-        panel = _make_tushare_panel(
-            mock_ch_for_panels,
-            mock_i18n,
-            mock_page,
-            on_loading_change=on_loading,
-            show_internal_loading=False,
-        )
-        panel._set_loading_state(True)
-        on_loading.assert_called_with(True)
-
-    def test_show_success(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._show_success("Success message")
-        assert panel.status_text.value == "Success message"
-
-    def test_show_error(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._show_error("Error message")
-        assert panel.status_text.value == "Error message"
-
-    def test_show_warning(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._show_warning("Warning message")
-        assert panel.status_text.value == "Warning message"
-
-    def test_safe_update(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._safe_update()
-
-    def test_safe_update_no_page(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.page = None
-        panel._safe_update()
-
-    def test_refresh_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.refresh_locale()
-        mock_i18n.get.assert_called()  # 多次调用预期 (多个标签翻译)
-
-    def test_compact_mode_hint_text(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, compact=True)
-        assert panel.token_input.hint_text is not None
-
-    @pytest.mark.asyncio
-    async def test_verify_token_already_verifying(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.token_input.value = "valid_token"
-        panel._is_verifying = True
-        result = await panel.verify_token()
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_verify_token_with_api_probe_success(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_verify = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
-        panel.token_input.value = "valid_token"
-
-        with (
-            patch("tushare.set_token"),
-            patch("tushare.pro_api") as mock_pro_api,
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-            patch("strategies.all_strategies.StrategyManager") as mock_sm,
-        ):
-            mock_pro = MagicMock()
-            mock_pro_api.return_value = mock_pro
-            mock_pro.trade_cal.return_value = MagicMock()
-
-            mock_client_instance = MagicMock()
-            mock_client_instance.set_token.return_value = True
-            mock_client_instance.probe_api_capabilities = AsyncMock(return_value={"daily": True, "index": True})
-            mock_client_cls.return_value = mock_client_instance
-
-            mock_sm.return_value.invalidate_dependency_cache = MagicMock()
-
-            result = await panel.verify_token()
-
-        assert result is True
-        mock_ch_for_panels.save_token.assert_called_once_with("valid_token")
-        on_verify.assert_called_once_with("valid_token")
-
-    @pytest.mark.asyncio
-    async def test_verify_token_with_api_probe_restricted_apis(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_verify = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
-        panel.token_input.value = "valid_token"
-
-        with (
-            patch("tushare.set_token"),
-            patch("tushare.pro_api") as mock_pro_api,
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-            patch("strategies.all_strategies.StrategyManager") as mock_sm,
-        ):
-            mock_pro = MagicMock()
-            mock_pro_api.return_value = mock_pro
-            mock_pro.trade_cal.return_value = MagicMock()
-
-            mock_client_instance = MagicMock()
-            mock_client_instance.set_token.return_value = True
-            mock_client_instance.probe_api_capabilities = AsyncMock(return_value={"daily": True, "premium": False})
-            mock_client_cls.return_value = mock_client_instance
-
-            mock_sm.return_value.invalidate_dependency_cache = MagicMock()
-
-            result = await panel.verify_token()
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_verify_token_with_api_probe_exception(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_verify = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
-        panel.token_input.value = "valid_token"
-
-        with (
-            patch("tushare.set_token"),
-            patch("tushare.pro_api") as mock_pro_api,
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-        ):
-            mock_pro = MagicMock()
-            mock_pro_api.return_value = mock_pro
-            mock_pro.trade_cal.return_value = MagicMock()
-
-            mock_client_instance = MagicMock()
-            mock_client_instance.set_token.return_value = True
-            mock_client_instance.probe_api_capabilities = AsyncMock(side_effect=Exception("probe error"))
-            mock_client_cls.return_value = mock_client_instance
-
-            result = await panel.verify_token()
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_verify_token_with_api_probe_empty_results(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_verify = MagicMock()
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page, on_verify_success=on_verify)
-        panel.token_input.value = "valid_token"
-
-        with (
-            patch("tushare.set_token"),
-            patch("tushare.pro_api") as mock_pro_api,
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-            patch("strategies.all_strategies.StrategyManager") as mock_sm,
-        ):
-            mock_pro = MagicMock()
-            mock_pro_api.return_value = mock_pro
-            mock_pro.trade_cal.return_value = MagicMock()
-
-            mock_client_instance = MagicMock()
-            mock_client_instance.set_token.return_value = True
-            mock_client_instance.probe_api_capabilities = AsyncMock(return_value={})
-            mock_client_cls.return_value = mock_client_instance
-
-            mock_sm.return_value.invalidate_dependency_cache = MagicMock()
-
-            result = await panel.verify_token()
-
-        assert result is True
-
-    def test_on_verify_click_no_page(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel.page = None
-        panel._on_verify_click(MagicMock())
-
-    def test_on_verify_click_already_verifying(self, mock_ch_for_panels, mock_i18n, mock_page):
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._is_verifying = True
-        panel._on_verify_click(MagicMock())
-        assert panel.status_text.value != "" or panel._is_verifying is True
-
-    def test_set_loading_state_with_callback(self, mock_ch_for_panels, mock_i18n, mock_page):
-        on_loading = MagicMock()
-        panel = _make_tushare_panel(
-            mock_ch_for_panels,
-            mock_i18n,
-            mock_page,
-            on_loading_change=on_loading,
-            show_internal_loading=False,
-        )
-        panel._set_loading_state(True)
-        on_loading.assert_called_with(True)
-
-
-class TestTushareConfigPanelTierDropdown:
-    """TushareConfigPanel 内嵌积分档位下拉框测试（v1.11.0 P0：token 配置即引导选档位）。
-
-    覆盖场景：
-    - 渲染：tier_dropdown 存在且默认值来自 ConfigHandler
-    - 保存：on_change 触发 set_tier + reload_rate_limiters + clear_capability_cache
-    - 失败：保存失败回滚下拉框
-    - 同步：did_mount 从 ConfigHandler 刷新（TierApiPanel 修改后同步）
-    - i18n：refresh_locale 重建 options + label + hint
-    """
-
-    def test_tier_dropdown_rendered(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """tier_dropdown 实例存在且类型正确。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_120"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        assert hasattr(panel, "tier_dropdown")
-        assert isinstance(panel.tier_dropdown, ft.Dropdown)
-
-    def test_tier_dropdown_default_value_from_config(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """默认值取自 ConfigHandler.get_tushare_point_tier()，而非硬编码。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_2000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        assert panel.tier_dropdown.value == "points_2000"
-
-    def test_tier_dropdown_has_five_options(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """档位下拉框必须包含 5 个选项（points_120/2000/5000/10000/15000）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        # ft.Dropdown.options 类型为 Optional[List[...]]，迭代前需类型收窄（与 L1741 同模式）
-        assert panel.tier_dropdown.options is not None
-        option_keys = [opt.key for opt in panel.tier_dropdown.options]
-        assert option_keys == [
-            "points_120",
-            "points_2000",
-            "points_5000",
-            "points_10000",
-            "points_15000",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_on_tier_change_saves_to_config_handler(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """on_change 触发 set_tushare_point_tier 持久化新档位。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        mock_ch_for_panels.set_tushare_point_tier.return_value = True
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        with (
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-        ):
-            mock_client = MagicMock()
-            mock_client_cls.return_value = mock_client
-
-            panel.tier_dropdown.value = "points_120"
-            await panel._on_tier_change(MagicMock())
-
-        mock_ch_for_panels.set_tushare_point_tier.assert_called_once_with("points_120")
-
-    @pytest.mark.asyncio
-    async def test_on_tier_change_reloads_rate_limiters_and_clears_cache(
-        self, mock_ch_for_panels, mock_i18n, mock_page
-    ):
-        """保存成功后必须 reload_rate_limiters + clear_capability_cache（避免旧限速/旧 probe 残留）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        mock_ch_for_panels.set_tushare_point_tier.return_value = True
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        with (
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-        ):
-            mock_client = MagicMock()
-            mock_client_cls.return_value = mock_client
-
-            panel.tier_dropdown.value = "points_2000"
-            await panel._on_tier_change(MagicMock())
-
-            mock_client.reload_rate_limiters.assert_called_once()
-            mock_client.clear_capability_cache.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_on_tier_change_failure_rolls_back_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """set_tier 返回 False 时回滚下拉框到当前实际档位并显示失败提示。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        mock_ch_for_panels.set_tushare_point_tier.return_value = False
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        with (
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-        ):
-            mock_client = MagicMock()
-            mock_client_cls.return_value = mock_client
-
-            panel.tier_dropdown.value = "points_120"
-            await panel._on_tier_change(MagicMock())
-
-            # 回滚到 ConfigHandler 当前值
-            assert panel.tier_dropdown.value == "points_5000"
-            # 失败提示（status_text 包含 sys_tier_save_failed key）
-            assert panel.status_text.value == "sys_tier_save_failed"
-            # 失败时不 reload_limiters
-            mock_client.reload_rate_limiters.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_on_tier_change_noop_when_value_unchanged(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """档位未变化时短路返回，不触发持久化（避免冗余 IO）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        with (
-            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
-        ):
-            mock_client = MagicMock()
-            mock_client_cls.return_value = mock_client
-
-            panel.tier_dropdown.value = "points_5000"  # 与 ConfigHandler 相同
-            await panel._on_tier_change(MagicMock())
-
-            mock_ch_for_panels.set_tushare_point_tier.assert_not_called()
-            mock_client.reload_rate_limiters.assert_not_called()
-
-    def test_did_mount_syncs_tier_from_config(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """did_mount 时刷新 tier_dropdown 到 ConfigHandler 最新值（TierApiPanel 修改后同步）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        # 模拟 TierApiPanel 修改档位后回到 token 面板
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_15000"
-        panel.did_mount()
-
-        assert panel.tier_dropdown.value == "points_15000"
-
-    def test_refresh_locale_rebuilds_tier_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """locale 变更时重建 tier_dropdown 的 label/hint/options（§5.8 i18n 规范）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        panel.refresh_locale()
-
-        # 验证 I18n.get 被调用至少包含 tier 相关 key
-        called_keys = [call.args[0] for call in mock_i18n.get.call_args_list]
-        assert "sys_tier_label_in_token_panel" in called_keys
-        assert "sys_tier_hint_in_token_panel" in called_keys
-        assert "sys_tier_points_120_label" in called_keys
-
-    @pytest.mark.asyncio
-    async def test_on_tier_change_exception_rolls_back_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """_on_tier_change 异常时回滚下拉框并显示失败提示（P2-2 异常路径覆盖）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        # set_tier 成功，但后续 TushareClient 初始化抛异常
-        mock_ch_for_panels.set_tushare_point_tier.return_value = True
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        with (
-            patch(
-                "data.external.tushare_client.TushareClient",
-                side_effect=RuntimeError("client init failed"),
-            ),
-        ):
-            panel.tier_dropdown.value = "points_120"
-            await panel._on_tier_change(MagicMock())
-
-            # 异常时回滚到 ConfigHandler 当前值
-            assert panel.tier_dropdown.value == "points_5000"
-            # 失败提示
-            assert panel.status_text.value == "sys_tier_save_failed"
-
-    def test_set_loading_state_disables_tier_dropdown(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """verify_token 期间必须禁用 tier_dropdown，避免档位变更与 probe 并发（P1-1）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(
-            mock_ch_for_panels,
-            mock_i18n,
-            mock_page,
-            show_internal_loading=True,
-        )
-
-        # loading=True 时 tier_dropdown 必须被禁用
-        panel._set_loading_state(True)
-        assert panel.tier_dropdown.disabled is True
-
-        # loading=False 时恢复可编辑
-        panel._set_loading_state(False)
-        assert panel.tier_dropdown.disabled is False
-
-    def test_will_unmount_unsubscribes_locale(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """will_unmount 必须取消 i18n 订阅，避免内存泄漏（§5.8 生命周期兜底）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-
-        # did_mount 订阅
-        with patch("ui.components.config_panels.tushare_config_panel.I18n") as mock_i18n_cls:
-            mock_i18n_cls.subscribe.return_value = "sub_id_123"
-            panel.did_mount()
-            mock_i18n_cls.subscribe.assert_called_once()
-
-            # will_unmount 取消订阅
-            panel.will_unmount()
-            mock_i18n_cls.unsubscribe.assert_called_once_with("sub_id_123")
-            assert panel._locale_subscription_id is None
-
-    def test_will_unmount_idempotent_when_no_subscription(self, mock_ch_for_panels, mock_i18n, mock_page):
-        """will_unmount 在未订阅时调用应安全无异常（重复 dispose 容错）。"""
-        mock_ch_for_panels.get_tushare_point_tier.return_value = "points_5000"
-        panel = _make_tushare_panel(mock_ch_for_panels, mock_i18n, mock_page)
-        panel._locale_subscription_id = None
-
-        # 不应抛异常
-        panel.will_unmount()
 
 
 class TestCallbackInjection:

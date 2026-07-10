@@ -118,7 +118,10 @@ def _make_tab() -> DataSourceTab:
     tab.progress_text = MagicMock()  # spec omitted: Flet Text, complex __init__
     tab.progress_text.value = ""
 
-    tab.tushare_panel = MagicMock()  # spec omitted: TushareConfigPanel, instance attrs set in __init__
+    tab.tushare_panel = (
+        MagicMock()
+    )  # spec omitted: TushareConfigPanel declarative component, used as SettingRow control
+    tab.tushare_vm = MagicMock()  # spec omitted: TushareConfigPanelViewModel, owns reload_config/dispose
     tab.history_years_dropdown = MagicMock()  # spec omitted: Flet Dropdown, complex __init__
     tab.history_years_dropdown.value = "3"
 
@@ -638,7 +641,7 @@ class TestOnMount:
             tab.vm.subscribe.return_value = unsubscribe
             tab._on_mount()
             mock_i18n.subscribe.assert_called_once()
-            tab.tushare_panel.reload_config.assert_called_once()
+            tab.tushare_vm.reload_config.assert_called_once()
             tab._tm.subscribe.assert_called_once()
             tab.vm.subscribe.assert_called_once()
             assert tab._vm_unsubscribe is unsubscribe
@@ -658,6 +661,7 @@ class TestOnUnmount:
             tab._tm.unsubscribe.assert_called_once()
             unsubscribe.assert_called_once()
             assert tab._vm_unsubscribe is None
+            tab.tushare_vm.dispose.assert_called_once()
             tab.vm.dispose.assert_called_once()
 
 

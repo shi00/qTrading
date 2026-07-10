@@ -18,6 +18,7 @@ from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
+from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -196,16 +197,21 @@ class DataSourceTab(ft.Container):
         )  # pragma: no cover
 
         # 3. Connection Settings
-        self.tushare_panel = TushareConfigPanel(  # pragma: no cover
-            compact=False,  # pragma: no cover
-            show_save_button=True,  # pragma: no cover
-            show_register_link=False,  # pragma: no cover
-            show_internal_loading=True,  # pragma: no cover
+        # NOTE(lazy): tushare_panel 改为声明式组件,VM 由消费方实例化。
+        # ceiling: Phase 4 DataSourceTab 声明式重写. upgrade: Task 4.x DataSourceTab 声明式重写.
+        self.tushare_vm = TushareConfigPanelViewModel(  # pragma: no cover
             on_verify_success=lambda token: self.show_snack(  # pragma: no cover
                 I18n.get("settings_snack_token_verified"),  # pragma: no cover
                 color=AppColors.SUCCESS,  # pragma: no cover
             ),  # pragma: no cover
             on_save=self._on_tushare_save,  # pragma: no cover
+            show_internal_loading=True,  # pragma: no cover
+        )  # pragma: no cover
+        self.tushare_panel = TushareConfigPanel(  # pragma: no cover
+            vm=self.tushare_vm,  # pragma: no cover
+            compact=False,  # pragma: no cover
+            show_save_button=True,  # pragma: no cover
+            show_register_link=False,  # pragma: no cover
         )  # pragma: no cover
 
         self.row_token = SettingRow(  # pragma: no cover
@@ -323,7 +329,7 @@ class DataSourceTab(ft.Container):
 
     def _on_mount(self):
         I18n.subscribe(self.refresh_locale)
-        self.tushare_panel.reload_config()
+        self.tushare_vm.reload_config()
         self._tm.subscribe(self._on_task_update)
         # NOTE(lazy): subscribe 替代 bind/on_* 回调,Phase 4 声明式重写时移除。
         # ceiling: Phase 4 DataSourceTab 重写. upgrade: Task 4.x DataSourceTab 声明式重写.
@@ -337,6 +343,7 @@ class DataSourceTab(ft.Container):
         if self._vm_unsubscribe is not None:
             self._vm_unsubscribe()
             self._vm_unsubscribe = None
+        self.tushare_vm.dispose()
         self.vm.dispose()
 
     def _on_task_update(self, current_tasks: list[AppTask]):

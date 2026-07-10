@@ -1,11 +1,15 @@
-"""
-Tushare Token Configuration Panel Component
+"""TushareConfigPanel — 声明式组件 (Phase 3.2.2).
 
-Provides a unified UI for Tushare Token configuration with:
-- Token input with password reveal
-- Token verification
-- Register link
-- i18n support with hot reload
+从命令式容器子类重写为 @ft.component 范式
+(CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook 已实现).
+
+变更要点:
+- 旧命令式 ``class TushareConfigPanel(ft.Container)`` → ``@ft.component def TushareConfigPanel(vm, ...)``
+- VM 由消费方实例化（OnboardingWizard 需要 ``vm.verify_token`` 引用）
+- View 通过 ``use_state`` + ``use_effect`` 订阅 ``vm.state`` 变化触发重渲染
+- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
+- page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
 """
 
 import logging
@@ -14,183 +18,234 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.i18n import I18n, refresh_dropdown_options
+from data.constants import TUSHARE_POINT_TIERS
+from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from utils.config_handler import ConfigHandler
-from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
+from ui.viewmodels import Message
+from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 
 logger = logging.getLogger(__name__)
 
 _TUSHARE_REGISTER_URL = "https://tushare.pro/register?reg=728426"
 
+# --- Status display config ---
 
-class TushareConfigPanel(ft.Container):
+_STATUS_ICON_MAP = {
+    "success": ft.Icons.CHECK_CIRCLE,
+    "error": ft.Icons.ERROR,
+    "warning": ft.Icons.WARNING,
+    "info": ft.Icons.INFO,
+}
+
+_STATUS_COLOR_MAP = {
+    "success": AppColors.SUCCESS,
+    "error": AppColors.ERROR,
+    "warning": AppColors.WARNING,
+    "info": AppColors.TEXT_SECONDARY,
+}
+
+
+def _render_message(msg: Message | None) -> str:
+    """Render a Message to localized text via I18n.get."""
+    if msg is None:
+        return ""
+    return I18n.get(msg.key, **msg.params)
+
+
+def _build_tier_options() -> list[ft.dropdown.Option]:
+    """构建 5 档下拉选项（points_120/2000/5000/10000/15000）。
+
+    与 TierApiPanel 同源 i18n key，不抽象共享（YAGNI，5 行重复成本 < 抽象成本）。
     """
-    Tushare Token Configuration Panel.
+    return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
 
-    Features:
-    - Token input with password reveal
-    - Token verification
-    - Register link (optional)
-    - i18n support with hot reload
+
+def _on_verify_click_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for verify button — submits vm.verify_token via page.run_task."""
+
+    def _on_verify_click(e: ft.ControlEvent) -> None:
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.verify_token)
+        except RuntimeError:
+            logger.debug("[TushareConfigPanel] page not available for verify_token")
+
+    return _on_verify_click
+
+
+def _on_save_click_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for save button — calls vm.save (sync, triggers on_save callback)."""
+
+    def _on_save_click(e: ft.ControlEvent) -> None:
+        vm.save()
+
+    return _on_save_click
+
+
+def _on_tier_change_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_select handler for tier dropdown — submits vm.update_tier via page.run_task."""
+
+    def _on_tier_change(e: ft.ControlEvent) -> None:
+        new_tier = e.control.value
+        if not new_tier:
+            return
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.update_tier, new_tier)
+        except RuntimeError:
+            logger.debug("[TushareConfigPanel] page not available for update_tier")
+
+    return _on_tier_change
+
+
+def _on_register_click(e: ft.ControlEvent) -> None:
+    """Open Tushare register page in browser."""
+    webbrowser.open_new_tab(_TUSHARE_REGISTER_URL)
+
+
+@ft.component
+def TushareConfigPanel(
+    vm: TushareConfigPanelViewModel,
+    *,
+    show_save_button: bool = True,
+    compact: bool = False,
+    show_register_link: bool = True,
+) -> ft.Control:
+    """Tushare Token configuration panel (declarative).
+
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - VM 由消费方实例化（DataSourceTab/OnboardingWizard 直接 new TushareConfigPanelViewModel）
+    - View 通过 ``use_state`` + ``use_effect`` 订阅 ``vm.state`` 变化触发重渲染
+    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - 无 page ref / 生命周期回调 / 手动刷新
 
     Args:
-        on_verify_success: Callback when verification succeeds (optional)
-        on_save: Callback when save button is clicked (optional)
-        on_change: Callback when input changes (optional)
-        on_loading_change: Callback for loading state change (optional)
-        show_save_button: Whether to show the save button (default: True)
-        compact: Whether to use compact layout for wizard (default: False)
-        show_register_link: Whether to show register link (default: True)
-        show_internal_loading: Whether to show internal loading state (default: True)
+        vm: 由消费方实例化的 TushareConfigPanelViewModel
+        show_save_button: 是否显示保存按钮（default: True）
+        compact: 是否使用紧凑布局（default: False）
+        show_register_link: 是否显示注册链接（default: True）
     """
+    # --- Subscribe to VM state changes ---
+    state, set_state = ft.use_state(lambda: vm.state)
 
-    def __init__(
-        self,
-        on_verify_success: Callable[[str], None] | None = None,
-        on_save: Callable[[dict], None] | None = None,
-        on_change: Callable[[], None] | None = None,
-        on_loading_change: Callable[[bool], None] | None = None,
-        show_save_button: bool = True,
-        compact: bool = False,
-        show_register_link: bool = True,
-        show_internal_loading: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
+    unsub_ref = ft.use_ref(lambda: None)
 
-        self.on_verify_success = on_verify_success
-        self.on_save = on_save
-        self.on_change = on_change
-        self.on_loading_change = on_loading_change
-        self._show_save_button = show_save_button
-        self._compact = compact
-        self._show_register_link = show_register_link
-        self._show_internal_loading = show_internal_loading
-        self._is_verifying = False
-        self._locale_subscription_id = None
+    def _setup() -> None:
+        unsub_ref.current = vm.subscribe(lambda new_state: set_state(new_state))
 
-        self._init_controls()
-        self.content = self._build_ui()
+    def _cleanup() -> None:
+        if unsub_ref.current is not None:
+            unsub_ref.current()
+            unsub_ref.current = None
 
-    def _init_controls(self):
-        saved_token = ConfigHandler.get_token() or ""
+    ft.use_effect(_setup, dependencies=[], cleanup=_cleanup)
 
-        self.token_input = ft.TextField(
-            label=I18n.get("tushare_token_label"),
-            password=True,
-            can_reveal_password=True,
-            value=saved_token,
-            on_change=self._on_input_change,
-            border_color=AppColors.PRIMARY,
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),
-        )
+    # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
+    ft.use_state(I18n.get_observable_state)
 
-        if self._compact:
-            self.token_input.width = AppStyles.CONTROL_WIDTH_LG
-            self.token_input.hint_text = I18n.get("tushare_token_hint")
+    # --- Build form controls (driven by state) ---
+    token_input = ft.TextField(
+        label=I18n.get("tushare_token_label"),
+        password=True,
+        can_reveal_password=True,
+        value=state.token,
+        on_change=lambda e: vm.update_token(e.control.value),
+        border_color=AppColors.PRIMARY,
+        label_style=ft.TextStyle(color=AppColors.PRIMARY),
+    )
 
-        # v1.11.0 P0：token 配置面板内嵌积分档位下拉框，避免新用户默认 points_5000 触发限流
-        self.tier_dropdown = ft.Dropdown(
-            label=I18n.get("sys_tier_label_in_token_panel"),
-            value=ConfigHandler.get_tushare_point_tier(),
-            width=AppStyles.CONTROL_WIDTH_MD,
-            options=self._build_tier_options(),
-            on_select=self._on_tier_change,
-            hint_text=I18n.get("sys_tier_hint_in_token_panel"),
-        )
+    if compact:
+        token_input.width = AppStyles.CONTROL_WIDTH_LG
+        token_input.hint_text = I18n.get("tushare_token_hint")
 
-        self.verify_button = ft.Button(
-            content=I18n.get("tushare_verify"),
-            icon=ft.Icons.VERIFIED_USER_OUTLINED,
-            on_click=self._on_verify_click,
-            style=AppStyles.secondary_button(),
-        )
+    tier_dropdown = ft.Dropdown(
+        label=I18n.get("sys_tier_label_in_token_panel"),
+        value=state.tier,
+        width=AppStyles.CONTROL_WIDTH_MD,
+        options=_build_tier_options(),
+        on_select=_on_tier_change_factory(vm),
+        hint_text=I18n.get("sys_tier_hint_in_token_panel"),
+        disabled=state.is_verifying,
+    )
 
-        self.save_button = ft.Button(
-            content=I18n.get("tushare_save"),
-            icon=ft.Icons.SAVE_OUTLINED,
-            on_click=self._on_save_click,
-            style=AppStyles.secondary_button(),
-            visible=self._show_save_button,
-        )
+    verify_button = ft.Button(
+        content=I18n.get("tushare_verify"),
+        icon=ft.Icons.VERIFIED_USER_OUTLINED,
+        on_click=_on_verify_click_factory(vm),
+        style=AppStyles.secondary_button(),
+        disabled=state.is_verifying,
+    )
 
-        self.status_icon = ft.Icon(
-            ft.Icons.CIRCLE,
-            color=AppColors.TEXT_HINT,
-            size=12,
-            visible=False,
-        )
+    save_button = ft.Button(
+        content=I18n.get("tushare_save"),
+        icon=ft.Icons.SAVE_OUTLINED,
+        on_click=_on_save_click_factory(vm),
+        style=AppStyles.secondary_button(),
+        visible=show_save_button,
+        disabled=state.is_verifying,
+    )
 
-        self.status_text = ft.Text(
-            "",
-            size=12,
-            color=AppColors.TEXT_SECONDARY,
-        )
+    # --- Status display (driven by state.status_message / status_type) ---
+    status_text = _render_message(state.status_message)
+    status_color = _STATUS_COLOR_MAP.get(state.status_type, AppColors.TEXT_SECONDARY)
+    status_icon_name = _STATUS_ICON_MAP.get(state.status_type, ft.Icons.INFO)
 
-        self.register_link = ft.TextButton(
-            content=I18n.get("tushare_register"),
-            icon=ft.Icons.OPEN_IN_NEW,
-            on_click=self._on_register_click,
-            style=ft.ButtonStyle(
-                color=AppColors.PRIMARY,
-            ),
-        )
+    status_icon = ft.Icon(
+        status_icon_name,
+        visible=status_text != "",
+        size=12,
+        color=status_color,
+    )
+    status_text_ctrl = ft.Text(
+        status_text,
+        size=12,
+        color=status_color,
+    )
 
-        # 提前创建 no_token_text 实例属性，便于 refresh_locale 引用
-        self.no_token_text = ft.Text(
-            I18n.get("tushare_no_token"),
-            size=12,
-            color=AppColors.TEXT_SECONDARY,
-        )
+    register_link = ft.TextButton(
+        content=I18n.get("tushare_register"),
+        icon=ft.Icons.OPEN_IN_NEW,
+        on_click=_on_register_click,
+        style=ft.ButtonStyle(
+            color=AppColors.PRIMARY,
+        ),
+    )
 
-    def reload_config(self):
-        saved_token = ConfigHandler.get_token() or ""
-        self.token_input.value = saved_token
-        self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
-        self._safe_update()
+    no_token_text = ft.Text(
+        I18n.get("tushare_no_token"),
+        size=12,
+        color=AppColors.TEXT_SECONDARY,
+    )
 
-    def _build_tier_options(self) -> list[ft.dropdown.Option]:
-        """构建 5 档下拉选项（points_120/2000/5000/10000/15000）。
-
-        与 TierApiPanel 同源 i18n key，不抽象共享（YAGNI，5 行重复成本 < 抽象成本）。
-        """
-        from data.constants import TUSHARE_POINT_TIERS
-
-        return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
-
-    def _build_ui(self) -> ft.Control:
-        if self._compact:
-            return self._build_compact_ui()
-        return self._build_standard_ui()
-
-    def _build_compact_ui(self) -> ft.Column:
-        controls = [
-            self.token_input,
+    # --- Build UI layout ---
+    if compact:
+        controls: list[ft.Control] = [
+            token_input,
             ft.Container(height=10),
-            self.tier_dropdown,
+            tier_dropdown,
             ft.Container(height=10),
             ft.Row(
-                [self.verify_button],
+                [verify_button],
                 alignment=ft.MainAxisAlignment.CENTER,
             ),
             ft.Container(height=5),
             ft.Row(
-                [self.status_icon, self.status_text],
+                [status_icon, status_text_ctrl],
                 alignment=ft.MainAxisAlignment.CENTER,
                 spacing=5,
             ),
         ]
 
-        if self._show_register_link:
+        if show_register_link:
             controls.extend(
                 [
                     ft.Container(height=15),
                     ft.Row(
                         [
-                            self.no_token_text,
-                            self.register_link,
+                            no_token_text,
+                            register_link,
                         ],
                         alignment=ft.MainAxisAlignment.CENTER,
                         spacing=5,
@@ -203,274 +258,30 @@ class TushareConfigPanel(ft.Container):
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
-    def _build_standard_ui(self) -> ft.Row:
-        buttons = [self.verify_button]
-        if self._show_save_button:
-            buttons.append(self.save_button)
+    # standard layout
+    buttons: list[ft.Control] = [verify_button]
+    if show_save_button:
+        buttons.append(save_button)
 
-        return ft.Row(
-            [
-                ft.Column(
-                    [
-                        ft.Row(
-                            [self.token_input] + buttons,
-                            alignment=ft.MainAxisAlignment.START,
-                            spacing=10,
-                            wrap=True,
-                        ),
-                        self.tier_dropdown,
-                        ft.Row(
-                            [self.status_icon, self.status_text],
-                            spacing=5,
-                        ),
-                    ],
-                    spacing=5,
-                    expand=True,
-                ),
-            ],
-            alignment=ft.MainAxisAlignment.START,
-        )
-
-    def _on_input_change(self, e):
-        if self.on_change:
-            self.on_change()
-
-    async def _on_tier_change(self, e):
-        """档位变更：持久化 + 重建限速器 + 清除旧 probe 缓存。
-
-        R16：set_tier/reload_limiters 是同步 IO，必须 offload 到 io_pool。
-        verify_token 后续 probe 会自动用新档位预筛（无需此处触发）。
-        """
-        new_tier = self.tier_dropdown.value
-        if not new_tier or new_tier == ConfigHandler.get_tushare_point_tier():
-            return
-
-        try:
-            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_tushare_point_tier, new_tier)
-            if not success:
-                self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
-                self._show_error(I18n.get("sys_tier_save_failed"))
-                self._safe_update()
-                return
-
-            from data.external.tushare_client import TushareClient
-
-            client = TushareClient()
-            await ThreadPoolManager().run_async(TaskType.IO, client.reload_rate_limiters)
-            client.clear_capability_cache()
-
-            self._show_success(I18n.get("sys_tier_saved_success"))
-        except Exception as exc:
-            logger.warning(
-                "[TushareConfigPanel] Failed to save tier: %s",
-                DataSanitizer.sanitize_error(exc),
-                exc_info=True,
-            )
-            self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
-            self._show_error(I18n.get("sys_tier_save_failed"))
-            self._safe_update()
-
-    def _on_verify_click(self, e):
-        if self._is_verifying:
-            self._show_warning(I18n.get("tushare_verifying_in_progress"))
-            return
-
-        if self.page:
-            self.page.run_task(self.verify_token)
-
-    def _on_save_click(self, e):
-        config = self.get_current_config()
-        if self.on_save:
-            self.on_save(config)
-
-    def _on_register_click(self, e):
-        webbrowser.open_new_tab(_TUSHARE_REGISTER_URL)
-
-    def _set_loading_state(self, loading: bool):
-        if self.on_loading_change:
-            self.on_loading_change(loading)
-
-        if self._show_internal_loading:
-            self.verify_button.disabled = loading
-            self.token_input.disabled = loading
-            self.save_button.disabled = loading
-            # v1.11.0 P1-1：verify_token 期间禁用 tier_dropdown，避免档位变更与 probe 并发
-            # （reload_rate_limiters + clear_capability_cache 与 probe 写入 cache 竞态）
-            self.tier_dropdown.disabled = loading
-
-            if loading:
-                self.status_text.value = I18n.get("tushare_verifying")
-                self.status_text.color = AppColors.WARNING
-                self.status_icon.icon = ft.Icons.HOURGLASS_TOP  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-                self.status_icon.color = AppColors.WARNING
-                self.status_icon.visible = True
-
-        self._safe_update()
-
-    def _show_success(self, message: str):
-        self.status_text.value = message
-        self.status_text.color = AppColors.SUCCESS
-        self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.SUCCESS
-        self.status_icon.visible = True
-        self._safe_update()
-
-    def _show_error(self, message: str):
-        self.status_text.value = message
-        self.status_text.color = AppColors.ERROR
-        self.status_icon.icon = ft.Icons.ERROR  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.ERROR
-        self.status_icon.visible = True
-        self._safe_update()
-
-    def _show_warning(self, message: str):
-        self.status_text.value = message
-        self.status_text.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.WARNING  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.WARNING
-        self.status_icon.visible = True
-        self._safe_update()
-
-    def _safe_update(self):
-        try:
-            if self.page:
-                self.update()
-        except Exception as exc:
-            logger.debug("[TushareConfig] UI update skipped: %s", exc, exc_info=True)
-
-    async def verify_token(self) -> bool:
-        token = (self.token_input.value or "").strip()
-
-        if not token:
-            self._show_error(I18n.get("tushare_token_required"))
-            return False
-
-        if self._is_verifying:
-            logger.warning("[TushareConfigPanel] Verification already in progress")
-            return False
-
-        self._is_verifying = True
-        self._set_loading_state(True)
-
-        try:
-            import tushare as ts
-
-            # ts.set_token 写入 ~/tk.csv 文件 (同步文件 IO)，必须 offload
-            await ThreadPoolManager().run_async(TaskType.IO, ts.set_token, token)
-            # 显式传 token，避免依赖 tushare SDK 全局状态（~/tk.csv 或环境变量）
-            timeout_val = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_tushare_timeout)
-            temp_pro = ts.pro_api(token=token, timeout=timeout_val)
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                temp_pro.trade_cal,
-                exchange="SSE",
-                start_date="20250101",
-                end_date="20250101",
-            )
-
-            from data.external.tushare_client import TushareClient
-            from strategies.all_strategies import StrategyManager
-
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_token, token)
-
-            # TushareClient.__init__ 和 set_token 内部调用 ts.set_token (文件 IO)，必须 offload
-            def _init_client_sync() -> tuple[TushareClient, bool]:
-                client = TushareClient()
-                return client, client.set_token(token)
-
-            client, needs_probe = await ThreadPoolManager().run_async(TaskType.IO, _init_client_sync)
-
-            if needs_probe:
-                try:
-                    logger.info("[TushareConfigPanel] Probing API capabilities...")
-                    probe_results = await client.probe_api_capabilities()
-
-                    StrategyManager().invalidate_dependency_cache()
-
-                    available_apis = [api for api, status in probe_results.items() if status is True]
-                    unavailable_apis = [api for api, status in probe_results.items() if status is False]
-
-                    if unavailable_apis:
-                        warning_msg = f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_restricted_apis')}: {', '.join(unavailable_apis)}"
-                        self._show_warning(warning_msg)
-                        logger.warning("[TushareConfigPanel] Restricted APIs: %s", unavailable_apis)
-                    elif available_apis:
-                        self._show_success(I18n.get("tushare_verify_success"))
-                        logger.info("[TushareConfigPanel] All probed APIs available: %s", len(available_apis))
-                    else:
-                        self._show_warning(
-                            f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}"
-                        )
-                except Exception as probe_exc:
-                    logger.warning(
-                        "[TushareConfigPanel] Capability probe failed (non-critical): %s",
-                        probe_exc,
-                        exc_info=True,
-                    )
-                    self._show_success(f"{I18n.get('tushare_verify_success')} — {I18n.get('tushare_probe_unknown')}")
-            else:
-                self._show_success(I18n.get("tushare_verify_success"))
-
-            if self.on_verify_success:
-                self.on_verify_success(token)
-
-            return True
-
-        except Exception as e:
-            from utils.error_classifier import classify_error, get_error_message
-
-            error_info = classify_error(e, context="token")
-            self._show_error(get_error_message(error_info))
-            logger.error(
-                "[TushareConfigPanel] Token verification failed: %s",
-                DataSanitizer.sanitize_error(e),
-                exc_info=True,
-            )
-            return False
-
-        finally:
-            self._is_verifying = False
-            self._set_loading_state(False)
-
-    def get_current_config(self) -> dict:
-        return {
-            "token": (self.token_input.value or "").strip(),
-        }
-
-    def set_config(self, config: dict):
-        if "token" in config:
-            self.token_input.value = config["token"]
-            self._safe_update()
-
-    def load_config(self):
-        saved_token = ConfigHandler.get_token() or ""
-        self.token_input.value = saved_token
-        self._safe_update()
-
-    def refresh_locale(self):
-        try:
-            self.token_input.label = I18n.get("tushare_token_label")
-            if self._compact:
-                self.token_input.hint_text = I18n.get("tushare_token_hint")
-            self.verify_button.content = I18n.get("tushare_verify")
-            self.save_button.content = I18n.get("tushare_save")
-            self.register_link.content = I18n.get("tushare_register")
-            self.no_token_text.value = I18n.get("tushare_no_token")
-            # §5.8 i18n：tier_dropdown label/hint/options 重建（选项文本含档位说明需翻译）
-            self.tier_dropdown.label = I18n.get("sys_tier_label_in_token_panel")
-            self.tier_dropdown.hint_text = I18n.get("sys_tier_hint_in_token_panel")
-            refresh_dropdown_options(self.tier_dropdown, self._build_tier_options())
-            self._safe_update()
-        except Exception as e:
-            logger.warning("[TushareConfigPanel] refresh_locale failed: %s", e, exc_info=True)
-
-    def did_mount(self):
-        # 刷新 tier_dropdown 到 ConfigHandler 最新值（TierApiPanel 可能在别处修改档位）
-        self.tier_dropdown.value = ConfigHandler.get_tushare_point_tier()
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
-        self._safe_update()
-
-    def will_unmount(self):
-        if self._locale_subscription_id:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
+    return ft.Row(
+        [
+            ft.Column(
+                [
+                    ft.Row(
+                        [token_input] + buttons,
+                        alignment=ft.MainAxisAlignment.START,
+                        spacing=10,
+                        wrap=True,
+                    ),
+                    tier_dropdown,
+                    ft.Row(
+                        [status_icon, status_text_ctrl],
+                        spacing=5,
+                    ),
+                ],
+                spacing=5,
+                expand=True,
+            ),
+        ],
+        alignment=ft.MainAxisAlignment.START,
+    )

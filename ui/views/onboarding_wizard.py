@@ -31,6 +31,7 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
+from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -157,7 +158,7 @@ class OnboardingWizard(ft.Container):
     def _bind_vm(self):  # pragma: no cover
         self.vm.bind(
             fn_validate_database=self.database_vm.save_config,
-            fn_validate_token=self.tushare_panel.verify_token,
+            fn_validate_token=self.tushare_vm.verify_token,
             fn_validate_cloud_ai=self._validate_cloud_ai_via_panel,
             fn_validate_local_model=self._validate_local_model_via_panel,
             fn_push_schedule_state=self._push_schedule_state,
@@ -195,7 +196,7 @@ class OnboardingWizard(ft.Container):
     def _rebind_panel_callbacks(self):  # pragma: no cover
         """Rebind panel operation callbacks (called after panel recreation on locale change)."""
         self.vm.fn_validate_database = self.database_vm.save_config
-        self.vm.fn_validate_token = self.tushare_panel.verify_token
+        self.vm.fn_validate_token = self.tushare_vm.verify_token
         self.vm.fn_validate_cloud_ai = self._validate_cloud_ai_via_panel
         self.vm.fn_validate_local_model = self._validate_local_model_via_panel
         self.vm.fn_push_schedule_state = self._push_schedule_state
@@ -272,12 +273,17 @@ class OnboardingWizard(ft.Container):
         )
 
     def _init_token_controls(self):  # pragma: no cover
+        # NOTE(lazy): tushare_panel 改为声明式组件,VM 由消费方实例化。
+        # ceiling: Phase 4 OnboardingWizard 声明式重写. upgrade: Task 4.x OnboardingWizard 声明式重写.
+        self.tushare_vm = TushareConfigPanelViewModel(
+            on_loading_change=self._on_panel_loading_change,
+            show_internal_loading=False,
+        )
         self.tushare_panel = TushareConfigPanel(
+            vm=self.tushare_vm,
             compact=True,
             show_save_button=False,
             show_register_link=True,
-            show_internal_loading=False,
-            on_loading_change=self._on_panel_loading_change,
         )
 
     def _init_cloud_ai_controls(self):  # pragma: no cover
@@ -1042,6 +1048,7 @@ class OnboardingWizard(ft.Container):
 
         LocalModelManager.cancel_verification_if_active()
         self.database_vm.dispose()
+        self.tushare_vm.dispose()
         self.vm.dispose()
 
     def _on_locale_change(self):
@@ -1087,9 +1094,8 @@ class OnboardingWizard(ft.Container):
         自动重渲染，无需级联调用 _on_locale_change。
         """
         # 级联调用子面板的 locale 刷新方法（纯 UI 文本更新，不触发 keyring IO）
-        # DatabaseConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
+        # DatabaseConfigPanel / TushareConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
         for panel_attr, method_name in (
-            ("tushare_panel", "refresh_locale"),
             ("llm_config_panel", "_on_locale_change"),
             ("local_model_panel", "_on_locale_change"),
         ):

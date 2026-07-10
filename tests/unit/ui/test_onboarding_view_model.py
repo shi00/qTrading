@@ -1021,7 +1021,8 @@ class TestOnboardingWizardI18n(_OnboardingWizardBase):
         # 绑定方法每次访问创建新对象，用 == 比较（比较 __self__ 和 __func__）
         assert wizard.vm.fn_validate_database is not None
         assert wizard.vm.fn_validate_database == wizard.database_vm.save_config
-        assert wizard.vm.fn_validate_token is wizard.tushare_panel.verify_token
+        # 绑定方法每次访问创建新对象，用 == 比较（比较 __self__ 和 __func__）
+        assert wizard.vm.fn_validate_token == wizard.tushare_vm.verify_token
 
 
 class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
@@ -1097,12 +1098,11 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
     def test_rebuild_cascades_panel_locale_refresh(self, mock_page):
         """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）
 
-        注：DatabaseConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
-        自动重渲染，不再需要级联调用 _on_locale_change。
+        注：DatabaseConfigPanel / TushareConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
+        自动重渲染，不再需要级联调用 _on_locale_change / refresh_locale。
         """
         wizard = self._make_wizard(mock_page)
         panels_and_methods = [
-            (wizard.tushare_panel, "refresh_locale"),
             (wizard.llm_config_panel, "_on_locale_change"),
             (wizard.local_model_panel, "_on_locale_change"),
         ]
@@ -1119,6 +1119,7 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
         wizard = self._make_wizard(mock_page)
         original_panels = {
             "database_vm": wizard.database_vm,
+            "tushare_vm": wizard.tushare_vm,
             "tushare_panel": wizard.tushare_panel,
             "llm_config_panel": wizard.llm_config_panel,
             "local_model_panel": wizard.local_model_panel,
