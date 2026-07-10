@@ -121,7 +121,7 @@
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
 | 3.2.1 | [lane:gate][tdd:required] `DatabaseConfigPanel` 声明式重写：`@ft.component` + 新建 `DatabaseConfigPanelViewModel`（DB 配置/测试连接）；移除 did_mount/.update()/refresh_locale | `grep "did_mount\|\.update()\|refresh_locale" ui/components/config_panels/database_config_panel.py` = 0；`pytest` 对应测试通过 | Phase 3.0 | cc:完了 [389 tests green, ruff/pyright clean, DoD grep=0, VM 43 tests + View 10 contract tests + 消费方适配] |
-| 3.2.2 | [lane:gate][tdd:required] `TushareConfigPanel` 声明式重写：`@ft.component` + 新建 `TushareConfigPanelViewModel`（Token/tier/probe）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
+| 3.2.2 | [lane:gate][tdd:required] `TushareConfigPanel` 声明式重写：`@ft.component` + 新建 `TushareConfigPanelViewModel`（Token/tier/probe）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:完了 [650c2f9] (453 tests green, ruff/pyright clean, DoD grep=0, VM 41 单测 + View 10 契约守护 + 消费方适配) |
 | 3.2.3 | [lane:gate][tdd:required] `LLMConfigPanel` 声明式重写：`@ft.component` + 新建 `LLMConfigPanelViewModel`（provider/key/test）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
 | 3.2.4 | [lane:gate][tdd:required] `LocalModelConfigPanel` 声明式重写：`@ft.component` + `use_state`（纯 UI 状态，直调 ConfigHandler，YAGNI 不建 VM）；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
 | 3.2.5 | [lane:gate][tdd:required] `BacktestConfigPanel` 声明式重写：`@ft.component` + 复用 `BacktestViewModel` 或新建子 VM；移除命令式模式 | grep 命令式模式 = 0；测试通过 | Phase 3.0 | cc:TODO |
