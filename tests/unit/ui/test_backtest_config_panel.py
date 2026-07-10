@@ -253,3 +253,20 @@ class TestBacktestConfigPanelContract:
         content = panel_path.read_text(encoding="utf-8")
 
         assert "ft.use_state(I18n.get_observable_state)" in content
+
+    def test_date_picker_uses_declarative_use_dialog(self) -> None:
+        """DoD: DatePicker 必须通过 ft.use_dialog() 声明式管理（§10.1），禁止 use_ref + page.show_dialog 回归。"""
+        from pathlib import Path
+
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
+
+        # 正向守护：必须使用 ft.use_dialog
+        assert "ft.use_dialog(" in content, "DatePicker 必须通过 ft.use_dialog() 声明式管理"
+        # 反向守护：禁止命令式 dialog 管理 API 回归
+        assert "page.show_dialog" not in content, "禁止 page.show_dialog 命令式 API"
+        assert "page.pop_dialog" not in content, "禁止 page.pop_dialog 命令式 API"
+        # 反向守护：DatePicker 不应与 use_ref 混用（命令式实例缓存）
+        assert "use_ref" not in content, "禁止 use_ref 缓存 DatePicker 实例"

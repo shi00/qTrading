@@ -12,8 +12,7 @@
   责任分层原则用 ``use_state`` 管理，不建 VM（YAGNI）
 - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
-- page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
-- DatePicker 通过 ``use_ref`` 持久化 + ``use_effect`` 注册 on_change + page.show_dialog 打开
+- DatePicker 通过 ``ft.use_dialog()`` 声明式管理（DialogControl 子类，§10.1）
 - 删除死代码 ``_strategy_key``/``set_strategy_key``（BacktestView 用自身 _selected_strategy，
   panel 的 _strategy_key 从未被 get_config/_on_run_click 使用）
 - 提取 ``_get_config_from_state`` 纯函数（类型转换/默认值/stamp_duty 分段），可独立单测
@@ -85,18 +84,27 @@ def _get_config_from_state(
 def _make_date_picker(
     first_date: date,
     last_date: date,
-    current_date: date,
+    value: date,
+    on_change: Callable[[ft.ControlEvent], None] | None = None,
+    on_dismiss: Callable[[ft.ControlEvent], None] | None = None,
 ) -> ft.DatePicker:
-    """创建 DatePicker（i18n 文案在渲染时由声明式重建自动刷新）。"""
+    """创建 DatePicker（i18n 文案在渲染时由声明式重建自动刷新）。
+
+    Args:
+        value: 选定日期（picker 高亮显示的当前选中值）。
+            current_date 保持默认（datetime.now()），日历网格正确高亮"今天"。
+    """
     return ft.DatePicker(
         first_date=first_date,
         last_date=last_date,
-        current_date=current_date,
+        value=value,
         help_text=I18n.get("date_picker_help"),
         cancel_text=I18n.get("common_cancel"),
         confirm_text=I18n.get("common_ok"),
         error_format_text=I18n.get("date_picker_error_format"),
         error_invalid_text=I18n.get("date_picker_error_invalid"),
+        on_change=on_change,
+        on_dismiss=on_dismiss,
     )
 
 
@@ -131,40 +139,57 @@ def BacktestConfigPanel(
     stamp_duty_rate, set_stamp_duty_rate = ft.use_state(0.5)
     slippage, set_slippage = ft.use_state(5.0)
 
-    # --- DatePicker lifecycle (use_ref 持久化 + use_effect 注册 on_change) ---
-    start_date_picker = ft.use_ref(lambda: _make_date_picker(date(2020, 1, 1), today, one_year_ago)).current
-    end_date_picker = ft.use_ref(lambda: _make_date_picker(date(2020, 1, 1), today, today)).current
+    # --- DatePicker 声明式管理 (ft.use_dialog, §10.1) ---
+    # DialogControl 子类，show_xxx_picker state 驱动 use_dialog 显示/关闭
+    show_start_picker, set_show_start_picker = ft.use_state(False)
+    show_end_picker, set_show_end_picker = ft.use_state(False)
 
-    def _setup_date_pickers() -> None:
-        def _on_start_change(e: ft.ControlEvent) -> None:
-            if e.control.value:
-                set_start_date(e.control.value)
+    def _on_start_change(e: ft.ControlEvent) -> None:
+        if e.control.value is not None:
+            set_start_date(e.control.value)
+        set_show_start_picker(False)
 
-        def _on_end_change(e: ft.ControlEvent) -> None:
-            if e.control.value:
-                set_end_date(e.control.value)
+    def _on_end_change(e: ft.ControlEvent) -> None:
+        if e.control.value is not None:
+            set_end_date(e.control.value)
+        set_show_end_picker(False)
 
-        start_date_picker.on_change = _on_start_change
-        end_date_picker.on_change = _on_end_change
+    def _on_start_dismiss(e: ft.ControlEvent) -> None:
+        set_show_start_picker(False)
 
-    ft.use_effect(_setup_date_pickers, dependencies=[])
+    def _on_end_dismiss(e: ft.ControlEvent) -> None:
+        set_show_end_picker(False)
+
+    ft.use_dialog(
+        _make_date_picker(
+            date(2020, 1, 1),
+            today,
+            start_date,
+            on_change=_on_start_change,
+            on_dismiss=_on_start_dismiss,
+        )
+        if show_start_picker
+        else None
+    )
+
+    ft.use_dialog(
+        _make_date_picker(
+            date(2020, 1, 1),
+            today,
+            end_date,
+            on_change=_on_end_change,
+            on_dismiss=_on_end_dismiss,
+        )
+        if show_end_picker
+        else None
+    )
 
     # --- Handlers ---
     def _show_start_picker(e: ft.ControlEvent) -> None:
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.show_dialog(start_date_picker)
-        except RuntimeError:
-            logger.debug("[BacktestConfigPanel] page not available for start date picker")
+        set_show_start_picker(True)
 
     def _show_end_picker(e: ft.ControlEvent) -> None:
-        try:
-            page = ft.context.page
-            if page is not None:
-                page.show_dialog(end_date_picker)
-        except RuntimeError:
-            logger.debug("[BacktestConfigPanel] page not available for end date picker")
+        set_show_end_picker(True)
 
     def _on_run_click(e: ft.ControlEvent) -> None:
         if on_run_backtest is not None:
