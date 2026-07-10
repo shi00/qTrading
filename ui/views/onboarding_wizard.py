@@ -68,10 +68,19 @@ def _get_page() -> ft.Page | None:
 
 
 def _show_snack(msg: str, color: str) -> None:
-    """通过 ``ft.context.page`` 显示 SnackBar。"""
+    """通过 ``page.show_toast`` 显示提示 (main.py:251 动态挂载).
+
+    CLAUDE.md §3.2 声明式 UI: 禁用 ``page.show_dialog(ft.SnackBar)`` 命令式 API.
+    """
     page = _get_page()
-    if page is not None:
-        page.show_dialog(ft.SnackBar(ft.Text(msg), bgcolor=color))
+    if page is None:
+        logger.debug("[OnboardingWizard] page not available for show_snack")
+        return
+    if not hasattr(page, "show_toast"):
+        logger.warning("[OnboardingWizard] show_toast unavailable: %s", msg)
+        return
+    msg_type = "error" if color == AppColors.ERROR else "info"
+    page.show_toast(msg, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
 
 
 async def _default_on_complete() -> None:

@@ -53,37 +53,34 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
 
 
 def _show_snack(message: str, color: str | None = None, **kwargs) -> None:
-    """Centralized snackbar handler — uses ``ft.context.page`` to access page.
+    """Centralized toast handler — uses ``page.show_toast`` (动态挂载于 main.py).
+
+    CLAUDE.md §3.2 声明式 UI: 禁用 ``page.show_dialog(ft.SnackBar(...))`` 命令式 API,
+    统一用 ``page.show_toast`` (main.py:251 动态挂载).
 
     Args:
-        message: Toast/snackbar message
-        color: Optional color hint — RED→error, GREEN→success, ORANGE/AMBER→warning
-        **kwargs: Extra args for SnackBar fallback
+        message: Toast message
+        color: Optional color hint — AppColors.ERROR/SUCCESS/WARNING/INFO
+               (兼容字符串 "error"/"success"/"warning"/"info" 调用方)
+        **kwargs: Reserved (ignored, for backward-compat call sites)
     """
     try:
         page = ft.context.page
     except RuntimeError:
         logger.debug("[SettingsView] page not available for show_snack")
         return
-    if page is None:
+    if page is None or not hasattr(page, "show_toast"):
+        logger.warning("[SettingsView] show_toast unavailable: %s", message)
         return
 
-    if hasattr(page, "show_toast"):
-        msg_type = "info"
-        if color == ft.Colors.RED:
-            msg_type = "error"
-        elif color == ft.Colors.GREEN:
-            msg_type = "success"
-        elif color in (ft.Colors.ORANGE, ft.Colors.AMBER):
-            msg_type = "warning"
-        page.show_toast(message, type=msg_type)  # type: ignore[untyped]
-    else:
-        snack = ft.SnackBar(
-            content=ft.Text(message),
-            bgcolor=color,
-            **kwargs,
-        )
-        page.show_dialog(snack)
+    msg_type = "info"
+    if color == AppColors.ERROR or color == "error":
+        msg_type = "error"
+    elif color == AppColors.SUCCESS or color == "success":
+        msg_type = "success"
+    elif color == AppColors.WARNING or color == "warning":
+        msg_type = "warning"
+    page.show_toast(message, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
 
 
 def _build_tabs(show_snack: Callable) -> list[ft.Control]:

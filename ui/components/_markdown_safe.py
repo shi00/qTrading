@@ -28,18 +28,22 @@ def _is_allowed_domain(url: str) -> bool:
     return hostname in ALLOWED_DOMAINS or any(hostname.endswith("." + allowed) for allowed in ALLOWED_DOMAINS)
 
 
-def _show_blocked_snack_bar(page) -> None:
-    """在给定 page 上显示"链接已拦截"提示条。"""
-    import flet as ft
+def _show_blocked_toast(page) -> None:
+    """在给定 page 上显示"链接已拦截"提示。
 
-    snack = ft.SnackBar(ft.Text("链接已拦截"), bgcolor="#d32f2f")
-    page.show_dialog(snack)
+    CLAUDE.md §3.2 声明式 UI: 用 ``page.show_toast`` 替代 ``page.show_dialog(ft.SnackBar)``
+    (main.py:251 动态挂载 show_toast).
+    """
+    if hasattr(page, "show_toast"):
+        page.show_toast("链接已拦截", type="error")  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+    else:
+        logger.warning("[MarkdownSafe] Blocked non-whitelisted URL (toast unavailable)")
 
 
 def safe_open_url(e) -> None:
     """``ft.Markdown`` 的 ``on_tap_link`` 回调：仅打开白名单域名的链接。
 
-    非白名单链接会通过 SnackBar 提示"链接已拦截"；若事件对象无法访问
+    非白名单链接会通过 toast 提示"链接已拦截"；若事件对象无法访问
     page，降级为 ``logger.warning``。
 
     Args:
@@ -61,9 +65,9 @@ def safe_open_url(e) -> None:
         page = getattr(e, "page", None)
     if page is not None:
         try:
-            _show_blocked_snack_bar(page)
+            _show_blocked_toast(page)
         except Exception as exc:
-            logger.warning("[MarkdownSafe] Failed to show snack bar: %s", exc, exc_info=True)
+            logger.warning("[MarkdownSafe] Failed to show toast: %s", exc, exc_info=True)
             logger.warning("[MarkdownSafe] Blocked non-whitelisted URL: %s", url)
     else:
         logger.warning("[MarkdownSafe] Blocked non-whitelisted URL: %s", url)
