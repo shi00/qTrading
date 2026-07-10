@@ -94,6 +94,7 @@ _VOLUME_COLS = frozenset({"vol", "volume", "amount"})
 _DATE_COLS = frozenset({"list_date", "trade_date"})
 
 # 流式卡片节流间隔 (秒) — <50ms/帧性能要求
+# NOTE(lazy): 节流常量已实现 ref buffer + set_state 节流模式, 但无法在单元测试中验证实际帧率 <50ms/帧 (需 renderer + 真实流式输入). ceiling: LLM 单 chunk 渲染耗时未基准化. upgrade: 集成测试 (flet_test_page + 模拟流式输入) 落地后补充帧率基准.
 _STREAM_THROTTLE = 0.05
 
 # 流式卡片最大显示数 (防止内存爆炸)

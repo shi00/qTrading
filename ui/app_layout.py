@@ -1,26 +1,42 @@
+"""app_layout — 声明式组件 (Phase F.4).
+
+从命令式容器子类重写为 ``@ft.component`` 函数组件范式
+(CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
+
+变更要点:
+- 旧命令式 ``class AppLayout(PageRefMixin, ft.Container)`` → ``@ft.component def AppLayout()``
+- 移除 PageRefMixin / _view_cache / did_mount / will_unmount / 防抖级联 / locale 命令式刷新 / update_theme / change_tab / run_strategy_from_home
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+- 状态驱动: current_tab / nav_collapsed 用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
+- page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+- 子视图直接函数调用消费 (HomeView()/ScreenerView()/...), 无 use_ref cache
+- resize 用 ``use_effect`` + ``page.on_resize`` (防抖 + state 更新触发重渲染)
+- 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
+- 最后一个 PageRefMixin 历史控件消除 (Phase G.3 可删除 v1_compat.py)
+"""
+
 import asyncio
 import logging
-import time as _time
 from enum import IntEnum
 
 import flet as ft
 
 from ui.i18n import I18n
-from ui.v1_compat import PageRefMixin
 from ui.theme import AppColors
-from utils.log_decorators import UILogger
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SettingsView
 from ui.views.task_center_view import TaskCenterView
+from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
-# 高度维度阈值：低于此值视为紧凑高度，需调整图表最小高度/表格页大小
-# 估算依据：min_height=720 - nav_rail(56) - tabs(40) - body_padding(64) ≈ 560
-COMPACT_HEIGHT_THRESHOLD = 560
+# Tab 切换防抖 (ms) — 快速连续点击导航时, 最后一次点击生效
+DEBOUNCE_MS = 50
+# Resize 防抖 (ms) — 窗口拖拽时, 停止后触发一次重渲染
+RESIZE_DEBOUNCE_MS = 100
 
 
 class NavTabs(IntEnum):
@@ -32,437 +48,197 @@ class NavTabs(IntEnum):
     SETTINGS = 5
 
 
-class AppLayout(PageRefMixin, ft.Container):
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
+
+
+def _build_view(tab_index: int) -> ft.Control:
+    """根据 tab 索引构造子视图 (直接函数调用, 不缓存实例)。
+
+    声明式范式: 每次重渲染重新构造子视图, 由 Flet diff 算法决定实际 DOM 更新。
+    子视图内部用 ``use_state``/``use_viewmodel`` 持久化自身状态, 重建不丢失。
     """
-    Main Application Layout Container.
-    Manages Navigation Rail, Views, and State Switching.
+    if tab_index == NavTabs.MARKET:
+        return HomeView()
+    if tab_index == NavTabs.SCREENER:
+        return ScreenerView()
+    if tab_index == NavTabs.BACKTEST:
+        return BacktestView()
+    if tab_index == NavTabs.DATA:
+        return DataExplorerView()
+    if tab_index == NavTabs.TASKS:
+        return TaskCenterView()
+    if tab_index == NavTabs.SETTINGS:
+        return SettingsView()
+    return ft.Text(I18n.get("view_unknown"))
 
-    Theme Architecture:
-        Standard colors use Flet semantic tokens (ft.Colors.SURFACE etc.)
-        and update automatically when page.theme changes.
-        Only custom business colors (UP/DOWN, TABLE_*) need manual propagation.
+
+def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
+    """构造导航栏目的地列表 (i18n 变化时由组件重渲染自动刷新)。"""
+    nav_items = [
+        (ft.Icons.DASHBOARD_OUTLINED, ft.Icons.DASHBOARD, "nav_market"),
+        (ft.Icons.FILTER_ALT_OUTLINED, ft.Icons.FILTER_ALT, "nav_screener"),
+        (ft.Icons.ASSESSMENT_OUTLINED, ft.Icons.ASSESSMENT, "nav_backtest"),
+        (ft.Icons.STORAGE_OUTLINED, ft.Icons.STORAGE_ROUNDED, "nav_data"),
+        (ft.Icons.FORMAT_LIST_BULLETED_OUTLINED, ft.Icons.FORMAT_LIST_BULLETED, "nav_tasks"),
+        (ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, "nav_settings"),
+    ]
+    return [
+        ft.NavigationRailDestination(
+            icon=icon,
+            selected_icon=selected_icon,
+            label=ft.Text(
+                I18n.get(label_key),
+                size=12,
+                weight=ft.FontWeight.BOLD,
+            ),
+        )
+        for icon, selected_icon, label_key in nav_items
+    ]
+
+
+@ft.component
+def AppLayout() -> ft.Container:
+    """主应用布局 (声明式).
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - 状态驱动: current_tab / nav_collapsed 用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
+    - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+    - 子视图直接函数调用消费 (无 use_ref cache), 每次重渲染重新构造
+    - resize 用 ``use_effect`` + ``page.on_resize`` (防抖 + state 更新触发重渲染)
+    - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
     """
+    # --- Subscribe to i18n + theme changes (auto-rerender) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-    def __init__(self, page: ft.Page):
-        super().__init__()
-        self.page = page  # type: ignore[assignment]  # [reason: V1 Control.page read-only, PageRefMixin overrides]
-        self.expand = True
+    # --- Pure UI state ---
+    current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
+    nav_collapsed, set_nav_collapsed = ft.use_state(False)
+    # 窗口尺寸快照 (resize 事件驱动, 触发重渲染让子视图按新尺寸布局)
+    _, set_window_size = ft.use_state((0.0, 0.0))
 
-        # State
-        self._current_tab_index = NavTabs.MARKET
-        self._pending_tab_index = None
-        self._debounce_task = None
-        self.DEBOUNCE_MS = 50
-        self._resize_debounce_task = None
-        self.RESIZE_DEBOUNCE_MS = 100
-        self._nav_collapsed = False
-        # 缓存来自 WindowResizeEvent 的实时尺寸 (page.width/page.window.width 仅连接时更新)
-        self._current_width: float = 0
-        self._current_height: float = 0
-
-        # UI Components Placeholders
-        self.nav_rail = None
-        self.body = None
-        self.main_layout = None
-
-        # Lazy Loading Cache
-        self._view_cache: dict[int, ft.Control] = {}
-
-        # I18n subscription id (set in did_mount, cleared in will_unmount)
-        self._locale_subscription_id = None
-        self._mounted = False
-
-        # Initialize
-        self._init_ui()
-
-        # Subscribe to Theme Changes (for custom business colors only)
-        # AppColors.subscribe 不立即触发回调，在 __init__ 中订阅安全
-        AppColors.subscribe(self.update_theme)
-
-    def did_mount(self):
-        """挂载后订阅 I18n，避免未入 page 时 sync_immediately 触发回调失败（§5.8 规范 1）"""
-        if self._mounted:
-            return
-        self._mounted = True
-        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
-
-    def will_unmount(self):
-        if self._resize_debounce_task:
-            self._resize_debounce_task.cancel()
-            self._resize_debounce_task = None
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-        self._mounted = False
-        AppColors.unsubscribe(self.update_theme)
-
-    def schedule_resize(self, width: float = 0, height: float = 0):
-        """从 on_resize 回调入口，调度防抖处理。
-
-        Args:
-            width: 来自 ``WindowResizeEvent.width`` 的实时窗口宽度，0 表示未知
-                (如 nav 折叠触发的内部 resize，此时复用缓存值)
-            height: 来自 ``WindowResizeEvent.height`` 的实时窗口高度，0 表示未知
-        """
-        if width:
-            self._current_width = width
-        if height:
-            self._current_height = height
-        if self._resize_debounce_task:
-            self._resize_debounce_task.cancel()
-        self._resize_debounce_task = self.page.run_task(self._handle_resize)
-
-    async def _handle_resize(self):
-        """防抖后实际执行 resize 派发。"""
+    # --- Tab 切换 (防抖, R2: CancelledError 必须 raise) ---
+    async def _do_tab_switch(new_tab: int) -> None:
         try:
-            await asyncio.sleep(self.RESIZE_DEBOUNCE_MS / 1000)
+            await asyncio.sleep(DEBOUNCE_MS / 1000)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
+        if new_tab != current_tab:
+            tab_name = NavTabs(new_tab).name.lower()
+            UILogger.log_action("AppLayout", "Navigate", f"tab={tab_name}")
+            set_current_tab(new_tab)
 
-        if not self.page:
+    def _on_nav_change(e: ft.ControlEvent) -> None:
+        selected = e.control.selected_index
+        if selected == int(current_tab):
+            return
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_tab_switch, selected)
+
+    def _toggle_nav(e: ft.ControlEvent) -> None:
+        set_nav_collapsed(not nav_collapsed)
+
+    # --- Resize 处理 (use_effect + page.on_resize, 防抖 + state 更新) ---
+    def _setup_resize() -> None:
+        page = _get_page()
+        if page is None:
             return
 
-        current_view = self._view_cache.get(self._current_tab_index)
-        if current_view is None:
-            return
+        # 防抖任务跟踪 (闭包变量, effect 只运行一次, 跨 resize 事件持久)
+        debounce_task: asyncio.Task[None] | None = None
 
-        # 鸭子类型：视图自愿实现 handle_resize 即被通知
-        # 传递缓存的实时尺寸 (来自 WindowResizeEvent)，不依赖 page.width (仅连接时更新)
-        if hasattr(current_view, "handle_resize"):
+        async def _do_resize(width: float, height: float) -> None:
+            nonlocal debounce_task
             try:
-                current_view.handle_resize(self._current_width, self._current_height)  # type: ignore[untyped]
-            except Exception as e:
-                logger.debug("[AppLayout] Resize handler error: %s", e, exc_info=True)
+                await asyncio.sleep(RESIZE_DEBOUNCE_MS / 1000)
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+            set_window_size((width, height))
+            debounce_task = None
 
-    def _toggle_nav(self, e):  # pragma: no cover
-        """切换 NavigationRail 折叠/展开状态。"""
-        self._nav_collapsed = not self._nav_collapsed
-        self.nav_rail.extended = not self._nav_collapsed
-        self.collapse_btn.selected = self._nav_collapsed
-        self.brand_text.visible = not self._nav_collapsed
-        self.nav_rail.update()
-        # nav 折叠/展开改变内容区可用宽度 (180↔80)，必须通知视图重新布局
-        self.schedule_resize()
+        def _on_resize(e: ft.ControlEvent) -> None:
+            nonlocal debounce_task
+            if debounce_task is not None:
+                debounce_task.cancel()
+            width = float(getattr(e, "width", 0) or 0)
+            height = float(getattr(e, "height", 0) or 0)
+            debounce_task = page.run_task(_do_resize, width, height)
 
-    def _init_ui(self):  # pragma: no cover
-        """Initialize all UI components"""  # pragma: no cover
+        page.on_resize = _on_resize
 
-        # 1. Create Layout Structure (No Views yet)  # pragma: no cover
-        logger.debug("[AppLayout] >>> Initializing Layout")  # pragma: no cover
+    def _cleanup_resize() -> None:
+        page = _get_page()
+        if page is not None:
+            page.on_resize = None
 
-        # 2. Brand Header — uses semantic token, auto-updates with theme  # pragma: no cover
-        self.collapse_btn = ft.IconButton(  # pragma: no cover
-            icon=ft.Icons.MENU_OPEN,  # pragma: no cover
-            selected=False,  # pragma: no cover
-            selected_icon=ft.Icons.MENU,  # pragma: no cover
-            on_click=self._toggle_nav,  # pragma: no cover
-            tooltip=I18n.get("nav_toggle_collapse"),  # pragma: no cover
-            icon_size=20,  # pragma: no cover
-        )  # pragma: no cover
-        self.brand_text = ft.Text(  # pragma: no cover
-            I18n.get("app_brand"),  # pragma: no cover
-            size=14,  # pragma: no cover
-            weight=ft.FontWeight.BOLD,  # pragma: no cover
-            color=ft.Colors.ON_SURFACE,  # pragma: no cover
-        )  # pragma: no cover
-        brand_header = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    self.collapse_btn,  # pragma: no cover
-                    ft.Image(  # pragma: no cover
-                        src="/icon.png",  # pragma: no cover
-                        width=48,  # pragma: no cover
-                        height=48,  # pragma: no cover
-                        fit=ft.BoxFit.CONTAIN,  # pragma: no cover
-                    ),  # pragma: no cover
-                    self.brand_text,  # pragma: no cover
-                ],  # pragma: no cover
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-                spacing=5,  # pragma: no cover
-            ),  # pragma: no cover
-            padding=ft.Padding.only(top=10, bottom=10),  # pragma: no cover
-        )  # pragma: no cover
+    ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
 
-        # 3. Navigation Rail — uses semantic tokens  # pragma: no cover
-        self.nav_rail = ft.NavigationRail(  # pragma: no cover
-            selected_index=int(self._current_tab_index),  # pragma: no cover
-            label_type=ft.NavigationRailLabelType.ALL,  # pragma: no cover
-            extended=True,  # pragma: no cover
-            min_width=80,  # pragma: no cover
-            min_extended_width=180,  # pragma: no cover
-            bgcolor=ft.Colors.SURFACE,  # pragma: no cover
-            indicator_color=ft.Colors.PRIMARY,  # pragma: no cover
-            indicator_shape=ft.RoundedRectangleBorder(radius=4),  # pragma: no cover
-            leading=brand_header,  # pragma: no cover
-            destinations=[  # pragma: no cover
-                ft.NavigationRailDestination(  # pragma: no cover
-                    icon=ft.Icons.DASHBOARD_OUTLINED,  # pragma: no cover
-                    selected_icon=ft.Icons.DASHBOARD,  # pragma: no cover
-                    label=ft.Text(  # pragma: no cover
-                        I18n.get("nav_market"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.NavigationRailDestination(  # pragma: no cover
-                    icon=ft.Icons.FILTER_ALT_OUTLINED,  # pragma: no cover
-                    selected_icon=ft.Icons.FILTER_ALT,  # pragma: no cover
-                    label=ft.Text(  # pragma: no cover
-                        I18n.get("nav_screener"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.NavigationRailDestination(  # pragma: no cover
-                    icon=ft.Icons.ASSESSMENT_OUTLINED,  # pragma: no cover
-                    selected_icon=ft.Icons.ASSESSMENT,  # pragma: no cover
-                    label=ft.Text(  # pragma: no cover
-                        I18n.get("nav_backtest"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.NavigationRailDestination(  # pragma: no cover
-                    icon=ft.Icons.STORAGE_OUTLINED,  # pragma: no cover
-                    selected_icon=ft.Icons.STORAGE_ROUNDED,  # pragma: no cover
-                    label=ft.Text(  # pragma: no cover
-                        I18n.get("nav_data"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.NavigationRailDestination(  # pragma: no cover
-                    icon=ft.Icons.FORMAT_LIST_BULLETED_OUTLINED,  # pragma: no cover
-                    selected_icon=ft.Icons.FORMAT_LIST_BULLETED,  # pragma: no cover
-                    label=ft.Text(  # pragma: no cover
-                        I18n.get("nav_tasks"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.NavigationRailDestination(  # pragma: no cover
-                    icon=ft.Icons.SETTINGS_OUTLINED,  # pragma: no cover
-                    selected_icon=ft.Icons.SETTINGS,  # pragma: no cover
-                    label=ft.Text(  # pragma: no cover
-                        I18n.get("nav_settings"),  # pragma: no cover
-                        size=12,  # pragma: no cover
-                        weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            on_change=self._on_nav_change,  # pragma: no cover
-        )  # pragma: no cover
+    # --- 渲染 ---
+    collapse_btn = ft.IconButton(
+        icon=ft.Icons.MENU_OPEN,
+        selected=nav_collapsed,
+        selected_icon=ft.Icons.MENU,
+        on_click=_toggle_nav,
+        tooltip=I18n.get("nav_toggle_collapse"),
+        icon_size=20,
+    )
+    brand_text = ft.Text(
+        I18n.get("app_brand"),
+        size=14,
+        weight=ft.FontWeight.BOLD,
+        color=ft.Colors.ON_SURFACE,
+        visible=not nav_collapsed,
+    )
+    brand_header = ft.Container(
+        content=ft.Column(
+            [
+                collapse_btn,
+                ft.Image(
+                    src="/icon.png",
+                    width=48,
+                    height=48,
+                    fit=ft.BoxFit.CONTAIN,
+                ),
+                brand_text,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=5,
+        ),
+        padding=ft.Padding.only(top=10, bottom=10),
+    )
 
-        # 4. Body Container — uses semantic token for background  # pragma: no cover
-        home_view = self._get_view(NavTabs.MARKET)  # pragma: no cover
+    nav_rail = ft.NavigationRail(
+        selected_index=int(current_tab),
+        label_type=ft.NavigationRailLabelType.ALL,
+        extended=not nav_collapsed,
+        min_width=80,
+        min_extended_width=180,
+        bgcolor=ft.Colors.SURFACE,
+        indicator_color=ft.Colors.PRIMARY,
+        indicator_shape=ft.RoundedRectangleBorder(radius=4),
+        leading=brand_header,
+        destinations=_build_nav_destinations(),
+        on_change=_on_nav_change,
+    )
 
-        self.body = ft.Container(  # pragma: no cover
-            content=home_view,  # pragma: no cover
-            expand=True,  # pragma: no cover
-            padding=20,  # pragma: no cover
-            bgcolor=AppColors.BACKGROUND,  # pragma: no cover
-        )  # pragma: no cover
+    body = ft.Container(
+        content=_build_view(int(current_tab)),
+        expand=True,
+        padding=20,
+        bgcolor=AppColors.BACKGROUND,
+    )
 
-        # 5. Main Layout Row  # pragma: no cover
-        self.content = ft.Row(  # pragma: no cover
-            [self.nav_rail, ft.VerticalDivider(width=1), self.body],  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _get_view(self, index: int) -> ft.Control:
-        """Lazy load view by index"""
-        if index in self._view_cache:
-            return self._view_cache[index]
-
-        logger.debug("[AppLayout] Lazy loading view for index %s", index)
-        _t0 = _time.perf_counter()
-
-        view = None
-        if index == NavTabs.MARKET:
-            view = HomeView(on_run_strategy=self.run_strategy_from_home)
-        elif index == NavTabs.SCREENER:
-            view = ScreenerView()  # type: ignore[untyped]  # [reason: Phase F.3 声明式重写, 无 page 参数]
-        elif index == NavTabs.BACKTEST:
-            view = BacktestView()  # type: ignore[untyped]
-        elif index == NavTabs.DATA:
-            view = DataExplorerView()
-        elif index == NavTabs.TASKS:
-            view = TaskCenterView()
-        elif index == NavTabs.SETTINGS:
-            view = SettingsView()
-        else:
-            view = ft.Text(I18n.get("view_unknown"))
-
-        self._view_cache[index] = view
-        logger.debug(
-            "[AppLayout] View %s loaded in %.1fms",
-            index,
-            (_time.perf_counter() - _t0) * 1000,
-        )
-        return view
-
-    def show(self):  # pragma: no cover
-        """Mount this layout to the page"""  # pragma: no cover
-        self.page.clean()  # type: ignore[untyped]  # pragma: no cover
-        self.page.add(self)  # type: ignore[untyped]  # pragma: no cover
-        self.page.update()  # type: ignore[untyped]  # pragma: no cover
-
-    def _on_locale_change(self):
-        """Handle i18n locale change"""
-        try:
-            self.page.title = I18n.get("app_title")  # type: ignore[untyped]
-            # Brand header controls
-            if self.brand_text:
-                self.brand_text.value = I18n.get("app_brand")
-            if self.collapse_btn:
-                self.collapse_btn.tooltip = I18n.get("nav_toggle_collapse")
-            if self.nav_rail:
-                nav_keys = [
-                    "nav_market",
-                    "nav_screener",
-                    "nav_backtest",
-                    "nav_data",
-                    "nav_tasks",
-                    "nav_settings",
-                ]
-                for i, key in enumerate(nav_keys):
-                    if i < len(self.nav_rail.destinations):  # type: ignore[untyped]
-                        text = I18n.get(key)
-                        # V1: label 是 ft.Text 控件（StrOrControl），更新 .value 即可；
-                        # 不再赋字符串以免覆盖控件的 size/weight 样式（R12.b NavRail 双写修复）
-                        self.nav_rail.destinations[i].label.value = text  # type: ignore[union-attr]
-                self.nav_rail.update()
-            if self.page:
-                self.page.update()  # type: ignore[untyped]
-        except Exception as e:
-            logger.warning("[AppLayout] _on_locale_change failed: %s", e, exc_info=True)
-        # 语言切换后文案长度变化可能导致布局溢出，触发 resize 重新验证布局
-        self.schedule_resize()
-
-    def _on_nav_change(self, e):
-        """Handle Navigation Rail Change"""
-        selected_index = e.control.selected_index
-        self.change_tab(selected_index)
-
-    def update_theme(self):  # pragma: no cover
-        """# pragma: no cover
-        Handle global theme change event.
-
-        Architecture:
-          - Standard colors (SURFACE, PRIMARY, TEXT) use semantic tokens and
-            auto-update when page.theme/page.dark_theme changes — NO manual work.
-          - Only custom business colors (UP/DOWN, TABLE_*) need manual propagation
-            to views that use them (tables, charts, market dashboard).
-        """  # pragma: no cover
-        logger.info("[AppLayout] Updating theme...")  # pragma: no cover
-
-        # 1. Apply new theme to page (sets page.theme, page.dark_theme, page.theme_mode)  # pragma: no cover
-        # 2. Propagate custom color updates to ALL views that have update_theme  # pragma: no cover
-        #    (Tables, charts, settings inputs — anything with Layer 2 colors)  # pragma: no cover
-        for _tab_index, view in self._view_cache.items():  # pragma: no cover
-            if hasattr(view, "update_theme"):  # pragma: no cover
-                try:  # pragma: no cover
-                    view.update_theme()  # type: ignore[untyped]  # pragma: no cover
-                except Exception as e:  # pragma: no cover
-                    logger.error(  # pragma: no cover
-                        "[AppLayout] Failed to update custom colors for %s: %s",  # pragma: no cover
-                        type(view).__name__,  # pragma: no cover
-                        e,  # pragma: no cover
-                        exc_info=True,  # pragma: no cover
-                    )  # pragma: no cover
-
-        # 3. Single page update — Flet redraws all semantic-token-based colors automatically  # pragma: no cover
-        self.page.update()  # type: ignore[untyped]  # pragma: no cover
-
-    def change_tab(self, index: int):
-        """Change tab with debounce logic"""
-        if index == self._current_tab_index:
-            return
-
-        self._pending_tab_index = index
-
-        # Cancel previous pending switch
-        if self._debounce_task:
-            self._debounce_task.cancel()
-
-        # Schedule new switch
-        self._debounce_task = self.page.run_task(self._execute_tab_switch)  # type: ignore[untyped]
-
-    async def _execute_tab_switch(self):
-        """Async execution of tab switch"""
-        try:
-            await asyncio.sleep(self.DEBOUNCE_MS / 1000)
-        except asyncio.CancelledError:
-            raise
-
-        index = self._pending_tab_index
-        if index is None or index == self._current_tab_index:
-            return
-
-        tab_name = NavTabs(index).name.lower()
-        UILogger.log_action("AppLayout", "Navigate", f"tab={tab_name}")
-
-        _t0 = _time.perf_counter()
-        logger.debug("[AppLayout] Switching to tab index %s", index)
-
-        # Optimize HomeView visibility for background resource saving
-        home_view = self._get_view(NavTabs.MARKET)
-        if hasattr(home_view, "set_visible"):
-            home_view.set_visible(index == NavTabs.MARKET)  # type: ignore[untyped]
-        # Switch Content (Lazy Load here)
-        new_view = self._get_view(index)
-        self.body.content = new_view  # type: ignore[untyped]
-        self._current_tab_index = index
-        self.nav_rail.selected_index = index  # type: ignore[untyped]
-
-        # 先挂载到 Flutter，再触发 locale 兜底（避免控件未挂载时调 update 触发 Null check）
-        try:
-            self.body.update()  # type: ignore[untyped]
-        except Exception as ex:
-            logger.error("[AppLayout] body.update() failed during tab switch: %s", ex, exc_info=True)
-            try:
-                if self.page:
-                    self.page.update()
-            except Exception as fallback_ex:
-                logger.debug(
-                    "[AppLayout] page.update() fallback also failed: %s",
-                    fallback_ex,
-                    exc_info=True,
-                )
-
-        self.nav_rail.update()  # type: ignore[untyped]
-
-        # 生命周期兜底：缓存的视图可能错过 I18n 通知（例如视图未挂载时收到语言切换），
-        # 挂载完成后再显式调用 refresh_locale，确保文案与当前 locale 一致。
-        refresh_fn = getattr(new_view, "refresh_locale", None) or getattr(new_view, "_on_locale_change", None)
-        if callable(refresh_fn):
-            try:
-                refresh_fn()
-            except Exception as ex:
-                logger.debug("[AppLayout] View locale refresh skipped: %s", ex, exc_info=True)
-
-        # 响应式兜底：延迟挂载的视图首次显示时，缓存的尺寸可能已过时 (窗口在后台 resize)，
-        # 挂载完成后显式调用 handle_resize，确保布局基于当前窗口尺寸。
-        if hasattr(new_view, "handle_resize"):
-            try:
-                new_view.handle_resize(self._current_width, self._current_height)  # type: ignore[untyped]
-            except Exception as ex:
-                logger.debug("[AppLayout] View handle_resize on mount skipped: %s", ex, exc_info=True)
-        logger.debug(
-            "[AppLayout] Tab switch done in %.1fms",
-            (_time.perf_counter() - _t0) * 1000,
-        )
-
-    async def run_strategy_from_home(self, strategy_key):
-        """Callback to switch to Screener and run strategy"""
-        self.change_tab(NavTabs.SCREENER)
-
-        if self._debounce_task:
-            self._debounce_task.cancel()
-
-        self._pending_tab_index = NavTabs.SCREENER
-        await self._execute_tab_switch()
-
-        screener_view = self._get_view(NavTabs.SCREENER)
-        if isinstance(screener_view, ScreenerView):
-            await screener_view.select_and_run_strategy(strategy_key)
+    return ft.Container(
+        content=ft.Row(
+            [nav_rail, ft.VerticalDivider(width=1), body],
+            expand=True,
+        ),
+        expand=True,
+    )
