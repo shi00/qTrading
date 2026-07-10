@@ -1042,14 +1042,22 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
         assert wizard._locale_subscription_id is None
 
     async def test_cleanup_vm_cancels_sync_and_disposes(self, mock_page):
-        """卸载时取消进行中的同步并清理 VM"""
+        """卸载时取消进行中的同步并清理 VM
+
+        断言全部 3 个 VM dispose 被调用（database_vm/tushare_vm/vm），
+        避免任一 dispose 行被误删时测试仍通过（§1.7 举一反三）。
+        """
         wizard = self._make_wizard(mock_page)
         wizard.page = mock_page
         wizard.vm.sync_in_progress = True
         wizard.vm.cancel_sync = AsyncMock()
         wizard.vm.dispose = MagicMock()
+        wizard.database_vm.dispose = MagicMock()
+        wizard.tushare_vm.dispose = MagicMock()
         await wizard._cleanup_vm()
         wizard.vm.cancel_sync.assert_awaited_once()
+        wizard.database_vm.dispose.assert_called_once()
+        wizard.tushare_vm.dispose.assert_called_once()
         wizard.vm.dispose.assert_called_once()
 
     async def test_cleanup_vm_disposes_without_sync(self, mock_page):
@@ -1059,8 +1067,12 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
         wizard.vm.sync_in_progress = False
         wizard.vm.cancel_sync = AsyncMock()
         wizard.vm.dispose = MagicMock()
+        wizard.database_vm.dispose = MagicMock()
+        wizard.tushare_vm.dispose = MagicMock()
         await wizard._cleanup_vm()
         wizard.vm.cancel_sync.assert_not_awaited()
+        wizard.database_vm.dispose.assert_called_once()
+        wizard.tushare_vm.dispose.assert_called_once()
         wizard.vm.dispose.assert_called_once()
 
 
