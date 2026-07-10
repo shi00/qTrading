@@ -606,3 +606,27 @@ class TestSaveConfigCommand:
             await vm.save_config()
 
         on_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_save_config_already_saving_returns_false(self, mock_config_handler, mock_thread_pool):
+        """重入守卫：is_saving=True 时直接返回 False，不执行保存流程。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        # 模拟正在保存中
+        vm._set_state(is_saving=True)  # type: ignore[attr-defined]
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock()
+            mock_svc.ensure_tables_exist = AsyncMock()
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "warning"
+        # 不应触达 service 层
+        mock_svc.test_connection.assert_not_called()
+        mock_svc.ensure_tables_exist.assert_not_called()

@@ -239,14 +239,14 @@ class TestDatabaseTabLifecycle:
         tab._on_mount()
         tab.config_vm.reload_config.assert_called_once()
 
-    def test_on_mount_calls_reload_config_only_once(self):
+    def test_on_mount_calls_reload_config_once(self):
         tab = self._make_tab()
         tab._on_mount()
         tab.config_vm.reload_config.assert_called_once()
 
     def test_on_unmount_does_not_raise(self):
         tab = self._make_tab()
-        # _on_unmount 是空操作，不应抛异常
+        # _on_unmount 调用 dispose/unsubscribe，Mock 环境下不应抛异常
         tab._on_unmount()
 
     def test_did_mount_delegates_to_on_mount(self):

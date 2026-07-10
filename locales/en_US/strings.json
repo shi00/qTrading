@@ -646,6 +646,7 @@
     "db_testing": "Testing connection...",
     "db_testing_in_progress": "Connection test in progress, please wait...",
     "db_saving": "Saving configuration...",
+    "db_saving_in_progress": "Configuration save in progress, please wait...",
     "db_msg_success": "Connection successful",
     "db_msg_saved": "Configuration saved",
     "db_msg_not_found": "Database does not exist",

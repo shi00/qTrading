@@ -543,6 +543,7 @@
     "db_testing": "正在测试连接...",
     "db_testing_in_progress": "连接测试正在进行中，请稍候...",
     "db_saving": "正在保存配置...",
+    "db_saving_in_progress": "配置保存正在进行中，请稍候...",
     "db_msg_success": "连接成功",
     "db_msg_saved": "配置已保存",
     "db_msg_not_found": "数据库不存在",

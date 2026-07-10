@@ -14,7 +14,6 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 - ConfigHandler.save_db_config 是同步 IO，通过 ThreadPoolManager offload
 """
 
-import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -82,7 +81,6 @@ class DatabaseConfigPanelViewModel:
         self._load_password = load_password
         self._state = DatabaseConfigState()
         self._subscribers: list[Callable[[DatabaseConfigState], None]] = []
-        self._main_loop: asyncio.AbstractEventLoop | None = None
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
 
@@ -96,10 +94,6 @@ class DatabaseConfigPanelViewModel:
     def subscribe(self, callback: Callable[[DatabaseConfigState], None]) -> Callable[[], None]:
         """订阅 state 变化，返回退订函数。"""
         self._subscribers.append(callback)
-        try:
-            self._main_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("[DatabaseConfigVM] subscribed without running loop (test mode)")
 
         def _unsubscribe() -> None:
             if callback in self._subscribers:
@@ -307,6 +301,8 @@ class DatabaseConfigPanelViewModel:
                             {"default": "Database not found. Will create on save."},
                         )
                     )
+                    if self._on_test_success_callback:
+                        self._on_test_success_callback(config)
                     return True
                 else:
                     self._show_error(self._raw_message(result.message))
@@ -337,6 +333,10 @@ class DatabaseConfigPanelViewModel:
         if not is_valid:
             assert error_msg is not None
             self._show_error(error_msg)
+            return False
+
+        if self._state.is_saving:
+            self._show_warning(Message("db_saving_in_progress"))
             return False
 
         self._show_warning(Message("db_saving"))
