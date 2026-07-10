@@ -763,6 +763,13 @@ class _OnboardingWizardBase:
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
         self.mock_ch = MagicMock()
+        self.mock_ch.get_llm_config.return_value = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-test",
+        }
+        self.mock_ch.get_provider_credential.return_value = {"api_key": "", "base_url": ""}
         # ThreadPoolManager mock: run_async 直接同步调用 func 并返回结果，
         # 避免 _do_language_change_wizard_async 等协程测试依赖真实线程池。
         self.mock_tpm = MagicMock()
@@ -774,6 +781,7 @@ class _OnboardingWizardBase:
             patch("ui.views.onboarding_wizard.AppColors", self.mock_ac),
             patch("ui.views.onboarding_wizard.AppStyles", self.mock_as),
             patch("ui.views.onboarding_wizard.ConfigHandler", self.mock_ch),
+            patch("ui.viewmodels.llm_config_panel_view_model.ConfigHandler", self.mock_ch),
             patch("ui.views.onboarding_wizard.ThreadPoolManager", self.mock_tpm),
             patch("ui.viewmodels.onboarding_view_model.DataProcessor"),
             patch("ui.views.onboarding_wizard.DatabaseConfigPanel", MagicMock()),
@@ -1044,7 +1052,7 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
     async def test_cleanup_vm_cancels_sync_and_disposes(self, mock_page):
         """卸载时取消进行中的同步并清理 VM
 
-        断言全部 3 个 VM dispose 被调用（database_vm/tushare_vm/vm），
+        断言全部 4 个 VM dispose 被调用（database_vm/tushare_vm/llm_vm/vm），
         避免任一 dispose 行被误删时测试仍通过（§1.7 举一反三）。
         """
         wizard = self._make_wizard(mock_page)
@@ -1054,10 +1062,12 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
         wizard.vm.dispose = MagicMock()
         wizard.database_vm.dispose = MagicMock()
         wizard.tushare_vm.dispose = MagicMock()
+        wizard.llm_vm.dispose = MagicMock()
         await wizard._cleanup_vm()
         wizard.vm.cancel_sync.assert_awaited_once()
         wizard.database_vm.dispose.assert_called_once()
         wizard.tushare_vm.dispose.assert_called_once()
+        wizard.llm_vm.dispose.assert_called_once()
         wizard.vm.dispose.assert_called_once()
 
     async def test_cleanup_vm_disposes_without_sync(self, mock_page):
@@ -1069,10 +1079,12 @@ class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
         wizard.vm.dispose = MagicMock()
         wizard.database_vm.dispose = MagicMock()
         wizard.tushare_vm.dispose = MagicMock()
+        wizard.llm_vm.dispose = MagicMock()
         await wizard._cleanup_vm()
         wizard.vm.cancel_sync.assert_not_awaited()
         wizard.database_vm.dispose.assert_called_once()
         wizard.tushare_vm.dispose.assert_called_once()
+        wizard.llm_vm.dispose.assert_called_once()
         wizard.vm.dispose.assert_called_once()
 
 
@@ -1110,12 +1122,11 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
     def test_rebuild_cascades_panel_locale_refresh(self, mock_page):
         """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）
 
-        注：DatabaseConfigPanel / TushareConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
+        注：DatabaseConfigPanel / TushareConfigPanel / LLMConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state)
         自动重渲染，不再需要级联调用 _on_locale_change / refresh_locale。
         """
         wizard = self._make_wizard(mock_page)
         panels_and_methods = [
-            (wizard.llm_config_panel, "_on_locale_change"),
             (wizard.local_model_panel, "_on_locale_change"),
         ]
         for panel, method_name in panels_and_methods:
@@ -1133,6 +1144,7 @@ class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
             "database_vm": wizard.database_vm,
             "tushare_vm": wizard.tushare_vm,
             "tushare_panel": wizard.tushare_panel,
+            "llm_vm": wizard.llm_vm,
             "llm_config_panel": wizard.llm_config_panel,
             "local_model_panel": wizard.local_model_panel,
         }

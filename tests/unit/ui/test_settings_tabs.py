@@ -482,11 +482,18 @@ class TestAIBrainTab:
         self.mock_ac = mock_app_colors
         self.mock_as = mock_app_styles
         self.mock_ch = mock_config_handler
+        self.mock_ch.get_llm_config.return_value = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-test",
+        }
         self.patches = [
             patch("ui.views.settings_tabs.ai_brain_tab.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.ai_brain_tab.AppColors", self.mock_ac),
             patch("ui.views.settings_tabs.ai_brain_tab.AppStyles", self.mock_as),
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler", self.mock_ch),
+            patch("ui.viewmodels.llm_config_panel_view_model.ConfigHandler", self.mock_ch),
             patch("ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel", MagicMock()),
             patch("ui.views.settings_tabs.ai_brain_tab.LocalModelConfigPanel", MagicMock()),
             patch("ui.views.settings_tabs.ai_brain_tab.DashboardCard", MagicMock()),
@@ -545,8 +552,8 @@ class TestAIBrainTab:
         tab.page = wrap_mock_page(mock_page)
         tab.ai_max_candidates_input.value = ""
         tab.strategy_min_turnover_input.value = ""
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         await tab._save_ai_settings(None)
         tab.show_snack.assert_called_once_with("ai_snack_fields_empty", color=self.mock_ac.ERROR)
@@ -560,8 +567,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "prompt"
         tab.ai_news_prompt_input.value = "news"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, ""), create=True):
             await tab._save_ai_settings(None)
@@ -576,8 +583,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "prompt"
         tab.ai_news_prompt_input.value = "news"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, ""), create=True):
             await tab._save_ai_settings(None)
@@ -592,8 +599,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "99"
         tab.ai_prompt_input.value = "prompt"
         tab.ai_news_prompt_input.value = "news"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, ""), create=True):
             await tab._save_ai_settings(None)
@@ -608,8 +615,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "prompt"
         tab.ai_news_prompt_input.value = "news"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         with patch(
             "utils.prompt_guard.validate_prompt",
@@ -622,7 +629,8 @@ class TestAIBrainTab:
 
     def test_did_mount_subscribes_i18n(self, mock_page):
         tab = self._make_tab()
-        tab.llm_config_panel = MagicMock()
+        tab.llm_vm = MagicMock()
+        tab.failover_panel = MagicMock()
         tab.local_model_panel = MagicMock()
         tab.did_mount()
         self.mock_i18n.subscribe.assert_called_once()
@@ -664,8 +672,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "test prompt"
         tab.ai_news_prompt_input.value = "news prompt"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         tab.local_model_panel.get_current_config.return_value = {"model_path": ""}
         self.mock_ch.set_ai_max_candidates.side_effect = Exception("save error")
@@ -682,8 +690,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "test prompt"
         tab.ai_news_prompt_input.value = "news prompt"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         tab.local_model_panel.get_current_config.return_value = {"model_path": "/nonexistent/model.gguf"}
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
@@ -702,8 +710,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "test prompt"
         tab.ai_news_prompt_input.value = "news prompt"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         tab.local_model_panel.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
@@ -731,8 +739,8 @@ class TestAIBrainTab:
         tab.ai_concurrency_input.value = "5"
         tab.ai_prompt_input.value = "test prompt"
         tab.ai_news_prompt_input.value = "news prompt"
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = {}
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         tab.local_model_panel.get_current_config.return_value = {"model_path": "/path/to/model.gguf"}
         with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):

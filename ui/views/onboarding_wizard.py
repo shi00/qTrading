@@ -30,6 +30,7 @@ from ui.i18n import I18n, refresh_dropdown_options
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
+from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.config_handler import ConfigHandler
@@ -207,8 +208,8 @@ class OnboardingWizard(ft.Container):
     # --- Panel validation bridges (View → VM callbacks) ---
 
     async def _validate_cloud_ai_via_panel(self) -> bool:  # pragma: no cover
-        if await self.llm_config_panel.async_verify_connection():
-            if not await self.llm_config_panel.save_current_config():
+        if await self.llm_vm.verify_connection():
+            if not await self.llm_vm.save_config():
                 logger.error("[OnboardingWizard] Failed to save LLM config")
                 self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
                 return False
@@ -287,11 +288,14 @@ class OnboardingWizard(ft.Container):
         )
 
     def _init_cloud_ai_controls(self):  # pragma: no cover
-        self.llm_config_panel = LLMConfigPanel(
+        self.llm_vm = LLMConfigPanelViewModel(
             on_test_connection=self._on_llm_test_connection,
-            show_save_button=False,
-            compact=True,
             on_loading_change=self._on_panel_loading_change,
+        )
+        self.llm_config_panel = LLMConfigPanel(
+            vm=self.llm_vm,
+            compact=True,
+            show_save_button=False,
         )
 
     def _init_local_model_controls(self):  # pragma: no cover
@@ -1049,6 +1053,7 @@ class OnboardingWizard(ft.Container):
         LocalModelManager.cancel_verification_if_active()
         self.database_vm.dispose()
         self.tushare_vm.dispose()
+        self.llm_vm.dispose()
         self.vm.dispose()
 
     def _on_locale_change(self):
@@ -1094,11 +1099,8 @@ class OnboardingWizard(ft.Container):
         自动重渲染，无需级联调用 _on_locale_change。
         """
         # 级联调用子面板的 locale 刷新方法（纯 UI 文本更新，不触发 keyring IO）
-        # DatabaseConfigPanel / TushareConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
-        for panel_attr, method_name in (
-            ("llm_config_panel", "_on_locale_change"),
-            ("local_model_panel", "_on_locale_change"),
-        ):
+        # DatabaseConfigPanel / TushareConfigPanel / LLMConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
+        for panel_attr, method_name in (("local_model_panel", "_on_locale_change"),):
             panel = getattr(self, panel_attr, None)
             if panel is None:
                 continue

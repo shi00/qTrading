@@ -1,33 +1,34 @@
-"""
-LLM Configuration Panel Component
+"""LLMConfigPanel — 声明式组件 (Phase 3.2.3).
 
-Provides a unified UI for configuring multiple LLM providers with:
-- Dynamic provider selection
-- Provider-specific model lists
-- Azure OpenAI special handling
-- Connection testing
-- Dynamic model refresh
+从命令式容器子类重写为 @ft.component 范式
+(CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook 已实现).
+
+变更要点:
+- 旧命令式 ``class LLMConfigPanel(ft.Container)`` → ``@ft.component def LLMConfigPanel(vm, ...)``
+- VM 由消费方实例化（AIBrainTab/OnboardingWizard 需要 ``vm.save_config`` / ``vm.verify_connection`` 引用）
+- View 通过 ``use_state`` + ``use_effect`` 订阅 ``vm.state`` 变化触发重渲染
+- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
+- page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
+- provider/model options 由 View 从 LLM_PROVIDERS + 当前 locale 构建（tag 需 i18n）
 """
 
 import logging
-import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 import flet as ft
 
 from ui.components.settings_widgets import SectionHeader
-from ui.i18n import I18n, refresh_dropdown_options
+from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from utils.config_handler import ConfigHandler
+from ui.viewmodels import Message
+from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 from utils.llm_providers import (
     AZURE_API_VERSIONS,
     AZURE_DEFAULT_API_VERSION,
     LLM_PROVIDERS,
     get_display_tag,
-    is_recommended_model,
 )
-from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,1157 +43,435 @@ MODELS_API_COMPATIBLE = {
     "custom",
 }
 
+# --- Status display config ---
 
-class LLMConfigPanel(ft.Container):
-    """
-    LLM Configuration Panel with multi-provider support.
+_STATUS_ICON_MAP = {
+    "success": ft.Icons.CHECK_CIRCLE,
+    "error": ft.Icons.ERROR,
+    "warning": ft.Icons.WARNING,
+    "info": ft.Icons.INFO,
+}
 
-    Features:
-    - Provider dropdown with icons
-    - Dynamic model dropdown based on provider
-    - Azure-specific fields (resource name, deployment, api version)
-    - Connection test button
-    - Dynamic model refresh
-    - i18n support with hot reload
+_STATUS_COLOR_MAP = {
+    "success": AppColors.SUCCESS,
+    "error": AppColors.ERROR,
+    "warning": AppColors.WARNING,
+    "info": AppColors.PRIMARY,
+}
 
-    Args:
-        on_test_connection: Callback for connection test (required)
-        on_save: Callback when save button is clicked (optional)
-        on_reload_service: Callback to reload service after config save (optional)
-        on_loading_change: Callback when loading state changes (optional)
-        show_save_button: Whether to show the save button (default: False)
-        compact: Whether to use compact layout for wizard (default: False)
-    """
 
-    _REFRESH_TIMEOUT = 10.0
-    _MAX_CUSTOM_MODELS = 50
+def _render_message(msg: Message | None) -> str:
+    """Render a Message to localized text via I18n.get."""
+    if msg is None:
+        return ""
+    return I18n.get(msg.key, **msg.params)
 
-    def __init__(
-        self,
-        on_test_connection: Callable[..., Awaitable[dict]],
-        on_save: Callable | None = None,
-        on_reload_service: Callable[[], Awaitable[None]] | None = None,
-        on_loading_change: Callable[[bool], None] | None = None,
-        show_save_button: bool = False,
-        compact: bool = False,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
 
-        self.on_test_connection = on_test_connection
-        self.on_save = on_save
-        self.on_reload_service = on_reload_service
-        self.on_loading_change = on_loading_change
-        self._show_save_button = show_save_button
-        self._compact = compact
+def _get_provider_name(provider: dict, provider_id: str) -> str:
+    """获取供应商显示名称（locale 感知）。"""
+    if I18n.current_locale() == "zh_CN":
+        return provider.get("name", provider_id)
+    return provider.get("name_en", provider.get("name", provider_id))
 
-        self._current_provider = "deepseek"
-        self._is_azure = False
-        self._api_key_modified = False
-        self._is_verifying = False
-        self._locale_subscription_id: object | None = None
 
-        self._build_ui()
+def _build_provider_options() -> list[ft.dropdown.Option]:
+    """构建供应商下拉选项（分组：国内/国际/自定义）。"""
+    options: list[ft.dropdown.Option] = []
 
-    def _build_ui(self):  # pragma: no cover
-        input_width = 360
-        container_width = input_width + 60
+    domestic = ft.dropdown.Option(I18n.get("llm_provider_domestic"))
+    domestic.disabled = True
+    options.append(domestic)
 
-        self.provider_dropdown = ft.Dropdown(
-            label=I18n.get("llm_select_provider"),
-            options=self._build_provider_options(),
-            value=self._current_provider,
-            on_select=self._on_provider_change,
-            width=input_width,
-        )
-
-        self.model_dropdown = ft.Dropdown(
-            label=I18n.get("llm_select_model"),
-            options=self._build_model_options(self._current_provider),
-            width=input_width,
-        )
-
-        self.custom_model_input = ft.Dropdown(
-            label=I18n.get("llm_custom_model"),
-            visible=False,
-            width=input_width,
-            editable=True,
-            options=[],
-        )
-
-        self.base_url_input = ft.TextField(
-            label=I18n.get("llm_base_url"),
-            value=LLM_PROVIDERS.get(self._current_provider, {}).get("base_url", ""),
-            width=input_width,
-        )
-
-        self.api_key_input = ft.TextField(
-            label=I18n.get("llm_api_key"),
-            password=True,
-            can_reveal_password=True,
-            width=input_width,
-            on_change=self._on_api_key_change,
-        )
-
-        self.azure_resource_input = ft.TextField(
-            label=I18n.get("llm_azure_resource_name"),
-            visible=False,
-            width=input_width,
-        )
-
-        self.azure_deployment_input = ft.TextField(
-            label=I18n.get("llm_azure_deployment_name"),
-            visible=False,
-            width=input_width,
-        )
-
-        self.azure_version_input = ft.Dropdown(
-            label=I18n.get("llm_azure_api_version"),
-            options=[ft.dropdown.Option(v) for v in AZURE_API_VERSIONS],
-            value=AZURE_DEFAULT_API_VERSION,
-            visible=False,
-            width=input_width,
-        )
-
-        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
-        self.status_text = ft.Text(
-            value="",
-            size=12,
-        )
-
-        self.test_button = ft.Button(
-            content=I18n.get("llm_test_connection"),
-            on_click=self._on_test_click,
-            icon=ft.Icons.CABLE if ft.Icons else None,
-            style=AppStyles.secondary_button(),
-        )
-
-        self.refresh_models_button = ft.IconButton(
-            icon=ft.Icons.REFRESH if ft.Icons else None,
-            tooltip=I18n.get("llm_refresh_models"),
-            on_click=self._on_refresh_click,
-        )
-
-        self.save_button = ft.Button(
-            content=I18n.get("settings_save_config"),
-            on_click=self._on_save_click,
-            icon=ft.Icons.SAVE if ft.Icons else None,
-            visible=self._show_save_button,
-            style=AppStyles.primary_button(),
-        )
-
-        provider_row = ft.Row(
-            controls=[
-                self.provider_dropdown,
-            ],
-            alignment=ft.MainAxisAlignment.START,
-        )
-
-        self.model_row = ft.Row(
-            controls=[
-                self.model_dropdown,
-                self.custom_model_input,
-                self.refresh_models_button,
-            ],
-            spacing=0,
-            vertical_alignment=ft.CrossAxisAlignment.END,
-        )
-
-        self.azure_row = ft.Column(
-            controls=[
-                self.azure_resource_input,
-                self.azure_deployment_input,
-                self.azure_version_input,
-            ],
-            visible=False,
-            horizontal_alignment=ft.CrossAxisAlignment.START,
-        )
-
-        self._links_row = self._build_links_row()
-
-        action_buttons = ft.Row(
-            controls=[
-                self.test_button,
-                self.save_button,
-            ],
-            alignment=ft.MainAxisAlignment.CENTER,
-        )
-
-        self.section_header = SectionHeader(I18n.get("settings_sec_ai"), title_key="settings_sec_ai")
-        self.section_header.visible = not self._compact
-
-        form_content = ft.Column(
-            controls=[
-                self.section_header,
-                provider_row,
-                self.model_row,
-                self.base_url_input,
-                self.api_key_input,
-                self.azure_row,
-                action_buttons,
-                ft.Row(
-                    [self.status_icon, self.status_text],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=5,
-                ),
-                self._links_row,
-            ],
-            spacing=10 if not self._compact else 6,
-            horizontal_alignment=ft.CrossAxisAlignment.START,
-        )
-
-        if self._compact:
-            self.content = ft.Container(
-                content=form_content,
-                width=container_width,
-                alignment=ft.Alignment.CENTER,
-            )
-        else:
-            self.content = form_content
-
-        self._load_config()
-
-    @staticmethod
-    def _get_provider_name(provider: dict, provider_id: str) -> str:
-        if I18n.current_locale() == "zh_CN":
-            return provider.get("name", provider_id)
-        return provider.get("name_en", provider.get("name", provider_id))
-
-    def _build_provider_options(self) -> list:  # pragma: no cover
-        options = []
-
-        domestic = ft.dropdown.Option(I18n.get("llm_provider_domestic"))
-        domestic.disabled = True
-        options.append(domestic)
-
-        for provider_id in ["deepseek", "qwen", "zhipu", "moonshot", "minimax"]:
-            provider = LLM_PROVIDERS.get(provider_id)
-            if provider:
-                options.append(
-                    ft.dropdown.Option(
-                        key=provider_id,
-                        text=self._get_provider_name(provider, provider_id),
-                    )
-                )
-
-        international = ft.dropdown.Option(I18n.get("llm_provider_international"))
-        international.disabled = True
-        options.append(international)
-
-        for provider_id in ["openai", "azure", "anthropic", "google", "mistral"]:
-            provider = LLM_PROVIDERS.get(provider_id)
-            if provider:
-                options.append(
-                    ft.dropdown.Option(
-                        key=provider_id,
-                        text=self._get_provider_name(provider, provider_id),
-                    )
-                )
-
-        custom = ft.dropdown.Option(I18n.get("llm_provider_custom_group"))
-        custom.disabled = True
-        options.append(custom)
-
-        options.append(
-            ft.dropdown.Option(
-                key="custom",
-                text=I18n.get("llm_provider_custom"),
-            )
-        )
-
-        return options
-
-    def _build_model_options(self, provider_id: str) -> list:  # pragma: no cover
-        provider = LLM_PROVIDERS.get(provider_id, {})
-        models = provider.get("models", [])
-
-        options = []
-        for model in models:
-            text = model.get("name", model.get("id", ""))
-            tag = model.get("tag", "")
-            display_tag = I18n.get(get_display_tag(tag), default=get_display_tag(tag))
-            if display_tag:
-                text = f"{text} ({display_tag})"
+    for provider_id in ["deepseek", "qwen", "zhipu", "moonshot", "minimax"]:
+        provider = LLM_PROVIDERS.get(provider_id)
+        if provider:
             options.append(
                 ft.dropdown.Option(
-                    key=model.get("id"),
-                    text=text,
+                    key=provider_id,
+                    text=_get_provider_name(provider, provider_id),
                 )
             )
 
-        return options
+    international = ft.dropdown.Option(I18n.get("llm_provider_international"))
+    international.disabled = True
+    options.append(international)
 
-    def _build_links_row(self) -> ft.Row:  # pragma: no cover
-        provider = LLM_PROVIDERS.get(self._current_provider, {})
-
-        links = []
-
-        # 仅在向导特供的 compact 模式下采用紧凑内边距，释放高达 70px+ 的占用
-        compact_btn_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=4)) if self._compact else None
-
-        console_url = provider.get("console_url")
-        if console_url:
-            links.append(
-                ft.TextButton(
-                    content=I18n.get("llm_get_api_key"),
-                    url=console_url,
-                    icon=ft.Icons.KEY if ft.Icons else None,
-                    style=compact_btn_style,
+    for provider_id in ["openai", "azure", "anthropic", "google", "mistral"]:
+        provider = LLM_PROVIDERS.get(provider_id)
+        if provider:
+            options.append(
+                ft.dropdown.Option(
+                    key=provider_id,
+                    text=_get_provider_name(provider, provider_id),
                 )
             )
 
-        pricing_url = provider.get("pricing_url")
-        if pricing_url:
-            links.append(
-                ft.TextButton(
-                    content=I18n.get("llm_view_pricing"),
-                    url=pricing_url,
-                    icon=ft.Icons.ATTACH_MONEY if ft.Icons else None,
-                    style=compact_btn_style,
-                )
-            )
+    custom = ft.dropdown.Option(I18n.get("llm_provider_custom_group"))
+    custom.disabled = True
+    options.append(custom)
 
-        models_url = provider.get("models_url")
-        if models_url:
-            links.append(
-                ft.TextButton(
-                    content=I18n.get("llm_view_models"),
-                    url=models_url,
-                    icon=ft.Icons.LIST if ft.Icons else None,
-                    style=compact_btn_style,
-                )
-            )
+    options.append(
+        ft.dropdown.Option(
+            key="custom",
+            text=I18n.get("llm_provider_custom"),
+        )
+    )
 
-        return ft.Row(
-            controls=links,
-            alignment=ft.MainAxisAlignment.CENTER if self._compact else ft.MainAxisAlignment.START,
-            wrap=not self._compact,
-            spacing=8 if self._compact else 10,
+    return options
+
+
+def _build_model_options(provider_id: str) -> list[ft.dropdown.Option]:
+    """构建指定供应商的模型下拉选项（tag 需 i18n）。"""
+    provider = LLM_PROVIDERS.get(provider_id, {})
+    models = provider.get("models", [])
+
+    options: list[ft.dropdown.Option] = []
+    for model in models:
+        text = model.get("name", model.get("id", ""))
+        tag = model.get("tag", "")
+        display_tag = I18n.get(get_display_tag(tag), default=get_display_tag(tag))
+        if display_tag:
+            text = f"{text} ({display_tag})"
+        options.append(
+            ft.dropdown.Option(
+                key=model.get("id"),
+                text=text,
+            )
         )
 
-    def _load_config(self):
-        llm_config = ConfigHandler.get_llm_config()
+    return options
 
-        provider = llm_config.get("provider", "deepseek")
-        model = llm_config.get("model", "")
-        base_url = llm_config.get("base_url", "")
-        api_key = llm_config.get("api_key", "")
 
-        self._current_provider = provider
-        self.provider_dropdown.value = provider
+def _build_links_row(provider_id: str, compact: bool) -> ft.Row:
+    """构建供应商相关链接行（console_url / pricing_url / models_url）。"""
+    provider = LLM_PROVIDERS.get(provider_id, {})
 
-        self.model_dropdown.options = self._build_model_options(provider)
+    links: list[ft.Control] = []
+    compact_btn_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=4)) if compact else None
 
-        if provider == "azure":
-            self._is_azure = True
-            self.azure_resource_input.value = llm_config.get("azure_resource_name", "")
-            self.azure_deployment_input.value = llm_config.get("azure_deployment_name", "") or model
-            self.azure_version_input.value = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
-            self._show_azure_fields(True)
-            self.base_url_input.value = ""
-            self.refresh_models_button.visible = False
-        else:
-            self._is_azure = False
-            self._show_azure_fields(False)
-
-            if provider == "custom":
-                self._load_custom_model_history(provider, llm_config)
-                self.custom_model_input.visible = True
-                self.model_dropdown.visible = False
-                self.base_url_input.read_only = False
-                self.custom_model_input.value = model
-            else:
-                models = LLM_PROVIDERS.get(provider, {}).get("models", [])
-                model_ids = [m.get("id") for m in models]
-                if model and model in model_ids:
-                    self.model_dropdown.value = model
-                elif model:
-                    self.model_dropdown.visible = False
-                    self.custom_model_input.visible = True
-                    self.custom_model_input.value = model
-                    self._load_custom_model_history(provider, llm_config)
-                elif models:
-                    recommended = next(
-                        (m.get("id") for m in models if is_recommended_model(m)),
-                        None,
-                    )
-                    self.model_dropdown.value = recommended or models[0].get("id")
-
-            provider_config = LLM_PROVIDERS.get(provider, {})
-            self.base_url_input.value = base_url or provider_config.get("base_url", "")
-
-            self.refresh_models_button.visible = provider in MODELS_API_COMPATIBLE
-
-        self.api_key_input.value = api_key
-        self._api_key_modified = False
-
-    def reload_config(self):  # pragma: no cover
-        self._load_config()
-        self._safe_update()
-
-    def _on_api_key_change(self, e):
-        self._api_key_modified = True
-
-    def _show_azure_fields(self, show: bool):  # pragma: no cover
-        self.azure_row.visible = show
-        self.azure_resource_input.visible = show
-        self.azure_deployment_input.visible = show
-        self.azure_version_input.visible = show
-        self.base_url_input.visible = not show
-        self.model_row.visible = not show
-        self.model_dropdown.visible = not show
-        if show:
-            self.custom_model_input.visible = False
-
-    def _on_provider_change(self, e):
-        if not self.page:
-            return
-
-        self.page.run_task(self._on_provider_change_async, e)
-
-    async def _on_provider_change_async(self, e):
-        try:
-            provider_id = e.control.value
-            self._current_provider = provider_id
-
-            provider = LLM_PROVIDERS.get(provider_id, {})
-            provider_name = self._get_provider_name(provider, provider_id)
-
-            self.model_dropdown.options = self._build_model_options(provider_id)
-            self.model_dropdown.value = None
-
-            # 尝试加载该供应商已存储的专属凭证（不回退到全局 Key，避免显示错误供应商的 Key）
-            stored_cred = await ThreadPoolManager().run_async(
-                TaskType.IO,
-                ConfigHandler.get_provider_credential,
-                provider_id,
-                fallback_to_global=False,
+    console_url = provider.get("console_url")
+    if console_url:
+        links.append(
+            ft.TextButton(
+                content=I18n.get("llm_get_api_key"),
+                url=console_url,
+                icon=ft.Icons.KEY if ft.Icons else None,
+                style=compact_btn_style,
             )
-            stored_key = stored_cred.get("api_key", "") or ""
-            stored_base_url = stored_cred.get("base_url", "")
-
-            self.api_key_input.value = stored_key
-            # Do NOT mark as modified when loading stored key - only user edits should trigger modification
-            self._api_key_modified = False
-
-            if provider_id == "azure":
-                self._is_azure = True
-                self._show_azure_fields(True)
-                self.base_url_input.value = ""
-                self.custom_model_input.visible = False
-                self.refresh_models_button.visible = False
-                self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
-            elif provider_id == "custom":
-                self._is_azure = False
-                self._show_azure_fields(False)
-                self.custom_model_input.visible = True
-                self.model_dropdown.visible = False
-                self.refresh_models_button.visible = True
-                self.base_url_input.value = stored_base_url
-                self.base_url_input.read_only = False
-                self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
-                custom_llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
-                self._load_custom_model_history(provider_id, custom_llm_config)
-            else:
-                self._is_azure = False
-                self._show_azure_fields(False)
-                self.custom_model_input.visible = False
-                self.model_dropdown.visible = True
-                self.refresh_models_button.visible = provider_id in MODELS_API_COMPATIBLE
-                self.base_url_input.value = stored_base_url or provider.get("base_url", "")
-                self.base_url_input.read_only = True
-                self._show_info(I18n.get("llm_switch_provider_hint").format(provider=provider_name))
-
-                models = provider.get("models", [])
-                if models:
-                    recommended = next(
-                        (m.get("id") for m in models if is_recommended_model(m)),
-                        None,
-                    )
-                    self.model_dropdown.value = recommended or models[0].get("id")
-
-            self._update_links_row()
-            self.update()
-        except Exception as ex:
-            logger.error("[LLMConfigPanel] Provider change failed: %s", DataSanitizer.sanitize_error(ex))
-            self._show_error(I18n.get("settings_save_failed"))
-
-    def _update_links_row(self):  # pragma: no cover
-        provider = LLM_PROVIDERS.get(self._current_provider, {})
-
-        links = []
-
-        compact_btn_style = ft.ButtonStyle(padding=ft.Padding.symmetric(horizontal=4)) if self._compact else None
-
-        console_url = provider.get("console_url")
-        if console_url:
-            links.append(
-                ft.TextButton(
-                    content=I18n.get("llm_get_api_key"),
-                    url=console_url,
-                    icon=ft.Icons.KEY if ft.Icons else None,
-                    style=compact_btn_style,
-                )
-            )
-
-        pricing_url = provider.get("pricing_url")
-        if pricing_url:
-            links.append(
-                ft.TextButton(
-                    content=I18n.get("llm_view_pricing"),
-                    url=pricing_url,
-                    icon=ft.Icons.ATTACH_MONEY if ft.Icons else None,
-                    style=compact_btn_style,
-                )
-            )
-
-        models_url = provider.get("models_url")
-        if models_url:
-            links.append(
-                ft.TextButton(
-                    content=I18n.get("llm_view_models"),
-                    url=models_url,
-                    icon=ft.Icons.LIST if ft.Icons else None,
-                    style=compact_btn_style,
-                )
-            )
-
-        self._links_row.controls = links
-
-    def _load_custom_model_history(self, provider_id: str, llm_config: dict | None = None):  # pragma: no cover
-        """Load custom model history for the given provider."""
-        if llm_config is None:
-            llm_config = ConfigHandler.get_llm_config()
-        custom_models = llm_config.get("custom_models", {})
-
-        provider_models = custom_models.get(provider_id, [])
-
-        self.custom_model_input.options = [ft.dropdown.Option(model_id) for model_id in provider_models]
-
-    def _on_test_click(self, e):  # pragma: no cover
-        if not self.page:
-            return
-
-        if self._is_verifying:
-            self._show_warning(I18n.get("llm_testing_in_progress"))
-            return
-
-        self.page.run_task(self._on_llm_test_connection)
-
-    def _acquire_verify_lock(self) -> bool:
-        """尝试获取验证锁。返回 True 表示成功获取，False 表示已有验证在执行。"""
-        if self._is_verifying:
-            logger.warning("[LLMConfigPanel] Verification already in progress")
-            return False
-        self._is_verifying = True
-        return True
-
-    def _validate_azure_fields(self) -> tuple[bool, str, str, str | None]:
-        """
-        验证 Azure 专用字段，返回 (is_valid, resource_name, deployment_name, api_version)。
-
-        验证失败时自动显示警告提示。
-        """
-        resource_name = self.azure_resource_input.value
-        deployment_name = self.azure_deployment_input.value
-        api_version = self.azure_version_input.value
-
-        if not resource_name:
-            self._show_warning(I18n.get("llm_azure_need_resource"))
-            return False, "", "", ""
-        if not deployment_name:
-            self._show_warning(I18n.get("llm_azure_need_deployment"))
-            return False, "", "", ""
-
-        return True, resource_name, deployment_name, api_version
-
-    async def _on_llm_test_connection(self):
-        api_key = (self.api_key_input.value or "").strip()
-
-        if not api_key:
-            self._show_warning(I18n.get("llm_test_need_key"))
-            return
-
-        # Check if model is blank (whitespace-only counts as blank)
-        model_raw = self.model_dropdown.value or self.custom_model_input.value
-        model = (model_raw or "").strip()
-        if not model:
-            self._show_warning(I18n.get("llm_test_need_model"))
-            return
-
-        if not self._acquire_verify_lock():
-            self._show_warning(I18n.get("llm_testing_in_progress"))
-            return
-        self._show_info(I18n.get("llm_testing"))
-        self.test_button.disabled = True
-        if self.on_loading_change:
-            self.on_loading_change(True)
-        self._safe_update()
-
-        try:
-            provider = self._current_provider
-
-            kwargs = {}
-            if self._is_azure:
-                is_valid, resource_name, deployment_name, api_version = self._validate_azure_fields()
-                if not is_valid:
-                    return
-
-                model = deployment_name
-                if api_version:
-                    kwargs["api_version"] = api_version
-                kwargs["azure_resource_name"] = resource_name
-                base_url = ""
-            else:
-                base_url = self.base_url_input.value or ""
-
-            result = await self.on_test_connection(
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                **kwargs,
-            )
-
-            if result.get("success"):
-                self._show_success(I18n.get("llm_test_success"))
-            else:
-                self._show_error(I18n.get(result.get("message", "common_err_unknown")))
-
-        except Exception as ex:
-            from utils.error_classifier import classify_error, get_error_message
-
-            error_info = classify_error(ex, context="llm")
-            self._show_error(get_error_message(error_info))
-            logger.error("[LLMConfigPanel] Test connection error: %s", DataSanitizer.sanitize_error(ex))
-
-        finally:
-            self._is_verifying = False
-            self.test_button.disabled = False
-            if self.on_loading_change:
-                self.on_loading_change(False)
-            self._safe_update()
-
-    async def async_verify_connection(self) -> bool:
-        provider = self._current_provider
-
-        if self._is_azure:
-            is_valid, resource_name, deployment_name, api_version = self._validate_azure_fields()
-            if not is_valid:
-                return False
-
-            model = deployment_name
-            kwargs: dict[str, object] = {"azure_resource_name": resource_name}
-            if api_version:
-                kwargs["api_version"] = api_version
-            base_url = ""
-        else:
-            model = self.model_dropdown.value or self.custom_model_input.value or ""
-            base_url = self._normalize_base_url(self.base_url_input.value or "")
-            kwargs = {}
-
-        api_key = self.api_key_input.value
-
-        if not api_key:
-            self._show_warning(I18n.get("llm_test_need_key"))
-            return False
-
-        if not provider or not model:
-            self._show_error(I18n.get("wizard_err_provider_model_required"))
-            return False
-
-        if not self._acquire_verify_lock():
-            return False
-
-        self._set_loading_state(True)
-        self._show_info(I18n.get("llm_testing"))
-
-        try:
-            result = await self.on_test_connection(
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                **kwargs,
-            )
-
-            if result.get("success"):
-                self._show_success(I18n.get("llm_test_success"))
-                return True
-
-            self._show_error(I18n.get(result.get("message", "common_err_unknown")))
-            return False
-
-        except Exception as ex:
-            from utils.error_classifier import classify_error, get_error_message
-
-            error_info = classify_error(ex, context="llm")
-            self._show_error(get_error_message(error_info))
-            logger.error("[LLMConfigPanel] Verify connection error: %s", DataSanitizer.sanitize_error(ex))
-            return False
-
-        finally:
-            self._is_verifying = False
-            self._set_loading_state(False)
-            self._safe_update()
-
-    def _set_loading_state(self, loading: bool):
-        self.test_button.disabled = loading
-        self.save_button.disabled = loading
-
-        if self.on_loading_change:
-            self.on_loading_change(loading)
-
-    def _on_refresh_click(self, e):  # pragma: no cover
-        if not self.page:
-            return
-
-        self.page.run_task(self._refresh_models)
-
-    async def _refresh_models(self):  # pragma: no cover
-        api_key = self.api_key_input.value
-        raw_base_url = self.base_url_input.value
-        base_url = self._normalize_base_url(raw_base_url or "")
-
-        if not api_key:
-            self._show_warning(I18n.get("llm_refresh_need_key"))
-            return
-
-        if not base_url:
-            self._show_warning(I18n.get("llm_refresh_need_url"))
-            return
-
-        self._show_info(I18n.get("llm_refreshing"))
-        self.refresh_models_button.disabled = True
-        if self.on_loading_change:
-            self.on_loading_change(True)
-        self.update()
-
-        try:
-            import httpx
-            from utils.proxy_manager import ProxyManager
-
-            models_url = f"{base_url.rstrip('/')}/models"
-
-            proxy_cfg = ProxyManager.get_httpx_proxy_config()
-            async with httpx.AsyncClient(**proxy_cfg) as client:
-                response = await client.get(
-                    models_url,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=self._REFRESH_TIMEOUT,
-                )
-                response.raise_for_status()
-                data = response.json()
-
-            models = data.get("data", [])
-            model_ids = sorted([m["id"] for m in models if m.get("id")])
-
-            if not model_ids:
-                self._show_warning(I18n.get("llm_refresh_empty"))
-                return
-
-            self.model_dropdown.options = [ft.dropdown.Option(m) for m in model_ids]
-
-            if self.model_dropdown.value not in model_ids:
-                self.model_dropdown.value = model_ids[0]
-
-            self.model_dropdown.update()
-
-            self._show_success(I18n.get("llm_refresh_success", count=len(model_ids)))
-
-        except Exception as ex:
-            from utils.error_classifier import classify_error, get_error_message
-
-            error_info = classify_error(ex, context="llm")
-            self._show_error(get_error_message(error_info))
-            logger.error("[LLMConfigPanel] Refresh models error: %s", DataSanitizer.sanitize_error(ex))
-
-        finally:
-            self.refresh_models_button.disabled = False
-            if self.on_loading_change:
-                self.on_loading_change(False)
-            self.update()
-
-    @staticmethod
-    def _normalize_base_url(url: str) -> str:
-        """
-        Normalize base URL by stripping known API endpoint suffixes while preserving base path.
-
-        Only removes trailing API endpoint paths (e.g., /chat/completions, /v1/chat/completions)
-        that users might paste, but keeps essential base paths like /compatible-mode/v1, /api/paas/v4.
-
-        Examples:
-            https://api.deepseek.com/v1/chat/completions -> https://api.deepseek.com/v1
-            https://api.openai.com/v1 -> https://api.openai.com/v1
-            https://api.example.com/ -> https://api.example.com
-            https://dashscope.aliyuncs.com/compatible-mode/v1 -> https://dashscope.aliyuncs.com/compatible-mode/v1
-        """
-        if not url:
-            return ""
-
-        url = url.strip().rstrip("/")
-
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-
-        # Strip known API endpoint suffixes that users might paste
-        url = re.sub(r"/chat/completions$", "", url)
-        url = re.sub(r"/completions$", "", url)
-        url = re.sub(r"/embeddings$", "", url)
-
-        return url
-
-    def _get_current_base_url(self) -> str:
-        if self._is_azure:
-            return ""
-        return self.base_url_input.value or ""
-
-    def _on_save_click(self, e):  # pragma: no cover
-        if not self.page:
-            return
-
-        self.page.run_task(self._save_config)
-
-    def _build_custom_models_update(
-        self, provider: str, model: str, is_azure: bool = False
-    ) -> dict[str, list[str]] | None:
-        if not model or is_azure:
-            return None
-        if provider != "custom" and model in [m.get("id") for m in LLM_PROVIDERS.get(provider, {}).get("models", [])]:
-            return None
-        llm_config = ConfigHandler.get_llm_config()
-        custom_models = llm_config.get("custom_models", {})
-        if provider not in custom_models:
-            custom_models[provider] = []
-        if model not in custom_models[provider]:
-            custom_models[provider].append(model)
-            custom_models[provider] = custom_models[provider][-self._MAX_CUSTOM_MODELS :]
-        return custom_models
-
-    @staticmethod
-    def _remove_primary_from_failover(provider: str) -> None:
-        failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
-        primary_prefix = f"{provider}/"
-        new_failover_models = [m for m in failover_models if not m.startswith(primary_prefix)]
-        if len(new_failover_models) != len(failover_models):
-            ConfigHandler.save_config({"llm_failover_models": new_failover_models})
-            logger.info(
-                "[LLMConfigPanel] Automatically removed primary provider %s models from failover list", provider
-            )
-
-    @staticmethod
-    async def _remove_primary_from_failover_async(provider: str) -> None:
-        """Async wrapper that offloads _remove_primary_from_failover to the IO thread pool (R16)."""
-        await ThreadPoolManager().run_async(
-            TaskType.IO,
-            LLMConfigPanel._remove_primary_from_failover,
-            provider,
         )
 
-    async def _save_config(self):
-        provider = self._current_provider
-        # Strip whitespace from api_key; if modified, use stripped value, else None
-        # Note: (api_key_raw or "").strip() ensures empty input clears the stored key,
-        # whereas the original api_key_raw.strip() would return None for empty input (keeping old key).
-        api_key_raw = self.api_key_input.value
-        api_key = (api_key_raw or "").strip() if self._api_key_modified else None
-
-        kwargs = {}
-
-        if self._is_azure:
-            is_valid, resource_name, deployment_name, api_version = self._validate_azure_fields()
-            if not is_valid:
-                return
-
-            model = deployment_name
-            base_url = ""
-
-            if api_version:
-                kwargs["api_version"] = api_version
-            kwargs["azure_resource_name"] = resource_name
-            kwargs["azure_deployment_name"] = deployment_name
-        else:
-            model = self.model_dropdown.value or self.custom_model_input.value or ""
-            base_url = self._normalize_base_url(self.base_url_input.value or "")
-
-        try:
-            if not self._is_azure:
-                custom_models_update = await ThreadPoolManager().run_async(
-                    TaskType.IO,
-                    self._build_custom_models_update,
-                    provider or "",
-                    model,
-                    is_azure=False,
-                )
-                if custom_models_update is not None:
-                    kwargs["custom_models"] = custom_models_update
-
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                ConfigHandler.save_llm_config,
-                provider=provider,
-                model=model or "",
-                base_url=base_url,
-                api_key=api_key,
-                **kwargs,
+    pricing_url = provider.get("pricing_url")
+    if pricing_url:
+        links.append(
+            ft.TextButton(
+                content=I18n.get("llm_view_pricing"),
+                url=pricing_url,
+                icon=ft.Icons.ATTACH_MONEY if ft.Icons else None,
+                style=compact_btn_style,
             )
-
-            self._api_key_modified = False
-
-            await self._remove_primary_from_failover_async(provider)
-
-            llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
-            custom_models = kwargs.get("custom_models", llm_config.get("custom_models", {}))
-            await self._sync_provider_credential_to_failover_async(
-                provider, api_key, base_url, custom_models.get(provider)
-            )
-
-            if self.on_reload_service:
-                await self.on_reload_service()
-
-            self._show_success(I18n.get("settings_verify_success"))
-
-            if self.on_save:
-                self.on_save()
-
-        except Exception as ex:
-            from utils.error_classifier import classify_error
-
-            classify_error(ex, context="llm")
-            self._show_error(I18n.get("settings_save_failed"))
-            logger.error("[LLMConfigPanel] Save config error: %s", DataSanitizer.sanitize_error(ex))
-
-        self.update()
-
-    @property
-    def api_key_modified(self) -> bool:
-        """Check if API key has been modified by user."""
-        return self._api_key_modified
-
-    def get_current_config(self) -> dict:
-        """
-        Get current configuration values from the panel.
-
-        Returns:
-            dict with provider, model, base_url, api_key, and Azure fields
-        """
-        provider = self._current_provider
-        base_url = self._normalize_base_url(self.base_url_input.value or "")
-        api_key = (self.api_key_input.value or "").strip()
-
-        result = {
-            "provider": provider,
-            "base_url": base_url,
-            "api_key": api_key,
-        }
-
-        if self._is_azure:
-            resource_name = self.azure_resource_input.value
-            deployment_name = self.azure_deployment_input.value
-            api_version = self.azure_version_input.value
-
-            result["model"] = deployment_name
-            result["api_version"] = api_version
-            result["azure_resource_name"] = resource_name
-            result["azure_deployment_name"] = deployment_name
-        else:
-            result["model"] = self.model_dropdown.value or self.custom_model_input.value
-
-        return result
-
-    async def save_current_config(self) -> bool:
-        """
-        Save current configuration to ConfigHandler.
-        All ConfigHandler IO is offloaded to the IO thread pool (R16).
-
-        Returns:
-            bool: True if saved successfully
-        """
-        config = self.get_current_config()
-
-        kwargs = {}
-        if self._is_azure:
-            kwargs["api_version"] = config.get("api_version", AZURE_DEFAULT_API_VERSION)
-            kwargs["azure_resource_name"] = config.get("azure_resource_name", "")
-            kwargs["azure_deployment_name"] = config.get("azure_deployment_name", "")
-
-        # 未修改 API Key 时传 None，避免不必要的重加密
-        api_key_to_save = config["api_key"] if self._api_key_modified else None
-
-        try:
-            custom_models_update = await ThreadPoolManager().run_async(
-                TaskType.IO,
-                self._build_custom_models_update,
-                config["provider"],
-                config["model"],
-                is_azure=self._is_azure,
-            )
-            if custom_models_update is not None:
-                kwargs["custom_models"] = custom_models_update
-
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                ConfigHandler.save_llm_config,
-                provider=config["provider"],
-                model=config["model"],
-                base_url=config["base_url"],
-                api_key=api_key_to_save,
-                **kwargs,
-            )
-            self._api_key_modified = False
-            await self._remove_primary_from_failover_async(config["provider"])
-            llm_config = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.get_llm_config)
-            custom_models = kwargs.get("custom_models", llm_config.get("custom_models", {}))
-            await self._sync_provider_credential_to_failover_async(
-                config["provider"],
-                api_key_to_save,
-                config["base_url"],
-                custom_models.get(config["provider"]),
-            )
-            self._schedule_ai_service_reload()
-            return True
-        except Exception as e:
-            logger.error("[LLMConfigPanel] Save current config error: %s", DataSanitizer.sanitize_error(e))
-            return False
-
-    def _schedule_ai_service_reload(self):
-        """在保存配置后通过回调异步刷新服务运行时状态。
-
-        save_current_config 是同步方法，无法 await 回调，
-        因此通过 page.run_task 调度异步执行。
-        """
-        if not self.on_reload_service:
-            return
-        if not self.page:
-            return
-        try:
-            self.page.run_task(self.on_reload_service)
-        except Exception as e:
-            logger.debug("[LLMConfigPanel] AIService reload scheduling skipped: %s", DataSanitizer.sanitize_error(e))
-
-    @staticmethod
-    def _sync_provider_credential_to_failover(
-        provider: str,
-        api_key: str | None,
-        base_url: str,
-        models: list[str] | None = None,
-    ) -> None:
-        """
-        如果当前 provider 在 failover_models 中，自动同步凭证到 llm_provider_credentials。
-
-        这样用户配置主供应商时，failover 凭证自动同步，无需额外配置。
-
-        注意: api_key 为 None 表示用户未修改密钥，此时应读取现有凭证中的 key，
-        避免用空字符串覆盖已存储的有效密钥。
-        """
-        try:
-            failover_models = ConfigHandler.load_config().get("llm_failover_models", [])
-            for model in failover_models:
-                if model.startswith(f"{provider}/"):
-                    # api_key 为 None 表示未修改，读取现有凭证避免覆盖
-                    effective_key = api_key
-                    if effective_key is None:
-                        existing_cred = ConfigHandler.get_provider_credential(provider)
-                        effective_key = existing_cred.get("api_key", "")
-
-                    ConfigHandler.save_provider_credential(
-                        provider=provider,
-                        api_key=effective_key,
-                        base_url=base_url,
-                        models=models,
-                    )
-                    logger.debug("[LLMConfigPanel] Synced credential to failover provider: %s", provider)
-                    break
-        except Exception as e:
-            logger.debug("[LLMConfigPanel] Failed to sync failover credential: %s", DataSanitizer.sanitize_error(e))
-
-    @staticmethod
-    async def _sync_provider_credential_to_failover_async(
-        provider: str,
-        api_key: str | None,
-        base_url: str,
-        models: list[str] | None = None,
-    ) -> None:
-        """Async wrapper that offloads _sync_provider_credential_to_failover to the IO thread pool (R16)."""
-        await ThreadPoolManager().run_async(
-            TaskType.IO,
-            LLMConfigPanel._sync_provider_credential_to_failover,
-            provider,
-            api_key,
-            base_url,
-            models,
         )
 
-    def _show_success(self, message: str):  # pragma: no cover
-        self.status_text.value = message
-        self.status_text.color = AppColors.SUCCESS
-        self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.SUCCESS
-        self.status_icon.visible = True
-        self._safe_update()
+    models_url = provider.get("models_url")
+    if models_url:
+        links.append(
+            ft.TextButton(
+                content=I18n.get("llm_view_models"),
+                url=models_url,
+                icon=ft.Icons.LIST if ft.Icons else None,
+                style=compact_btn_style,
+            )
+        )
 
-    def _show_error(self, message: str):  # pragma: no cover
-        self.status_text.value = message
-        self.status_text.color = AppColors.ERROR
-        self.status_icon.icon = ft.Icons.ERROR  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.ERROR
-        self.status_icon.visible = True
-        self._safe_update()
+    return ft.Row(
+        controls=links,
+        alignment=ft.MainAxisAlignment.CENTER if compact else ft.MainAxisAlignment.START,
+        wrap=not compact,
+        spacing=8 if compact else 10,
+    )
 
-    def _show_warning(self, message: str):  # pragma: no cover
-        self.status_text.value = message
-        self.status_text.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.WARNING  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.WARNING
-        self.status_icon.visible = True
-        self._safe_update()
 
-    def _show_info(self, message: str):  # pragma: no cover
-        self.status_text.value = message
-        self.status_text.color = AppColors.PRIMARY
-        self.status_icon.icon = ft.Icons.INFO  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.PRIMARY
-        self.status_icon.visible = True
-        self._safe_update()
+def _on_test_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for test button — submits vm.verify_connection via page.run_task.
 
-    def _safe_update(self):
+    verify_connection 复用 on_test_connection 回调，同时更新 VM 状态（is_verifying/status）。
+    """
+
+    def _on_test_click(e: ft.ControlEvent) -> None:
         try:
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.debug("[LLMConfigPanel] Safe update skipped: %s", DataSanitizer.sanitize_error(e))
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.verify_connection)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for verify_connection")
 
-    def did_mount(self):  # pragma: no cover
-        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
+    return _on_test_click
 
-    def will_unmount(self):  # pragma: no cover
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
 
-    def _on_locale_change(self):
+def _on_save_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for save button — submits vm.save_config via page.run_task."""
+
+    def _on_save_click(e: ft.ControlEvent) -> None:
         try:
-            self.provider_dropdown.label = I18n.get("llm_select_provider")
-            self.model_dropdown.label = I18n.get("llm_select_model")
-            self.custom_model_input.label = I18n.get("llm_custom_model")
-            self.base_url_input.label = I18n.get("llm_base_url")
-            self.api_key_input.label = I18n.get("llm_api_key")
-            self.azure_resource_input.label = I18n.get("llm_azure_resource_name")
-            self.azure_deployment_input.label = I18n.get("llm_azure_deployment_name")
-            self.azure_version_input.label = I18n.get("llm_azure_api_version")
-            self.test_button.content = I18n.get("llm_test_connection")
-            self.refresh_models_button.tooltip = I18n.get("llm_refresh_models")
-            self.save_button.content = I18n.get("settings_save_config")
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.save_config)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for save_config")
 
-            refresh_dropdown_options(self.provider_dropdown, self._build_provider_options())
+    return _on_save_click
 
-            refresh_dropdown_options(self.model_dropdown, self._build_model_options(self._current_provider))
 
-            self._update_links_row()
+def _on_refresh_click_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for refresh button — submits vm.refresh_models via page.run_task."""
 
-            self.section_header.update_locale()
+    def _on_refresh_click(e: ft.ControlEvent) -> None:
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.refresh_models)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for refresh_models")
 
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[LLMConfigPanel] refresh_locale failed: %s", e, exc_info=True)
+    return _on_refresh_click
+
+
+def _on_provider_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_select handler for provider dropdown — submits vm.update_provider via page.run_task."""
+
+    def _on_provider_change(e: ft.ControlEvent) -> None:
+        provider_id = e.control.value
+        if not provider_id:
+            return
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.update_provider, provider_id)
+        except RuntimeError:
+            logger.debug("[LLMConfigPanel] page not available for update_provider")
+
+    return _on_provider_change
+
+
+@ft.component
+def LLMConfigPanel(
+    vm: LLMConfigPanelViewModel,
+    *,
+    show_save_button: bool = True,
+    compact: bool = False,
+    show_register_link: bool = True,
+) -> ft.Control:
+    """LLM Configuration panel (declarative).
+
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - VM 由消费方实例化（AIBrainTab/OnboardingWizard 直接 new LLMConfigPanelViewModel）
+    - View 通过 ``use_state`` + ``use_effect`` 订阅 ``vm.state`` 变化触发重渲染
+    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - 无 page ref / 生命周期回调 / 手动刷新
+
+    Args:
+        vm: 由消费方实例化的 LLMConfigPanelViewModel
+        show_save_button: 是否显示保存按钮（default: True）
+        compact: 是否使用紧凑布局（default: False）
+        show_register_link: 是否显示注册链接（default: True）
+    """
+    # --- Subscribe to VM state changes ---
+    state, set_state = ft.use_state(lambda: vm.state)
+
+    unsub_ref = ft.use_ref(lambda: None)
+
+    def _setup() -> None:
+        unsub_ref.current = vm.subscribe(lambda new_state: set_state(new_state))
+
+    def _cleanup() -> None:
+        if unsub_ref.current is not None:
+            unsub_ref.current()
+            unsub_ref.current = None
+
+    ft.use_effect(_setup, dependencies=[], cleanup=_cleanup)
+
+    # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
+    ft.use_state(I18n.get_observable_state)
+
+    # --- Build form controls (driven by state) ---
+    input_width = 360
+
+    provider_dropdown = ft.Dropdown(
+        label=I18n.get("llm_select_provider"),
+        options=_build_provider_options(),
+        value=state.provider,
+        on_select=_on_provider_change_factory(vm),
+        width=input_width,
+    )
+
+    model_dropdown = ft.Dropdown(
+        label=I18n.get("llm_select_model"),
+        options=_build_model_options(state.provider),
+        value=state.model,
+        width=input_width,
+        visible=not state.is_azure and not state.show_custom_model_input,
+        on_select=lambda e: vm.update_model(e.control.value) if e.control.value else None,
+    )
+
+    custom_model_input = ft.Dropdown(
+        label=I18n.get("llm_custom_model"),
+        value=state.custom_model,
+        visible=state.show_custom_model_input and not state.is_azure,
+        width=input_width,
+        editable=True,
+        options=[ft.dropdown.Option(m) for m in state.custom_model_options],
+        on_select=lambda e: vm.update_custom_model(e.control.value) if e.control.value else None,
+    )
+
+    base_url_input = ft.TextField(
+        label=I18n.get("llm_base_url"),
+        value=state.base_url,
+        width=input_width,
+        visible=not state.is_azure,
+        read_only=state.base_url_read_only,
+        on_change=lambda e: vm.update_base_url(e.control.value),
+    )
+
+    api_key_input = ft.TextField(
+        label=I18n.get("llm_api_key"),
+        password=True,
+        can_reveal_password=True,
+        value=state.api_key,
+        width=input_width,
+        on_change=lambda e: vm.update_api_key(e.control.value),
+    )
+
+    azure_resource_input = ft.TextField(
+        label=I18n.get("llm_azure_resource_name"),
+        value=state.azure_resource_name,
+        visible=state.is_azure,
+        width=input_width,
+        on_change=lambda e: vm.update_azure_resource(e.control.value),
+    )
+
+    azure_deployment_input = ft.TextField(
+        label=I18n.get("llm_azure_deployment_name"),
+        value=state.azure_deployment_name,
+        visible=state.is_azure,
+        width=input_width,
+        on_change=lambda e: vm.update_azure_deployment(e.control.value),
+    )
+
+    azure_version_input = ft.Dropdown(
+        label=I18n.get("llm_azure_api_version"),
+        options=[ft.dropdown.Option(v) for v in AZURE_API_VERSIONS],
+        value=state.azure_api_version or AZURE_DEFAULT_API_VERSION,
+        visible=state.is_azure,
+        width=input_width,
+        on_select=lambda e: vm.update_azure_version(e.control.value) if e.control.value else None,
+    )
+
+    # --- Status display (driven by state.status_message / status_type) ---
+    status_text = _render_message(state.status_message)
+    status_color = _STATUS_COLOR_MAP.get(state.status_type, AppColors.PRIMARY)
+    status_icon_name = _STATUS_ICON_MAP.get(state.status_type, ft.Icons.INFO)
+
+    status_icon = ft.Icon(
+        status_icon_name,
+        visible=status_text != "",
+        size=16,
+        color=status_color,
+    )
+    status_text_ctrl = ft.Text(
+        status_text,
+        size=12,
+        color=status_color,
+    )
+
+    # --- Buttons ---
+    test_button = ft.Button(
+        content=I18n.get("llm_test_connection"),
+        on_click=_on_test_click_factory(vm),
+        icon=ft.Icons.CABLE if ft.Icons else None,
+        style=AppStyles.secondary_button(),
+        disabled=state.is_verifying,
+    )
+
+    refresh_models_button = ft.IconButton(
+        icon=ft.Icons.REFRESH if ft.Icons else None,
+        tooltip=I18n.get("llm_refresh_models"),
+        on_click=_on_refresh_click_factory(vm),
+        visible=state.show_refresh_button,
+        disabled=state.is_refreshing,
+    )
+
+    save_button = ft.Button(
+        content=I18n.get("settings_save_config"),
+        on_click=_on_save_click_factory(vm),
+        icon=ft.Icons.SAVE if ft.Icons else None,
+        visible=show_save_button,
+        style=AppStyles.primary_button(),
+        disabled=state.is_saving,
+    )
+
+    # --- Build UI layout ---
+    model_row = ft.Row(
+        controls=[
+            model_dropdown,
+            custom_model_input,
+            refresh_models_button,
+        ],
+        spacing=0,
+        vertical_alignment=ft.CrossAxisAlignment.END,
+    )
+
+    azure_row = ft.Column(
+        controls=[
+            azure_resource_input,
+            azure_deployment_input,
+            azure_version_input,
+        ],
+        visible=state.is_azure,
+        horizontal_alignment=ft.CrossAxisAlignment.START,
+    )
+
+    action_buttons = ft.Row(
+        controls=[
+            test_button,
+            save_button,
+        ],
+        alignment=ft.MainAxisAlignment.CENTER,
+    )
+
+    links_row = _build_links_row(state.provider, compact)
+    links_row.visible = show_register_link
+
+    section_header = SectionHeader(I18n.get("settings_sec_ai"), title_key="settings_sec_ai")
+    section_header.visible = not compact
+
+    form_content = ft.Column(
+        controls=[
+            section_header,
+            ft.Row(
+                [provider_dropdown],
+                alignment=ft.MainAxisAlignment.START,
+            ),
+            model_row,
+            base_url_input,
+            api_key_input,
+            azure_row,
+            action_buttons,
+            ft.Row(
+                [status_icon, status_text_ctrl],
+                alignment=ft.MainAxisAlignment.CENTER,
+                spacing=5,
+            ),
+            links_row,
+        ],
+        spacing=10 if not compact else 6,
+        horizontal_alignment=ft.CrossAxisAlignment.START,
+    )
+
+    if compact:
+        container_width = input_width + 60
+        return ft.Container(
+            content=form_content,
+            width=container_width,
+            alignment=ft.Alignment.CENTER,
+        )
+
+    return form_content

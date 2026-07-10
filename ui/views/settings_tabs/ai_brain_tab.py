@@ -12,6 +12,7 @@ import flet as ft
 from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
+from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
@@ -144,10 +145,13 @@ class AIBrainTab(ft.Container):
 
     def _build_content(self):  # pragma: no cover
         """组装 UI 布局"""  # pragma: no cover
-        self.llm_config_panel = LLMConfigPanel(  # pragma: no cover
+        self.llm_vm = LLMConfigPanelViewModel(  # pragma: no cover
             on_test_connection=self._on_llm_test_connection,  # pragma: no cover
             on_reload_service=self._on_reload_ai_service,  # pragma: no cover
             on_save=self._on_llm_config_saved,  # pragma: no cover
+        )  # pragma: no cover
+        self.llm_config_panel = LLMConfigPanel(  # pragma: no cover
+            vm=self.llm_vm,  # pragma: no cover
             show_save_button=False,  # pragma: no cover
         )  # pragma: no cover
 
@@ -379,7 +383,7 @@ class AIBrainTab(ft.Container):
         self._mounted = True  # pragma: no cover
         self._locale_subscription_id = I18n.subscribe(self._on_locale_change)  # pragma: no cover
         logger.debug("[AIBrainTab] Subscribed to locale changes")  # pragma: no cover
-        self.llm_config_panel.reload_config()  # pragma: no cover
+        self.llm_vm.reload_config()  # pragma: no cover
         self.failover_panel.reload_config()  # pragma: no cover
         self.local_model_panel.reload_config()  # pragma: no cover
 
@@ -394,6 +398,7 @@ class AIBrainTab(ft.Container):
         from services.local_model_manager import LocalModelManager
 
         LocalModelManager.cancel_verification_if_active()  # pragma: no cover
+        self.llm_vm.dispose()  # pragma: no cover
 
     # =========================================================================
     # Helper Methods
@@ -462,7 +467,8 @@ class AIBrainTab(ft.Container):
 
             # 级联调用子面板的 locale 刷新方法（子面板已通过各自 did_mount() 订阅 I18n 通知，
             # 此处显式级联调用作为兜底，确保刷新生效；不重建 panel，无需 will_unmount）
-            for panel_attr in ("llm_config_panel", "failover_panel", "local_model_panel"):
+            # LLMConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
+            for panel_attr in ("failover_panel", "local_model_panel"):
                 panel = getattr(self, panel_attr, None)
                 if panel is None:
                     continue
@@ -629,32 +635,7 @@ class AIBrainTab(ft.Container):
 
             # ========== 阶段 2: 提取 UI 值（必须在事件循环中，避免跨线程 UI 访问） ==========
 
-            llm_config = self.llm_config_panel.get_current_config()
             local_config = self.local_model_panel.get_current_config()
-            is_azure = self.llm_config_panel._is_azure
-            api_key_modified = self.llm_config_panel._api_key_modified
-
-            # 构建 LLM 保存参数
-            llm_kwargs: dict = {}
-            if is_azure:
-                from utils.llm_providers import AZURE_DEFAULT_API_VERSION
-
-                llm_kwargs["api_version"] = llm_config.get("api_version", AZURE_DEFAULT_API_VERSION)
-                llm_kwargs["azure_resource_name"] = llm_config.get("azure_resource_name", "")
-                llm_kwargs["azure_deployment_name"] = llm_config.get("azure_deployment_name", "")
-
-            custom_models_update = await ThreadPoolManager().run_async(
-                TaskType.IO,
-                self.llm_config_panel._build_custom_models_update,
-                llm_config["provider"],
-                llm_config["model"],
-                is_azure=is_azure,
-            )
-            if custom_models_update is not None:
-                llm_kwargs["custom_models"] = custom_models_update
-
-            # 未修改 API Key 时传 None，避免不必要的重加密
-            api_key_to_save = llm_config["api_key"] if api_key_modified else None
 
             # 构建 LocalModel 保存参数
             local_save_kwargs = {
@@ -669,16 +650,14 @@ class AIBrainTab(ft.Container):
 
             # ========== 阶段 3: 统一保存所有配置（异步化 IO，纯 ConfigHandler 操作） ==========
 
+            # 先保存 LLM 配置（VM 收敛了 Azure 字段/custom_models 历史/failover 同步/api_key_modified reset）
+            llm_saved = await self.llm_vm.save_config()
+            if not llm_saved:
+                self.show_snack(I18n.get("settings_save_failed"), color=AppColors.ERROR)
+                return
+
             def _save_configs_sync():
-                """所有配置保存操作，在 IO 线程池执行（不访问 UI 控件）"""
-                if not ConfigHandler.save_llm_config(
-                    provider=llm_config["provider"],
-                    model=llm_config["model"],
-                    base_url=llm_config["base_url"],
-                    api_key=api_key_to_save,
-                    **llm_kwargs,
-                ):
-                    return False
+                """LocalModel + 其他 AI 配置保存操作，在 IO 线程池执行（不访问 UI 控件）"""
                 if not ConfigHandler.save_local_ai_config(**local_save_kwargs):
                     return False
                 if not ConfigHandler.save_config(
@@ -692,19 +671,7 @@ class AIBrainTab(ft.Container):
                     return False
                 if not ConfigHandler.save_ai_system_prompt(ai_prompt):
                     return False
-                if not ConfigHandler.set_ai_news_prompt(news_prompt):
-                    return False
-
-                # failover 同步逻辑（纯 ConfigHandler IO，在线程池中执行）
-                LLMConfigPanel._remove_primary_from_failover(llm_config["provider"])
-                custom_models = llm_kwargs.get("custom_models", ConfigHandler.get_llm_config().get("custom_models", {}))
-                LLMConfigPanel._sync_provider_credential_to_failover(
-                    llm_config["provider"],
-                    api_key_to_save,
-                    llm_config["base_url"],
-                    custom_models.get(llm_config["provider"]),
-                )
-                return True
+                return ConfigHandler.set_ai_news_prompt(news_prompt)
 
             success = await ThreadPoolManager().run_async(
                 TaskType.IO,
@@ -713,9 +680,6 @@ class AIBrainTab(ft.Container):
             if not success:
                 self.show_snack(I18n.get("settings_save_failed"), color=AppColors.ERROR)
                 return
-
-            # 保存成功后更新 panel 状态标志（在事件循环中安全访问 UI 属性）
-            self.llm_config_panel._api_key_modified = False
 
             # 提交验证模式（如果活跃）—— 验证模型成为正式模型
             LocalModelManager.commit_verification_if_active()

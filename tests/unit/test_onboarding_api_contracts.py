@@ -328,30 +328,20 @@ class TestProgressCallbackSignature:
 
 
 class TestLocaleChangeSignature:
-    """Tests for _on_locale_change signature - §5.8 规范 2：零参签名"""
+    """Tests for _on_locale_change signature - §5.8 规范 2：零参签名
 
-    def test_llm_config_panel_locale_change_is_zero_arg(self):
-        """Test that LLMConfigPanel._on_locale_change takes no args other than self (§5.8 规范 2)"""
-        import inspect
+    注：LLMConfigPanel 已重写为声明式组件（Phase 3.2.3），
+    通过 ft.use_state(I18n.get_observable_state) 自动重渲染，不再需要 _on_locale_change。
+    """
 
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+    def test_llm_config_panel_uses_i18n_observable_state(self):
+        """DoD: LLMConfigPanel 通过 ft.use_state(I18n.get_observable_state) 订阅 i18n（声明式）。"""
+        from pathlib import Path
 
-        sig = inspect.signature(LLMConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
+        import ui.components.config_panels.llm_config_panel as mod
 
-        assert params == ["self"]
-
-    def test_locale_change_callable_with_zero_args(self):
-        """Test that _on_locale_change can be called with zero args (matches I18n.subscribe contract)"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        # Should not raise TypeError about missing arguments
-        import inspect
-
-        sig = inspect.signature(LLMConfigPanel._on_locale_change)
-        # Verify no required args beyond self
-        required = [p for p in sig.parameters.values() if p.default is inspect.Parameter.empty]
-        assert required == [sig.parameters["self"]]
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "I18n.get_observable_state" in source, "LLMConfigPanel 必须订阅 I18n.get_observable_state"
 
     # --- 本次新修复的零参签名（必须校验 params == ["self"]）---
 
@@ -466,32 +456,32 @@ class TestLocaleChangeSignature:
 
 
 class TestLLMProviderSwitch:
-    """Tests for LLM provider switch behavior - clears API Key"""
+    """Tests for LLM provider switch behavior.
 
-    def test_llm_config_panel_has_api_key_modified_flag(self):
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+    注：LLMConfigPanel 已重写为声明式组件（Phase 3.2.3），
+    provider 切换逻辑收敛进 VM.update_provider command，
+    api_key_modified flag 收敛进 VM state。
+    旧命令式 API 测试（_on_provider_change/_load_config/_api_key_modified）已移除。
+    """
 
-        assert hasattr(LLMConfigPanel, "__init__")
-        panel = LLMConfigPanel.__new__(LLMConfigPanel)
-        panel._api_key_modified = False
-        assert hasattr(panel, "_api_key_modified")
+    def test_llm_vm_has_update_provider(self):
+        """DoD: VM 暴露 update_provider command（声明式）。"""
+        from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 
-    def test_llm_config_panel_has_on_provider_change(self):
-        """Test that LLMConfigPanel has _on_provider_change method"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        assert hasattr(LLMConfigPanelViewModel, "update_provider"), "VM 必须暴露 update_provider command"
 
-        assert hasattr(LLMConfigPanel, "_on_provider_change")
+    def test_llm_vm_state_has_api_key_modified_flag(self):
+        """DoD: VM state 包含 api_key_modified flag（声明式）。"""
+        from ui.viewmodels.llm_config_panel_view_model import LLMConfigState
 
-    def test_llm_config_panel_loads_saved_api_key(self):
-        """Test that LLMConfigPanel._load_config loads saved API Key"""
-        import inspect
+        assert hasattr(LLMConfigState, "__dataclass_fields__"), "LLMConfigState 必须是 dataclass"
+        assert "api_key_modified" in LLMConfigState.__dataclass_fields__, "state 必须包含 api_key_modified"
 
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+    def test_llm_vm_has_reload_config(self):
+        """DoD: VM 暴露 reload_config command（替代旧 _load_config）。"""
+        from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 
-        assert hasattr(LLMConfigPanel, "_load_config")
-
-        sig = inspect.signature(LLMConfigPanel._load_config)
-        assert sig is not None
+        assert hasattr(LLMConfigPanelViewModel, "reload_config"), "VM 必须暴露 reload_config command"
 
 
 class TestLocalModelAsyncVerification:

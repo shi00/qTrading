@@ -1,7 +1,7 @@
 """
 Component Tests for Onboarding Wizard Configuration Panels
 
-Tests for DatabaseConfigPanel, LocalModelConfigPanel, LLMConfigPanel
+Tests for DatabaseConfigPanel, LocalModelConfigPanel
 """
 
 import os
@@ -268,29 +268,6 @@ class TestLocalModelConfigPanel:
             result = panel.save_config()
 
         assert result is True
-
-
-class TestLLMConfigPanel:
-    """Tests for LLMConfigPanel component"""
-
-    def test_panel_creation(self, mock_page, isolated_config):
-        """Test LLMConfigPanel can be created"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
-        assert hasattr(panel, "provider_dropdown")
-        assert hasattr(panel, "api_key_input")
-
-    def test_get_current_config_structure(self, mock_page, isolated_config):
-        """Test get_current_config returns correct structure"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
-        config = panel.get_current_config()
-
-        assert "provider" in config
-        assert "model" in config
-        assert "api_key" in config
 
 
 class TestConfigPanelsIntegration:
@@ -754,120 +731,6 @@ class TestLocalModelConfigPanelVerificationState:
 
         with patch("os.path.exists", return_value=True):
             result = await panel.async_verify_model()
-
-        assert result is False
-        assert panel._is_verifying is False
-
-
-class TestLLMConfigPanelVerificationState:
-    """Tests for LLMConfigPanel verification state management"""
-
-    def test_is_verifying_initial_state(self, mock_page, isolated_config):
-        """Test _is_verifying is initially False"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
-        assert panel._is_verifying is False
-
-    @pytest.mark.asyncio
-    async def test_double_verify_prevention(self, mock_page, isolated_config):
-        """Test that double verification is prevented"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
-        panel.page = mock_page
-        panel._is_verifying = True
-        panel._current_provider = "deepseek"
-        panel._is_azure = False
-        panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-v4-flash"
-        panel.custom_model_input = MagicMock()
-        panel.custom_model_input.value = ""
-        panel.base_url_input = MagicMock()
-        panel.base_url_input.value = ""
-        panel.api_key_input = MagicMock()
-        panel.api_key_input.value = "test_key"
-        panel.status_text = MagicMock()
-        panel._safe_update = MagicMock()
-
-        result = await panel.async_verify_connection()
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_verify_state_reset_on_success(self, mock_page, isolated_config):
-        """Test _is_verifying is reset after successful verification"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": True}))
-        panel.page = mock_page
-        panel._current_provider = "deepseek"
-        panel._is_azure = False
-        panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-v4-flash"
-        panel.custom_model_input = MagicMock()
-        panel.custom_model_input.value = ""
-        panel.base_url_input = MagicMock()
-        panel.base_url_input.value = ""
-        panel.api_key_input = MagicMock()
-        panel.api_key_input.value = "test_key"
-        panel.status_text = MagicMock()
-        panel._safe_update = MagicMock()
-        panel._set_loading_state = MagicMock()
-
-        result = await panel.async_verify_connection()
-
-        assert result is True
-        assert panel._is_verifying is False
-
-    @pytest.mark.asyncio
-    async def test_verify_state_reset_on_failure(self, mock_page, isolated_config):
-        """Test _is_verifying is reset after failed verification"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(return_value={"success": False, "message": "Test error"}))
-        panel.page = mock_page
-        panel._current_provider = "deepseek"
-        panel._is_azure = False
-        panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-v4-flash"
-        panel.custom_model_input = MagicMock()
-        panel.custom_model_input.value = ""
-        panel.base_url_input = MagicMock()
-        panel.base_url_input.value = ""
-        panel.api_key_input = MagicMock()
-        panel.api_key_input.value = "test_key"
-        panel.status_text = MagicMock()
-        panel._safe_update = MagicMock()
-        panel._set_loading_state = MagicMock()
-
-        result = await panel.async_verify_connection()
-
-        assert result is False
-        assert panel._is_verifying is False
-
-    @pytest.mark.asyncio
-    async def test_verify_state_reset_on_exception(self, mock_page, isolated_config):
-        """Test _is_verifying is reset after exception"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        panel = LLMConfigPanel(on_test_connection=AsyncMock(side_effect=Exception("Test error")))
-        panel.page = mock_page
-        panel._current_provider = "deepseek"
-        panel._is_azure = False
-        panel.model_dropdown = MagicMock()
-        panel.model_dropdown.value = "deepseek-v4-flash"
-        panel.custom_model_input = MagicMock()
-        panel.custom_model_input.value = ""
-        panel.base_url_input = MagicMock()
-        panel.base_url_input.value = ""
-        panel.api_key_input = MagicMock()
-        panel.api_key_input.value = "test_key"
-        panel.status_text = MagicMock()
-        panel._safe_update = MagicMock()
-        panel._set_loading_state = MagicMock()
-
-        result = await panel.async_verify_connection()
 
         assert result is False
         assert panel._is_verifying is False

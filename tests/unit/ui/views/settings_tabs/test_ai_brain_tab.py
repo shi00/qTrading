@@ -29,8 +29,10 @@ class TestAIBrainTabEventHandlers:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
+            patch("ui.viewmodels.llm_config_panel_view_model.ConfigHandler", mock_ch),
             patch("services.ai_service.AIService"),
             patch("services.local_model_manager.LocalModelManager"),
+            patch("ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel", MagicMock()),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
             mock_ch.get_ai_max_candidates.return_value = 30
@@ -39,6 +41,12 @@ class TestAIBrainTabEventHandlers:
             mock_ch.get_ai_news_max_concurrent.return_value = 1
             mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
             mock_ch.get_ai_news_prompt.return_value = "Classify this news."
+            mock_ch.get_llm_config.return_value = {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "sk-test",
+            }
             return AIBrainTab(show_snack_callback=MagicMock())
 
     def test_on_llm_config_saved(self):
@@ -132,8 +140,10 @@ class TestAIBrainTabSaveAISettings:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
+            patch("ui.viewmodels.llm_config_panel_view_model.ConfigHandler", mock_ch),
             patch("services.ai_service.AIService"),
             patch("services.local_model_manager.LocalModelManager"),
+            patch("ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel", MagicMock()),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
             mock_ch.get_ai_max_candidates.return_value = 30
@@ -142,6 +152,12 @@ class TestAIBrainTabSaveAISettings:
             mock_ch.get_ai_news_max_concurrent.return_value = 1
             mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
             mock_ch.get_ai_news_prompt.return_value = "Classify this news."
+            mock_ch.get_llm_config.return_value = {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "sk-test",
+            }
             return AIBrainTab(show_snack_callback=MagicMock())
 
     def _setup_save_mocks(
@@ -158,27 +174,8 @@ class TestAIBrainTabSaveAISettings:
         local_model_config=None,
     ):
         tab.show_snack = MagicMock()
-        tab.llm_config_panel = MagicMock()
-        tab.llm_config_panel.get_current_config.return_value = (
-            {
-                "provider": "openai",
-                "model": "gpt-4",
-                "base_url": "https://api.openai.com",
-                "api_key": api_key,
-            }
-            if api_key
-            else {
-                "provider": "openai",
-                "model": "gpt-4",
-                "base_url": "https://api.openai.com",
-                "api_key": "",
-            }
-        )
-        tab.llm_config_panel._is_azure = False
-        tab.llm_config_panel._api_key_modified = bool(api_key)
-        tab.llm_config_panel._build_custom_models_update.return_value = None
-        tab.llm_config_panel._remove_primary_from_failover = MagicMock()
-        tab.llm_config_panel._sync_provider_credential_to_failover = MagicMock()
+        tab.llm_vm = MagicMock()
+        tab.llm_vm.save_config = AsyncMock(return_value=True)
         tab.local_model_panel = MagicMock()
         tab.local_model_panel.get_current_config.return_value = (
             local_model_config if local_model_config is not None else {}
@@ -417,8 +414,8 @@ class TestAIBrainTabSaveAISettings:
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             await tab._save_ai_settings(None)
-            # 验证直接调用 ConfigHandler.save_llm_config（而非 panel.save_current_config）
-            mock_ch.save_llm_config.assert_called_once()
+            # 验证 VM save_config 被调用（LLM 配置保存由 VM 收敛）
+            tab.llm_vm.save_config.assert_awaited_once()
             mock_ch.save_local_ai_config.assert_called_once()
             mock_ch.save_config.assert_any_call(
                 {
@@ -447,7 +444,7 @@ class TestAIBrainTabSaveAISettings:
         )
 
         with (
-            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
+            patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler"),
             patch("services.ai_service.AIService") as mock_ai,
             patch(
                 "ui.views.settings_tabs.ai_brain_tab.validate_prompt",
@@ -460,12 +457,8 @@ class TestAIBrainTabSaveAISettings:
         ):
             mock_ai.return_value.reload_config = AsyncMock()
             await tab._save_ai_settings(None)
-            # 验证 save_llm_config 被调用且 api_key 传入（因为 _api_key_modified=True）
-            mock_ch.save_llm_config.assert_called_once()
-            call_kwargs = mock_ch.save_llm_config.call_args
-            assert call_kwargs.kwargs.get("api_key") == "sk-test" or call_kwargs[1].get("api_key") == "sk-test"
-            # 验证 _api_key_modified 被重置
-            assert tab.llm_config_panel._api_key_modified is False
+            # 验证 VM save_config 被调用（api_key 流程由 VM 内部处理）
+            tab.llm_vm.save_config.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_save_success_local_model_file_not_found(self):
@@ -740,8 +733,10 @@ class TestAIBrainTabLocaleChange:
 
         with (
             patch("ui.views.settings_tabs.ai_brain_tab.ConfigHandler") as mock_ch,
+            patch("ui.viewmodels.llm_config_panel_view_model.ConfigHandler", mock_ch),
             patch("services.ai_service.AIService"),
             patch("services.local_model_manager.LocalModelManager"),
+            patch("ui.views.settings_tabs.ai_brain_tab.LLMConfigPanel", MagicMock()),
             patch("ui.views.settings_tabs.ai_brain_tab.ft.Column"),
         ):
             mock_ch.get_ai_max_candidates.return_value = 30
@@ -750,11 +745,17 @@ class TestAIBrainTabLocaleChange:
             mock_ch.get_ai_news_max_concurrent.return_value = 1
             mock_ch.get_ai_system_prompt.return_value = "You are an analyst."
             mock_ch.get_ai_news_prompt.return_value = "Classify this news."
+            mock_ch.get_llm_config.return_value = {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "base_url": "https://api.deepseek.com",
+                "api_key": "sk-test",
+            }
             return AIBrainTab(show_snack_callback=MagicMock())
 
     def _setup_panels(self, tab):
         """用 MagicMock 替换子面板，便于断言级联调用"""
-        tab.llm_config_panel = MagicMock()
+        # LLMConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
         tab.failover_panel = MagicMock()
         tab.local_model_panel = MagicMock()
 
@@ -849,7 +850,6 @@ class TestAIBrainTabLocaleChange:
 
         tab._on_locale_change()
 
-        tab.llm_config_panel._on_locale_change.assert_called_once()
         tab.failover_panel._on_locale_change.assert_called_once()
         tab.local_model_panel._on_locale_change.assert_called_once()
 
@@ -881,7 +881,6 @@ class TestAIBrainTabLocaleChange:
         self._setup_panels(tab)
         tab._safe_update = MagicMock()
         # 模拟子面板无 _on_locale_change 方法（getattr 返回 None）
-        tab.llm_config_panel._on_locale_change = None
         tab.failover_panel._on_locale_change = None
         tab.local_model_panel._on_locale_change = None
 
