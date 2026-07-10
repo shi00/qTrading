@@ -267,7 +267,8 @@ class OnboardingWizard(ft.Container):
             self._show_loading_overlay(False)
 
     def _init_database_controls(self):  # pragma: no cover
-        # VM 由消费方实例化（声明式 DatabaseConfigPanel 接收 vm 参数）
+        # NOTE(lazy): VM 由消费方实例化（声明式 DatabaseConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
+        # ceiling: Phase 4 OnboardingWizard 声明式重写. upgrade: Task 4.x OnboardingWizard 声明式重写.
         self.database_vm = DatabaseConfigPanelViewModel(
             load_password=True,
             on_change=lambda: self._on_input_change("database"),
@@ -289,6 +290,8 @@ class OnboardingWizard(ft.Container):
         )
 
     def _init_cloud_ai_controls(self):  # pragma: no cover
+        # NOTE(lazy): VM 由消费方实例化（声明式 LLMConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
+        # ceiling: Phase 4 OnboardingWizard 声明式重写. upgrade: Task 4.x OnboardingWizard 声明式重写.
         self.llm_vm = LLMConfigPanelViewModel(
             on_test_connection=self._on_llm_test_connection,
             on_loading_change=self._on_panel_loading_change,
@@ -300,6 +303,8 @@ class OnboardingWizard(ft.Container):
         )
 
     def _init_local_model_controls(self):  # pragma: no cover
+        # NOTE(lazy): VM 由消费方实例化（声明式 LocalModelConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
+        # ceiling: Phase 4 OnboardingWizard 声明式重写. upgrade: Task 4.x OnboardingWizard 声明式重写.
         self.local_model_vm = LocalModelConfigPanelViewModel(
             on_verify_model=self._on_verify_local_model,
             on_change=lambda: self._on_input_change("local_model"),

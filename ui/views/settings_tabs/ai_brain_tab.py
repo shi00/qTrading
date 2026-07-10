@@ -146,6 +146,8 @@ class AIBrainTab(ft.Container):
 
     def _build_content(self):  # pragma: no cover
         """组装 UI 布局"""  # pragma: no cover
+        # NOTE(lazy): VM 由消费方实例化（声明式 LLMConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
+        # ceiling: Phase 3.4 AIBrainTab 声明式重写. upgrade: Task 3.4.x AIBrainTab 声明式重写.
         self.llm_vm = LLMConfigPanelViewModel(  # pragma: no cover
             on_test_connection=self._on_llm_test_connection,  # pragma: no cover
             on_reload_service=self._on_reload_ai_service,  # pragma: no cover
@@ -177,6 +179,8 @@ class AIBrainTab(ft.Container):
             ),  # pragma: no cover
         )  # pragma: no cover
 
+        # NOTE(lazy): VM 由消费方实例化（声明式 LocalModelConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
+        # ceiling: Phase 3.4 AIBrainTab 声明式重写. upgrade: Task 3.4.x AIBrainTab 声明式重写.
         self.local_model_vm = LocalModelConfigPanelViewModel(  # pragma: no cover
             on_verify_model=self._on_verify_local_model,  # pragma: no cover
             on_save=self._on_local_model_saved,  # pragma: no cover
@@ -470,8 +474,9 @@ class AIBrainTab(ft.Container):
 
             # 级联调用子面板的 locale 刷新方法（子面板已通过各自 did_mount() 订阅 I18n 通知，
             # 此处显式级联调用作为兜底，确保刷新生效；不重建 panel，无需 will_unmount）
-            # LLMConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染
-            for panel_attr in ("failover_panel", "local_model_panel"):
+            # LLMConfigPanel / LocalModelConfigPanel 已是声明式组件，通过
+            # ft.use_state(I18n.get_observable_state) 自动重渲染，无需级联
+            for panel_attr in ("failover_panel",):
                 panel = getattr(self, panel_attr, None)
                 if panel is None:
                     continue

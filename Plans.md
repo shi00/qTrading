@@ -228,6 +228,19 @@
 
 ---
 
+## 合规检视技术债登记（Phase 2 .. HEAD 全量检视发现）
+
+> 来源：superpowers 合规检视（CLAUDE.md / CONTRIBUTING.md / flet-best-practices.md 三标准对照）。
+> P0-1/P1-2/P2-1/P2-2 已在本轮修复；以下为登记为独立任务的遗留技术债。
+
+| 编号 | 优先级 | 内容 | 影响文件 | 修复时机 | 状态 |
+|------|--------|------|----------|----------|------|
+| P1-1 | major | 消费方命令式存量直接实例化 VM（8 处，已有 NOTE(lazy) 标记） | onboarding_wizard.py / ai_brain_tab.py / data_source_tab.py / database_tab.py | Phase 3.3/3.4/3.5 消费方声明式重写时迁移到 use_viewmodel | 已标记 NOTE(lazy)，随消费方重写自动消解 |
+| P1-3 | major | 5 个 VM 感知 locale（违反 "VM 不感知 locale" 契约，应产出 Message(key, params)） | screener_view_model.py / backtest_view_model.py / system_viewmodel.py / data_source_view_model.py / data_explorer_view_model.py | Phase 3.5 对应 Tab 重写时一并修复（Tab 重写会消费这些 VM） | 登记待修 |
+| P1-4 | major | 3 个 VM 无 DI 参数（违反 CLAUDE.md §4.3，隐式获取全局状态） | screener_view_model.py / system_viewmodel.py / home_view_model.py | Phase 3.5/3.6 对应 Tab/View 重写时一并修复 | 登记待修 |
+
+---
+
 ## 事前確認
 
 以下操作在 plan 承认時に一括確認する。`harness-work` / `breezing` 実行中、宣言済み事項だけを理由に `AskUserQuestion` を出さない。

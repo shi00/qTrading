@@ -6,7 +6,7 @@
 变更要点:
 - 旧命令式 ``class TushareConfigPanel(ft.Container)`` → ``@ft.component def TushareConfigPanel(vm, ...)``
 - VM 由消费方实例化（OnboardingWizard 需要 ``vm.verify_token`` 引用）
-- View 通过 ``use_state`` + ``use_effect`` 订阅 ``vm.state`` 变化触发重渲染
+- View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
 - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
 - page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
@@ -19,6 +19,7 @@ from collections.abc import Callable
 import flet as ft
 
 from data.constants import TUSHARE_POINT_TIERS
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
@@ -117,7 +118,7 @@ def TushareConfigPanel(
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
     - VM 由消费方实例化（DataSourceTab/OnboardingWizard 直接 new TushareConfigPanelViewModel）
-    - View 通过 ``use_state`` + ``use_effect`` 订阅 ``vm.state`` 变化触发重渲染
+    - View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
     - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
     - 无 page ref / 生命周期回调 / 手动刷新
 
@@ -127,20 +128,8 @@ def TushareConfigPanel(
         compact: 是否使用紧凑布局（default: False）
         show_register_link: 是否显示注册链接（default: True）
     """
-    # --- Subscribe to VM state changes ---
-    state, set_state = ft.use_state(lambda: vm.state)
-
-    unsub_ref = ft.use_ref(lambda: None)
-
-    def _setup() -> None:
-        unsub_ref.current = vm.subscribe(lambda new_state: set_state(new_state))
-
-    def _cleanup() -> None:
-        if unsub_ref.current is not None:
-            unsub_ref.current()
-            unsub_ref.current = None
-
-    ft.use_effect(_setup, dependencies=[], cleanup=_cleanup)
+    # --- Subscribe to VM state changes (外部 VM 模式，VM 生命周期由消费方管理) ---
+    state, _ = use_viewmodel(vm=vm)
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(I18n.get_observable_state)

@@ -844,6 +844,7 @@ class TestAIBrainTabLocaleChange:
         assert tab.ai_news_prompt_input.value == original_values["ai_news_prompt_input"]
 
     def test_on_locale_change_cascades_to_panels(self):
+        """failover_panel（命令式存量）级联刷新；local_model_panel（声明式）自动重渲染不参与级联。"""
         tab = self._make_tab()
         self._setup_panels(tab)
         tab._safe_update = MagicMock()
@@ -851,7 +852,9 @@ class TestAIBrainTabLocaleChange:
         tab._on_locale_change()
 
         tab.failover_panel._on_locale_change.assert_called_once()
-        tab.local_model_panel._on_locale_change.assert_called_once()
+        # LocalModelConfigPanel 已是声明式组件，通过 ft.use_state(I18n.get_observable_state)
+        # 自动重渲染，不参与命令式级联
+        tab.local_model_panel._on_locale_change.assert_not_called()
 
     def test_on_locale_change_calls_safe_update(self):
         tab = self._make_tab()
@@ -882,7 +885,6 @@ class TestAIBrainTabLocaleChange:
         tab._safe_update = MagicMock()
         # 模拟子面板无 _on_locale_change 方法（getattr 返回 None）
         tab.failover_panel._on_locale_change = None
-        tab.local_model_panel._on_locale_change = None
 
         # 不应抛出异常，且 _safe_update 仍被调用
         tab._on_locale_change()

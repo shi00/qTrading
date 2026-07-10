@@ -25,7 +25,8 @@ class DatabaseTab(ft.Container):
         self.expand = True  # pragma: no cover
         self._locale_subscription_id: object | None = None  # pragma: no cover
 
-        # VM 由消费方实例化（声明式 DatabaseConfigPanel 接收 vm 参数）
+        # NOTE(lazy): VM 由消费方实例化（声明式 DatabaseConfigPanel 接收 vm 参数，经 use_viewmodel(vm=vm) 消费）。
+        # ceiling: Phase 3.3 DatabaseTab 声明式重写. upgrade: Task 3.3.3 DatabaseTab 声明式重写.
         self.config_vm = DatabaseConfigPanelViewModel(  # pragma: no cover
             on_save_callback=self._on_save,  # pragma: no cover
             on_test_success_callback=self._on_test_success,  # pragma: no cover
