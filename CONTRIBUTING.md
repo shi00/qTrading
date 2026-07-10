@@ -867,15 +867,15 @@ def ScreenerView():
 
 > 宪法依据：CLAUDE.md §5 索引指向本节；本节不重复 API 细节，仅声明引用关系与优先级。
 
-项目规范的 Flet 知识聚焦于**项目专属约束**（上文 21 行 breaking changes 表、V1 声明式 UI 规范、兼容垫片、依赖管理、PyInstaller、升级协同）。通用 Flet v1 概念（路由 `ft.Router`、Services 用法、`SharedPreferences`/`Clipboard`/`StoragePaths`/`FilePicker`、`use_state`/`use_effect`/`use_ref`/`use_dialog`/`create_context` 基础 Hooks、`yield` 中间进度反馈、资源管理、构建打包、性能与错误处理通用模式等）见 [`man/flet-0.85.3-best-practices.md`](./man/flet-0.85.3-best-practices.md)（通用 Flet v1 开发参考手册，API 声明已对 `flet==0.85.3` 实测核实）。
+项目规范的 Flet 知识聚焦于**项目专属约束**（上文 21 行 breaking changes 表、V1 声明式 UI 规范、兼容垫片、依赖管理、PyInstaller、升级协同）。通用 Flet v1 概念（路由 `ft.Router`、Services 用法、`SharedPreferences`/`Clipboard`/`StoragePaths`/`FilePicker`、`use_state`/`use_effect`/`use_ref`/`use_dialog`/`create_context` 基础 Hooks、`yield` 中间进度反馈、资源管理、构建打包、性能与错误处理通用模式等）见 [`man/flet-best-practices.md`](./man/flet-best-practices.md)（通用 Flet v1 开发参考手册，API 声明已对 `flet==0.85.3` 实测核实）。
 
 **优先级（冲突时前者覆盖后者）**：
 
 1. [CLAUDE.md](./CLAUDE.md)（红线 R1~R17、架构边界、交互准则）
 2. 本文件（CONTRIBUTING.md，项目实现规范）
-3. [`man/flet-0.85.3-best-practices.md`](./man/flet-0.85.3-best-practices.md)（通用 Flet v1 参考）
+3. [`man/flet-best-practices.md`](./man/flet-best-practices.md)（通用 Flet v1 参考）
 
-**项目专属约束覆盖通用手册的 7 处分叉**（查阅通用手册时须以下表项目规范为准）：
+**项目专属约束覆盖通用手册的 8 处分叉**（查阅通用手册时须以下表项目规范为准）：
 
 | 维度 | 通用手册 | 项目规范（优先） |
 |------|---------|----------------|
@@ -886,6 +886,7 @@ def ScreenerView():
 | 版本锁定 | `flet==0.85.3` + charts 解析版本 | `flet`/`flet-desktop`/`flet-charts` 三包全锁 `==0.85.3`（见 [依赖管理](#依赖管理)） |
 | 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | compact/standard/wide/ultra_wide 1200/1600/2400（见 [响应式布局规范](#响应式布局规范-responsive-layout)） |
 | 桌面打包 | `flet pack`（通用手册 §13.5） | PyInstaller（[`AStockScreener.spec`](./AStockScreener.spec)，见 [PyInstaller 打包](#pyinstaller-打包)） |
+| Dialog 管理 | `ft.use_dialog()` Hook（通用手册 §10.1，声明式唯一推荐） | `page.show_dialog()`/`page.pop_dialog()`（V0→V1 迁移完成态；声明式重写进行中，见 CLAUDE.md §3.3 技术债） |
 
 通用手册中 Web/移动专属内容（WASM/CDN、APK/IPA 构建、`SafeArea`、Cupertino `adaptive`、移动端 `NavigationBar` 等）项目桌面端不适用，仅作背景知识。
 
