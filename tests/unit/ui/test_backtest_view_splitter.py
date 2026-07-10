@@ -19,7 +19,6 @@ import polars as pl
 import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
-from ui.components.backtest.backtest_config_panel import BacktestConfigPanel
 from ui.components.backtest.backtest_result_panel import BacktestResultPanel
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.views.backtest_view import BacktestView, logger as view_logger
@@ -127,13 +126,17 @@ class TestBacktestViewSplitter:
         )
 
     def test_config_panel_sliders_have_no_width_200(self) -> None:
-        """BacktestConfigPanel 的 Slider 不再硬编码 width=200。"""
-        with patch("ui.components.backtest.backtest_config_panel.I18n.get", return_value="mock_text"):
-            panel = BacktestConfigPanel(on_run_backtest=MagicMock())
-        sliders = [c for c in _walk_controls(panel.content) if isinstance(c, ft.Slider)]
-        assert sliders, "BacktestConfigPanel 应至少包含 3 个 Slider"
-        for s in sliders:
-            assert s.width != 200, f"Slider 不应硬编码 width=200，实际: {s.width}"
+        """BacktestConfigPanel 的 Slider 不再硬编码 width=200（源码检查，声明式组件无法在无 renderer 下实例化）。"""
+        from pathlib import Path
+
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
+        # Slider 不应有 width=200 硬编码
+        assert "width=200" not in content, "Slider 不应硬编码 width=200"
+        # 应至少有 3 个 Slider（commission/stamp_duty/slippage）
+        assert content.count("ft.Slider(") >= 3
 
     def test_result_panel_has_set_chart_min_height(self) -> None:
         """BacktestResultPanel 必须实现 set_chart_min_height 方法。"""

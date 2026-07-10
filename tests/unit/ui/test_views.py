@@ -296,6 +296,9 @@ class TestAppLayout:
             patch("ui.app_layout.DataExplorerView", MagicMock()),
             patch("ui.app_layout.TaskCenterView", MagicMock()),
             patch("ui.app_layout.SettingsView", MagicMock()),
+            # BacktestView.__init__ 实例化 @ft.component 声明式 BacktestConfigPanel，
+            # 无 renderer 环境下会抛 RuntimeError，需与其他 View 一并 mock（Phase 3.2.5）
+            patch("ui.app_layout.BacktestView", MagicMock()),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:

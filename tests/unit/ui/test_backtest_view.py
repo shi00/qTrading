@@ -176,7 +176,8 @@ class TestBacktestView:
         view._on_strategy_change(mock_event)
 
         assert view._selected_strategy == "strategy2"
-        mock_config_panel.set_strategy_key.assert_called_with("strategy2")
+        # set_strategy_key 已在 Phase 3.2.5 声明式重写中删除（死代码），
+        # 声明式 config_panel 通过 on_run_backtest 回调一次性获取配置，无需策略 key 注入。
 
     @patch("ui.views.backtest_view.BacktestViewModel")
     @patch("ui.views.backtest_view.BacktestConfigPanel")
@@ -412,7 +413,11 @@ class TestBacktestView:
         mock_vm_cls: MagicMock,
         mock_page: MagicMock,
     ) -> None:
-        """§5.8 规范 6：refresh_locale 必须级联调用 config_panel 与 result_panel 的 refresh_locale。"""
+        """§5.8 规范 6：refresh_locale 级联调用 result_panel 的 refresh_locale。
+
+        注：config_panel 在 Phase 3.2.5 已重写为声明式组件，通过
+        ft.use_state(I18n.get_observable_state) 自动重渲染，不再参与级联。
+        """
         mock_i18n.return_value = "mock_text"
         mock_vm = MagicMock()
         mock_vm_cls.return_value = mock_vm
@@ -429,7 +434,8 @@ class TestBacktestView:
 
         view.refresh_locale()
 
-        mock_config_panel.refresh_locale.assert_called_once()
+        # config_panel 已是声明式组件，不再级联；仅 result_panel 仍为命令式需级联
+        mock_config_panel.refresh_locale.assert_not_called()
         mock_result_panel.refresh_locale.assert_called_once()
         view.update.assert_called_once()
 

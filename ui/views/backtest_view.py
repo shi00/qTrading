@@ -67,6 +67,9 @@ class BacktestView(ft.Container):
         )
 
         self.config_panel = BacktestConfigPanel(on_run_backtest=self._on_run_backtest)
+        # NOTE(lazy): config_panel 已是声明式组件（Phase 3.2.5），通过
+        # ft.use_state(I18n.get_observable_state) 自动重渲染，无需 refresh_locale 级联。
+        # ceiling: Phase 3.6.3 BacktestView 声明式重写. upgrade: Task 3.6.3 完成.
         self.result_panel = BacktestResultPanel()
 
         # NOTE(lazy): vm.bind() removed — BacktestViewModel now uses state + subscribe/_notify
@@ -101,8 +104,7 @@ class BacktestView(ft.Container):
                 [ft.dropdown.Option(key, name) for key, name in strategies.items()],
             )
             self.cancel_button.content = I18n.get("common_cancel")
-            if hasattr(self.config_panel, "refresh_locale"):
-                self.config_panel.refresh_locale()
+            # config_panel 已是声明式组件（Phase 3.2.5），自动重渲染，无需级联 refresh_locale
             if hasattr(self.result_panel, "refresh_locale"):
                 self.result_panel.refresh_locale()
             if self.page:
@@ -180,13 +182,11 @@ class BacktestView(ft.Container):
             first_key = next(iter(strategies.keys()))
             self.strategy_dropdown.value = first_key
             self._selected_strategy = first_key
-            self.config_panel.set_strategy_key(first_key)
 
     def _on_strategy_change(self, e):
         """策略选择变更。"""
         self._selected_strategy = e.control.value
         UILogger.log_action("BacktestView", "Select", f"strategy={self._selected_strategy}")
-        self.config_panel.set_strategy_key(self._selected_strategy)
 
     def _on_run_backtest(self, config: dict):
         """运行回测按钮点击。"""
