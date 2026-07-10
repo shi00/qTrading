@@ -3,23 +3,20 @@
 覆盖：
 - _build_content 使用 ResizableSplitter 替代 expand=1/2 分栏
 - BacktestConfigPanel Slider 移除 width=200 硬编码
-- BacktestResultPanel.set_chart_min_height 局部更新图表容器高度
-- BacktestView.handle_resize 基于 COMPACT_HEIGHT_THRESHOLD 调整高度
+- BacktestView.handle_resize 基于 COMPACT_HEIGHT_THRESHOLD 通过 props 推送 chart_min_height
+  （Phase 3.2.6 后：声明式 result_panel 不再有 set_chart_min_height 方法，
+  BacktestView 改为 _refresh_result_panel 重新实例化推送 props）
 - _fixed_vertical_chrome_height 返回值合理性
 - handle_resize 异常降级与判空保护
 """
 
 import logging
-from datetime import date, datetime
+from collections.abc import Iterator
 from unittest.mock import MagicMock, patch
 
 import flet as ft
-import flet_charts as fch
-import polars as pl
 import pytest
 
-from strategies.backtest.config import BacktestConfig, BacktestResult
-from ui.components.backtest.backtest_result_panel import BacktestResultPanel
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.views.backtest_view import BacktestView, logger as view_logger
 
@@ -54,51 +51,17 @@ def mock_page() -> MagicMock:
 
 
 @pytest.fixture
-def backtest_config() -> BacktestConfig:
-    return BacktestConfig(
-        start_date=date(2024, 1, 1),
-        end_date=date(2024, 1, 31),
-        initial_capital=1_000_000.0,
-    )
+def view_with_mock_result(mock_page: MagicMock) -> Iterator[tuple[BacktestView, MagicMock]]:
+    """构建 BacktestView，mock 掉 VM/面板/I18n/ConfigHandler.get_typed。
 
+    用 yield fixture 让 patch 持续整个测试方法（with 块在 fixture teardown 时才退出），
+    确保 handle_resize 调用 ``BacktestResultPanel(...)`` 时仍是 mock（无 renderer 环境下
+    原始 ``@ft.component`` 会抛 RuntimeError "No current renderer is set"）。
 
-@pytest.fixture
-def sample_result(backtest_config: BacktestConfig) -> BacktestResult:
-    return BacktestResult(
-        config=backtest_config,
-        strategy_name="test_strategy",
-        params_snapshot={},
-        nav_curve=pl.DataFrame(
-            {
-                "trade_date": [date(2024, 1, 1), date(2024, 1, 2)],
-                "nav": [1_000_000.0, 1_010_000.0],
-            }
-        ),
-        daily_returns=pl.Series([0.0, 0.01]),
-        benchmark_returns=pl.Series([0.0, 0.008]),
-        trades=pl.DataFrame(),
-        positions=pl.DataFrame(),
-        skipped_orders=pl.DataFrame(),
-        metrics={
-            "total_return": 0.15,
-            "annualized_return": 0.20,
-            "sharpe_ratio": 1.8,
-            "max_drawdown": 0.08,
-            "ic_mean": 0.06,
-            "ic_ir": 0.8,
-        },
-        ic_series=pl.Series([0.02, 0.04, -0.01, 0.05]),
-        period_stats=pl.DataFrame(),
-        data_warnings=(),
-        failed_signal_dates=(),
-        run_id="test_run",
-        executed_at=datetime(2024, 1, 31, 12, 0, 0),
-        duration_ms=1000,
-    )
-
-
-def _make_view(mock_page: MagicMock) -> BacktestView:
-    """构建 BacktestView，mock 掉 VM/面板/I18n/ConfigHandler.get_typed。"""
+    Yields:
+        (view, mock_result_cls) 元组，mock_result_cls 供测试断言
+        BacktestResultPanel 的重新实例化调用记录。
+    """
     with (
         patch("ui.views.backtest_view.BacktestViewModel") as mock_vm_cls,
         patch("ui.views.backtest_view.BacktestConfigPanel") as mock_config_cls,
@@ -111,15 +74,19 @@ def _make_view(mock_page: MagicMock) -> BacktestView:
         mock_vm.get_available_strategies.return_value = {"strategy1": "策略1"}
         mock_config_cls.return_value = MagicMock()
         mock_result_cls.return_value = MagicMock()
-        return BacktestView(mock_page)
+        view = BacktestView(mock_page)
+        # _result_container 替换为 MagicMock，避免 _refresh_result_panel 中
+        # ft.Container.content = value 触发 V1 renderer 检查（无 renderer 环境下抛 RuntimeError）
+        view._result_container = MagicMock()
+        yield view, mock_result_cls
 
 
 class TestBacktestViewSplitter:
     """SubTask 4.1: splitter + 高度维度测试。"""
 
-    def test_content_contains_resizable_splitter(self, mock_page: MagicMock) -> None:
+    def test_content_contains_resizable_splitter(self, view_with_mock_result: tuple[BacktestView, MagicMock]) -> None:
         """_build_content 必须使用 ResizableSplitter 替代 expand=1/2 分栏。"""
-        view = _make_view(mock_page)
+        view, _ = view_with_mock_result
         controls = list(_walk_controls(view.content))
         assert any(isinstance(c, ResizableSplitter) for c in controls), (
             "BacktestView content 必须包含 ResizableSplitter 实例"
@@ -138,79 +105,70 @@ class TestBacktestViewSplitter:
         # 应至少有 3 个 Slider（commission/stamp_duty/slippage）
         assert content.count("ft.Slider(") >= 3
 
-    def test_result_panel_has_set_chart_min_height(self) -> None:
-        """BacktestResultPanel 必须实现 set_chart_min_height 方法。"""
-        with patch("ui.components.backtest.backtest_result_panel.I18n.get", return_value="mock_text"):
-            panel = BacktestResultPanel()
-        assert hasattr(panel, "set_chart_min_height")
-
-    def test_set_chart_min_height_updates_chart_containers(self, sample_result: BacktestResult) -> None:
-        """set_chart_min_height 调用后，图表容器高度应变化（局部更新）。"""
-        with patch("ui.components.backtest.backtest_result_panel.I18n.get", return_value="mock_text"):
-            panel = BacktestResultPanel()
-        panel.page = MagicMock()
-        panel.update = MagicMock()
-
-        panel.set_result(sample_result)
-
-        chart_containers_before = [
-            c
-            for c in _walk_controls(panel.content)
-            if isinstance(c, ft.Container) and isinstance(getattr(c, "content", None), (fch.LineChart, fch.BarChart))
-        ]
-        assert chart_containers_before, "set_result 后应构建出图表容器"
-        for c in chart_containers_before:
-            assert c.height != 240
-
-        panel.set_chart_min_height(240)
-
-        chart_containers_after = [
-            c
-            for c in _walk_controls(panel.content)
-            if isinstance(c, ft.Container) and isinstance(getattr(c, "content", None), (fch.LineChart, fch.BarChart))
-        ]
-        assert chart_containers_after, "调用后仍应存在图表容器"
-        for c in chart_containers_after:
-            assert c.height == 240, f"图表容器高度应为 240，实际: {c.height}"
-
-    def test_fixed_vertical_chrome_height_positive_and_below_window(self, mock_page: MagicMock) -> None:
+    def test_fixed_vertical_chrome_height_positive_and_below_window(
+        self, view_with_mock_result: tuple[BacktestView, MagicMock]
+    ) -> None:
         """_fixed_vertical_chrome_height 返回值 > 0 且 < 窗口最小高度（§1.5 懒代码必须验证）。"""
-        view = _make_view(mock_page)
+        view, _ = view_with_mock_result
         val = view._fixed_vertical_chrome_height()
         assert 0 < val < 720, f"_fixed_vertical_chrome_height 应在 (0, 720)，实际: {val}"
 
-    def test_handle_resize_compact_height_calls_240(self, mock_page: MagicMock) -> None:
-        """可用高度 < COMPACT_HEIGHT_THRESHOLD 时调用 set_chart_min_height(240)。"""
-        view = _make_view(mock_page)
+    def test_handle_resize_compact_height_sets_240(self, view_with_mock_result: tuple[BacktestView, MagicMock]) -> None:
+        """可用高度 < COMPACT_HEIGHT_THRESHOLD 时通过 props 推送 chart_min_height=240。
+
+        Phase 3.2.6 后：声明式 result_panel 不再有 set_chart_min_height 方法，
+        BacktestView 改为 _refresh_result_panel 重新实例化推送 chart_min_height prop。
+        """
+        view, mock_result_cls = view_with_mock_result
+        initial_call_count = mock_result_cls.call_count
         # 可用高度 = height - 160；height=700 -> available=540 < 560
         view.handle_resize(width=1280, height=700)
-        view.result_panel.set_chart_min_height.assert_called_once_with(240)
+        assert view._chart_min_height == 240
+        # _refresh_result_panel 应重新实例化 BacktestResultPanel with chart_min_height=240
+        assert mock_result_cls.call_count == initial_call_count + 1
+        last_call = mock_result_cls.call_args
+        assert last_call.kwargs.get("chart_min_height") == 240
 
-    def test_handle_resize_tall_height_calls_360(self, mock_page: MagicMock) -> None:
-        """可用高度 >= COMPACT_HEIGHT_THRESHOLD 时调用 set_chart_min_height(360)。"""
-        view = _make_view(mock_page)
+    def test_handle_resize_tall_height_sets_360(self, view_with_mock_result: tuple[BacktestView, MagicMock]) -> None:
+        """可用高度 >= COMPACT_HEIGHT_THRESHOLD 时通过 props 推送 chart_min_height=360。"""
+        view, mock_result_cls = view_with_mock_result
+        initial_call_count = mock_result_cls.call_count
         # 可用高度 = height - 160；height=800 -> available=640 >= 560
         view.handle_resize(width=1280, height=800)
-        view.result_panel.set_chart_min_height.assert_called_once_with(360)
+        assert view._chart_min_height == 360
+        assert mock_result_cls.call_count == initial_call_count + 1
+        last_call = mock_result_cls.call_args
+        assert last_call.kwargs.get("chart_min_height") == 360
 
-    def test_handle_resize_result_panel_none_no_raise(self, mock_page: MagicMock) -> None:
-        """result_panel 为 None 时 handle_resize 不抛异常。"""
-        view = _make_view(mock_page)
-        view.result_panel = None
-        # 不应抛出
-        view.handle_resize(width=1280, height=800)
-
-    def test_handle_resize_swallows_exception_and_logs_debug(self, mock_page: MagicMock, caplog) -> None:
-        """set_chart_min_height 抛异常时 handle_resize 不抛出 + 记 debug 日志。"""
-        view = _make_view(mock_page)
-        view.result_panel.set_chart_min_height.side_effect = RuntimeError("chart boom")
+    def test_handle_resize_swallows_exception_and_logs_debug(
+        self, view_with_mock_result: tuple[BacktestView, MagicMock], caplog
+    ) -> None:
+        """_refresh_result_panel 抛异常时 handle_resize 不抛出 + 记 debug 日志。"""
+        view, mock_result_cls = view_with_mock_result
+        # 让 BacktestResultPanel 构造抛异常（_refresh_result_panel 内部调用）
+        mock_result_cls.side_effect = RuntimeError("chart boom")
         with caplog.at_level(logging.DEBUG, logger=view_logger.name):
             # 不应抛出
             view.handle_resize(width=1280, height=800)
         assert any("handle_resize skipped" in r.message and "chart boom" in r.message for r in caplog.records)
 
-    def test_handle_resize_height_zero_returns_early(self, mock_page: MagicMock) -> None:
-        """height=0 时 handle_resize 提前返回，不调用 set_chart_min_height。"""
-        view = _make_view(mock_page)
+    def test_handle_resize_height_zero_returns_early(
+        self, view_with_mock_result: tuple[BacktestView, MagicMock]
+    ) -> None:
+        """height=0 时 handle_resize 提前返回，不更新 chart_min_height。"""
+        view, mock_result_cls = view_with_mock_result
+        initial_call_count = mock_result_cls.call_count
         view.handle_resize(width=1280, height=0)
-        view.result_panel.set_chart_min_height.assert_not_called()
+        assert view._chart_min_height is None
+        # 没有重新实例化 result_panel
+        assert mock_result_cls.call_count == initial_call_count
+
+    def test_handle_resize_same_height_no_refresh(self, view_with_mock_result: tuple[BacktestView, MagicMock]) -> None:
+        """chart_min_height 未变化时不重新实例化 result_panel（避免重复 resize 不必要刷新）。"""
+        view, mock_result_cls = view_with_mock_result
+        # 第一次 resize 触发实例化
+        view.handle_resize(width=1280, height=800)
+        call_count_after_first = mock_result_cls.call_count
+        # 第二次 resize 同高度，不应重新实例化
+        view.handle_resize(width=1280, height=800)
+        assert mock_result_cls.call_count == call_count_after_first

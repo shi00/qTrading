@@ -374,7 +374,9 @@ class TestBacktestView:
 
         view._on_vm_result(mock_result)
 
-        mock_result_panel.set_result.assert_called_once_with(mock_result)
+        # Phase 3.2.6: result_panel 已是声明式组件，通过 props 推送（_result 字段 + 重新实例化）
+        assert view._result == mock_result
+        mock_result_panel_cls.assert_called_with(result=mock_result, chart_min_height=None)
         assert view.progress_bar.visible is False
         view.update.assert_called_once()
 
@@ -413,10 +415,10 @@ class TestBacktestView:
         mock_vm_cls: MagicMock,
         mock_page: MagicMock,
     ) -> None:
-        """§5.8 规范 6：refresh_locale 级联调用 result_panel 的 refresh_locale。
+        """§5.8 规范 6：refresh_locale 不再级联声明式子面板。
 
-        注：config_panel 在 Phase 3.2.5 已重写为声明式组件，通过
-        ft.use_state(I18n.get_observable_state) 自动重渲染，不再参与级联。
+        config_panel（Phase 3.2.5）和 result_panel（Phase 3.2.6）均已重写为声明式组件，
+        通过 ft.use_state(I18n.get_observable_state) 自动重渲染，不再参与级联。
         """
         mock_i18n.return_value = "mock_text"
         mock_vm = MagicMock()
@@ -434,9 +436,9 @@ class TestBacktestView:
 
         view.refresh_locale()
 
-        # config_panel 已是声明式组件，不再级联；仅 result_panel 仍为命令式需级联
+        # config_panel/result_panel 已是声明式组件，不再级联
         mock_config_panel.refresh_locale.assert_not_called()
-        mock_result_panel.refresh_locale.assert_called_once()
+        mock_result_panel.refresh_locale.assert_not_called()
         view.update.assert_called_once()
 
     @patch("ui.views.backtest_view.BacktestViewModel")

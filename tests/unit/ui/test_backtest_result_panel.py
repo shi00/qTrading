@@ -1,4 +1,11 @@
-"""BacktestResultPanel 单元测试"""
+"""BacktestResultPanel 测试（声明式 V1）。
+
+测试策略：
+1. 模块级纯函数单测（颜色判断/metric_card/各子构建器/分页回调）
+2. 契约守护测试（grep 命令式禁止模式 = 0）
+
+声明式组件的渲染逻辑由 Flet 框架保证，不测组件实例化（参考 3.2.1-3.2.5 范式）。
+"""
 
 from datetime import date, datetime
 from unittest.mock import MagicMock, patch
@@ -9,7 +16,18 @@ import polars as pl
 import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
-from ui.components.backtest.backtest_result_panel import BacktestResultPanel
+from ui.components.backtest.backtest_result_panel import (
+    _build_empty_content,
+    _build_ic_chart,
+    _build_metrics_section,
+    _build_monthly_table,
+    _build_nav_chart,
+    _build_trades_table,
+    _get_color_for_ic,
+    _get_color_for_sharpe,
+    _get_color_for_value,
+    _metric_card,
+)
 from ui.theme import AppColors
 
 pytestmark = pytest.mark.unit
@@ -107,271 +125,308 @@ def empty_result(backtest_config: BacktestConfig) -> BacktestResult:
     )
 
 
-@pytest.fixture
-def panel() -> BacktestResultPanel:
-    with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
-        mock_i18n.return_value = "mock_text"
-        return BacktestResultPanel()
+class TestColorHelpers:
+    """颜色判断纯函数单测。"""
+
+    def test_get_color_for_value_positive(self) -> None:
+        assert _get_color_for_value(0.1) == AppColors.SUCCESS
+
+    def test_get_color_for_value_negative(self) -> None:
+        assert _get_color_for_value(-0.1) == AppColors.ERROR
+
+    def test_get_color_for_value_zero(self) -> None:
+        assert _get_color_for_value(0.0) == AppColors.TEXT_PRIMARY
+
+    def test_get_color_for_sharpe_excellent(self) -> None:
+        assert _get_color_for_sharpe(2.0) == AppColors.SUCCESS
+
+    def test_get_color_for_sharpe_good(self) -> None:
+        assert _get_color_for_sharpe(1.0) == AppColors.WARNING
+
+    def test_get_color_for_sharpe_negative(self) -> None:
+        assert _get_color_for_sharpe(-0.5) == AppColors.ERROR
+
+    def test_get_color_for_sharpe_neutral(self) -> None:
+        assert _get_color_for_sharpe(0.3) == AppColors.TEXT_PRIMARY
+
+    def test_get_color_for_ic_positive_significant(self) -> None:
+        assert _get_color_for_ic(0.06) == AppColors.SUCCESS
+
+    def test_get_color_for_ic_negative_significant(self) -> None:
+        assert _get_color_for_ic(-0.06) == AppColors.ERROR
+
+    def test_get_color_for_ic_insignificant(self) -> None:
+        assert _get_color_for_ic(0.03) == AppColors.TEXT_PRIMARY
 
 
-class TestBacktestResultPanel:
-    def test_init(self) -> None:
+class TestMetricCard:
+    """_metric_card 纯函数单测。"""
+
+    def test_metric_card_structure(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            panel = BacktestResultPanel()
+            card = _metric_card("Test Label", "Test Value", AppColors.SUCCESS)
 
-        assert panel._result is None
-        assert isinstance(panel.content, ft.Column)
+        assert isinstance(card, ft.Container)
+        assert card.width is None  # 移除固定宽度，改用 ResponsiveRow col
+        assert isinstance(card.content, ft.Column)
+        assert len(card.content.controls) == 2
 
-    def test_set_result_with_data(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel.page = MagicMock()
-        panel.update = MagicMock()
 
-        panel.set_result(sample_result)
+class TestBuildMetricsSection:
+    """_build_metrics_section 纯函数单测。"""
 
-        assert panel._result == sample_result
-        assert isinstance(panel.content, ft.Column)
-        panel.update.assert_called_once()
+    def test_build_metrics_section_full(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            metrics = {
+                "total_return": 0.15,
+                "annualized_return": 0.20,
+                "sharpe_ratio": 1.8,
+                "max_drawdown": 0.08,
+                "calmar_ratio": 2.5,
+                "ic_mean": 0.06,
+                "ic_ir": 0.8,
+                "win_rate": 0.65,
+            }
+            content = _build_metrics_section(metrics)
 
-    def test_set_result_without_page(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel.page = None
+        assert isinstance(content, ft.Column)
+        assert len(content.controls) == 3  # title + row1 + row2
 
-        panel.set_result(sample_result)
+    def test_build_metrics_section_empty(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({})
 
-        assert panel._result == sample_result
+        assert isinstance(content, ft.Column)
 
-    def test_build_empty_content(self, panel: BacktestResultPanel) -> None:
-        content = panel._build_empty_content()
+    def test_max_drawdown_color_high(self) -> None:
+        """max_drawdown > 0.2 → ERROR 色。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({"max_drawdown": 0.25})
+
+        assert isinstance(content, ft.Column)
+
+    def test_max_drawdown_color_low(self) -> None:
+        """max_drawdown <= 0.2 → WARNING 色。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_metrics_section({"max_drawdown": 0.10})
+
+        assert isinstance(content, ft.Column)
+
+
+class TestBuildEmptyContent:
+    """_build_empty_content 纯函数单测。"""
+
+    def test_build_empty_content(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            content = _build_empty_content()
 
         assert isinstance(content, ft.Column)
         assert len(content.controls) == 1
 
-    def test_build_content_with_result(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel._result = sample_result
 
-        content = panel._build_content()
+class TestBuildNavChart:
+    """_build_nav_chart 纯函数单测。"""
 
-        assert isinstance(content, ft.Column)
-        assert len(content.controls) == 3
-
-    def test_build_content_uses_v1_tabs_three_piece_set(
-        self, panel: BacktestResultPanel, sample_result: BacktestResult
-    ) -> None:
-        """R12.b V1 三件套验证：_build_content 返回的 Column 含 ft.Tabs + ft.TabBar + ft.TabBarView。"""
-        panel._result = sample_result
-
-        content = panel._build_content()
-
-        # 第 3 个控件是 ft.Tabs（前两个是 metrics_section 和 Divider）
-        tabs_control = content.controls[2]
-        assert isinstance(tabs_control, ft.Tabs)
-        assert tabs_control.length == 4
-        assert tabs_control.selected_index == 0
-        # V1 三件套：content 是 ft.Column，含 ft.TabBar + ft.TabBarView
-        assert isinstance(tabs_control.content, ft.Column)
-        assert len(tabs_control.content.controls) == 2
-        assert isinstance(tabs_control.content.controls[0], ft.TabBar)
-        assert len(tabs_control.content.controls[0].tabs) == 4
-        assert isinstance(tabs_control.content.controls[1], ft.TabBarView)
-        assert len(tabs_control.content.controls[1].controls) == 4
-
-    def test_build_content_without_result(self, panel: BacktestResultPanel) -> None:
-        panel._result = None
-
-        content = panel._build_content()
-
-        assert isinstance(content, ft.Column)
-
-    def test_build_metrics_section(self, panel: BacktestResultPanel) -> None:
-        metrics = {
-            "total_return": 0.15,
-            "annualized_return": 0.20,
-            "sharpe_ratio": 1.8,
-            "max_drawdown": 0.08,
-            "calmar_ratio": 2.5,
-            "ic_mean": 0.06,
-            "ic_ir": 0.8,
-            "win_rate": 0.65,
-        }
-
-        content = panel._build_metrics_section(metrics)
-
-        assert isinstance(content, ft.Column)
-        assert len(content.controls) == 3
-
-    def test_metric_card(self, panel: BacktestResultPanel) -> None:
-        card = panel._metric_card("Test Label", "Test Value", AppColors.SUCCESS)
-
-        assert isinstance(card, ft.Container)
-        assert card.width is None  # 移除固定宽度，改用 ResponsiveRow col
-
-    def test_get_color_for_value_positive(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_value(0.1)
-        assert color == AppColors.SUCCESS
-
-    def test_get_color_for_value_negative(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_value(-0.1)
-        assert color == AppColors.ERROR
-
-    def test_get_color_for_value_zero(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_value(0.0)
-        assert color == AppColors.TEXT_PRIMARY
-
-    def test_get_color_for_sharpe_excellent(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_sharpe(2.0)
-        assert color == AppColors.SUCCESS
-
-    def test_get_color_for_sharpe_good(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_sharpe(1.0)
-        assert color == AppColors.WARNING
-
-    def test_get_color_for_sharpe_negative(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_sharpe(-0.5)
-        assert color == AppColors.ERROR
-
-    def test_get_color_for_sharpe_neutral(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_sharpe(0.3)
-        assert color == AppColors.TEXT_PRIMARY
-
-    def test_get_color_for_ic_positive_significant(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_ic(0.06)
-        assert color == AppColors.SUCCESS
-
-    def test_get_color_for_ic_negative_significant(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_ic(-0.06)
-        assert color == AppColors.ERROR
-
-    def test_get_color_for_ic_insignificant(self, panel: BacktestResultPanel) -> None:
-        color = panel._get_color_for_ic(0.03)
-        assert color == AppColors.TEXT_PRIMARY
-
-    def test_build_nav_chart_with_data(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel._result = sample_result
-
-        container = panel._build_nav_chart()
+    def test_build_nav_chart_with_data(self, sample_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_nav_chart(sample_result, None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, fch.LineChart)
 
-    def test_build_nav_chart_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
-        panel._result = empty_result
+    def test_build_nav_chart_with_min_height(self, sample_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_nav_chart(sample_result, 300)
 
-        container = panel._build_nav_chart()
+        assert container.height == 300
+
+    def test_build_nav_chart_empty(self, empty_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_nav_chart(empty_result, None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_build_nav_chart_no_result(self, panel: BacktestResultPanel) -> None:
-        panel._result = None
-
-        container = panel._build_nav_chart()
+    def test_build_nav_chart_no_result(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_nav_chart(None, None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_build_trades_table_with_data(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel._result = sample_result
 
-        container = panel._build_trades_table()
+class TestBuildTradesTable:
+    """_build_trades_table 纯函数单测。"""
+
+    def test_build_trades_table_with_data(self, sample_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_trades_table(sample_result, 0, MagicMock())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Column)
 
-    def test_build_trades_table_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
-        panel._result = empty_result
-
-        container = panel._build_trades_table()
-
-        assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.Text)
-
-    def test_build_trades_table_no_result(self, panel: BacktestResultPanel) -> None:
-        panel._result = None
-
-        container = panel._build_trades_table()
+    def test_build_trades_table_empty(self, empty_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_trades_table(empty_result, 0, MagicMock())
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_build_ic_chart_with_data(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel._result = sample_result
+    def test_build_trades_table_no_result(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_trades_table(None, 0, MagicMock())
 
-        container = panel._build_ic_chart()
+        assert isinstance(container, ft.Container)
+        assert isinstance(container.content, ft.Text)
+
+    def test_trades_pagination_prev_page_calls_setter(self, sample_result: BacktestResult) -> None:
+        """分页 prev_button on_click 调用 set_trades_page(page-1)。"""
+        set_trades_page = MagicMock()
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_trades_table(sample_result, 1, set_trades_page)
+
+        # pagination 是 Column 的第 2 个控件（DataTable 后）
+        pagination = container.content.controls[1]
+        prev_btn = pagination.controls[0]
+        assert isinstance(prev_btn, ft.IconButton)
+        assert prev_btn.disabled is False  # trades_page=1，可向前翻页
+        # 触发 on_click（Flet on_click Union 类型含 0 参分支，pyright 推断为 0 参，运行时接收 ControlEvent）
+        prev_btn.on_click(MagicMock())  # type: ignore[call-issue]  # [reason: Flet on_click Union 含 0 参分支，pyright 推断为 0 参，运行时接收 ControlEvent]
+        set_trades_page.assert_called_once_with(0)
+
+    def test_trades_pagination_prev_disabled_at_page_zero(self, sample_result: BacktestResult) -> None:
+        """trades_page=0 时 prev_button disabled。"""
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_trades_table(sample_result, 0, MagicMock())
+
+        pagination = container.content.controls[1]
+        prev_btn = pagination.controls[0]
+        assert prev_btn.disabled is True
+
+
+class TestBuildIcChart:
+    """_build_ic_chart 纯函数单测。"""
+
+    def test_build_ic_chart_with_data(self, sample_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_ic_chart(sample_result, None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, fch.BarChart)
 
-    def test_build_ic_chart_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
-        panel._result = empty_result
+    def test_build_ic_chart_with_min_height(self, sample_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_ic_chart(sample_result, 300)
 
-        container = panel._build_ic_chart()
+        assert container.height == 300
+
+    def test_build_ic_chart_empty(self, empty_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_ic_chart(empty_result, None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_build_ic_chart_no_result(self, panel: BacktestResultPanel) -> None:
-        panel._result = None
-
-        container = panel._build_ic_chart()
+    def test_build_ic_chart_no_result(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_ic_chart(None, None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_build_monthly_table_with_data(self, panel: BacktestResultPanel, sample_result: BacktestResult) -> None:
-        panel._result = sample_result
 
-        container = panel._build_monthly_table()
+class TestBuildMonthlyTable:
+    """_build_monthly_table 纯函数单测。"""
+
+    def test_build_monthly_table_with_data(self, sample_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_monthly_table(sample_result)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.DataTable)
 
-    def test_build_monthly_table_empty(self, panel: BacktestResultPanel, empty_result: BacktestResult) -> None:
-        panel._result = empty_result
-
-        container = panel._build_monthly_table()
-
-        assert isinstance(container, ft.Container)
-        assert isinstance(container.content, ft.Text)
-
-    def test_build_monthly_table_no_result(self, panel: BacktestResultPanel) -> None:
-        panel._result = None
-
-        container = panel._build_monthly_table()
+    def test_build_monthly_table_empty(self, empty_result: BacktestResult) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_monthly_table(empty_result)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
 
-    def test_metrics_with_missing_keys(self, panel: BacktestResultPanel) -> None:
-        metrics = {}
+    def test_build_monthly_table_no_result(self) -> None:
+        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
+            mock_i18n.return_value = "mock_text"
+            container = _build_monthly_table(None)
 
-        content = panel._build_metrics_section(metrics)
+        assert isinstance(container, ft.Container)
+        assert isinstance(container.content, ft.Text)
 
-        assert isinstance(content, ft.Column)
 
-    def test_max_drawdown_color_high(self, panel: BacktestResultPanel) -> None:
-        metrics = {"max_drawdown": 0.25}
+class TestBacktestResultPanelContract:
+    """契约守护测试：声明式组件禁止命令式模式。"""
 
-        content = panel._build_metrics_section(metrics)
+    def test_no_imperative_patterns(self) -> None:
+        """grep 命令式禁止模式 = 0（did_mount/will_unmount/refresh_locale/.update()/class X(ft.Container)/set_result/set_chart_min_height）。"""
+        from pathlib import Path
 
-        assert isinstance(content, ft.Column)
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_result_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
 
-    def test_max_drawdown_color_low(self, panel: BacktestResultPanel) -> None:
-        metrics = {"max_drawdown": 0.10}
+        forbidden_patterns = [
+            "def did_mount",
+            "def will_unmount",
+            "def refresh_locale",
+            "self.update()",
+            "class BacktestResultPanel(ft.Container)",
+            "class BacktestResultPanel(ft.UserControl)",
+            "PageRefMixin",
+            "def set_result",
+            "def set_chart_min_height",
+        ]
+        for pattern in forbidden_patterns:
+            assert pattern not in content, f"禁止命令式模式: {pattern}"
 
-        content = panel._build_metrics_section(metrics)
+    def test_is_declarative_component(self) -> None:
+        """验证是 @ft.component 声明式组件。"""
+        from pathlib import Path
 
-        assert isinstance(content, ft.Column)
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_result_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
 
-    def test_win_rate_color_high(self, panel: BacktestResultPanel) -> None:
-        metrics = {"win_rate": 0.6}
+        assert "@ft.component" in content
+        assert "def BacktestResultPanel(" in content
 
-        content = panel._build_metrics_section(metrics)
+    def test_uses_i18n_observable_state(self) -> None:
+        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        from pathlib import Path
 
-        assert isinstance(content, ft.Column)
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_result_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
 
-    def test_win_rate_color_low(self, panel: BacktestResultPanel) -> None:
-        metrics = {"win_rate": 0.4}
-
-        content = panel._build_metrics_section(metrics)
-
-        assert isinstance(content, ft.Column)
+        assert "ft.use_state(I18n.get_observable_state)" in content

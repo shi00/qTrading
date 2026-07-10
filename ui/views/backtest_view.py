@@ -70,7 +70,14 @@ class BacktestView(ft.Container):
         # NOTE(lazy): config_panel 已是声明式组件（Phase 3.2.5），通过
         # ft.use_state(I18n.get_observable_state) 自动重渲染，无需 refresh_locale 级联。
         # ceiling: Phase 3.6.3 BacktestView 声明式重写. upgrade: Task 3.6.3 完成.
-        self.result_panel = BacktestResultPanel()
+        # result_panel 已是声明式组件（Phase 3.2.6），通过 props 推送 result/chart_min_height。
+        # BacktestView 重新实例化推送 props（过渡期，Task 3.6.3 后改父组件 state 驱动）。
+        self._result: BacktestResult | None = None
+        self._chart_min_height: int | None = None
+        self.result_panel = BacktestResultPanel(result=self._result, chart_min_height=self._chart_min_height)
+        # _result_container 包装 result_panel，重新实例化时只更新 container.content，
+        # 避免触及 ResizableSplitter 内部结构（微创原则）。
+        self._result_container = ft.Container(content=self.result_panel, expand=True)
 
         # NOTE(lazy): vm.bind() removed — BacktestViewModel now uses state + subscribe/_notify
         # (Phase 2 改造). BacktestView will be rewritten to use_viewmodel hook in Phase 4.
@@ -104,9 +111,8 @@ class BacktestView(ft.Container):
                 [ft.dropdown.Option(key, name) for key, name in strategies.items()],
             )
             self.cancel_button.content = I18n.get("common_cancel")
-            # config_panel 已是声明式组件（Phase 3.2.5），自动重渲染，无需级联 refresh_locale
-            if hasattr(self.result_panel, "refresh_locale"):
-                self.result_panel.refresh_locale()
+            # config_panel/result_panel 已是声明式组件（Phase 3.2.5/3.2.6），通过
+            # ft.use_state(I18n.get_observable_state) 自动重渲染，无需级联 refresh_locale
             if self.page:
                 self.update()
         except Exception as e:
@@ -131,7 +137,7 @@ class BacktestView(ft.Container):
                 ft.Container(height=16),
                 ResizableSplitter(
                     left_content=self.config_panel,
-                    right_content=self.result_panel,
+                    right_content=self._result_container,
                     config_key="ui_splitter_backtest_config",
                     default_width=360,
                     min_width=280,
@@ -169,10 +175,24 @@ class BacktestView(ft.Container):
 
             available_height = max(0, height - self._fixed_vertical_chrome_height())
             chart_min_height = 240 if available_height < COMPACT_HEIGHT_THRESHOLD else 360
-            if self.result_panel is not None:
-                self.result_panel.set_chart_min_height(chart_min_height)
+            # 只在 chart_min_height 实际变化时重新实例化 result_panel，避免重复 resize 不必要刷新
+            if self._chart_min_height != chart_min_height:
+                self._chart_min_height = chart_min_height
+                self._refresh_result_panel()
         except Exception as e:
             logger.debug("[BacktestView] handle_resize skipped: %s", e)
+
+    def _refresh_result_panel(self) -> None:
+        """重新实例化 result_panel 并更新到布局（props 推送模式）。
+
+        声明式组件通过 props 接收数据，BacktestView 重新实例化推送 result/chart_min_height。
+        过渡期方案：Task 3.6.3 BacktestView 声明式重写后改为父组件 state 驱动。
+        """
+        self.result_panel = BacktestResultPanel(
+            result=self._result,
+            chart_min_height=self._chart_min_height,
+        )
+        self._result_container.content = self.result_panel
 
     def _load_strategies(self):
         """加载可用策略列表。"""
@@ -254,7 +274,8 @@ class BacktestView(ft.Container):
             self.update()
 
     def _on_vm_result(self, result: BacktestResult):
-        self.result_panel.set_result(result)
+        self._result = result
+        self._refresh_result_panel()
         self.progress_bar.visible = False
         self.cancel_button.visible = False
         if self.page:
