@@ -204,7 +204,7 @@ def test_v1_control_update_silent_when_unmounted():
 
     V1 原生 ``ft.Control.update()`` 在控件未挂载到 page 时抛 ``RuntimeError``；
     ``_v1_page_compat`` autouse fixture（见 ``conftest.py``）monkey-patch 后应静默返回
-    （V0 兼容行为），替代已删除的 ``_install_v1_compat_control_page_mock`` 全局桩。
+    （V0 兼容行为），替代已删除的旧全局桩。
     """
     # _v1_page_compat autouse fixture 已激活（见 tests/unit/ui/conftest.py）
     # 未挂载控件调用 update() 应静默返回（不抛 RuntimeError）

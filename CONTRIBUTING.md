@@ -718,25 +718,18 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 | 17 | 窗口图标 | `page.window_icon` | `page.window.icon` | AttributeError |
 | 18 | 控件 page 属性 | `self.page = page` 直接赋值 | 通过 `parent` 链访问；声明式组件内经 `ft.context.page` 或事件 `e.page` 获取（`PageRefMixin` 即将删除，新代码禁用） | AttributeError |
 | 19 | 本地存储 | `page.client_storage` | `page.shared_preferences` | AttributeError |
-| 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `mock_flet._install_v1_compat_control_page_mock()` 全局桩兼容） | RuntimeError |
+| 20 | 控件 update | 未挂载时 `control.update()` 静默返回 | 未挂载抛 `RuntimeError`（测试代码由 `conftest._v1_page_compat` fixture 兼容） | RuntimeError |
 | 21 | 窗口方法 | `page.window.destroy()`（同步） | `await page.window.destroy()`（V1 协程） | 运行期（RuntimeWarning: coroutine never awaited） |
 
 > **⚠️ 桌面关闭事件不可用 `page.on_close`**：`page.on_close` 在会话关闭/超时断开时触发，**非**用户点击窗口关闭按钮。桌面端关闭拦截必须用 `page.window.prevent_close = True` + `page.window.on_event`（监听 `ft.WindowEventType.CLOSE`），见 `main.py` 的窗口事件处理器。此为 V1 正确实现，非 V0 遗留。
 
 > **来源说明**：第 8 项（`src_base64` → `src`）与第 16 项（`delta_x` → `primary_delta`）来自 Flet 官方 issue #5238（V1 breaking changes 汇总）。
 
-### 兼容垫片使用规则（即将删除）
+### 兼容垫片使用规则（已全部删除）
 
-以下 V0→V1 兼容垫片为本次升级新增，**即将删除**——所有依赖垫片的代码正在全面重写为声明式范式（CLAUDE.md §1.4 UI 迁移例外 + §3.3）。重写完成后立即删除垫片本身。
-
-| 垫片 | 位置 | 用途 | 删除条件 |
-|------|------|------|----------|
-| `PageRefMixin` | [`ui/v1_compat.py`](./ui/v1_compat.py) | 覆盖 `ft.Control.page` 只读 property，使 5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）可读写 `control.page` | 5 个历史控件全部重写为 `@ft.component` 声明式后删除 |
-| `_install_v1_compat_control_page_mock()` | [`tests/unit/ui/mock_flet.py`](./tests/unit/ui/mock_flet.py) | 全局 monkey-patch `ft.Control.page`/`update`，使测试代码可注入 mock_page 且未挂载 `update()` 静默返回 | 所有命令式 View 测试重构为声明式测试后删除 |
+声明式改造期间使用的 V0→V1 兼容垫片（PageRefMixin / 旧 mock 全局桩）已在 Phase G.3 全部删除。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。
 
 > **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py) 不是兼容垫片，而是 V1 渲染管线针对命令式 `page.update()` 批量更新的永久解决方案。**声明式下不再需要**（options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化）。所有命令式控件重写为声明式后，该函数随之删除。
-
-> 每项垫片均遵循 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations) `# NOTE(lazy):` 标记规范。
 
 ### V1 声明式 UI 开发规范
 

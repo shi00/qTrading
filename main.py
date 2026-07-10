@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from collections.abc import Callable
 
 import flet as ft
 
@@ -15,9 +16,32 @@ from ui.components.toast_manager import ToastManager
 from ui.theme import apply_page_theme
 from app.bootstrap import mask_sensitive
 from app.startup_controller import StartupController
-from ui.startup_views import StartupViewRenderer
+from ui.startup_views import StartupView, _StartupBridge
 
 logger = logging.getLogger(__name__)
+
+
+@ft.component
+def CloseConfirmDialog(
+    on_cancel: Callable[[ft.ControlEvent], None],
+    on_confirm: Callable[[ft.ControlEvent], None],
+) -> ft.AlertDialog:
+    """窗口关闭确认对话框 (声明式, i18n state 驱动自动重渲染).
+
+    CLAUDE.md §3.2 MVVM: i18n 通过 ``ft.use_state(I18n.get_observable_state)``
+    订阅, locale 切换时自动重渲染, 无需手动刷新控件。
+    """
+    ft.use_state(I18n.get_observable_state)
+    return ft.AlertDialog(
+        modal=True,
+        title=ft.Text(I18n.get("exit_confirm_title")),
+        content=ft.Text(I18n.get("exit_confirm_content")),
+        actions=[
+            ft.TextButton(I18n.get("common_cancel"), on_click=on_cancel),
+            ft.TextButton(I18n.get("common_confirm"), on_click=on_confirm),
+        ],
+        actions_alignment=ft.MainAxisAlignment.END,
+    )
 
 
 async def main(page: ft.Page):
@@ -61,11 +85,10 @@ async def main(page: ft.Page):
     from utils.shutdown import ShutdownCoordinator
 
     coordinator = ShutdownCoordinator(page)
-    close_confirm_dialog = None
     close_confirm_visible = False
     shutdown_requested = False
     active_dialog = None
-    locale_subscription_id = None
+    current_close_confirm_dialog = None
 
     async def _perform_window_shutdown():
         nonlocal shutdown_requested
@@ -101,7 +124,7 @@ async def main(page: ft.Page):
             shutdown_requested = False
 
     def _page_dialog_matches_close_confirm() -> bool:
-        return active_dialog is close_confirm_dialog
+        return active_dialog is current_close_confirm_dialog
 
     def _show_dialog(dialog):
         nonlocal active_dialog
@@ -115,16 +138,17 @@ async def main(page: ft.Page):
             active_dialog = None
 
     def _hide_close_confirm_dialog():
-        nonlocal close_confirm_visible
+        nonlocal close_confirm_visible, current_close_confirm_dialog
         logger.debug(
             "[Main] Hiding close confirm dialog. visible=%s, dialog_exists=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
-            close_confirm_dialog is not None,
+            current_close_confirm_dialog is not None,
             _page_dialog_matches_close_confirm(),
         )
-        if close_confirm_dialog is None:
+        if current_close_confirm_dialog is None:
             return
-        _hide_dialog(close_confirm_dialog)
+        _hide_dialog(current_close_confirm_dialog)
+        current_close_confirm_dialog = None
         close_confirm_visible = False
 
     def _on_close_cancel(_):
@@ -140,40 +164,14 @@ async def main(page: ft.Page):
         UILogger.log_action("MainWindow", action="close_confirm")
         page.run_task(_perform_window_shutdown)
 
-    close_confirm_dialog = ft.AlertDialog(
-        modal=True,
-        title=ft.Text(I18n.get("exit_confirm_title")),
-        content=ft.Text(I18n.get("exit_confirm_content")),
-        actions=[
-            ft.TextButton(I18n.get("common_cancel"), on_click=_on_close_cancel),
-            ft.TextButton(I18n.get("common_confirm"), on_click=_on_close_confirm),
-        ],
-        actions_alignment=ft.MainAxisAlignment.END,
-    )
-
-    def _refresh_close_dialog_locale():
-        try:
-            if close_confirm_dialog:
-                close_confirm_dialog.title.value = I18n.get("exit_confirm_title")
-                close_confirm_dialog.content.value = I18n.get("exit_confirm_content")
-                if len(close_confirm_dialog.actions) >= 2:
-                    close_confirm_dialog.actions[0].content = I18n.get("common_cancel")
-                    close_confirm_dialog.actions[1].content = I18n.get("common_confirm")
-                if close_confirm_visible:
-                    close_confirm_dialog.update()
-        except Exception as e:
-            logger.warning("[Main] Failed to update close confirm dialog locale: %s", e)
-
-    locale_subscription_id = I18n.subscribe(_refresh_close_dialog_locale, sync_immediately=False)
-
     def _show_close_confirm_dialog():
-        nonlocal close_confirm_visible
+        nonlocal close_confirm_visible, current_close_confirm_dialog
         logger.debug(
             "[Main] Request to show close confirm dialog. visible=%s, shutdown_requested=%s, "
             "dialog_exists=%s, page_dialog_is_close_confirm=%s",
             close_confirm_visible,
             shutdown_requested,
-            close_confirm_dialog is not None,
+            current_close_confirm_dialog is not None,
             _page_dialog_matches_close_confirm(),
         )
         if close_confirm_visible or shutdown_requested:
@@ -183,7 +181,8 @@ async def main(page: ft.Page):
                 shutdown_requested,
             )
             return
-        _show_dialog(close_confirm_dialog)
+        current_close_confirm_dialog = CloseConfirmDialog(_on_close_cancel, _on_close_confirm)
+        _show_dialog(current_close_confirm_dialog)
         close_confirm_visible = True
 
     def _is_web_mode() -> bool:
@@ -206,30 +205,7 @@ async def main(page: ft.Page):
     if not _is_web_mode():
         page.window.on_event = _on_window_event
 
-    async def _on_resize(e):
-        """窗口 resize 回调 — 委托给 AppLayout 防抖处理。
-
-        Flet 0.85.3 的正确属性名为 ``on_resize``，
-        ``WindowResizeEvent`` 携带实时 width/height。
-        注意：``page.width`` / ``page.window.width`` 只在页面连接时更新一次，
-        resize 事件中不会刷新，因此必须从事件对象读取实时尺寸。
-        """
-        if not page.controls:
-            return
-        layout = page.controls[0]
-        # 启动期间 page.controls[0] 可能是 StartupView，需 isinstance 守卫
-        from ui.app_layout import AppLayout
-
-        if isinstance(layout, AppLayout):
-            width = getattr(e, "width", 0) or 0
-            height = getattr(e, "height", 0) or 0
-            layout.schedule_resize(width, height)
-
-    page.on_resize = _on_resize
-
     async def _on_disconnect(e):
-        if locale_subscription_id is not None:
-            I18n.unsubscribe(locale_subscription_id)
         coordinator.start_watchdog(25)
         cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
 
@@ -293,19 +269,22 @@ async def main(page: ft.Page):
         """Wrap show_toast to resolve i18n keys before displaying."""
         show_toast(I18n.get(message_key), toast_type)
 
+    bridge = _StartupBridge()
     controller = StartupController(
         cache_manager=cache_manager,
-        on_state_change=lambda state, ctx: renderer.on_state_change(state, ctx),
+        on_state_change=bridge.notify,
         on_show_toast=_on_show_toast,
         on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
     )
 
-    renderer = StartupViewRenderer(
-        page=page,
-        controller=controller,
-        show_dialog_fn=_show_dialog,
-        hide_dialog_fn=_hide_dialog,
-        run_task_fn=page.run_task,
+    page.add(
+        StartupView(
+            controller=controller,
+            bridge=bridge,
+            show_dialog_fn=_show_dialog,
+            hide_dialog_fn=_hide_dialog,
+            run_task_fn=page.run_task,
+        )
     )
 
     db_url = ConfigHandler.get_db_url()

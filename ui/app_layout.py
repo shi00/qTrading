@@ -12,12 +12,13 @@
 - 子视图直接函数调用消费 (HomeView()/ScreenerView()/...), 无 use_ref cache
 - resize 用 ``use_effect`` + ``page.on_resize`` (防抖 + state 更新触发重渲染)
 - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
-- 最后一个 PageRefMixin 历史控件消除 (Phase G.3 可删除 v1_compat.py)
+- PageRefMixin 兼容桩已在 Phase G.3 删除 (声明式改造收官)
 """
 
 import asyncio
 import logging
 from enum import IntEnum
+from typing import Any
 
 import flet as ft
 
@@ -152,7 +153,8 @@ def AppLayout() -> ft.Container:
             return
 
         # 防抖任务跟踪 (闭包变量, effect 只运行一次, 跨 resize 事件持久)
-        debounce_task: asyncio.Task[None] | None = None
+        # page.run_task 返回 Future, 用 Any 注解避免 pyright 协变/逆变推断冲突
+        debounce_task: Any = None
 
         async def _do_resize(width: float, height: float) -> None:
             nonlocal debounce_task
