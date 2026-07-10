@@ -365,14 +365,11 @@ class ScreenerView(ft.Container):
         if hasattr(self, "result_table") and self.result_table:
             self.result_table.clear()
 
-        # Cleanup dialog to prevent memory leak
-        # R3: V1 对话框由 show_dialog/pop_dialog 管理；view 卸载时若 dialog 仍开着，用 pop_dialog 关闭
-        if self.detail_dialog and self.page:
-            try:
-                self.page.pop_dialog()
-            except Exception as e:
-                logger.debug("[ScreenerView] pop_dialog on unmount skipped: %s", e)
-            self.detail_dialog = None
+        # Cleanup dialog reference
+        # NOTE(lazy): detail_dialog 已是声明式组件（Phase 3.2.7），dialog 生命周期由
+        # ft.use_dialog 自动管理（卸载时自动从 overlay 移除）。过渡期命令式消费方仅清理引用。
+        # ceiling: Phase 3.6.2 ScreenerView 声明式重写. upgrade: Task 3.6.2 完成.
+        self.detail_dialog = None
 
         # U-1 fix: Reset mounted state for proper re-mount handling
         self._mounted = False
@@ -1501,22 +1498,21 @@ class ScreenerView(ft.Container):
         ts_code = row_data.get("ts_code", "")
         raw_data = getattr(self, "_raw_row_lookup", {}).get(ts_code, row_data)
 
-        # Instantiate or update dialog
-        if not self.detail_dialog:
-            self.detail_dialog = StockDetailDialog(
-                stock_data=raw_data,
-                data_processor=self.vm.data_processor,
-                page=self.page,
-            )
-        else:
-            self.detail_dialog.update_data(raw_data)
+        # NOTE(lazy): detail_dialog 已是声明式组件（Phase 3.2.7），通过 props 推送
+        # （重新实例化模式），K 线图由组件内部 use_effect 自动触发，dialog 由
+        # ft.use_dialog 自动挂载/卸载。不再调 page.show_dialog / load_chart。
+        # ceiling: Phase 3.6.2 ScreenerView 声明式重写. upgrade: Task 3.6.2 完成.
+        self.detail_dialog = StockDetailDialog(
+            stock_data=raw_data,
+            data_processor=self.vm.data_processor,
+            page=self.page,
+            open_state=True,
+            on_close=self._on_detail_close,
+        )
 
-        # R3: V1 对话框通过 show_dialog 打开（pop_dialog 时自动从 overlay 移除）
-        self.page.show_dialog(self.detail_dialog)
-
-        # Trigger async chart load
-        if ts_code:
-            self.page.run_task(self.detail_dialog.load_chart, ts_code)
+    def _on_detail_close(self):
+        """Detail dialog 关闭回调（声明式组件 on_close prop，清理引用）。"""
+        self.detail_dialog = None
 
     # --- UI Update Callbacks ---
 

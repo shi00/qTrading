@@ -935,13 +935,37 @@ class DataSourceTab(ft.Container):
                 return
             from ui.components.health_report_dialog import HealthReportDialog
 
-            dlg = HealthReportDialog(self.page, report)
-            self.page.show_dialog(dlg)
+            # NOTE(lazy): HealthReportDialog 已是声明式组件（Phase 3.2.7），通过 props 推送
+            # （重新实例化模式），dialog 由 ft.use_dialog 自动挂载/卸载。深度扫描通过
+            # on_deep_scan 回调打开 HealthScanDialog（仍命令式，Task 4.3 重写）。
+            # ceiling: Phase 3.3 DataSourceTab 声明式重写. upgrade: Task 3.3.1 完成.
+            self._health_dialog = HealthReportDialog(
+                report=report,
+                page=self.page,
+                open_state=True,
+                on_close=self._on_health_close,
+                on_deep_scan=self._on_deep_scan,
+            )
         except Exception as ex:
             from utils.error_classifier import classify_error, get_error_message
 
             error_info = classify_error(ex, context="general")
             self.show_snack(get_error_message(error_info), color=AppColors.ERROR)
+
+    def _on_health_close(self):  # pragma: no cover
+        """HealthReportDialog 关闭回调（声明式组件 on_close prop，清理引用）。"""
+        self._health_dialog = None
+
+    def _on_deep_scan(self):  # pragma: no cover
+        """深度扫描回调：打开 HealthScanDialog（命令式，Task 4.3 重写）。"""
+        from data.data_processor import DataProcessor
+        from ui.components.health_report_dialog import HealthScanDialog
+
+        if not self.page:
+            return
+        scan_dlg = HealthScanDialog(self.page, DataProcessor())
+        self.page.show_dialog(scan_dlg)
+        self.page.run_task(scan_dlg.start_scan)
 
     def handle_resize(self, width: float = 0, height: float = 0) -> None:
         """窗口 resize 通知。当前布局自适应，无需响应式调整。"""

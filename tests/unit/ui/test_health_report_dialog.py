@@ -51,7 +51,17 @@ def _apply_patches(mock_i18n, mock_ac):
     ]
 
 
+# ---------------------------------------------------------------------------
+# 模块级纯函数：_health_dialog_size / _log_report_summary / _build_health_content
+# （由旧 HealthReportDialog 实例方法转换）
+# ---------------------------------------------------------------------------
 class TestHealthReportDialog:
+    """HealthReportDialog 声明式组件测试（纯函数 + 契约守护）。
+
+    声明式组件的渲染逻辑由 Flet 框架保证，不测组件实例化（参考 Phase 3.2.7 范式）。
+    实例方法已转为模块级纯函数，可直接单测。
+    """
+
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
@@ -79,179 +89,45 @@ class TestHealthReportDialog:
             "reasons": [],
         }
 
-    def _make_dialog(self, mock_page, report=None, on_dismiss=None):
-        from ui.components.health_report_dialog import HealthReportDialog
+    def test_health_dialog_size_default_without_page(self):
+        """B1: _health_dialog_size 无 page 时返回 (600, 600)。"""
+        from ui.components.health_report_dialog import _health_dialog_size
 
-        return HealthReportDialog(
-            page=mock_page,
-            report=report or self._make_report(),
-            on_dismiss=on_dismiss,
-        )
+        assert _health_dialog_size(None) == (600, 600)
 
-    def test_dialog_creates_with_report_data(self, mock_page):
+    def test_health_dialog_size_with_page(self, mock_page):
+        """_health_dialog_size 有 page 时基于窗口尺寸计算（含上限约束）。"""
+        from ui.components.health_report_dialog import _health_dialog_size
+
+        mock_page.window.width = 2000
+        mock_page.window.height = 1500
+        w, h = _health_dialog_size(mock_page)
+        # min(max(2000-80, 480), 600) = 600; min(max(1500-80, 400), 600) = 600
+        assert w == 600
+        assert h == 600
+
+    def test_health_dialog_size_small_window(self, mock_page):
+        """_health_dialog_size 小窗口时使用下限约束。"""
+        from ui.components.health_report_dialog import _health_dialog_size
+
+        mock_page.window.width = 500
+        mock_page.window.height = 400
+        w, h = _health_dialog_size(mock_page)
+        # min(max(500-80, 480), 600) = 480; min(max(400-80, 400), 600) = 400
+        assert w == 480
+        assert h == 400
+
+    def test_log_report_summary_normal(self, caplog):
+        """_log_report_summary 正常路径记录 INFO 日志。"""
+        from ui.components.health_report_dialog import _log_report_summary
+
         report = self._make_report()
-        callback = MagicMock()
-        dlg = self._make_dialog(mock_page, report, callback)
-        assert dlg.page_ref is mock_page
-        assert dlg.report is report
-        assert dlg.on_dismiss_callback is callback
+        with caplog.at_level(logging.INFO, logger=dialog_logger.name):
+            _log_report_summary(report)
+        assert any("HealthReportDialog Opened" in r.message for r in caplog.records)
 
-    def test_dialog_has_two_actions(self, mock_page):
-        dlg = self._make_dialog(mock_page)
-        assert len(dlg.actions) == 2
-
-    @pytest.mark.asyncio
-    async def test_run_deep_scan_closes_and_opens_scan_dialog(self, mock_page):
-        dlg = self._make_dialog(mock_page)
-        dlg.page = mock_page
-        dlg.close_dialog = MagicMock()
-        mock_scan = MagicMock()
-        mock_scan.start_scan = AsyncMock()
-        with (
-            patch("data.data_processor.DataProcessor") as mock_dp_cls,
-            patch(
-                "ui.components.health_report_dialog.HealthScanDialog",
-                return_value=mock_scan,
-            ) as mock_scan_cls,
-        ):
-            await dlg.run_deep_scan(None)
-        dlg.close_dialog.assert_called_once_with(None)
-        assert mock_scan in mock_page.overlay
-        mock_scan.start_scan.assert_awaited_once()
-        # UI-C2: DataProcessor is instantiated by caller and injected into HealthScanDialog
-        mock_dp_cls.assert_called_once()
-        mock_scan_cls.assert_called_once_with(mock_page, mock_dp_cls.return_value)
-
-    def test_build_content_green_status(self, mock_page):
-        dlg = self._make_dialog(mock_page, self._make_report("green"))
-        assert dlg.content is not None
-
-    def test_build_content_yellow_status(self, mock_page):
-        dlg = self._make_dialog(mock_page, self._make_report("yellow"))
-        assert dlg.content is not None
-
-    def test_build_content_red_status(self, mock_page):
-        dlg = self._make_dialog(mock_page, self._make_report("red"))
-        assert dlg.content is not None
-
-    def test_refresh_locale_rebuilds_actions(self, mock_page):
-        """§5.8 规范 6：refresh_locale 应正确刷新文案（重建 actions），不抛出异常。"""
-        dlg = self._make_dialog(mock_page, self._make_report("green"))
-        dlg.page = mock_page
-        dlg.update = MagicMock()
-        original_content = dlg.content
-
-        # 模拟 locale 切换：i18n 返回翻译后的值，使重建产生不同内容（V1 Prop 在值变化时才更新引用）
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
-        dlg.refresh_locale()
-
-        # content 被重建为新对象（_build_content 返回新树）
-        assert dlg.content is not original_content
-        # 仍然有 2 个 action（深度扫描 + 关闭）
-        assert len(dlg.actions) == 2
-        dlg.update.assert_called_once()
-        # I18n.get 应被调用以刷新文案
-        self.mock_i18n.get.assert_any_call("health_btn_deep_scan")
-        self.mock_i18n.get.assert_any_call("common_close")
-
-    def test_refresh_locale_swallows_exception(self, mock_page, caplog):
-        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
-        dlg = self._make_dialog(mock_page, self._make_report("green"))
-        dlg.page = mock_page
-        # 强制 I18n.get 抛异常以触发 try/except
-        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
-
-        with caplog.at_level(logging.WARNING, logger=dialog_logger.name):
-            # 不应抛出异常
-            dlg.refresh_locale()
-
-        assert any("refresh_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
-
-    def test_dialog_size_default_without_page(self):
-        """B1: _dialog_size 无 page_ref 时返回 (600, 600)。"""
-        from ui.components.health_report_dialog import HealthReportDialog
-
-        report = {
-            "status": "green",
-            "market": {"lag_days": 0, "latest_local": "2025-01-01"},
-            "fundamentals": {"gap_count": 0, "sanity_errors": 0, "tables": {}},
-            "reasons": [],
-        }
-        dlg = HealthReportDialog(page=None, report=report)
-        assert dlg._cached_width == 600
-        assert dlg._cached_height == 600
-
-    def test_did_mount_subscribes_i18n(self, mock_page):
-        """B2: did_mount 订阅 I18n。"""
-        dlg = self._make_dialog(mock_page)
-        dlg.did_mount()
-        self.mock_i18n.subscribe.assert_called_once_with(dlg.refresh_locale)
-        assert dlg._locale_subscription_id == "sub_id"
-
-    def test_will_unmount_unsubscribes(self, mock_page):
-        """B3: will_unmount 取消订阅并清理 id。"""
-        dlg = self._make_dialog(mock_page)
-        dlg.did_mount()
-        dlg.will_unmount()
-        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
-        assert dlg._locale_subscription_id is None
-
-    def test_build_content_with_reasons(self, mock_page):
-        """B4: _build_content 含 reasons 时构建 issues_section。"""
-        report = self._make_report()
-        report["reasons"] = ["数据延迟", "缺失财务"]
-        dlg = self._make_dialog(mock_page, report)
-
-        # issues_section 是 Column 中的第 3 个控件 (index 2)
-        issues_section = dlg.content.content.controls[2]
-        # 有 reasons 时 issues_section 有 bgcolor 和 content
-        assert issues_section.bgcolor is not None
-        issues_column = issues_section.content
-        # 第一个控件是标题 "common_reason"
-        assert issues_column.controls[0].value == "common_reason"
-        # 后续是 2 个 reason 行
-        assert len(issues_column.controls) == 3  # 1 header + 2 reasons
-
-    def test_refresh_locale_no_page_skips_update(self, mock_page):
-        """B5: refresh_locale 无 page 时不调用 update。"""
-        dlg = self._make_dialog(mock_page, self._make_report("green"))
-        dlg.page = mock_page
-        # 模拟无 page 场景
-        dlg._mock_page = None
-        dlg.update = MagicMock()
-
-        dlg.refresh_locale()
-
-        dlg.update.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_run_deep_scan_uses_show_dialog_no_fallback(self, mock_page):
-        """B6: V1 删除双路径回退，page_ref.show_dialog 为唯一路径。
-
-        原 B6 测试验证无 open 方法时的回退，V1 升级后双路径已删除，
-        此测试改为验证 show_dialog 直接调用（无回退）。
-        """
-        dlg = self._make_dialog(mock_page)
-        dlg.page = mock_page
-        dlg.close_dialog = MagicMock()
-
-        mock_scan = MagicMock()
-        mock_scan.start_scan = AsyncMock()
-        with (
-            patch("data.data_processor.DataProcessor"),
-            patch(
-                "ui.components.health_report_dialog.HealthScanDialog",
-                return_value=mock_scan,
-            ),
-        ):
-            await dlg.run_deep_scan(None)
-
-        # V1: show_dialog 是唯一路径，无回退
-        assert mock_scan in mock_page.overlay
-        mock_scan.start_scan.assert_awaited_once()
-
-    def test_init_logs_error_when_summary_fails(self, mock_page, caplog):
-        """B7: __init__ 摘要日志异常路径。"""
+    def test_log_report_summary_handles_exception(self, caplog):
+        """B7: _log_report_summary 异常路径不抛出，降级为 logger.error。"""
 
         class WeirdMarket:
             def get(self, key, default=None):
@@ -265,12 +141,108 @@ class TestHealthReportDialog:
             "fundamentals": {"gap_count": 0, "sanity_errors": 0, "tables": {}},
             "reasons": [],
         }
+        from ui.components.health_report_dialog import _log_report_summary
 
         with caplog.at_level(logging.ERROR, logger=dialog_logger.name):
-            dlg = self._make_dialog(mock_page, report)
-
+            _log_report_summary(report)
         assert any("Error logging report summary" in r.message for r in caplog.records)
-        assert dlg.content is not None
+
+    def test_build_health_content_green(self):
+        """_build_health_content green status 返回 Container。"""
+        from ui.components.health_report_dialog import _build_health_content
+
+        content = _build_health_content(self._make_report("green"), 600, 600)
+        assert content is not None
+        assert content.width == 600
+        assert content.height == 600
+
+    def test_build_health_content_yellow(self):
+        from ui.components.health_report_dialog import _build_health_content
+
+        content = _build_health_content(self._make_report("yellow"), 600, 600)
+        assert content is not None
+
+    def test_build_health_content_red(self):
+        from ui.components.health_report_dialog import _build_health_content
+
+        content = _build_health_content(self._make_report("red"), 600, 600)
+        assert content is not None
+
+    def test_build_health_content_with_reasons(self):
+        """B4: _build_health_content 含 reasons 时构建 issues_section。"""
+        from ui.components.health_report_dialog import _build_health_content
+
+        report = self._make_report()
+        report["reasons"] = ["数据延迟", "缺失财务"]
+        content = _build_health_content(report, 600, 600)
+        # issues_section 是 Column 中的第 3 个控件 (index 2)
+        issues_section = content.content.controls[2]
+        assert issues_section.bgcolor is not None
+        issues_column = issues_section.content
+        assert issues_column.controls[0].value == "common_reason"
+        assert len(issues_column.controls) == 3  # 1 header + 2 reasons
+
+
+# ---------------------------------------------------------------------------
+# 契约守护测试：HealthReportDialog 声明式组件禁止命令式模式
+# ---------------------------------------------------------------------------
+class TestHealthReportDialogContract:
+    """契约守护测试：HealthReportDialog 声明式组件禁止命令式模式。
+
+    注意：HealthScanDialog 仍为命令式（Task 4.3 重写），其 did_mount/pop_dialog 等
+    不在本契约范围内。本契约仅守护 HealthReportDialog 的声明式重写成果。
+    """
+
+    def test_no_page_show_dialog(self) -> None:
+        """DoD: grep `page.show_dialog` in health_report_dialog.py == 0。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "health_report_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+        assert "page.show_dialog" not in content, "禁止 page.show_dialog（DoD）"
+
+    def test_health_report_dialog_is_declarative_component(self) -> None:
+        """验证 HealthReportDialog 是 @ft.component 声明式组件。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "health_report_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+        assert "@ft.component" in content
+        assert "def HealthReportDialog(" in content
+
+    def test_health_report_dialog_not_alert_dialog_subclass(self) -> None:
+        """验证 HealthReportDialog 不再是 ft.AlertDialog 子类。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "health_report_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+        assert "class HealthReportDialog(ft.AlertDialog)" not in content
+
+    def test_uses_use_dialog(self) -> None:
+        """验证通过 ft.use_dialog 自动挂载/卸载 dialog。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "health_report_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+        assert "ft.use_dialog(" in content
+
+    def test_uses_i18n_observable_state(self) -> None:
+        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "health_report_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+        assert "ft.use_state(I18n.get_observable_state)" in content
+
+    def test_pure_functions_preserved(self) -> None:
+        """验证模块级纯函数保留导出。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "health_report_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+        assert "def _health_dialog_size(" in content
+        assert "def _log_report_summary(" in content
+        assert "def _build_health_content(" in content
 
 
 class TestHealthScoreCard:

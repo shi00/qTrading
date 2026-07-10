@@ -705,15 +705,23 @@ class TestScreenerView:
         view._on_row_click({"ts_code": "000001.SZ"})
         assert view.detail_dialog is not None
 
-    def test_on_row_click_updates_existing_dialog(self, mock_page):
+    def test_on_row_click_recreates_dialog_with_new_data(self, mock_page):
+        """声明式范式：每次点击重新调用 StockDetailDialog（props 推送新数据），不复用实例。"""
+        from ui.views import screener_view as sv
+
         view = self._make_view(mock_page)
         view._raw_row_lookup = {"000001.SZ": {"ts_code": "000001.SZ", "name": "test"}}
         view._on_row_click({"ts_code": "000001.SZ"})
-        first_dialog = view.detail_dialog
+        assert view.detail_dialog is not None
+        assert sv.StockDetailDialog.call_count == 1
+
+        # 第二次点击新股票：重新调用 StockDetailDialog（props 推送）
         view._raw_row_lookup = {"000002.SZ": {"ts_code": "000002.SZ", "name": "test2"}}
         view._on_row_click({"ts_code": "000002.SZ"})
-        assert view.detail_dialog is first_dialog
-        view.detail_dialog.update_data.assert_called_once()
+        assert sv.StockDetailDialog.call_count == 2
+        # 第二次调用应包含新 stock_data
+        second_call = sv.StockDetailDialog.call_args
+        assert second_call.kwargs["stock_data"]["ts_code"] == "000002.SZ"
 
     def test_on_row_click_without_page(self):
         view = self._make_view(MagicMock())

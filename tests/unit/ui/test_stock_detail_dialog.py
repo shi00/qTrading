@@ -1,12 +1,23 @@
+"""StockDetailDialog 测试（声明式 V1）。
+
+测试策略：
+1. 模块级纯函数单测（is_valid_number/format_mv/format_vol/format_amount/
+   _format_val/_format_mv/_format_vol/_format_amount/_dialog_size/_build_title/
+   _build_content/_load_chart_async）
+2. 契约守护测试（grep 命令式禁止模式 = 0 + 验证声明式 API）
+
+声明式组件的渲染逻辑由 Flet 框架保证，不测组件实例化（参考 3.2.1-3.2.7 范式）。
+实例方法已转为模块级纯函数，可直接单测。
+"""
+
 import contextlib
-import logging
-import math
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import flet as ft
 import pytest
 
 from data.data_processor import DataProcessor
-from ui.components.stock_detail_dialog import logger as detail_logger
 
 pytestmark = pytest.mark.unit
 
@@ -23,364 +34,94 @@ class _TrickyInt(int):
         raise ValueError("tricky")
 
 
-class TestStockDetailDialogFormatVal:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_val_none_returns_dash(self):
-        dlg = self._make_dialog({})
-        result = dlg._format_val("close")
-        assert result == "-"
-
-    def test_format_val_nan_returns_dash(self):
-        dlg = self._make_dialog({"close": float("nan")})
-        result = dlg._format_val("close")
-        assert result == "-"
-
-    def test_format_val_float_with_suffix(self):
-        dlg = self._make_dialog({"close": 12.34})
-        result = dlg._format_val("close", "元")
-        assert result == "12.34元"
-
-    def test_format_val_non_numeric_returns_dash(self):
-        dlg = self._make_dialog({"close": "abc"})
-        result = dlg._format_val("close")
-        assert result == "-"
-
-    def test_format_val_zero(self):
-        dlg = self._make_dialog({"close": 0})
-        result = dlg._format_val("close", "%")
-        assert result == "0.00%"
-
-
-class TestStockDetailDialogFormatMv:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_mv_none_returns_dash(self):
-        dlg = self._make_dialog({})
-        result = dlg._format_mv("total_mv")
-        assert result == "-"
-
-    def test_format_mv_nan_returns_dash(self):
-        dlg = self._make_dialog({"total_mv": float("nan")})
-        result = dlg._format_mv("total_mv")
-        assert result == "-"
-
-    def test_format_mv_converts_wan_to_yi(self):
-        dlg = self._make_dialog({"total_mv": 500000})
-        result = dlg._format_mv("total_mv")
-        assert "50.0" in result
-
-    def test_format_mv_non_numeric_returns_dash(self):
-        dlg = self._make_dialog({"total_mv": "abc"})
-        result = dlg._format_mv("total_mv")
-        assert result == "-"
-
-
-class TestStockDetailDialogFormatVol:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_vol_none_returns_dash(self):
-        dlg = self._make_dialog({})
-        result = dlg._format_vol("vol")
-        assert result == "-"
-
-    def test_format_vol_over_10000(self):
-        dlg = self._make_dialog({"vol": 50000})
-        result = dlg._format_vol("vol")
-        assert "5.0" in result
-
-    def test_format_vol_under_10000(self):
-        dlg = self._make_dialog({"vol": 5000})
-        result = dlg._format_vol("vol")
-        assert "5000" in result
-
-    def test_format_vol_nan_returns_dash(self):
-        dlg = self._make_dialog({"vol": float("nan")})
-        result = dlg._format_vol("vol")
-        assert result == "-"
-
-
-class TestStockDetailDialogFormatAmount:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_amount_none_returns_dash(self):
-        dlg = self._make_dialog({})
-        result = dlg._format_amount("amount")
-        assert result == "-"
-
-    def test_format_amount_converts_qianyuan_to_yi(self):
-        dlg = self._make_dialog({"amount": 5000000})
-        result = dlg._format_amount("amount")
-        assert "50.00" in result
-
-    def test_format_amount_nan_returns_dash(self):
-        dlg = self._make_dialog({"amount": float("nan")})
-        result = dlg._format_amount("amount")
-        assert result == "-"
-
-
-class TestStockDetailDialog:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None, data_processor=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {}, data_processor=data_processor)
-
-    def test_instantiation_with_no_data(self):
-        dlg = self._make_dialog()
-        assert dlg.stock_data == {}
-
-    def test_instantiation_with_data(self):
-        data = {"ts_code": "000001.SZ", "name": "平安银行"}
-        dlg = self._make_dialog(data)
-        assert dlg.stock_data["ts_code"] == "000001.SZ"
-
-    def test_close_calls_pop_dialog(self, mock_page):
-        # R3: V1 _close 通过 page.pop_dialog() 关闭对话框（不再设置 self.open）
-        dlg = self._make_dialog()
-        dlg.page = mock_page
-        mock_page.pop_dialog = MagicMock()
-        dlg._close(None)
-        mock_page.pop_dialog.assert_called_once()
-
-    def test_update_data_replaces_stock_data(self):
-        dlg = self._make_dialog({"ts_code": "000001.SZ"})
-        new_data = {"ts_code": "600000.SH", "name": "浦发银行"}
-        dlg.update_data(new_data)
-        assert dlg.stock_data["ts_code"] == "600000.SH"
-
-    def test_refresh_locale_rebuilds_content(self, mock_page):
-        """§5.8 规范 6：refresh_locale 应正确刷新文案（重建 title/content/actions），不抛出异常。"""
-        dlg = self._make_dialog({"ts_code": "000001.SZ", "name": "平安银行"})
-        dlg.page = mock_page
-        dlg.update = MagicMock()
-        original_title = dlg.title
-        original_content = dlg.content
-        original_actions = list(dlg.actions)
-
-        # 模拟 locale 切换：i18n 返回翻译后的值，使重建产生不同内容
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
-        dlg.refresh_locale()
-
-        # title 不依赖 i18n（仅用 stock_data），V1 Prop 在值相等时跳过赋值，这是 V1 的优化行为
-        assert dlg.title is original_title
-        # content/actions 依赖 i18n，locale 切换后值变化，V1 Prop 会更新引用
-        assert dlg.content is not original_content
-        # actions 列表被替换为新 TextButton
-        assert len(dlg.actions) == 1
-        assert dlg.actions[0] is not original_actions[0]
-        dlg.update.assert_called_once()
-        # I18n.get 应被调用以刷新文案
-        self.mock_i18n.get.assert_any_call("common_close")
-
-    def test_refresh_locale_swallows_exception(self, mock_page, caplog):
-        """refresh_locale 异常时不应抛出，应降级为 logger.warning。"""
-        dlg = self._make_dialog({"ts_code": "000001.SZ"})
-        dlg.page = mock_page
-        # 强制 I18n.get 抛异常以触发 try/except
-        self.mock_i18n.get.side_effect = RuntimeError("i18n boom")
-
-        with caplog.at_level(logging.WARNING, logger=detail_logger.name):
-            # 不应抛出异常
-            dlg.refresh_locale()
-
-        assert any("refresh_locale failed" in r.message and "i18n boom" in r.message for r in caplog.records)
-
-    @pytest.mark.asyncio
-    async def test_load_chart_no_processor(self, mock_page):
-        dlg = self._make_dialog(data_processor=None)
-        dlg.page = mock_page
-        dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
-        await dlg.load_chart("000001.SZ")
-        dlg.chart_container.update.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_load_chart_with_processor(self, mock_page):
-        mock_dp = MagicMock(spec=DataProcessor)
-        mock_dp.get_stock_history = MagicMock(return_value=_async_empty_df())
-        dlg = self._make_dialog(data_processor=mock_dp)
-        dlg.page = mock_page
-        dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
-        with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
-            mock_tpm.return_value.run_async.return_value = _async_b64()
-            await dlg.load_chart("000001.SZ")
-        assert dlg.chart_container.update.call_count == 2  # 多次调用预期 (loading + chart)
-
-    def test_pct_chg_positive_has_plus(self):
-        data = {"pct_chg": 3.5}
-        dlg = self._make_dialog(data)
-        assert dlg.stock_data["pct_chg"] == 3.5
-
-    def test_pct_chg_nan_guarded(self):
-        data = {"pct_chg": float("nan")}
-        self._make_dialog(data)
-        assert math.isnan(data["pct_chg"])
-
-    def test_pct_chg_none_guarded(self):
-        data = {"pct_chg": None}
-        dlg = self._make_dialog(data)
-        assert dlg.stock_data["pct_chg"] is None
-
-
-def _async_empty_df():
-    import asyncio
-    import pandas as pd
-
-    loop = asyncio.get_event_loop()
-    fut = loop.create_future()
-    fut.set_result(pd.DataFrame())
-    return fut
-
-
-def _async_b64():
-    import asyncio
-
-    loop = asyncio.get_event_loop()
-    fut = loop.create_future()
-    fut.set_result("base64data")
-    return fut
-
-
-class TestStockDetailDialogFormatVolException:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_vol_exception_returns_dash(self):
-        dlg = self._make_dialog({"vol": "invalid"})
-        result = dlg._format_vol("vol")
-        assert result == "-"
-
-
-class TestStockDetailDialogFormatAmountException:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_amount_exception_returns_dash(self):
-        dlg = self._make_dialog({"amount": "invalid"})
-        result = dlg._format_amount("amount")
-        assert result == "-"
+# ---------------------------------------------------------------------------
+# 模块级常量
+# ---------------------------------------------------------------------------
+class TestTushareUnitConstants:
+    """Verify Tushare unit conversion constants are exported and correct."""
 
+    def test_mv_unit_is_10000(self):
+        from ui.components.stock_detail_dialog import TUSHARE_MV_UNIT
 
+        assert TUSHARE_MV_UNIT == 10000
+
+    def test_amount_unit_is_100000(self):
+        from ui.components.stock_detail_dialog import TUSHARE_AMOUNT_UNIT
+
+        assert TUSHARE_AMOUNT_UNIT == 100000
+
+
+# ---------------------------------------------------------------------------
+# 模块级纯函数：is_valid_number
+# ---------------------------------------------------------------------------
+class TestIsValidNumber:
+    """Unit tests for the module-level is_valid_number function."""
+
+    def test_none_returns_false(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(None) is False
+
+    def test_float_nan_returns_false(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(float("nan")) is False
+
+    def test_decimal_nan_returns_false(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(Decimal("nan")) is False
+
+    def test_float_returns_true(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(3.14) is True
+
+    def test_int_returns_true(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(42) is True
+
+    def test_decimal_returns_true(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(Decimal("1.5")) is True
+
+    def test_numeric_string_returns_true(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number("123") is True
+
+    def test_non_numeric_string_returns_false(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number("abc") is False
+
+    def test_list_returns_false(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number([1, 2, 3]) is False
+
+    def test_dict_returns_false(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number({"v": 1}) is False
+
+    def test_zero_returns_true(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(0) is True
+        assert is_valid_number(0.0) is True
+
+    def test_negative_returns_true(self):
+        from ui.components.stock_detail_dialog import is_valid_number
+
+        assert is_valid_number(-1.5) is True
+
+
+# ---------------------------------------------------------------------------
+# 模块级纯函数：format_mv
+# ---------------------------------------------------------------------------
 class TestFormatMvPureFunction:
     """Unit tests for the module-level format_mv pure function."""
 
@@ -410,8 +151,6 @@ class TestFormatMvPureFunction:
         assert format_mv(float("nan")) == "-"
 
     def test_decimal_nan_returns_dash(self):
-        from decimal import Decimal
-
         from ui.components.stock_detail_dialog import format_mv
 
         assert format_mv(Decimal("nan")) == "-"
@@ -448,8 +187,6 @@ class TestFormatMvPureFunction:
         assert result == "50.0unit_yi"
 
     def test_decimal_input_formats_correctly(self):
-        from decimal import Decimal
-
         from ui.components.stock_detail_dialog import format_mv
 
         result = format_mv(Decimal("250000"))
@@ -466,6 +203,9 @@ class TestFormatMvPureFunction:
         assert format_mv([1, 2, 3]) == "-"
 
 
+# ---------------------------------------------------------------------------
+# 模块级纯函数：format_vol
+# ---------------------------------------------------------------------------
 class TestFormatVolPureFunction:
     """Unit tests for the module-level format_vol pure function."""
 
@@ -495,8 +235,6 @@ class TestFormatVolPureFunction:
         assert format_vol(float("nan")) == "-"
 
     def test_decimal_nan_returns_dash(self):
-        from decimal import Decimal
-
         from ui.components.stock_detail_dialog import format_vol
 
         assert format_vol(Decimal("nan")) == "-"
@@ -539,8 +277,6 @@ class TestFormatVolPureFunction:
         assert result == "1234.6unit_wanshou"
 
     def test_decimal_input_formats_correctly(self):
-        from decimal import Decimal
-
         from ui.components.stock_detail_dialog import format_vol
 
         result = format_vol(Decimal("20000"))
@@ -557,6 +293,9 @@ class TestFormatVolPureFunction:
         assert format_vol({"v": 1}) == "-"
 
 
+# ---------------------------------------------------------------------------
+# 模块级纯函数：format_amount
+# ---------------------------------------------------------------------------
 class TestFormatAmountPureFunction:
     """Unit tests for the module-level format_amount pure function."""
 
@@ -586,8 +325,6 @@ class TestFormatAmountPureFunction:
         assert format_amount(float("nan")) == "-"
 
     def test_decimal_nan_returns_dash(self):
-        from decimal import Decimal
-
         from ui.components.stock_detail_dialog import format_amount
 
         assert format_amount(Decimal("nan")) == "-"
@@ -624,8 +361,6 @@ class TestFormatAmountPureFunction:
         assert result == "50.00unit_yi"
 
     def test_decimal_input_formats_correctly(self):
-        from decimal import Decimal
-
         from ui.components.stock_detail_dialog import format_amount
 
         result = format_amount(Decimal("2500000"))
@@ -642,79 +377,12 @@ class TestFormatAmountPureFunction:
         assert format_amount((1, 2)) == "-"
 
 
-class TestStockDetailDialogLoadChart:
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None, data_processor=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {}, data_processor=data_processor)
-
-    @pytest.mark.asyncio
-    async def test_load_chart_empty_dataframe(self, mock_page):
-        import pandas as pd
-        import asyncio
-
-        mock_dp = MagicMock(spec=DataProcessor)
-        loop = asyncio.get_event_loop()
-        fut = loop.create_future()
-        fut.set_result(pd.DataFrame())
-        mock_dp.get_stock_history = MagicMock(return_value=fut)
-
-        dlg = self._make_dialog(data_processor=mock_dp)
-        dlg.page = mock_page
-        dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
-
-        await dlg.load_chart("000001.SZ")
-        assert dlg.chart_container.update.call_count == 2  # 多次调用预期 (loading + empty)
-
-    @pytest.mark.asyncio
-    async def test_load_chart_exception(self, mock_page):
-        mock_dp = MagicMock(spec=DataProcessor)
-        mock_dp.get_stock_history = MagicMock(side_effect=Exception("network error"))
-
-        dlg = self._make_dialog(data_processor=mock_dp)
-        dlg.page = mock_page
-        dlg.chart_container = MagicMock()  # spec omitted: Flet Container, complex __init__
-
-        await dlg.load_chart("000001.SZ")
-        assert dlg.chart_container.update.call_count == 2  # 多次调用预期 (loading + error)
-
-
-def _collect_markdown_controls(control, found):
-    """Recursively collect ft.Markdown controls from the flet control tree."""
-    import flet as ft
-
-    if isinstance(control, ft.Markdown):
-        found.append(control)
-        return
-    for attr_name in ("content",):
-        child = getattr(control, attr_name, None)
-        if child is not None and hasattr(child, "__class__"):
-            _collect_markdown_controls(child, found)
-    for attr_name in ("controls",):
-        children = getattr(control, attr_name, None)
-        if isinstance(children, list):
-            for child in children:
-                if child is not None:
-                    _collect_markdown_controls(child, found)
-
-
-class TestStockDetailDialogMarkdownTapLink:
-    """SEC-010: verify ft.Markdown controls register on_tap_link=safe_open_url."""
+# ---------------------------------------------------------------------------
+# 模块级纯函数：_format_val / _format_mv / _format_vol / _format_amount
+# （由旧实例方法转换，接收 stock_data dict）
+# ---------------------------------------------------------------------------
+class TestFormatValModuleFunction:
+    """模块级 _format_val(stock_data, key, suffix) 纯函数测试。"""
 
     patches: list
 
@@ -731,108 +399,165 @@ class TestStockDetailDialogMarkdownTapLink:
                 stack.enter_context(p)
             yield
 
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
+    def test_format_val_none_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_val
 
-        return StockDetailDialog(stock_data=data or {})
+        assert _format_val({}, "close") == "-"
 
-    def test_markdown_controls_have_on_tap_link(self):
-        from ui.components._markdown_safe import safe_open_url
+    def test_format_val_nan_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_val
 
-        data = {"ai_reason": "test reason", "thinking": "test thinking"}
-        dlg = self._make_dialog(data)
-        found: list = []
-        _collect_markdown_controls(dlg.content, found)
-        assert len(found) >= 2  # ai_reason + thinking markdown
-        for md in found:
-            assert md.on_tap_link is safe_open_url
+        assert _format_val({"close": float("nan")}, "close") == "-"
 
+    def test_format_val_float_with_suffix(self):
+        from ui.components.stock_detail_dialog import _format_val
 
-class TestIsValidNumber:
-    """Unit tests for the module-level is_valid_number function."""
+        assert _format_val({"close": 12.34}, "close", "元") == "12.34元"
 
-    def test_none_returns_false(self):
-        from ui.components.stock_detail_dialog import is_valid_number
+    def test_format_val_non_numeric_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_val
 
-        assert is_valid_number(None) is False
+        assert _format_val({"close": "abc"}, "close") == "-"
 
-    def test_float_nan_returns_false(self):
-        from ui.components.stock_detail_dialog import is_valid_number
+    def test_format_val_zero(self):
+        from ui.components.stock_detail_dialog import _format_val
 
-        assert is_valid_number(float("nan")) is False
+        assert _format_val({"close": 0}, "close", "%") == "0.00%"
 
-    def test_decimal_nan_returns_false(self):
-        from decimal import Decimal
+    def test_format_val_tricky_int_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_val
 
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number(Decimal("nan")) is False
-
-    def test_float_returns_true(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number(3.14) is True
-
-    def test_int_returns_true(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number(42) is True
-
-    def test_decimal_returns_true(self):
-        from decimal import Decimal
-
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number(Decimal("1.5")) is True
-
-    def test_numeric_string_returns_true(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number("123") is True
-
-    def test_non_numeric_string_returns_false(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number("abc") is False
-
-    def test_list_returns_false(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number([1, 2, 3]) is False
-
-    def test_dict_returns_false(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number({"v": 1}) is False
-
-    def test_zero_returns_true(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number(0) is True
-        assert is_valid_number(0.0) is True
-
-    def test_negative_returns_true(self):
-        from ui.components.stock_detail_dialog import is_valid_number
-
-        assert is_valid_number(-1.5) is True
+        assert _format_val({"close": _TrickyInt(5)}, "close") == "-"
 
 
-class TestTushareUnitConstants:
-    """Verify Tushare unit conversion constants are exported and correct."""
+class TestFormatMvModuleFunction:
+    """模块级 _format_mv(stock_data, key) 纯函数测试。"""
 
-    def test_mv_unit_is_10000(self):
-        from ui.components.stock_detail_dialog import TUSHARE_MV_UNIT
+    patches: list
 
-        assert TUSHARE_MV_UNIT == 10000
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
 
-    def test_amount_unit_is_100000(self):
-        from ui.components.stock_detail_dialog import TUSHARE_AMOUNT_UNIT
+    def test_format_mv_none_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_mv
 
-        assert TUSHARE_AMOUNT_UNIT == 100000
+        assert _format_mv({}, "total_mv") == "-"
+
+    def test_format_mv_nan_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_mv
+
+        assert _format_mv({"total_mv": float("nan")}, "total_mv") == "-"
+
+    def test_format_mv_converts_wan_to_yi(self):
+        from ui.components.stock_detail_dialog import _format_mv
+
+        result = _format_mv({"total_mv": 500000}, "total_mv")
+        assert "50.0" in result
+
+    def test_format_mv_non_numeric_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_mv
+
+        assert _format_mv({"total_mv": "abc"}, "total_mv") == "-"
+
+
+class TestFormatVolModuleFunction:
+    """模块级 _format_vol(stock_data, key) 纯函数测试。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def test_format_vol_none_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_vol
+
+        assert _format_vol({}, "vol") == "-"
+
+    def test_format_vol_over_10000(self):
+        from ui.components.stock_detail_dialog import _format_vol
+
+        result = _format_vol({"vol": 50000}, "vol")
+        assert "5.0" in result
+
+    def test_format_vol_under_10000(self):
+        from ui.components.stock_detail_dialog import _format_vol
+
+        result = _format_vol({"vol": 5000}, "vol")
+        assert "5000" in result
+
+    def test_format_vol_nan_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_vol
+
+        assert _format_vol({"vol": float("nan")}, "vol") == "-"
+
+    def test_format_vol_exception_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_vol
+
+        assert _format_vol({"vol": "invalid"}, "vol") == "-"
+
+
+class TestFormatAmountModuleFunction:
+    """模块级 _format_amount(stock_data, key) 纯函数测试。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def test_format_amount_none_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_amount
+
+        assert _format_amount({}, "amount") == "-"
+
+    def test_format_amount_converts_qianyuan_to_yi(self):
+        from ui.components.stock_detail_dialog import _format_amount
+
+        result = _format_amount({"amount": 5000000}, "amount")
+        assert "50.00" in result
+
+    def test_format_amount_nan_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_amount
+
+        assert _format_amount({"amount": float("nan")}, "amount") == "-"
+
+    def test_format_amount_exception_returns_dash(self):
+        from ui.components.stock_detail_dialog import _format_amount
+
+        assert _format_amount({"amount": "invalid"}, "amount") == "-"
 
 
 # ---------------------------------------------------------------------------
-# 补充覆盖：format_mv/vol/amount 防御性 except 分支
+# 模块级纯函数：format_mv/vol/amount 防御性 except 分支
 # ---------------------------------------------------------------------------
 class TestFormatPureFunctionExceptionBranch:
     """覆盖 format_mv/vol/amount 中 except (ValueError, TypeError) 分支。
@@ -873,110 +598,62 @@ class TestFormatPureFunctionExceptionBranch:
 
 
 # ---------------------------------------------------------------------------
-# 补充覆盖：_format_val 防御性 except 分支
+# 模块级纯函数：_dialog_size
 # ---------------------------------------------------------------------------
-class TestStockDetailDialogFormatValException:
-    """覆盖 _format_val 中 except (ValueError, TypeError) 分支。"""
+class TestDialogSizeFunction:
+    """模块级 _dialog_size(page) 纯函数测试。"""
 
-    patches: list
+    def test_no_page_returns_default(self):
+        from ui.components.stock_detail_dialog import _dialog_size
 
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
+        w, h = _dialog_size(None)
+        assert w == 900
+        assert h == 700
 
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_format_val_tricky_int_returns_dash(self):
-        dlg = self._make_dialog({"close": _TrickyInt(5)})
-        assert dlg._format_val("close") == "-"
-
-
-# ---------------------------------------------------------------------------
-# 补充覆盖：_dialog_size 带 page 参数
-# ---------------------------------------------------------------------------
-class TestStockDetailDialogDialogSize:
-    """覆盖 _dialog_size 在有 page 参数时的计算分支。"""
-
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def test_dialog_size_with_page_uses_window_dims(self, mock_page):
-        from ui.components.stock_detail_dialog import StockDetailDialog
+    def test_with_page_uses_window_dims(self, mock_page):
+        from ui.components.stock_detail_dialog import _dialog_size
 
         # mock_page.window.width=1200, window.height=800
         # w = min(max(1200-80, 600), 900) = 900
         # h = min(max(800-80, 500), 700) = 700
-        dlg = StockDetailDialog(stock_data={}, page=mock_page)
-        assert dlg._cached_width == 900
-        assert dlg._cached_height == 700
+        w, h = _dialog_size(mock_page)
+        assert w == 900
+        assert h == 700
 
-    def test_dialog_size_clamps_to_min(self, mock_page):
-        from ui.components.stock_detail_dialog import StockDetailDialog
+    def test_clamps_to_min(self, mock_page):
+        from ui.components.stock_detail_dialog import _dialog_size
 
         mock_page.window.width = 600  # 600-80=520 < 600 → clamp to 600
         mock_page.window.height = 500  # 500-80=420 < 500 → clamp to 500
-        dlg = StockDetailDialog(stock_data={}, page=mock_page)
-        assert dlg._cached_width == 600
-        assert dlg._cached_height == 500
+        w, h = _dialog_size(mock_page)
+        assert w == 600
+        assert h == 500
 
-    def test_dialog_size_clamps_to_max(self, mock_page):
-        from ui.components.stock_detail_dialog import StockDetailDialog
+    def test_clamps_to_max(self, mock_page):
+        from ui.components.stock_detail_dialog import _dialog_size
 
         mock_page.window.width = 2000  # 2000-80=1920 > 900 → clamp to 900
         mock_page.window.height = 2000  # 2000-80=1920 > 700 → clamp to 700
-        dlg = StockDetailDialog(stock_data={}, page=mock_page)
-        assert dlg._cached_width == 900
-        assert dlg._cached_height == 700
+        w, h = _dialog_size(mock_page)
+        assert w == 900
+        assert h == 700
 
-    def test_dialog_size_window_none_falls_back(self, mock_page):
-        from ui.components.stock_detail_dialog import StockDetailDialog
+    def test_window_none_falls_back(self, mock_page):
+        from ui.components.stock_detail_dialog import _dialog_size
 
         mock_page.window.width = None
         mock_page.window.height = None
         # int(None or 1280) = 1280, int(None or 800) = 800
-        dlg = StockDetailDialog(stock_data={}, page=mock_page)
-        assert dlg._cached_width == 900  # min(max(1280-80, 600), 900) = 900
-        assert dlg._cached_height == 700  # min(max(800-80, 500), 700) = 700
-
-    def test_chart_width_derived_from_dialog_width(self, mock_page):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        mock_page.window.width = 1000
-        dlg = StockDetailDialog(stock_data={}, page=mock_page)
-        # _cached_width = min(max(1000-80, 600), 900) = 900
-        # _chart_width = max(900 - 40, 600) = 860
-        assert dlg._chart_width == 860
+        w, h = _dialog_size(mock_page)
+        assert w == 900  # min(max(1280-80, 600), 900) = 900
+        assert h == 700  # min(max(800-80, 500), 700) = 700
 
 
 # ---------------------------------------------------------------------------
-# 补充覆盖：ai_score 解析异常
+# 模块级纯函数：_build_title
 # ---------------------------------------------------------------------------
-class TestStockDetailDialogAiScoreParse:
-    """覆盖 ai_score 为不可转换值时的 except 分支。"""
+class TestBuildTitleFunction:
+    """模块级 _build_title(stock_data) 纯函数测试。"""
 
     patches: list
 
@@ -993,41 +670,145 @@ class TestStockDetailDialogAiScoreParse:
                 stack.enter_context(p)
             yield
 
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
+    def test_build_title_with_name_and_code(self):
+        from ui.components.stock_detail_dialog import _build_title
 
-        return StockDetailDialog(stock_data=data or {})
+        title = _build_title({"ts_code": "000001.SZ", "name": "平安银行"})
+        assert isinstance(title, ft.Row)
+        # 标题应包含名称和代码
+        texts = [c for c in title.controls if isinstance(c, ft.Text)]
+        assert any("平安银行" in (t.value or "") for t in texts)
+        assert any("000001.SZ" in (t.value or "") for t in texts)
+
+    def test_build_title_with_empty_data(self):
+        from ui.components.stock_detail_dialog import _build_title
+
+        title = _build_title({})
+        assert isinstance(title, ft.Row)
+
+
+# ---------------------------------------------------------------------------
+# 模块级纯函数：_initial_chart_content
+# ---------------------------------------------------------------------------
+class TestInitialChartContent:
+    """模块级 _initial_chart_content() 纯函数测试。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def test_initial_chart_content_has_progress_ring(self):
+        from ui.components.stock_detail_dialog import _initial_chart_content
+
+        content = _initial_chart_content()
+        assert isinstance(content, ft.Column)
+        # 应包含 ProgressRing 和 Text
+        controls = content.controls
+        assert any(isinstance(c, ft.ProgressRing) for c in controls)
+        assert any(isinstance(c, ft.Text) for c in controls)
+
+
+# ---------------------------------------------------------------------------
+# 模块级纯函数：_build_content（ai_score 解析 + markdown on_tap_link）
+# ---------------------------------------------------------------------------
+class TestBuildContentFunction:
+    """模块级 _build_content(stock_data, chart_content, width, height) 纯函数测试。"""
+
+    patches: list
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, mock_i18n, mock_app_colors):
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.patches = [
+            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
+            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
+        ]
+        with contextlib.ExitStack() as stack:
+            for p in self.patches:
+                stack.enter_context(p)
+            yield
+
+    def _build(self, data=None):
+        from ui.components.stock_detail_dialog import _build_content, _initial_chart_content
+
+        return _build_content(data or {}, _initial_chart_content(), 900, 700)
+
+    def test_build_content_returns_container(self):
+        container = self._build({"ts_code": "000001.SZ"})
+        assert isinstance(container, ft.Container)
 
     def test_ai_score_invalid_string_falls_back_to_zero(self):
         # ai_score="not_a_number" → float() raises ValueError → score_val=0
-        dlg = self._make_dialog({"ai_reason": "test", "ai_score": "not_a_number"})
-        # 验证对话框正常构建（score_val=0，不抛异常）
-        assert dlg.content is not None
+        container = self._build({"ai_reason": "test", "ai_score": "not_a_number"})
+        assert container is not None
 
     def test_ai_score_none_with_ai_reason(self):
         # ai_score=None → score_val=0 (else 分支)
-        dlg = self._make_dialog({"ai_reason": "test", "ai_score": None})
-        assert dlg.content is not None
+        container = self._build({"ai_reason": "test", "ai_score": None})
+        assert container is not None
 
     def test_ai_score_valid_number(self):
-        dlg = self._make_dialog({"ai_reason": "test", "ai_score": "85.5"})
-        assert dlg.content is not None
+        container = self._build({"ai_reason": "test", "ai_score": "85.5"})
+        assert container is not None
 
     def test_ai_score_only_no_reason(self):
         # 仅 ai_score，无 ai_reason
-        dlg = self._make_dialog({"ai_score": "90"})
-        assert dlg.content is not None
+        container = self._build({"ai_score": "90"})
+        assert container is not None
 
     def test_ai_score_int_zero(self):
-        dlg = self._make_dialog({"ai_reason": "test", "ai_score": 0})
-        assert dlg.content is not None
+        container = self._build({"ai_reason": "test", "ai_score": 0})
+        assert container is not None
+
+    def test_markdown_controls_have_on_tap_link(self):
+        """SEC-010: verify ft.Markdown controls register on_tap_link=safe_open_url."""
+        from ui.components._markdown_safe import safe_open_url
+
+        container = self._build({"ai_reason": "test reason", "thinking": "test thinking"})
+        found: list = []
+        _collect_markdown_controls(container, found)
+        assert len(found) >= 2  # ai_reason + thinking markdown
+        for md in found:
+            assert md.on_tap_link is safe_open_url
+
+
+def _collect_markdown_controls(control, found):
+    """Recursively collect ft.Markdown controls from the flet control tree."""
+    if isinstance(control, ft.Markdown):
+        found.append(control)
+        return
+    for attr_name in ("content",):
+        child = getattr(control, attr_name, None)
+        if child is not None and hasattr(child, "__class__"):
+            _collect_markdown_controls(child, found)
+    for attr_name in ("controls",):
+        children = getattr(control, attr_name, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    _collect_markdown_controls(child, found)
 
 
 # ---------------------------------------------------------------------------
-# 补充覆盖：_close / did_mount / will_unmount / refresh_locale 边界
+# 模块级纯函数：_load_chart_async
 # ---------------------------------------------------------------------------
-class TestStockDetailDialogLifecycle:
-    """覆盖生命周期方法与 _close 的边界分支。"""
+class TestLoadChartAsyncFunction:
+    """模块级 _load_chart_async(...) 纯函数测试。
+
+    接收 set_chart_content 回调，可独立单测（无需实例化 StockDetailDialog）。
+    """
 
     patches: list
 
@@ -1043,137 +824,70 @@ class TestStockDetailDialogLifecycle:
             for p in self.patches:
                 stack.enter_context(p)
             yield
-
-    def _make_dialog(self, data=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {})
-
-    def test_close_without_page_no_exception(self):
-        # R3: V1 _close 在 page 未设置时不抛异常（不调用 pop_dialog）
-        dlg = self._make_dialog()
-        dlg._close(None)
-        # 无断言：仅验证不抛异常
-
-    def test_did_mount_subscribes_locale(self):
-        dlg = self._make_dialog()
-        dlg.did_mount()
-        # I18n.subscribe 应被调用，返回 sub_id
-        self.mock_i18n.subscribe.assert_called_once()
-        assert dlg._locale_subscription_id == "sub_id"
-
-    def test_will_unmount_unsubscribes_when_id_set(self):
-        dlg = self._make_dialog()
-        dlg.did_mount()  # 设置 _locale_subscription_id
-        dlg.will_unmount()
-        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
-        assert dlg._locale_subscription_id is None
-
-    def test_will_unmount_noop_when_id_none(self):
-        dlg = self._make_dialog()
-        # 未调用 did_mount，_locale_subscription_id 为 None
-        dlg.will_unmount()
-        self.mock_i18n.unsubscribe.assert_not_called()
-
-    def test_refresh_locale_without_page_no_update(self):
-        dlg = self._make_dialog({"ts_code": "000001.SZ"})
-        # page 未设置，refresh_locale 不应抛出（不调用 self.update）
-        dlg.refresh_locale()
-        # title/content 被重建
-        assert dlg.title is not None
-        assert dlg.content is not None
-
-    def test_refresh_locale_preserves_ft_image_chart(self, mock_page):
-        """refresh_locale 应保留已加载的 ft.Image K 线图。"""
-        import flet as ft
-
-        dlg = self._make_dialog({"ts_code": "000001.SZ", "name": "测试"})
-        dlg.page = mock_page
-        dlg.update = MagicMock()
-
-        # 模拟已加载的 K 线图（ft.Image）
-        original_image = ft.Image(src="loaded_png_data", fit=ft.BoxFit.CONTAIN)
-        dlg.chart_container.content = original_image
-
-        dlg.refresh_locale()
-
-        # chart_container.content 应恢复为原来的 ft.Image
-        assert dlg.chart_container.content is original_image
-        dlg.update.assert_called_once()
-
-    def test_refresh_locale_does_not_preserve_non_image_chart(self, mock_page):
-        """chart_container.content 非 ft.Image 时不应保留。"""
-        import flet as ft
-
-        dlg = self._make_dialog({"ts_code": "000001.SZ"})
-        dlg.page = mock_page
-        dlg.update = MagicMock()
-
-        # chart_container.content 是 ProgressRing（非 ft.Image）
-        dlg.chart_container.content = ft.ProgressRing()
-        original = dlg.chart_container.content
-
-        dlg.refresh_locale()
-
-        # _build_content 会重建 chart_container，content 不再是原来的 ProgressRing
-        assert dlg.chart_container.content is not original
-
-
-# ---------------------------------------------------------------------------
-# 补充覆盖：load_chart 成功路径（非空 DataFrame + 生成图片）
-# ---------------------------------------------------------------------------
-class TestStockDetailDialogLoadChartSuccess:
-    """覆盖 load_chart 成功路径：非空 DataFrame → 生成 PNG → 设置 ft.Image。"""
-
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.patches = [
-            patch("ui.components.stock_detail_dialog.I18n", self.mock_i18n),
-            patch("ui.components.stock_detail_dialog.AppColors", self.mock_ac),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_dialog(self, data=None, data_processor=None):
-        from ui.components.stock_detail_dialog import StockDetailDialog
-
-        return StockDetailDialog(stock_data=data or {}, data_processor=data_processor)
 
     @pytest.mark.asyncio
-    async def test_load_chart_success_sets_ft_image(self, mock_page):
-        import flet as ft
+    async def test_no_processor_sets_error_text(self):
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        calls: list = []
+        await _load_chart_async(None, {}, "000001.SZ", calls.append, 860, 340)
+        assert len(calls) == 1
+        assert isinstance(calls[0], ft.Text)
+
+    @pytest.mark.asyncio
+    async def test_empty_dataframe_sets_no_history_text(self):
         import pandas as pd
 
-        # 非空 DataFrame，无 vol 列（覆盖 line 529-530 添加 vol 列）
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = AsyncMock(return_value=pd.DataFrame())
+
+        calls: list = []
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
+        # 第一次：loading（ProgressRing），第二次：no_history（Text）
+        assert len(calls) == 2
+        assert isinstance(calls[1], ft.Text)
+
+    @pytest.mark.asyncio
+    async def test_exception_sets_error_text(self):
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        mock_dp = MagicMock(spec=DataProcessor)
+        mock_dp.get_stock_history = MagicMock(side_effect=Exception("network error"))
+
+        calls: list = []
+        await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
+        # 第一次：loading，第二次：error
+        assert len(calls) == 2
+        assert isinstance(calls[1], ft.Text)
+
+    @pytest.mark.asyncio
+    async def test_success_sets_ft_image(self):
+        import pandas as pd
+
+        from ui.components.stock_detail_dialog import _load_chart_async
+
+        # 非空 DataFrame，无 vol 列（覆盖添加 vol 列分支）
         df = pd.DataFrame({"close": [10.0, 11.0, 12.0]})
 
         mock_dp = MagicMock(spec=DataProcessor)
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
-        dlg = self._make_dialog(data={"name": "测试股票"}, data_processor=mock_dp)
-        dlg.page = mock_page
-        dlg.chart_container = MagicMock()
-
+        calls: list = []
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(return_value="base64pngdata")
-            await dlg.load_chart("000001.SZ")
+            await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append, 860, 340)
 
-        # 验证最终设置了 ft.Image
-        assert isinstance(dlg.chart_container.content, ft.Image)
-        assert dlg.chart_container.content.src == "base64pngdata"
-        # chart_container.update 被调用多次（loading + 最终图片）
-        assert dlg.chart_container.update.call_count >= 2
+        # 最终设置 ft.Image
+        assert isinstance(calls[-1], ft.Image)
+        assert calls[-1].src == "base64pngdata"
 
     @pytest.mark.asyncio
-    async def test_load_chart_success_with_existing_vol_column(self, mock_page):
-        import flet as ft
+    async def test_success_with_existing_vol_column(self):
         import pandas as pd
+
+        from ui.components.stock_detail_dialog import _load_chart_async
 
         # 非空 DataFrame，已有 vol 列
         df = pd.DataFrame({"close": [10.0, 11.0], "vol": [100, 200]})
@@ -1181,14 +895,95 @@ class TestStockDetailDialogLoadChartSuccess:
         mock_dp = MagicMock(spec=DataProcessor)
         mock_dp.get_stock_history = AsyncMock(return_value=df)
 
-        dlg = self._make_dialog(data={"name": "测试"}, data_processor=mock_dp)
-        dlg.page = mock_page
-        dlg.chart_container = MagicMock()
-
+        calls: list = []
         with patch("utils.thread_pool.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(return_value="b64")
-            await dlg.load_chart("000001.SZ")
+            await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
 
-        assert isinstance(dlg.chart_container.content, ft.Image)
+        assert isinstance(calls[-1], ft.Image)
         # vol 列已存在，不应被覆盖
         assert list(df["vol"]) == [100, 200]
+
+
+# ---------------------------------------------------------------------------
+# 契约守护测试：声明式组件禁止命令式模式
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogContract:
+    """契约守护测试：声明式组件禁止命令式模式。"""
+
+    def test_no_imperative_patterns(self) -> None:
+        """grep 命令式禁止模式 = 0（did_mount/will_unmount/refresh_locale/.update()/class X(ft.AlertDialog)/PageRefMixin/update_data/load_chart）。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        forbidden_patterns = [
+            "def did_mount",
+            "def will_unmount",
+            "def refresh_locale",
+            "self.update()",
+            "class StockDetailDialog(ft.AlertDialog)",
+            "class StockDetailDialog(ft.Container)",
+            "class StockDetailDialog(ft.UserControl)",
+            "PageRefMixin",
+            "def update_data",
+            "def load_chart",
+            "page.show_dialog",
+            "page.pop_dialog",
+        ]
+        for pattern in forbidden_patterns:
+            assert pattern not in content, f"禁止命令式模式: {pattern}"
+
+    def test_is_declarative_component(self) -> None:
+        """验证是 @ft.component 声明式组件。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        assert "@ft.component" in content
+        assert "def StockDetailDialog(" in content
+
+    def test_uses_i18n_observable_state(self) -> None:
+        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        assert "ft.use_state(I18n.get_observable_state)" in content
+
+    def test_uses_use_dialog(self) -> None:
+        """验证通过 ft.use_dialog 自动挂载/卸载 dialog。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        assert "ft.use_dialog(" in content
+
+    def test_uses_use_effect_for_chart_loading(self) -> None:
+        """验证通过 ft.use_effect 异步加载 K 线图。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        assert "ft.use_effect(" in content
+
+    def test_pure_functions_preserved(self) -> None:
+        """验证模块级纯函数保留导出。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        # 纯函数
+        assert "def is_valid_number(" in content
+        assert "def format_mv(" in content
+        assert "def format_vol(" in content
+        assert "def format_amount(" in content
+        # 常量
+        assert "TUSHARE_MV_UNIT" in content
+        assert "TUSHARE_AMOUNT_UNIT" in content

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import flet as ft
@@ -421,183 +422,174 @@ class CoverageDetailTable(ft.Column):
 # ==============================================================================
 
 
-class HealthReportDialog(ft.AlertDialog):
-    def __init__(self, page, report, on_dismiss=None):
-        self.page_ref = page
-        self.report = report
-        self._locale_subscription_id: object | None = None
+def _health_dialog_size(page: ft.Page | None) -> tuple[int, int]:
+    """基于窗口尺寸计算对话框宽高，加上限约束（纯函数）。"""
+    if not page:
+        return 600, 600
+    win_w = int(page.window.width or 1280)
+    win_h = int(page.window.height or 800)
+    w = min(max(win_w - 80, 480), 600)
+    h = min(max(win_h - 80, 400), 600)
+    return w, h
 
-        # 缓存对话框尺寸（打开时计算一次，不随 resize 变化）
-        self._cached_width, self._cached_height = self._dialog_size()
 
-        # LOG REPORT SUMMARY FOR DEBUGGING
-        try:
-            r_status = report.get("status", "unknown")
-            r_tables = len(report.get("fundamentals", {}).get("tables", {}))
-            r_lag = report.get("market", {}).get("lag_days", "?")
-            logger.info(
-                "HealthReportDialog Opened: Status=%s, Tables=%s, Lag=%s",
-                r_status,
-                r_tables,
-                r_lag,
+def _log_report_summary(report: dict) -> None:
+    """记录报告摘要日志（纯函数，异常不抛出）。"""
+    try:
+        r_status = report.get("status", "unknown")
+        r_tables = len(report.get("fundamentals", {}).get("tables", {}))
+        r_lag = report.get("market", {}).get("lag_days", "?")
+        logger.info(
+            "HealthReportDialog Opened: Status=%s, Tables=%s, Lag=%s",
+            r_status,
+            r_tables,
+            r_lag,
+        )
+    except Exception as e:
+        logger.error("Error logging report summary: %s", e, exc_info=True)
+
+
+def _build_health_content(report: dict, width: int, height: int) -> ft.Container:
+    """构建健康报告详情内容（纯函数）。
+
+    由旧 ``HealthReportDialog._build_content`` 实例方法转换。
+    """
+    status = report.get("status", "red")
+    market = report.get("market", {})
+    fundamentals = report.get("fundamentals", {})
+    tables = fundamentals.get("tables", {})
+    reasons = report.get("reasons", [])
+
+    header = HealthScoreCard(status, len(tables))
+    metrics = KeyMetricsGrid(market, fundamentals)
+    coverage = CoverageDetailTable(tables)
+
+    issues_section: ft.Control = ft.Container()
+    if reasons:
+        issues_list = [
+            ft.Row(
+                [
+                    ft.Icon(ft.Icons.WARNING_AMBER, color=AppColors.ERROR, size=14),
+                    ft.Text(r, size=12, color=AppColors.ERROR),
+                ],
             )
-        except Exception as e:
-            logger.error("Error logging report summary: %s", e, exc_info=True)
+            for r in reasons
+        ]
+        issues_section = ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(
+                        I18n.get("common_reason"),
+                        weight=ft.FontWeight.BOLD,
+                        size=12,
+                        color=AppColors.TEXT_PRIMARY,
+                    ),
+                    *issues_list,
+                ],
+                spacing=5,
+            ),
+            padding=10,
+            bgcolor=ft.Colors.with_opacity(0.1, AppColors.ERROR),
+            border_radius=4,
+            margin=ft.Margin.only(bottom=10),
+        )
 
-        self.on_dismiss_callback = on_dismiss
+    return ft.Container(
+        width=width,
+        height=height,
+        padding=20,
+        content=ft.Column(
+            controls=[
+                header,
+                ft.Divider(height=20, color=ft.Colors.TRANSPARENT),
+                issues_section,
+                metrics,
+                ft.Divider(height=20, color=AppColors.DIVIDER),
+                ft.Column(
+                    [
+                        ft.Container(
+                            content=coverage,
+                            padding=ft.Padding.only(right=15),
+                        ),
+                    ],
+                    scroll=ft.ScrollMode.AUTO,
+                    expand=True,
+                ),
+            ],
+            spacing=0,
+        ),
+    )
 
-        super().__init__(
+
+@ft.component
+def HealthReportDialog(
+    report: dict,
+    page: ft.Page | None = None,
+    open_state: bool = False,
+    on_close: Callable[[], None] | None = None,
+    on_deep_scan: Callable[[], None] | None = None,
+) -> ft.Container:
+    """健康报告弹窗（声明式 V1）。
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
+    - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
+    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - 深度扫描通过 ``on_deep_scan`` 回调通知消费方（HealthScanDialog 仍命令式，Task 4.3 重写）
+    - 无 ``did_mount``/``will_unmount``/手动 update/``show_dialog``/``pop_dialog``
+
+    Args:
+        report: 健康报告字典
+        page: ft.Page 引用（用于计算对话框尺寸）
+        open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
+        on_close: 关闭回调（消费方用于清理引用）
+        on_deep_scan: 深度扫描回调（消费方打开 HealthScanDialog）
+    """
+    ft.use_state(I18n.get_observable_state)
+    open_, set_open = ft.use_state(open_state)
+
+    width, height = _health_dialog_size(page)
+    _log_report_summary(report)
+
+    def _close(_e=None) -> None:
+        set_open(False)
+        if on_close is not None:
+            on_close()
+
+    def _deep_scan(_e=None) -> None:
+        set_open(False)
+        if on_close is not None:
+            on_close()
+        if on_deep_scan is not None:
+            on_deep_scan()
+
+    dialog = (
+        ft.AlertDialog(
             content_padding=0,
             modal=True,
             title=ft.Container(),
             title_padding=0,
-            content=self._build_content(),
+            content=_build_health_content(report, width, height),
             actions=[
                 ft.TextButton(
                     I18n.get("health_btn_deep_scan"),
-                    on_click=self.run_deep_scan,
+                    on_click=_deep_scan,
                     style=ft.ButtonStyle(color=AppColors.ACCENT),
                 ),
                 ft.TextButton(
                     I18n.get("common_close"),
-                    on_click=self.close_dialog,
+                    on_click=_close,
                     style=ft.ButtonStyle(color=AppColors.PRIMARY),
                 ),
             ],
             actions_padding=10,
             shape=ft.RoundedRectangleBorder(radius=8),
         )
+        if open_
+        else None
+    )
+    ft.use_dialog(dialog)
 
-    def _dialog_size(self) -> tuple[int, int]:
-        """基于窗口尺寸计算对话框宽高，加上限约束。"""
-        if not self.page_ref:
-            return 600, 600
-        win_w = int(self.page_ref.window.width or 1280)
-        win_h = int(self.page_ref.window.height or 800)
-        w = min(max(win_w - 80, 480), 600)
-        h = min(max(win_h - 80, 400), 600)
-        return w, h
-
-    def close_dialog(self, e=None):  # pragma: no cover
-        try:
-            self.page_ref.pop_dialog()
-        except Exception as ex:
-            logger.error("Error closing dialog: %s", ex, exc_info=True)
-
-        if self.on_dismiss_callback:
-            self.on_dismiss_callback()
-
-    def did_mount(self):
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
-
-    def will_unmount(self):
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-
-    def refresh_locale(self):
-        """Refresh i18n text on locale change (pure UI rebuild)."""
-        try:
-            self.content = self._build_content()
-            self.actions = [
-                ft.TextButton(
-                    I18n.get("health_btn_deep_scan"),
-                    on_click=self.run_deep_scan,
-                    style=ft.ButtonStyle(color=AppColors.ACCENT),
-                ),
-                ft.TextButton(
-                    I18n.get("common_close"),
-                    on_click=self.close_dialog,
-                    style=ft.ButtonStyle(color=AppColors.PRIMARY),
-                ),
-            ]
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[HealthReportDialog] refresh_locale failed: %s", e, exc_info=True)
-
-    def _build_content(self):
-        # Extract Data
-        status = self.report.get("status", "red")
-        market = self.report.get("market", {})
-        fundamentals = self.report.get("fundamentals", {})
-        tables = fundamentals.get("tables", {})
-        reasons = self.report.get("reasons", [])
-
-        # Components
-        header = HealthScoreCard(status, len(tables))
-        metrics = KeyMetricsGrid(market, fundamentals)
-        coverage = CoverageDetailTable(tables)
-
-        # Issues Section (if any)
-        issues_section = ft.Container()
-        if reasons:
-            issues_list = [
-                ft.Row(
-                    [
-                        ft.Icon(ft.Icons.WARNING_AMBER, color=AppColors.ERROR, size=14),
-                        ft.Text(r, size=12, color=AppColors.ERROR),
-                    ],
-                )
-                for r in reasons
-            ]
-            issues_section = ft.Container(
-                content=ft.Column(
-                    [
-                        ft.Text(
-                            I18n.get("common_reason"),
-                            weight=ft.FontWeight.BOLD,
-                            size=12,
-                            color=AppColors.TEXT_PRIMARY,
-                        ),
-                        *issues_list,
-                    ],
-                    spacing=5,
-                ),
-                padding=10,
-                bgcolor=ft.Colors.with_opacity(0.1, AppColors.ERROR),
-                border_radius=4,
-                margin=ft.Margin.only(bottom=10),
-            )
-
-        # Assemble
-        return ft.Container(
-            width=self._cached_width,
-            height=self._cached_height,
-            padding=20,
-            content=ft.Column(
-                controls=[
-                    header,
-                    ft.Divider(height=20, color=ft.Colors.TRANSPARENT),
-                    issues_section,
-                    metrics,
-                    ft.Divider(height=20, color=AppColors.DIVIDER),
-                    ft.Column(
-                        [
-                            ft.Container(
-                                content=coverage,
-                                padding=ft.Padding.only(right=15),
-                            ),
-                        ],
-                        scroll=ft.ScrollMode.AUTO,
-                        expand=True,
-                    ),  # Scrollable list
-                ],
-                spacing=0,
-            ),
-        )
-
-    async def run_deep_scan(self, e):
-        """Open Deep Scan Dialog"""
-        from data.data_processor import DataProcessor
-
-        self.close_dialog(e)
-
-        dialog = HealthScanDialog(self.page_ref, DataProcessor())
-        self.page_ref.show_dialog(dialog)
-
-        # Run backend scan without blocking UI thread indefinitely.
-        await dialog.start_scan()
+    return ft.Container(width=0, height=0)
 
 
 class HealthScanDialog(ft.AlertDialog):
