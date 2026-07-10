@@ -48,8 +48,12 @@ def _get_config_from_state(
 
     含类型转换、默认值兜底、stamp_duty_auto 分段逻辑：
     - stamp_duty_auto=True → stamp_duty_rate=None（由 BacktestConfig 默认值决定）
-    - stamp_duty_auto=False → stamp_duty_rate=slider_value/1000（‰ → 小数）
-    - commission slider 值为万分之一（‱）→ commission_rate=slider_value/10000
+    - stamp_duty_auto=False → stamp_duty_rate=slider_value/1000（‰ → 小数，0 合法）
+    - commission slider 值为万分之一（‱）→ commission_rate=slider_value/10000（0 合法）
+    - slippage slider 值为 bps → slippage_bps=slider_value（0 合法）
+
+    注：commission/slippage/stamp_duty_rate 入参类型为 float（use_state 初始化 +
+    on_change 的 None 兜底保证非 None），0 是合法值，不用 falsy 兜底。
     """
     try:
         initial_capital = float(initial_capital_str or "1000000")
@@ -64,7 +68,7 @@ def _get_config_from_state(
     if stamp_duty_auto:
         stamp_duty_rate_val = None
     else:
-        stamp_duty_rate_val = stamp_duty_rate / 1000 if stamp_duty_rate else None
+        stamp_duty_rate_val = stamp_duty_rate / 1000
 
     return {
         "start_date": start_date,
@@ -72,9 +76,9 @@ def _get_config_from_state(
         "initial_capital": initial_capital,
         "rebalance_freq": rebalance_freq or "signal",
         "max_position_count": max_positions,
-        "commission_rate": commission / 10000 if commission else 3e-4,
+        "commission_rate": commission / 10000,
         "stamp_duty_rate": stamp_duty_rate_val,
-        "slippage_bps": slippage or 5.0,
+        "slippage_bps": slippage,
     }
 
 
@@ -235,7 +239,7 @@ def BacktestConfigPanel(
         value=commission,
         label="{value}",
         expand=True,
-        on_change=lambda e: set_commission(e.control.value or 3.0),
+        on_change=lambda e: set_commission(e.control.value if e.control.value is not None else 3.0),
     )
     commission_text = ft.Text(f"{commission:g}‱", size=12, color=AppColors.TEXT_SECONDARY)
 
@@ -252,7 +256,7 @@ def BacktestConfigPanel(
         label="{value}",
         expand=True,
         disabled=stamp_duty_auto,
-        on_change=lambda e: set_stamp_duty_rate(e.control.value or 0.5),
+        on_change=lambda e: set_stamp_duty_rate(e.control.value if e.control.value is not None else 0.5),
     )
     if stamp_duty_auto:
         stamp_duty_text_value = I18n.get("backtest_stamp_duty_auto")
@@ -267,7 +271,7 @@ def BacktestConfigPanel(
         value=slippage,
         label="{value}",
         expand=True,
-        on_change=lambda e: set_slippage(e.control.value or 5.0),
+        on_change=lambda e: set_slippage(e.control.value if e.control.value is not None else 5.0),
     )
     slippage_text = ft.Text(f"{slippage:g} bps", size=12, color=AppColors.TEXT_SECONDARY)
 

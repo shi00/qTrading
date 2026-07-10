@@ -129,8 +129,8 @@ class TestGetConfigFromState:
         )
         assert config["max_position_count"] == 50
 
-    def test_slider_fallback_values(self, today: date, one_year_ago: date) -> None:
-        """commission=0 兜底 3‱，slippage=0 兜底 5bps，stamp_duty_auto=False + slider=1 → 1/1000。"""
+    def test_slider_zero_values_respected(self, today: date, one_year_ago: date) -> None:
+        """Slider 0 值被尊重（资金路径精度）：commission=0 → 0.0，slippage=0 → 0.0，stamp_duty_auto=False + slider=0 → 0.0。"""
         config = _get_config_from_state(
             start_date=one_year_ago,
             end_date=today,
@@ -139,12 +139,12 @@ class TestGetConfigFromState:
             max_positions_str="50",
             commission=0,
             stamp_duty_auto=False,
-            stamp_duty_rate=1.0,
+            stamp_duty_rate=0,
             slippage=0,
         )
-        assert config["commission_rate"] == 3 / 10000  # 0 → 默认 3e-4
-        assert config["stamp_duty_rate"] == 1 / 1000
-        assert config["slippage_bps"] == 5.0  # 0 → 默认 5.0
+        assert config["commission_rate"] == 0.0  # 0 ‱ → 0.0（免佣金）
+        assert config["stamp_duty_rate"] == 0.0  # 0 ‰ → 0.0（0 印花税）
+        assert config["slippage_bps"] == 0.0  # 0 bps（无滑点）
 
     def test_none_rebalance_freq_falls_back(self, today: date, one_year_ago: date) -> None:
         """rebalance_freq=None 兜底 signal。"""
@@ -176,8 +176,8 @@ class TestGetConfigFromState:
         )
         assert config["stamp_duty_rate"] is None
 
-    def test_stamp_duty_auto_false_slider_zero_returns_none(self, today: date, one_year_ago: date) -> None:
-        """stamp_duty_auto=False + slider=0 → stamp_duty_rate=None。"""
+    def test_stamp_duty_auto_false_slider_zero_returns_zero(self, today: date, one_year_ago: date) -> None:
+        """stamp_duty_auto=False + slider=0 → stamp_duty_rate=0.0（0 值被尊重，资金路径精度）。"""
         config = _get_config_from_state(
             start_date=one_year_ago,
             end_date=today,
@@ -189,7 +189,7 @@ class TestGetConfigFromState:
             stamp_duty_rate=0,
             slippage=5.0,
         )
-        assert config["stamp_duty_rate"] is None
+        assert config["stamp_duty_rate"] == 0.0
 
 
 class TestBacktestConfigPanelContract:
