@@ -328,9 +328,9 @@ class TestProgressCallbackSignature:
 
 
 class TestLocaleChangeSignature:
-    """Tests for _on_locale_change signature - §5.8 规范 2：零参签名
+    """声明式组件 locale change 契约守护 - §5.8 规范 2 由声明式范式替代
 
-    注：LLMConfigPanel 已重写为声明式组件（Phase 3.2.3），
+    所有 UI 组件已重写为 @ft.component 声明式组件，
     通过 ft.use_state(I18n.get_observable_state) 自动重渲染，不再需要 _on_locale_change。
     """
 
@@ -343,29 +343,23 @@ class TestLocaleChangeSignature:
         source = Path(mod.__file__).read_text(encoding="utf-8")
         assert "I18n.get_observable_state" in source, "LLMConfigPanel 必须订阅 I18n.get_observable_state"
 
-    # --- 本次新修复的零参签名（必须校验 params == ["self"]）---
+    # --- 声明式组件契约守护（@ft.component + 无 _on_locale_change）---
 
     def test_app_layout_locale_change_is_zero_arg(self):
-        """AppLayout._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """AppLayout 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.app_layout import AppLayout
 
-        sig = inspect.signature(AppLayout._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(AppLayout, "__wrapped__"), "AppLayout 必须是 @ft.component 声明式组件"
+        assert not hasattr(AppLayout, "_on_locale_change"), "声明式 AppLayout 不应有 _on_locale_change"
 
     def test_onboarding_wizard_locale_change_is_zero_arg(self):
-        """OnboardingWizard._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """OnboardingWizard 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
-        sig = inspect.signature(OnboardingWizard._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(OnboardingWizard, "__wrapped__"), "OnboardingWizard 必须是 @ft.component 声明式组件"
+        assert not hasattr(OnboardingWizard, "_on_locale_change"), "声明式 OnboardingWizard 不应有 _on_locale_change"
 
     def test_ai_brain_tab_locale_change_is_zero_arg(self):
         """AIBrainTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
@@ -375,7 +369,7 @@ class TestLocaleChangeSignature:
         assert hasattr(AIBrainTab, "__wrapped__"), "AIBrainTab 必须是 @ft.component 声明式组件"
         assert not hasattr(AIBrainTab, "_on_locale_change"), "声明式 AIBrainTab 不应有 _on_locale_change"
 
-    # --- 零参签名（§5.8 规范 2：回调方法签名无参数）---
+    # --- 声明式组件契约守护（@ft.component + 无 _on_locale_change）---
 
     def test_database_config_panel_locale_change_is_zero_arg(self):
         """DatabaseConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
@@ -390,17 +384,16 @@ class TestLocaleChangeSignature:
         )
 
     def test_failover_config_panel_locale_change_is_zero_arg(self):
-        """FailoverConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """FailoverConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.components.config_panels.failover_config_panel import (
             FailoverConfigPanel,
         )
 
-        sig = inspect.signature(FailoverConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(FailoverConfigPanel, "__wrapped__"), "FailoverConfigPanel 必须是 @ft.component 声明式组件"
+        assert not hasattr(FailoverConfigPanel, "_on_locale_change"), (
+            "声明式 FailoverConfigPanel 不应有 _on_locale_change"
+        )
 
     def test_local_model_config_panel_locale_change_is_zero_arg(self):
         """LocalModelConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
@@ -415,40 +408,28 @@ class TestLocaleChangeSignature:
         )
 
     def test_system_tab_locale_change_is_zero_arg(self):
-        """SystemTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """SystemTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.system_tab import SystemTab
 
-        assert hasattr(SystemTab, "_on_locale_change")
-        sig = inspect.signature(SystemTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(SystemTab, "__wrapped__"), "SystemTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(SystemTab, "_on_locale_change"), "声明式 SystemTab 不应有 _on_locale_change"
 
     def test_automation_tab_locale_change_is_zero_arg(self):
-        """AutomationTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """AutomationTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.automation_tab import AutomationTab
 
-        assert hasattr(AutomationTab, "_on_locale_change")
-        sig = inspect.signature(AutomationTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(AutomationTab, "__wrapped__"), "AutomationTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(AutomationTab, "_on_locale_change"), "声明式 AutomationTab 不应有 _on_locale_change"
 
     def test_notifications_tab_locale_change_is_zero_arg(self):
-        """NotificationsTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """NotificationsTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.automation_tab import NotificationsTab
 
-        assert hasattr(NotificationsTab, "_on_locale_change")
-        sig = inspect.signature(NotificationsTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(NotificationsTab, "__wrapped__"), "NotificationsTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(NotificationsTab, "_on_locale_change"), "声明式 NotificationsTab 不应有 _on_locale_change"
 
 
 class TestLLMProviderSwitch:

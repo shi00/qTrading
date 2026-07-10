@@ -12,7 +12,7 @@ import main as app_main
 import ui.views.onboarding_wizard as onboarding_wizard_mod
 import utils.shutdown as shutdown_mod
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 AsyncEventHandler = Callable[[Any], Awaitable[None]]
 SyncClickHandler = Callable[[Any], None]
@@ -160,6 +160,21 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     # Mock startup flow to avoid real DB operations: stop at NEED_ONBOARDING by default
     monkeypatch.setattr(startup_ctrl, "check_onboarding_needed", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(onboarding_wizard_mod, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
+    # G.1 重写后 main.py 用声明式 @ft.component StartupView 替代 OnboardingWizard;
+    # 测试目标是 shutdown flow, 不验证 StartupView 渲染, mock 为 MagicMock 避免 renderer 上下文依赖
+    monkeypatch.setattr(app_main, "StartupView", lambda *_args, **_kwargs: MagicMock())
+    # CloseConfirmDialog 同为 @ft.component, mock 为返回 _FakeAlertDialog 的工厂,
+    # 保留 actions[0/1].on_click 回调绑定以验证 cancel/confirm 按钮行为
+    monkeypatch.setattr(
+        app_main,
+        "CloseConfirmDialog",
+        lambda on_cancel, on_confirm: _FakeAlertDialog(
+            actions=[
+                _FakeTextButton("Cancel", on_click=on_cancel),
+                _FakeTextButton("Confirm", on_click=on_confirm),
+            ],
+        ),
+    )
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
     if exit_spy is None:
         monkeypatch.setattr(

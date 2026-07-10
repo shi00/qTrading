@@ -15,7 +15,7 @@ from data.persistence.review_manager import ReviewManager
 import pytest
 
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 
 def _make_trade_cal_mock():
@@ -251,6 +251,25 @@ class TestReviewManagerUpdateResultStatusOverride(unittest.TestCase):
 
 class TestGetLearningContext(unittest.TestCase):
     """测试获取学习上下文"""
+
+    def setUp(self):
+        """强制中文 locale, 避免完整集成测试套件中 I18n._locale 被其他测试污染为 en_US。
+
+        ReviewManager.get_learning_context 用 I18n.get('review_ctx_positive') 等返回
+        本地化文案, 本测试断言中文文案, 故需确保 locale=zh_CN。
+        """
+        from core.i18n import I18n
+
+        self._saved_locale = I18n._locale
+        self._saved_initialized = I18n._initialized
+        I18n._locale = "zh_CN"
+        I18n._initialized = True
+
+    def tearDown(self):
+        from core.i18n import I18n
+
+        I18n._locale = self._saved_locale
+        I18n._initialized = self._saved_initialized
 
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")

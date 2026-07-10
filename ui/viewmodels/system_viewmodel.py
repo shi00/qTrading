@@ -94,7 +94,7 @@ class SystemViewModel:
         return ConfigHandler.get_tushare_point_tier()
 
     def get_capability_cache(self) -> dict[str, bool | None]:
-        """返回 capability cache 副本（供 TierApiPanel.did_mount 拉取最新缓存）。"""
+        """返回 capability cache 副本（供 TierApiPanel 挂载时拉取最新缓存）。"""
         from data.external.tushare_client import TushareClient
 
         return TushareClient().get_capability_cache()
@@ -208,7 +208,7 @@ class SystemViewModel:
         """存储 probe 结果并通过 state 通知 View (dual-track, §3.0.4)。
 
         v1.9.0 M-5 修订：无订阅者时 logger.warning（避免自动 probe 在
-        TierApiPanel 未挂载时静默丢失），由 TierApiPanel.did_mount 主动拉取最新缓存刷新。
+        TierApiPanel 未挂载时静默丢失），由 TierApiPanel 挂载时主动拉取最新缓存刷新。
 
         Returns:
             result dict（供测试断言）；正常路径下通过 state.probe_result_version 推送给 View。
@@ -217,10 +217,8 @@ class SystemViewModel:
         self._set_state(probe_result_version=self._state.probe_result_version + 1)
         if not self._subscribers:
             # v1.9.0 M-5：自动 probe 在 TierApiPanel 未挂载时无订阅者，
-            # 静默丢失会让用户错过 probe 结果。改为 warning 提示，由 did_mount 主动拉取刷新。
-            logger.warning(
-                "[SystemViewModel] no subscribers, probe result dropped; TierApiPanel should pull on did_mount"
-            )
+            # 静默丢失会让用户错过 probe 结果。改为 warning 提示，由 TierApiPanel 挂载时主动拉取刷新。
+            logger.warning("[SystemViewModel] no subscribers, probe result dropped; TierApiPanel should pull on mount")
         return result
 
     def _emit_probe_result(self, tier: str, results: dict[str, bool | None]) -> dict:

@@ -196,8 +196,8 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| G2.1 | 单元测试统一修复：修复所有混合态遗留测试失败（命令式消费方测试 mock 调整、契约守护测试补全、PaginatedTable 测试修复等） | `pytest tests/unit/ -m "not slow"` 全绿（0 failed）；失败数从 86 降到 0 | G.4 | cc:TODO |
-| G2.2 | 集成测试统一修复：`pytest tests/integration/` 全绿 | `pytest tests/integration/` 全绿 | G2.1 | cc:TODO |
+| G2.1 | 单元测试统一修复：修复所有混合态遗留测试失败（命令式消费方测试 mock 调整、契约守护测试补全、PaginatedTable 测试修复等） | `pytest tests/unit/ -m "not slow"` 全绿（0 failed）；失败数从 86 降到 0 | G.4 | cc:完了 [7115 passed, 0 failed, 删除 5 过时测试文件(-3960行), test_llm_config.py 删 5 过时类, test_onboarding_api_contracts.py 6 签名测试改声明式契约守护] |
+| G2.2 | 集成测试统一修复：`pytest tests/integration/` 全绿 | `pytest tests/integration/` 全绿 | G2.1 | cc:完了 [938 passed, 0 failed, test_config_panels i18n 断言修复, test_main_shutdown_flow+test_main no_db mark+StartupView/CloseConfirmDialog mock, test_service_review_manager locale 强制 zh_CN, 删除 TestMainLocaleChangeUpdate] |
 | G2.3 | 全量门禁回归：`ruff check .` + `ruff format --check .` + `pyright` + `pytest tests/unit/ -m "not slow"` + `pytest tests/integration/` + `pre-commit run --all-files` 全绿；`grep -rn "v1_compat\|PageRefMixin\|_page_ref\|did_mount\|will_unmount" --include=*.py ui/ main.py`=0 | 6 项门禁全绿；grep 全部=0 | G2.1/G2.2 | cc:TODO |
 | G2.4 | [review-gate] Phase G2 review gate | 检视记录；单元+集成测试全绿；门禁全绿 | G2.3 | cc:TODO |
 

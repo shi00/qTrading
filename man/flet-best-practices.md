@@ -610,6 +610,19 @@ v1 对对话框管理提供**两套 API**，按编程范式选用：
 
 **声明式应用（本手册唯一推荐范式）必须用 `ft.use_dialog()`**。`page.show_dialog/pop_dialog` 是命令式 API，**不适合 `@ft.component` 组件**——在声明式组件中调用会绕过框架的状态驱动渲染，导致 dialog 状态与组件状态不同步。官方在 0.85 发布公告中明确："That model doesn't fit declarative apps, where the UI is supposed to be a function of state."
 
+**`use_dialog()` 接受所有 `DialogControl` 子类**（源码核验 `flet/controls/dialog_control.py`）：
+
+| 控件 | 用途 |
+|------|------|
+| `ft.AlertDialog` | 模态对话框（确认/表单/详情） |
+| `ft.DatePicker` | 日期选择器 |
+| `ft.TimePicker` | 时间选择器 |
+| `ft.SnackBar` | 底部临时消息 |
+| `ft.Banner` | 顶部横幅 |
+| `ft.BottomSheet` | 底部抽屉 |
+
+以上 6 类控件在声明式组件中**一律用 `ft.use_dialog()`**，不用 `page.show_dialog()`。`FilePicker` 不是 `DialogControl`（是 `Service`），见 §8.3。
+
 #### `ft.use_dialog()` 用法
 
 每次渲染调用一次，传 `DialogControl` 显示，传 `None` 隐藏：
@@ -677,6 +690,20 @@ ft.Container(
 
 ### 10.5 主题
 
+#### 10.5.1 Material 3 为默认设计语言
+
+Flet 0.85.3 底层 Flutter 3.16+，**Material 3（Material You）是默认且唯一推荐的设计语言**。`ft.Theme.use_material3` 属性默认 `None`（透传给 Flutter，等同 `True`）。
+
+**关键事实**（源码核验 `flet/controls/theme.py`）：
+
+- `use_material3: Optional[bool] = None` — 注释明确为 "opt-out flag"，即默认启用 M3
+- 仅当显式设置 `use_material3=False` 时才回退 Material 2 行为
+- M3 影响多个组件的默认行为：`AlertDialog.icon_color`、`ProgressBar` track gap、`Tabs` indicator 样式、`IconButton` tooltip 展示、`Switch` thumb 形状等
+
+**项目约定**（AStockScreener）：不设置 `use_material3`，保持 M3 默认。`theme.py` 构建 `ft.Theme(color_scheme=...)` 隐式运行在 M3 模式。若需 opt-out 某组件的 M3 行为，查阅 [Flet 源码](https://github.com/flet-dev/flet) 中该组件对 `use_material3` 的分支判断。
+
+#### 10.5.2 明暗主题与颜色
+
 - 用 `page.theme` / `page.dark_theme` + `page.theme_mode` 支持明暗；
 - `page.theme_animation_style`（0.85）可自定义明暗切换的时长与曲线，或用 `AnimationStyle.no_animation()` 关闭；
 - 颜色用 `ft.Colors.*`、图标用 `ft.Icons.*`（枚举，享受 IDE 补全与类型检查）；
@@ -688,6 +715,284 @@ ft.Container(
 
 - 用 `ResponsiveRow` + `col` 做栅格响应式；`col=0` 表示隐藏；
 - 开启 `auto_scroll` 时必须同时显式设置 `scroll`，否则不生效。
+
+### 10.7 表单输入组件
+
+项目大量使用 `Dropdown` / `TextField` / `Slider` / `Switch` / `Checkbox`，统一规则如下。
+
+#### Dropdown
+
+```python
+ft.Dropdown(
+    label="策略",
+    options=[ft.DropdownOption(key="macd", text="MACD")],
+    value="macd",
+    on_change=_on_change,
+)
+```
+
+- **M3 默认**：`ft.Dropdown` 是 Material 3 风格；若需 M2 风格用 `ft.DropdownM2`（源码 `flet/controls/material/dropdown.py`）
+- **V1 破坏性变更**：`options` 接受 `ft.DropdownOption` 列表（非旧 `ft.dropdown.Option`）
+- 声明式组件中 `value` 应由 `use_state` 驱动，`on_change` 调 `set_state(e.control.value)`
+- 大量选项时用 `ft.DropdownOption` 的 `content` 属性自定义行渲染
+
+#### TextField
+
+```python
+ft.TextField(
+    label="API Key",
+    password=True,           # 密码输入（can_reveal_password=True 显示切换按钮）
+    value=api_key,
+    on_change=lambda e: set_api_key(e.control.value),
+)
+```
+
+- 声明式中 `value` 必须受控（由 `use_state` 驱动），否则重渲染会丢失输入
+- 密码/密钥字段用 `password=True` + `can_reveal_password=True`
+- 多行文本用 `multiline=True` + `min_lines` / `max_lines`
+- `ft.use_dialog()` 包裹的 `AlertDialog` 内的 `TextField` 能跨重渲染保持焦点（frozen-diff 机制，见 §10.1）
+
+#### Slider / Switch / Checkbox
+
+```python
+ft.Slider(min=0, max=100, divisions=10, value=50, on_change=_on_change)
+ft.Switch(label="启用", value=True, on_change=_on_change)
+ft.Checkbox(label="创建数据库", value=False, on_change=_on_change)
+```
+
+- 声明式中 `value` 受控于 `use_state`
+- `Slider` 的 `divisions` 设置后为离散刻度（M3 风格）
+- `Switch` 在 M3 下默认有 thumb icon，`Switch.thumb_icon` 可自定义
+
+### 10.8 选择器组件
+
+#### DatePicker
+
+```python
+@ft.component
+def DateRangePicker():
+    show, set_show = ft.use_state(False)
+    picked, set_picked = ft.use_state("")
+
+    ft.use_dialog(
+        ft.DatePicker(
+            first_date=date(2020, 1, 1),
+            last_date=date.today(),
+            value=date.today(),
+            on_change=lambda e: set_picked(str(e.control.value)),
+            on_dismiss=lambda e: set_show(False),
+        )
+        if show
+        else None
+    )
+
+    return ft.OutlinedButton(str(picked or "选择日期"), on_click=lambda e: set_show(True))
+```
+
+- `ft.DatePicker` 是 `DialogControl` 子类（源码核验 MRO：`DatePicker → DialogControl`），**完全支持 `ft.use_dialog()` 声明式管理**
+- 声明式中 `show` 状态驱动 `use_dialog(date_picker if show else None)`，`on_dismiss` 调 `set_show(False)` 关闭
+- 全局样式用 `ft.Theme.date_picker_theme`（`DatePickerTheme`）配置
+- **项目技术债**：`backtest_config_panel.py` 当前用 `page.show_dialog(date_picker)` 命令式打开，应改造为 `use_dialog()` 范式（见 §10.1）
+
+#### SegmentedButton
+
+```python
+ft.SegmentedButton(
+    selected={"realtime"},
+    segments=[
+        ft.Segment(key="realtime", icon=ft.Icons.SPEED, label="实时"),
+        ft.Segment(key="history", icon=ft.Icons.HISTORY, label="历史"),
+    ],
+    on_change=_on_change,
+)
+```
+
+- M3 风格分段控件，`selected` 是 `set[str]`（多选）或单值（单选）
+- 声明式中 `selected` 由 `use_state` 驱动
+- 适用于 2-5 个互斥选项的场景，比 `Dropdown` 更直观
+
+### 10.9 导航组件
+
+#### NavigationRail
+
+```python
+ft.NavigationRail(
+    selected_index=0,
+    destinations=[
+        ft.NavigationRailDestination(icon=ft.Icons.HOME, label="首页"),
+        ft.NavigationRailDestination(icon=ft.Icons.SEARCH, label="选股"),
+    ],
+    on_change=_on_change,
+    extended=False,                          # 折叠时仅图标
+    label_type=ft.NavigationRailLabelType.ALL,
+)
+```
+
+- 桌面应用主导航首选，配合 `VerticalDivider` 分隔内容区
+- `selected_index` 由 `use_state` 驱动，`on_change` 调 `set_state(e.control.selected_index)`
+- `extended=True` 时展开显示标签，`False` 时仅图标（配合折叠按钮）
+- M3 下 `label_type` 控制标签显示策略：`ALL` / `SELECTED` / `NONE`
+
+### 10.10 列表与展开组件
+
+#### ListView
+
+```python
+ft.ListView(
+    controls=[...],
+    expand=True,
+    spacing=4,
+    auto_scroll=True,    # 新内容自动滚动到底部
+    padding=ft.Padding.all(8),
+)
+```
+
+- 长列表首选（虚拟滚动），比 `Column` + `scroll=True` 性能更好
+- `auto_scroll=True` 时必须设置 `scroll` 属性（V1 要求）
+- 流式更新场景用 `use_ref` 缓冲 + 节流 `set_state`（见项目 `screener_view.py` AI 日志流）
+
+#### ExpansionTile / ListTile
+
+```python
+ft.ExpansionTile(
+    title=ft.Text("高级设置"),
+    controls=[...],
+    initially_expanded=False,
+    on_change=_on_change,
+)
+
+ft.ListTile(
+    leading=ft.Icon(ft.Icons.STOCKS),
+    title=ft.Text("贵州茅台"),
+    subtitle=ft.Text("600519.SH"),
+    trailing=ft.Text("+2.3%"),
+    on_click=_on_click,
+)
+```
+
+- `ExpansionTile` 用于可折叠分组，`controls` 为展开内容
+- `ListTile` 用于单行列表项，`leading` / `title` / `subtitle` / `trailing` 四槽位
+- M3 下 `ListTile` 默认有触控波纹，`on_click=None` 时无波纹
+- 声明式中 `initially_expanded` 应由 `use_state` 驱动的 `expanded` 属性替代
+
+### 10.11 数据展示组件
+
+#### DataTable
+
+```python
+ft.DataTable(
+    columns=[ft.DataColumn(ft.Text("代码"), numeric=False)],
+    rows=[
+        ft.DataRow(
+            cells=[ft.DataCell(ft.Text("600519.SH"))],
+            on_select_changed=_on_select,
+        ),
+    ],
+    heading_row_color=ft.Colors.with_opacity(0.08, ft.Colors.ON_SURFACE),
+    data_row_color={ft.ControlState.HOVERED: ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE)},
+)
+```
+
+- 大数据量（>100 行）用 `ListView` + 自定义行（项目 `virtual_table.py` 模式），`DataTable` 性能有限
+- `numeric=True` 的列右对齐
+- 全局样式用 `ft.Theme.data_table_theme`（`DataTableTheme`）配置
+- 声明式中 `rows` 应由 state 驱动重新构造，不建议 `use_ref` 缓存行对象
+
+#### ProgressBar / ProgressRing
+
+```python
+ft.ProgressBar(value=0.5, visible=is_loading, color=AppColors.PRIMARY)  # 确定性进度
+ft.ProgressRing(visible=is_loading)                                      # 不确定等待
+ft.ProgressBar(visible=is_loading)                                       # 不确定等待（线性）
+```
+
+- **确定性进度**（已知百分比）用 `value=0.0~1.0`
+- **不确定性等待**（未知百分比）省略 `value` 或设为 `None`
+- `ProgressRing` 圆形 / `ProgressBar` 线性，按场景选用：短操作用 Ring，长任务用 Bar
+- M3 下 `ProgressBar` 有 track gap，`year_2023=True` 可关闭（旧版样式）
+
+### 10.12 文本与内容组件
+
+#### Markdown
+
+```python
+ft.Markdown(
+    value=md_content,
+    selectable=True,
+    on_tap_link=safe_open_url,    # 必须用安全回调（见下）
+    extension_set=ft.MarkdownExtensionSet.GITHUB,
+    code_theme="atom-one-dark",
+)
+```
+
+- **安全红线**：`on_tap_link` 必须用安全回调（项目 `_markdown_safe.py` 的 `safe_open_url`），白名单域名才放行，防止钓鱼/恶意站点
+- LLM 生成内容可能含恶意链接，禁止直接 `webbrowser.open(url)`
+- `extension_set` 支持 GitHub Flavored Markdown（表格/删除线/任务列表）
+- `code_theme` 代码高亮主题：`atom-one-dark` / `github` / `vs` 等
+
+#### Tooltip
+
+```python
+ft.IconButton(
+    icon=ft.Icons.REFRESH,
+    tooltip=I18n.get("refresh"),   # i18n key，locale 变化自动重渲染
+    on_click=_on_click,
+)
+```
+
+- 所有可交互控件支持 `tooltip` 属性（M3 风格自动展示）
+- i18n 场景 `tooltip` 用 `I18n.get(key)`，声明式组件 locale 变化时自动重渲染
+- 长 tooltip 用 `ft.Tooltip(message=..., text_style=...)` 独立控件自定义样式
+
+#### Badge（M3 新增）
+
+```python
+ft.Badge(
+    content=ft.Icon(ft.Icons.NOTIFICATIONS),
+    label=ft.Text("3"),
+    offset=ft.Offset(2, -2),
+)
+```
+
+- M3 角标控件，用于通知计数
+- `label` 为 `None` 时显示小圆点（无数字）
+
+### 10.13 菜单与交互组件
+
+#### PopupMenuButton
+
+```python
+ft.PopupMenuButton(
+    icon=ft.Icons.MORE_VERT,
+    items=[
+        ft.PopupMenuItem(text="导出 CSV", on_click=_export),
+        ft.PopupMenuItem(text="刷新", on_click=_refresh),
+        ft.PopupMenuItem(),  # 分隔线
+        ft.PopupMenuItem(text="删除", checked=False, on_click=_delete),
+    ],
+)
+```
+
+- 声明式中 `items` 由 state 驱动构造
+- 空构造 `ft.PopupMenuItem()` 为分隔线
+- M3 下 `checked` 属性支持勾选态
+
+#### GestureDetector
+
+```python
+ft.GestureDetector(
+    content=ft.Container(width=4, bgcolor=AppColors.BORDER),
+    on_horizontal_drag_update=_on_drag,
+    on_horizontal_drag_start=_on_drag_start,
+    on_hover=_on_hover,
+    mouse_cursor=ft.MouseCursor.RESIZE_LEFT_RIGHT,
+)
+```
+
+- 自定义手势识别（拖拽/悬停/长按等）
+- 拖拽场景用 `use_ref` 缓存即时坐标 + 节流 `set_state`（见项目 `resizable_splitter.py`）
+- `mouse_cursor` 设置鼠标悬停光标样式
+- 性能要求：拖拽 <16ms/帧（项目约定），用 `use_ref` 避免 `use_state` 触发 re-render
 
 ---
 
@@ -982,6 +1287,11 @@ async def test_fetch_user(monkeypatch):
 - [ ] Service 实例记得加入 `page.services`；
 - [ ] 文件路径统一走 `ft.StoragePaths()`（非 Web），资源走相对路径；
 - [ ] 弹层：声明式组件用 `ft.use_dialog()` Hook（§10.1），命令式写法用 `show_dialog`/`pop_dialog`；间距用 `Padding/Margin/BorderRadius` 类方法；
+- [ ] 主题：保持 Material 3 默认（不设 `use_material3`），明暗用 `page.theme`/`page.theme_mode`（§10.5）；
+- [ ] 表单组件：`Dropdown`/`TextField`/`Slider`/`Switch`/`Checkbox` 的 `value` 受控于 `use_state`（§10.7）；
+- [ ] 所有 `DialogControl` 子类（`AlertDialog`/`DatePicker`/`TimePicker`/`SnackBar`/`Banner`/`BottomSheet`）一律用 `ft.use_dialog()`，无例外（§10.1、§10.8）；
+- [ ] `Markdown.on_tap_link` 必须用安全回调（`_markdown_safe.py`），禁止直接 `webbrowser.open`（§10.12）；
+- [ ] 长列表用 `ListView`（虚拟滚动），大数据表用 `ListView`+自定义行（§10.10、§10.11）；
 - [ ] 自适应布局：`ResponsiveRow`+`col`（带 `xs` 兜底）做栅格，`page.on_resize`/`page.width` 切换形态，`page.adaptive=True` 适配平台，桌面设 `window.min_width/min_height`；
 - [ ] CI 缓存 `~/.flet/cache/` 加速构建；
 - [ ] 为 services 与状态逻辑编写单测（`pytest-asyncio`）。

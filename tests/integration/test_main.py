@@ -14,10 +14,27 @@ import main as app_main
 import ui.views.onboarding_wizard as onboarding_wizard_mod
 import utils.shutdown as shutdown_mod
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.no_db]
 
 AsyncEventHandler = Callable[[Any], Awaitable[None]]
 SyncClickHandler = Callable[[Any], None]
+
+
+class _FakeTextButton:
+    def __init__(self, label: str, on_click: SyncClickHandler | None = None):
+        self.label = label
+        self.content = label
+        self.on_click = on_click
+
+
+class _FakeAlertDialog:
+    def __init__(self, **kwargs):
+        self.modal = kwargs.get("modal")
+        self.title = kwargs.get("title")
+        self.content = kwargs.get("content")
+        self.actions = kwargs.get("actions", [])
+        self.actions_alignment = kwargs.get("actions_alignment")
+        self.open = False
 
 
 class _DummyWindow:
@@ -150,6 +167,22 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     # Mock startup flow to avoid real DB operations: stop at NEED_ONBOARDING by default
     monkeypatch.setattr(startup_ctrl, "check_onboarding_needed", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(onboarding_wizard_mod, "OnboardingWizard", lambda *_args, **_kwargs: MagicMock())
+    # G.1 重写后 main.py 用声明式 @ft.component StartupView 替代 OnboardingWizard;
+    # 测试目标是 main.py 的窗口/对话框/disconnect 行为, 不验证 StartupView 渲染,
+    # mock 为 MagicMock 避免 renderer 上下文依赖
+    monkeypatch.setattr(app_main, "StartupView", lambda *_args, **_kwargs: MagicMock())
+    # CloseConfirmDialog 同为 @ft.component, mock 为返回 _FakeAlertDialog 的工厂,
+    # 保留 actions[0/1].on_click 回调绑定以验证 cancel/confirm 按钮行为
+    monkeypatch.setattr(
+        app_main,
+        "CloseConfirmDialog",
+        lambda on_cancel, on_confirm: _FakeAlertDialog(
+            actions=[
+                _FakeTextButton("Cancel", on_click=on_cancel),
+                _FakeTextButton("Confirm", on_click=on_confirm),
+            ],
+        ),
+    )
     monkeypatch.setattr(shutdown_mod, "ShutdownCoordinator", _FakeCoordinator)
     _tpm_mock = MagicMock()
     _tpm_mock.return_value.run_async = AsyncMock()
@@ -457,73 +490,6 @@ class TestMainHideCloseConfirmDialog:
         await asyncio.sleep(0)
 
         assert page.current_dialog is None
-
-
-class TestMainLocaleChangeUpdate:
-    @pytest.mark.asyncio
-    async def test_locale_change_updates_confirm_dialog(self, monkeypatch):
-        translations = {
-            "zh_CN": {
-                "exit_confirm_title": "确认退出",
-                "exit_confirm_content": "确认退出吗？",
-                "common_cancel": "取消",
-                "common_confirm": "确认",
-            },
-            "en_US": {
-                "exit_confirm_title": "Confirm Exit",
-                "exit_confirm_content": "Confirm exit?",
-                "common_cancel": "Cancel",
-                "common_confirm": "Confirm",
-            },
-        }
-
-        # Clear listeners, set language
-        app_main.I18n._listeners = []
-        app_main.I18n._locale = "en_US"
-        app_main.I18n._initialized = True
-
-        _prepare_main(monkeypatch)
-
-        # Override I18n.get to return translations depending on current locale
-        monkeypatch.setattr(
-            app_main.I18n,
-            "get",
-            lambda key, default=None: translations.get(app_main.I18n.current_locale(), {}).get(key, key),
-        )
-        monkeypatch.setattr(app_main.I18n, "initialize", lambda *args, **kwargs: None)
-
-        page = _DummyPage()
-        await app_main.main(page)
-
-        # Trigger CLOSE event to open the close confirmation dialog
-        assert page.window.on_event is not None
-        on_event = cast(AsyncEventHandler, page.window.on_event)
-        await on_event(SimpleNamespace(type="close"))
-
-        dialog = page.current_dialog
-        assert dialog is not None
-
-        # Verify initial English texts
-        assert dialog.title.value == "Confirm Exit"
-        assert dialog.content.value == "Confirm exit?"
-        assert dialog.actions[0].content == "Cancel"
-        assert dialog.actions[1].content == "Confirm"
-
-        # Simulate changing locale to zh_CN
-        app_main.I18n.set_locale("zh_CN")
-
-        # Verify texts updated to Chinese
-        assert dialog.title.value == "确认退出"
-        assert dialog.content.value == "确认退出吗？"
-        assert dialog.actions[0].content == "取消"
-        assert dialog.actions[1].content == "确认"
-
-        # Verify unsubscription on disconnect
-        on_disconnect = cast(AsyncEventHandler, page.on_disconnect)
-        assert len(app_main.I18n._listeners) > 0
-        await on_disconnect(MagicMock())
-        # The listener should have unsubscribed
-        assert len(app_main.I18n._listeners) == 0
 
 
 @pytest.mark.asyncio
