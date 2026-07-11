@@ -78,6 +78,9 @@ class ScreenerState:
     logs: tuple[LogEntry, ...] = ()
     # AI streaming/placeholder cards (state-driven, §3.2 MVVM)
     stream_cards: tuple[StreamCard, ...] = ()
+    # Strategy selection (R.2.1: 内聚到 VM, 消除 View 双源真相)
+    selected_strategy: str | None = None
+    tier_hint: str | None = None
     # Mode: "REALTIME" or "HISTORY"
     mode: str = "REALTIME"
     # Task unlock signal (View resets after consuming)
@@ -230,6 +233,38 @@ class ScreenerViewModel:
             )
 
         return params
+
+    def select_strategy(self, key: str | None) -> None:
+        """选中策略 + 计算 tier_hint（R.2.1: 内聚到 VM, 消除 View 双源真相）。
+
+        Args:
+            key: 策略 key, None 表示清空选择
+        """
+        tier_hint = self._compute_tier_hint(key)
+        self._set_state(selected_strategy=key, tier_hint=tier_hint)
+
+    @staticmethod
+    def _compute_tier_hint(selected_strategy: str | None) -> str | None:
+        """检查策略档位是否足够，不足时返回 i18n key，否则 None。
+
+        返回 i18n key（非翻译值），符合 §3.2 "VM 只产出 i18n key"。
+        View 渲染时 ``I18n.get(state.tier_hint)``。
+        """
+        if not selected_strategy:
+            return None
+        try:
+            from data.external.tushare_client import TushareClient
+            from services.ai_service import get_strategy_min_tier
+            from utils.config_handler import ConfigHandler
+
+            current_tier = ConfigHandler.get_tushare_point_tier()
+            min_tier = get_strategy_min_tier(selected_strategy)
+            client = TushareClient()
+            if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
+                return "sys_strategy_tier_hint"
+        except Exception as e:
+            logger.debug("[ScreenerVM] tier hint check skipped: %s", e, exc_info=True)
+        return None
 
     async def run_strategy(
         self,

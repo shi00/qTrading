@@ -3,7 +3,8 @@
 声明式重写后 View 层测试聚焦:
 - 纯函数辅助 (_format_cell_value / _build_table_data / _parse_num /
   _build_strategy_options / _build_page_size_options / _resolve_group_title /
-  _format_history_date / _compute_tier_hint / _build_strategy_desc) 覆盖
+  _format_history_date / _build_strategy_desc) 覆盖
+- _compute_tier_hint 已迁入 VM (R.2.1), 测试见 test_screener_view_model.py
 - 声明式契约守护见 test_screener_view_contract.py
 - VM 交互 / 流式渲染 / 深度链接 / 模式切换由集成测试 (flet_test_page fixture) 承担,
   声明式组件含 use_state 在无 renderer 下抛 RuntimeError
@@ -20,7 +21,6 @@ from ui.views.screener_view import (
     _build_page_size_options,
     _build_strategy_options,
     _build_table_data,
-    _compute_tier_hint,
     _format_cell_value,
     _format_history_date,
     _parse_num,
@@ -247,51 +247,3 @@ class TestFormatHistoryDate:
         display, key = _format_history_date("notadate")
         assert display == "notadate"
         assert key == "notadate"
-
-
-class TestComputeTierHint:
-    """_compute_tier_hint 纯函数测试。"""
-
-    def test_none_strategy_returns_none(self):
-        assert _compute_tier_hint(None) is None
-
-    def test_empty_strategy_returns_none(self):
-        assert _compute_tier_hint("") is None
-
-    def test_insufficient_tier_returns_hint(self):
-        """当前档位 < 策略所需档位时返回提示文案。"""
-        from data.external.tushare_client import TushareClient as _RealClient
-
-        tier_order = _RealClient._TIER_ORDER
-        mock_client = MagicMock()
-        mock_client.get_tier_order.side_effect = lambda tier: tier_order.get(tier, 0)
-
-        with (
-            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
-            patch("services.ai_service.get_strategy_min_tier", return_value="points_5000"),
-            patch("utils.config_handler.ConfigHandler.get_tushare_point_tier", return_value="points_120"),
-            patch("ui.views.screener_view.I18n") as mock_i18n,
-        ):
-            mock_i18n.get.return_value = "档位不足提示"
-            result = _compute_tier_hint("value")
-        assert result == "档位不足提示"
-
-    def test_sufficient_tier_returns_none(self):
-        """当前档位 ≥ 策略所需档位时返回 None。"""
-        mock_client = MagicMock()
-        mock_client.get_tier_order.side_effect = lambda tier: 0
-
-        with (
-            patch("data.external.tushare_client.TushareClient", return_value=mock_client),
-            patch("services.ai_service.get_strategy_min_tier", return_value="points_120"),
-            patch("utils.config_handler.ConfigHandler.get_tushare_point_tier", return_value="points_5000"),
-        ):
-            result = _compute_tier_hint("value")
-        assert result is None
-
-    def test_exception_returns_none(self):
-        """内部异常时安全返回 None (不传播)。"""
-
-        with patch("utils.config_handler.ConfigHandler.get_tushare_point_tier", side_effect=RuntimeError("boom")):
-            result = _compute_tier_hint("value")
-        assert result is None

@@ -200,3 +200,52 @@ class TestScreenerViewContract:
         params = list(sig.parameters.keys())
         assert "page" not in params, "ScreenerView 不应接收 page 参数"
         assert "initial_strategy" in params, "ScreenerView 必须接收 initial_strategy 参数"
+
+    # ========================================================================
+    # R.2.2: ScreenerView 改用 VM state (selected_strategy/tier_hint)
+    # 消除双源真相: View 禁止 use_state 持有业务状态, 改从 state.* 读取
+    # ========================================================================
+
+    def test_screener_view_reads_selected_strategy_from_vm(self):
+        """R.2.2: View 从 VM state 读取 selected_strategy/tier_hint, 禁止本地 use_state 双源真相。
+
+        DoD: grep `selected_strategy.*use_state\\|set_tier_hint` ui/views/screener_view.py = 0。
+        全量 regex 校验所有 use_state 解构 + set_tier_hint 调用为 0,
+        避免"存在一处合规即放行"的虚假保障 (R.2.1 QA Critical 教训)。
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: selected_strategy 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(r"selected_strategy[^\n]*use_state", code)
+        assert use_state_matches == [], f"selected_strategy 不应使用 use_state (双源真相, R.2.2): {use_state_matches}"
+
+        # 禁止: tier_hint 通过 use_state 解构持有 (双源真相)
+        tier_hint_use_state = re.findall(r"tier_hint[^\n]*use_state", code)
+        assert tier_hint_use_state == [], f"tier_hint 不应使用 use_state (双源真相, R.2.2): {tier_hint_use_state}"
+
+        # 禁止: set_tier_hint 任何调用/解构 (VM select_strategy 内聚)
+        set_tier_hint_matches = re.findall(r"\bset_tier_hint\b", code)
+        assert set_tier_hint_matches == [], (
+            f"禁止 set_tier_hint 调用 (VM select_strategy 内聚, R.2.2): {set_tier_hint_matches}"
+        )
+
+        # 禁止: set_selected_strategy 任何调用/解构 (VM select_strategy 内聚)
+        set_selected_matches = re.findall(r"\bset_selected_strategy\b", code)
+        assert set_selected_matches == [], (
+            f"禁止 set_selected_strategy 调用 (VM select_strategy 内聚, R.2.2): {set_selected_matches}"
+        )
+
+        # 禁止: 模块级 _compute_tier_hint 函数定义 (已迁入 VM 为静态方法)
+        def_matches = re.findall(r"def _compute_tier_hint", code)
+        assert def_matches == [], f"禁止模块级 _compute_tier_hint 定义 (已迁入 VM, R.2.2): {def_matches}"
+
+        # 必须: 调用 vm.select_strategy (新 API, 替代 set_selected_strategy + set_tier_hint)
+        assert "vm.select_strategy" in code, "必须调用 vm.select_strategy (R.2.2 新 API)"
+
+        # 必须: 从 state.selected_strategy 读取 (VM state 单源真相)
+        assert "state.selected_strategy" in code, "必须从 state.selected_strategy 读取 (R.2.2)"
+
+        # 必须: 从 state.tier_hint 读取 (VM state 单源真相)
+        assert "state.tier_hint" in code, "必须从 state.tier_hint 读取 (R.2.2)"

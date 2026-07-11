@@ -926,3 +926,142 @@ class TestTaskManagerSubscription:
         """VM 不再有 on_task_unlock 回调；state.task_unlocked 默认为 False。"""
         vm = ScreenerViewModel()
         assert vm.state.task_unlocked is False
+
+
+# ============================================================================
+# R.2.1: select_strategy command + _compute_tier_hint 内聚到 VM
+# ============================================================================
+
+
+class TestScreenerViewModelSelectStrategy:
+    """R.2.1: select_strategy command — 选中策略 + 计算 tier_hint 内聚到 VM。"""
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_select_strategy_updates_state(self, mock_dp, mock_sm, mock_rm):
+        """select_strategy(key) 更新 state.selected_strategy + state.tier_hint。"""
+        vm = ScreenerViewModel()
+        with patch.object(ScreenerViewModel, "_compute_tier_hint", return_value=None):
+            vm.select_strategy("momentum_breakout")
+        assert vm.state.selected_strategy == "momentum_breakout"
+        assert vm.state.tier_hint is None
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_select_strategy_none_clears_state(self, mock_dp, mock_sm, mock_rm):
+        """select_strategy(None) 清空 selected_strategy + tier_hint。"""
+        vm = ScreenerViewModel()
+        vm._set_state(selected_strategy="old_key", tier_hint="sys_strategy_tier_hint")
+        with patch.object(ScreenerViewModel, "_compute_tier_hint", return_value=None):
+            vm.select_strategy(None)
+        assert vm.state.selected_strategy is None
+        assert vm.state.tier_hint is None
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_select_strategy_with_tier_hint(self, mock_dp, mock_sm, mock_rm):
+        """select_strategy(key) 档位不足时 tier_hint 为 i18n key（非翻译值，§3.2）。"""
+        vm = ScreenerViewModel()
+        with patch.object(ScreenerViewModel, "_compute_tier_hint", return_value="sys_strategy_tier_hint"):
+            vm.select_strategy("ai_llm_v")
+        assert vm.state.selected_strategy == "ai_llm_v"
+        assert vm.state.tier_hint == "sys_strategy_tier_hint"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_select_strategy_notifies_subscribers(self, mock_dp, mock_sm, mock_rm):
+        """select_strategy 必须通知订阅者（state 变化传播）。"""
+        vm = ScreenerViewModel()
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+        with patch.object(ScreenerViewModel, "_compute_tier_hint", return_value=None):
+            vm.select_strategy("momentum_breakout")
+        assert len(snapshots) == 1
+        assert snapshots[0].selected_strategy == "momentum_breakout"
+        assert snapshots[0].tier_hint is None
+
+
+class TestScreenerViewModelComputeTierHint:
+    """R.2.1: _compute_tier_hint 覆盖 None / 已知策略 / 未知策略 3 路径。
+
+    返回 i18n key（非翻译值），符合 §3.2 "VM 只产出 i18n key"。
+    """
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_compute_tier_hint_none_strategy(self, mock_dp, mock_sm, mock_rm):
+        """路径1: selected_strategy=None → 返回 None。"""
+        vm = ScreenerViewModel()
+        assert vm._compute_tier_hint(None) is None
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_compute_tier_hint_tier_sufficient(self, mock_dp, mock_sm, mock_rm):
+        """路径2: 已知策略 + 当前档位 >= 最低档位 → 返回 None。"""
+        vm = ScreenerViewModel()
+        with (
+            patch("utils.config_handler.ConfigHandler.get_tushare_point_tier", return_value="points_5000"),
+            patch("services.ai_service.get_strategy_min_tier", return_value="points_120"),
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = mock_client_cls.return_value
+            mock_client.get_tier_order.side_effect = lambda tier: {"points_120": 0, "points_5000": 2}.get(tier, 0)
+            result = vm._compute_tier_hint("momentum_breakout")
+        assert result is None
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_compute_tier_hint_tier_insufficient(self, mock_dp, mock_sm, mock_rm):
+        """路径3: 已知策略 + 当前档位 < 最低档位 → 返回 i18n key。"""
+        vm = ScreenerViewModel()
+        with (
+            patch("utils.config_handler.ConfigHandler.get_tushare_point_tier", return_value="points_120"),
+            patch("services.ai_service.get_strategy_min_tier", return_value="points_5000"),
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = mock_client_cls.return_value
+            mock_client.get_tier_order.side_effect = lambda tier: {"points_120": 0, "points_5000": 2}.get(tier, 0)
+            result = vm._compute_tier_hint("ai_llm_v")
+        assert result == "sys_strategy_tier_hint"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_compute_tier_hint_unknown_strategy_defaults_points_120(self, mock_dp, mock_sm, mock_rm):
+        """未知策略: get_strategy_min_tier 真实默认 points_120, 当前档位 >= points_120 → 返回 None。
+
+        不 mock get_strategy_min_tier，让真实默认回退路径运行（_STRATEGY_MIN_TIER.get(key, "points_120")）。
+        """
+        vm = ScreenerViewModel()
+        with (
+            patch("utils.config_handler.ConfigHandler.get_tushare_point_tier", return_value="points_120"),
+            patch("data.external.tushare_client.TushareClient") as mock_client_cls,
+        ):
+            mock_client = mock_client_cls.return_value
+            mock_client.get_tier_order.side_effect = lambda tier: {"points_120": 0}.get(tier, 0)
+            result = vm._compute_tier_hint("unknown_strategy")
+        assert result is None
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_compute_tier_hint_exception_returns_none(self, mock_dp, mock_sm, mock_rm):
+        """路径4: 内部异常时安全返回 None (不传播, 安全降级)。
+
+        ConfigHandler.get_tushare_point_tier 抛 RuntimeError 时, _compute_tier_hint
+        应捕获异常并返回 None, 而非传播异常 (保持 View 渲染不中断)。
+        """
+        vm = ScreenerViewModel()
+        with patch(
+            "utils.config_handler.ConfigHandler.get_tushare_point_tier",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = vm._compute_tier_hint("value")
+        assert result is None
