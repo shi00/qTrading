@@ -1,9 +1,15 @@
+import asyncio
 import hashlib
 import logging
 import os
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import quote_plus
 
 import asyncpg
+import flet as ft
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, insert
@@ -52,18 +58,49 @@ from tests.integration.fixtures.mvd_data import (
     MVD_TRADE_CAL,
 )
 
-# NOTE(lazy): 集成测试侧显式调用 V1 兼容桩，让 ft.Control.page 可读写、update() 容忍未挂载情况.
-# ceiling: 集成测试套件（tests/integration/ 路径）.
-# upgrade: 与 mock_flet._install_v1_compat_control_page_mock 同步移除，
-#     集成测试代码改用 PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
-# 集成测试（如 test_config_panels.py）用 `panel.page = mock_page` 赋值，
-# 但 V1 中 ft.Control.page 是只读 property，需此桩恢复 V0 行为。
-# 导入 mock_flet 模块时已自动应用桩，此处显式调用确保幂等。
-from tests.unit.ui.mock_flet import _install_v1_compat_control_page_mock
-
-_install_v1_compat_control_page_mock()
-
 logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _v1_page_compat(monkeypatch):
+    """Per-test V1 page 兼容桩（替代旧 mock_flet 全局桩，方案 §3.3.1）。
+
+    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
+    ``Control.update()`` 要求控件已挂载。本 fixture 用 monkeypatch 作用域隔离地
+    恢复 V0 兼容行为：page 可读写、未挂载 ``update()`` 静默返回。
+
+    集成测试（如 test_config_panels.py）用 ``panel.page = mock_page`` 注入 page。
+    与 tests/unit/ui/conftest.py 的同名 fixture 行为一致，避免重复维护两套桩。
+    """
+    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
+    original_page_get: Any = ft.Control.page.fget
+    original_update: Any = ft.Control.update
+
+    @property
+    def page(self) -> ft.Page | None:
+        mock_page = self.__dict__.get("_mock_page")
+        if mock_page is not None:
+            return mock_page
+        try:
+            return original_page_get(self)
+        except RuntimeError:
+            return None
+
+    @page.setter
+    def page(self, value: ft.Page | None) -> None:
+        self.__dict__["_mock_page"] = value
+
+    def update(self) -> None:
+        if self.__dict__.get("_mock_page") is None:
+            try:
+                original_page_get(self)
+            except RuntimeError:
+                return
+        original_update(self)
+
+    monkeypatch.setattr(ft.Control, "page", page)
+    monkeypatch.setattr(ft.Control, "update", update)
+
 
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
@@ -214,7 +251,158 @@ async def _cleanup_mvd_data(test_engine: AsyncEngine):
         await conn.execute(delete(DailyQuotes).where(DailyQuotes.ts_code.in_(["000001.SZ", "600000.SH"])))
         # L0
         await conn.execute(delete(TradeCal).where(TradeCal.exchange == "SSE"))
-        await conn.execute(delete(StockBasic).where(StockBasic.ts_code.in_(["000001.SZ", "600000.SH"])))
+        # StockBasic 全表清理（非仅 MVD 股票）：TestDatabaseBase.asyncTearDown 不清理数据，
+        # 其末尾测试残留的非 MVD 股票会导致 prompt_validator 的 check_multi_period_data /
+        # check_field_exists 随机抽样到无财务数据的股票，injector 返回 False。
+        await conn.execute(delete(StockBasic))
+
+
+@dataclass
+class FletTestPage:
+    """``flet_test_page`` fixture 返回值：含 page + 集成测试辅助方法（方案 §3.3.3 + Phase 3.0.1 扩展）。
+
+    Phase 3.0.1 扩展：支持声明式组件 ``use_state``/``use_viewmodel`` 真订阅测试。
+    - ``wait_for_render``: 基于控件数量轮询（向后兼容）
+    - ``wait_for_condition``: 通用条件轮询（支持内容断言，替代仅数量检查）
+    - ``find_control``: 深度优先查找满足谓词的控件（用于断言 state 变更后的内容）
+
+    典型用法（state 变更后断言内容）::
+
+        vm.set_current_step(2)  # 触发 state 变更 → Renderer reconcile
+        ftp.wait_for_condition(
+            lambda: ftp.find_control(lambda c: isinstance(c, ft.Text) and c.value == "Step 2") is not None
+        )
+    """
+
+    page: ft.Page
+
+    def wait_for_render(self, timeout: float = 2.0, expected_controls: int | None = None) -> None:
+        """轮询 ``page.controls`` 长度变化，超时抛 ``TimeoutError``（方案 §3.3.3 M3）。
+
+        Args:
+            timeout: 超时秒数，默认 2.0。
+            expected_controls: 期望的控件数量；None 表示当前数量 + 1。
+        """
+        deadline = time.monotonic() + timeout
+        initial = len(self.page.controls)
+        target = expected_controls if expected_controls is not None else initial + 1
+        while time.monotonic() < deadline:
+            if len(self.page.controls) >= target:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"wait_for_render 超时: 期望 {target} 个控件，实际 {len(self.page.controls)}")
+
+    def wait_for_condition(
+        self,
+        predicate: Callable[[], bool],
+        timeout: float = 2.0,
+        interval: float = 0.05,
+    ) -> None:
+        """通用条件轮询：``predicate`` 返回 True 时返回，超时抛 ``TimeoutError``（Phase 3.0.1）。
+
+        用于声明式组件 ``use_state``/``use_viewmodel`` 触发重渲染后的内容断言。
+        ``wait_for_render`` 仅感知控件数量变化，无法感知 state 变更后的内容更新；
+        本方法配合 ``find_control`` 可断言"控件内容已反映新 state"。
+
+        Args:
+            predicate: 返回 bool 的可调用对象；True 表示条件满足。
+            timeout: 超时秒数，默认 2.0。
+            interval: 轮询间隔秒数，默认 0.05。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if predicate():
+                    return
+            except Exception:
+                # predicate 内部访问控件属性可能因渲染未完成抛异常，继续轮询
+                pass
+            time.sleep(interval)
+        raise TimeoutError(f"wait_for_condition 超时: predicate 未在 {timeout}s 内返回 True")
+
+    def find_control(self, predicate: Callable[[ft.BaseControl], bool]) -> ft.BaseControl | None:
+        """深度优先查找满足 ``predicate`` 的控件（Phase 3.0.1）。
+
+        用于断言 state 变更后的内容（如 ``lambda c: isinstance(c, ft.Text) and c.value == "new"``）。
+        遍历 ``page.controls`` 及其子控件（``content``/``controls`` 属性）。
+
+        Args:
+            predicate: 接受 ``ft.BaseControl`` 返回 bool 的可调用对象。
+
+        Returns:
+            第一个满足谓词的控件；未找到返回 None。
+        """
+        return _find_control_recursive(self.page.controls, predicate)
+
+
+def _find_control_recursive(
+    controls: Sequence[ft.BaseControl],
+    predicate: Callable[[ft.BaseControl], bool],
+) -> ft.BaseControl | None:
+    """``find_control`` 的递归实现（模块级，避免 dataclass 方法递归开销）。"""
+    for control in controls:
+        try:
+            if predicate(control):
+                return control
+        except Exception:
+            pass
+        # 深度优先：先 content（单控件），再 controls（控件列表）
+        content = getattr(control, "content", None)
+        if isinstance(content, ft.BaseControl):
+            found = _find_control_recursive([content], predicate)
+            if found is not None:
+                return found
+        children = getattr(control, "controls", None)
+        if isinstance(children, list):
+            found = _find_control_recursive(children, predicate)
+            if found is not None:
+                return found
+    return None
+
+
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
+async def flet_test_page():
+    """启动完整 Flet app 返回 ``FletTestPage``（page + ``wait_for_render``，方案 §3.3.3）。
+
+    通过 ``ft.run_async`` + ``AppView.FLET_APP_HIDDEN`` 启动隐藏 Flet app，
+    在 ``main`` 回调中捕获 page。session 作用域避免每次测试重新启动 app。
+
+    首次运行需下载 Flet bundle（one-time），预热后启动较快。
+    spike 验证：``ft.run_async`` + ``FLET_APP_HIDDEN`` 可在 60s 内捕获 page
+    （含首次 bundle 下载），``page.add`` 后 ``page.controls`` 立即更新。
+
+    Windows 限制：``ft.run_async`` 的 socket server 不兼容
+    ``WindowsSelectorEventLoop``（抛 ``NotImplementedError``），而 pytest-asyncio
+    在 Windows 强制 selector policy。因此 Windows 本地无法运行依赖此 fixture
+    的测试（probe 测试已加 ``skipif(win32)``）。本地 Windows 验证请用独立 spike：
+    ``python -m tests.integration._spike_flet_run_async``。
+
+    Headless Linux 限制：``ft.run_async`` 内部 ``is_linux_server()`` 检测
+    ``DISPLAY`` 环境变量——CI ubuntu-latest headless 下返回 True，强制
+    ``view=AppView.WEB_BROWSER``（flet app.py L188-190），启动 web server
+    等待浏览器连接，无浏览器则 main 回调永不触发，fixture 挂起 120s 超时。
+    因此依赖此 fixture 的测试在 CI headless Linux 下也需 skip（probe 测试
+    已加 ``skipif(_IS_HEADLESS_LINUX)``）。本地 Linux 需有 X server 或用
+    ``xvfb-run``。技术债：CI 完整验证需装 ``xvfb`` + ``flet_desktop``。
+    """
+    captured: list[ft.Page] = []
+    ready = asyncio.Event()
+
+    async def app_main(page: ft.Page) -> None:
+        captured.append(page)
+        ready.set()
+
+    task = asyncio.create_task(ft.run_async(app_main, view=ft.AppView.FLET_APP_HIDDEN, port=0))
+    try:
+        await asyncio.wait_for(ready.wait(), timeout=120.0)
+        yield FletTestPage(page=captured[0])
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # task 被主动取消是预期行为（fixture teardown），非业务异常吞没
+            pass
 
 
 @pytest_asyncio.fixture
@@ -319,15 +507,9 @@ def _reset_thread_pool():
     ThreadPoolManager._reset_singleton()
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def db_schema_ready(request, test_engine):
-    """Ensure database schema is ready before each test.
-
-    Skip for tests that use isolated database fixtures (e.g., migrated_db_engine,
-    metadata_db_engine, etc.) to avoid conflicting with their own database setup.
-    """
-    # Skip for tests that use isolated database fixtures
-    isolated_fixtures = {
+# 使用隔离 DB 的 fixture 列表（与 db_schema_ready 配合跳过 test_engine 依赖）
+_ISOLATED_DB_FIXTURES = frozenset(
+    {
         "migrated_db_engine",
         "partial_db_engine",
         "empty_status_db_engine",
@@ -341,12 +523,45 @@ async def db_schema_ready(request, test_engine):
         "db_via_init_db",
         "db_via_alembic",
     }
-    fixture_names = set(request.fixturenames)
-    if not (isolated_fixtures & fixture_names):
+)
+
+
+@pytest.fixture(autouse=True)
+def _test_engine_dep(request):
+    """同步解析 test_engine，避免在 async fixture 内调用 getfixturevalue 触发
+    ``Runner.run() cannot be called from a running event loop``。
+
+    pytest-asyncio 对 async fixture 的首次 setup 需调用 ``runner.run()``，
+    若 ``getfixturevalue`` 在已运行的事件循环（即另一个 async fixture setup）中
+    调用，则抛 RuntimeError。将解析移至 sync fixture 可在无事件循环时完成 setup。
+
+    no_db / isolated fixture 场景返回 None，不触发 test_engine 创建。
+    """
+    if request.node.get_closest_marker("no_db"):
+        return None
+    if _ISOLATED_DB_FIXTURES & set(request.fixturenames):
+        return None
+    return request.getfixturevalue("test_engine")
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def db_schema_ready(request, _test_engine_dep):
+    """Ensure database schema is ready before each test.
+
+    Skip for tests that use isolated database fixtures (e.g., migrated_db_engine,
+    metadata_db_engine, etc.) to avoid conflicting with their own database setup.
+
+    Skip for tests marked ``no_db`` (e.g., flet_test_page probe) — 这类测试
+    不需要 DB，不应触发 ``test_engine`` 创建。
+
+    test_engine 通过同步 fixture ``_test_engine_dep`` 解析，避免在 async 上下文
+    中调用 ``getfixturevalue`` 触发 ``Runner.run()`` 嵌套事件循环错误。
+    """
+    if _test_engine_dep is not None:
         from data.persistence.db_migrator import DatabaseMigrator
 
         with override_db_url(TEST_DB_URL):
-            await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+            await DatabaseMigrator.init_db(_test_engine_dep, auto_migrate=True)
 
     yield
 

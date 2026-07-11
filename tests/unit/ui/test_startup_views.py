@@ -1,9 +1,31 @@
-import pytest
+"""StartupView 声明式组件单测 (Phase G.1).
+
+从命令式 StartupViewRenderer 测试重写为声明式范式测试:
+- 纯函数构建器 (_build_*) 独立测试 (无状态, 可直接调用)
+- _StartupBridge 桥接行为测试 (纯 Python class)
+- _get_localized_detail 保留
+- StartupView 组件契约守护 (@ft.component 装饰)
+- 有状态组件 (use_state/use_effect) 的渲染测试走集成测试, 不在此覆盖
+"""
+
 from unittest.mock import MagicMock, patch
+
 import flet as ft
+import pytest
 
 from app.startup_controller import StartupContext, StartupController, StartupState
-from ui.startup_views import StartupViewRenderer, _get_localized_detail
+from ui.startup_views import (
+    StartupView,
+    _StartupBridge,
+    _build_error_view,
+    _build_loading_view,
+    _build_onboarding_view,
+    _build_upgrade_dialog,
+    _build_upgrade_failed_dialog,
+    _build_upgrade_in_progress_dialog,
+    _build_upgrade_success_dialog,
+    _get_localized_detail,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -16,7 +38,6 @@ def mock_controller():
 def _trigger_click(button):
     """Safely trigger Flet control on_click callback in tests."""
     assert button.on_click is not None
-    # Pyright doesn't know button.on_click is callable or what event type it takes
     button.on_click(MagicMock())  # type: ignore[reportArgumentType, reportOptionalCall]
 
 
@@ -25,7 +46,6 @@ def _find_controls(control, control_type):
     found = []
     if isinstance(control, control_type):
         found.append(control)
-    # Check standard container properties
     if hasattr(control, "controls") and isinstance(control.controls, list):
         for child in control.controls:
             found.extend(_find_controls(child, control_type))
@@ -46,6 +66,9 @@ def _find_button_by_text(root, text: str):
         if btn_text == text:
             return btn
     return None
+
+
+# --- _get_localized_detail ---
 
 
 def test_get_localized_detail_empty():
@@ -80,232 +103,160 @@ def test_get_localized_detail_exception():
         assert _get_localized_detail("some error detail") == "some error detail"
 
 
-def test_renderer_initialization(mock_page, mock_controller):
-    show_dialog = MagicMock()
-    hide_dialog = MagicMock()
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, show_dialog, hide_dialog, run_task)
-    assert renderer._page == mock_page
-    assert renderer._controller == mock_controller
-    assert renderer._show_dialog == show_dialog
-    assert renderer._hide_dialog == hide_dialog
-    assert renderer._run_task == run_task
-    assert renderer._current_dialog is None
+# --- _StartupBridge ---
 
 
-def test_show_dialog_tracked(mock_page, mock_controller):
-    show_dialog = MagicMock()
-    hide_dialog = MagicMock()
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, show_dialog, hide_dialog, run_task)
-
-    dialog1 = ft.AlertDialog(title=ft.Text("D1"))
-    renderer._show_dialog_tracked(dialog1)
-    show_dialog.assert_called_once_with(dialog1)
-    assert renderer._current_dialog == dialog1
-
-    dialog2 = ft.AlertDialog(title=ft.Text("D2"))
-    renderer._show_dialog_tracked(dialog2)
-    hide_dialog.assert_called_once_with(dialog1)
-    show_dialog.assert_called_with(dialog2)
-    assert renderer._current_dialog == dialog2
+def test_bridge_initial_state():
+    bridge = _StartupBridge()
+    assert bridge.state == StartupState.LOADING
+    assert bridge.context == StartupContext()
+    assert bridge.dispatch is None
 
 
-def test_on_state_change_routing(mock_page, mock_controller):
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), MagicMock())
-    context = StartupContext()
-
-    states = [
-        (StartupState.LOADING, "_render_loading"),
-        (StartupState.NEED_UPGRADE, "_render_upgrade_dialog"),
-        (StartupState.UPGRADE_IN_PROGRESS, "_render_upgrade_in_progress"),
-        (StartupState.UPGRADE_SUCCESS, "_render_upgrade_success"),
-        (StartupState.UPGRADE_FAILED, "_render_upgrade_failed"),
-        (StartupState.INIT_FAILED, "_render_error_view"),
-        (StartupState.NEED_ONBOARDING, "_render_onboarding"),
-        (StartupState.READY, "_render_main_app"),
-    ]
-
-    for state, method_name in states:
-        with patch.object(renderer, method_name) as mock_method:
-            if method_name in ("_render_upgrade_dialog", "_render_upgrade_failed", "_render_error_view"):
-                renderer.on_state_change(state, context)
-                mock_method.assert_called_once_with(context)
-            else:
-                renderer.on_state_change(state, context)
-                mock_method.assert_called_once()
+def test_bridge_notify_updates_state_context():
+    bridge = _StartupBridge()
+    ctx = StartupContext(error="db_init_failed", detail="conn error")
+    bridge.notify(StartupState.INIT_FAILED, ctx)
+    assert bridge.state == StartupState.INIT_FAILED
+    assert bridge.context is ctx
 
 
-def test_render_loading(mock_page, mock_controller, mock_i18n):
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), MagicMock())
+def test_bridge_notify_no_dispatch_when_unbound():
+    """dispatch 未绑定时 notify 仅更新快照, 不报错."""
+    bridge = _StartupBridge()
+    bridge.notify(StartupState.READY, StartupContext())
+    assert bridge.state == StartupState.READY
+    assert bridge.dispatch is None
+
+
+def test_bridge_notify_calls_dispatch_when_bound():
+    """dispatch 绑定后 notify 触发 dispatch (controller → set_state 重渲染)."""
+    bridge = _StartupBridge()
+    calls: list[tuple[StartupState, StartupContext]] = []
+    bridge.dispatch = lambda s, c: calls.append((s, c))
+
+    ctx = StartupContext(error="err")
+    bridge.notify(StartupState.INIT_FAILED, ctx)
+    assert calls == [(StartupState.INIT_FAILED, ctx)]
+    assert bridge.state == StartupState.INIT_FAILED
+
+
+# --- 纯函数构建器 ---
+
+
+def test_build_loading_view(mock_i18n):
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_loading()
-    assert len(mock_page.controls) > 0
-    assert isinstance(mock_page.controls[-1], ft.Container)
+        view = _build_loading_view()
+    assert isinstance(view, ft.Container)
+    assert len(_find_controls(view, ft.ProgressRing)) == 1
+    assert len(_find_controls(view, ft.Text)) == 1
 
 
-def test_render_upgrade_dialog(mock_page, mock_controller, mock_i18n):
-    show_dialog = MagicMock()
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, show_dialog, MagicMock(), run_task)
-
-    context = StartupContext()
+def test_build_upgrade_dialog(mock_i18n):
+    on_upgrade = MagicMock()
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_upgrade_dialog(context)
-
-    show_dialog.assert_called_once()
-    dialog = show_dialog.call_args[0][0]
+        dialog = _build_upgrade_dialog(on_upgrade)
     assert isinstance(dialog, ft.AlertDialog)
     assert dialog.modal is True
-
-    # Test button click
     button = dialog.actions[0]
     assert isinstance(button, ft.Button)
     _trigger_click(button)
-    run_task.assert_called_once_with(mock_controller.upgrade)
+    on_upgrade.assert_called_once()
 
 
-def test_render_upgrade_in_progress(mock_page, mock_controller, mock_i18n):
-    show_dialog = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, show_dialog, MagicMock(), MagicMock())
+def test_build_upgrade_in_progress_dialog(mock_i18n):
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_upgrade_in_progress()
-    show_dialog.assert_called_once()
-    dialog = show_dialog.call_args[0][0]
+        dialog = _build_upgrade_in_progress_dialog()
+    assert isinstance(dialog, ft.AlertDialog)
     assert isinstance(dialog.content, ft.Column)
     assert any(isinstance(c, ft.ProgressBar) for c in dialog.content.controls)
 
 
-def test_render_upgrade_success(mock_page, mock_controller, mock_i18n):
-    show_dialog = MagicMock()
-    hide_dialog = MagicMock()
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, show_dialog, hide_dialog, run_task)
-
+def test_build_upgrade_success_dialog(mock_i18n):
+    on_ok = MagicMock()
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_upgrade_success()
-
-    show_dialog.assert_called_once()
-    dialog = show_dialog.call_args[0][0]
+        dialog = _build_upgrade_success_dialog(on_ok)
+    assert isinstance(dialog, ft.AlertDialog)
     button = dialog.actions[0]
+    assert isinstance(button, ft.TextButton)
     _trigger_click(button)
-    hide_dialog.assert_called_once_with(dialog)
-    run_task.assert_called_once_with(mock_controller.proceed_after_upgrade_success)
+    on_ok.assert_called_once()
 
 
-def test_render_upgrade_failed(mock_page, mock_controller, mock_i18n):
-    show_dialog = MagicMock()
-    hide_dialog = MagicMock()
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, show_dialog, hide_dialog, run_task)
-
-    context = StartupContext()
+def test_build_upgrade_failed_dialog(mock_i18n):
+    on_exit = MagicMock()
+    on_retry = MagicMock()
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_upgrade_failed(context)
-
-    show_dialog.assert_called_once()
-    dialog = show_dialog.call_args[0][0]
-    # exit_program button
+        dialog = _build_upgrade_failed_dialog(on_exit, on_retry)
+    assert isinstance(dialog, ft.AlertDialog)
     btn_exit = dialog.actions[0]
-    _trigger_click(btn_exit)
-    hide_dialog.assert_called_with(dialog)
-    mock_controller.upgrade_exit.assert_called_once()
-
-    # retry button
     btn_retry = dialog.actions[1]
+    _trigger_click(btn_exit)
+    on_exit.assert_called_once()
     _trigger_click(btn_retry)
-    hide_dialog.assert_called_with(dialog)
-    run_task.assert_called_once_with(mock_controller.upgrade_retry)
+    on_retry.assert_called_once()
 
 
-def test_render_error_view_db_init_failed(mock_page, mock_controller, mock_i18n):
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), run_task)
-
+def test_build_error_view_db_init_failed(mock_i18n):
+    on_retry = MagicMock()
+    on_reconfigure = MagicMock()
+    on_skip = MagicMock()
     context = StartupContext(error="db_init_failed", detail="connection error")
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_error_view(context)
+        view = _build_error_view(context, on_retry, on_reconfigure, on_skip)
+    assert isinstance(view, ft.Container)
 
-    # Use robust traversal helpers to find controls instead of brittle index access
-    btn_retry = _find_button_by_text(mock_page, "retry")
-    btn_reconfig = _find_button_by_text(mock_page, "db_reconfigure")
-    btn_skip = _find_button_by_text(mock_page, "skip")
-
+    btn_retry = _find_button_by_text(view, "retry")
+    btn_reconfig = _find_button_by_text(view, "db_reconfigure")
+    btn_skip = _find_button_by_text(view, "skip")
     assert btn_retry is not None
     assert btn_reconfig is not None
     assert btn_skip is not None
 
     _trigger_click(btn_retry)
-    run_task.assert_any_call(mock_controller.retry)
-
+    on_retry.assert_called_once()
     _trigger_click(btn_reconfig)
-    run_task.assert_any_call(mock_controller.reconfigure)
-
+    on_reconfigure.assert_called_once()
     _trigger_click(btn_skip)
-    mock_controller.skip.assert_called_once()
+    on_skip.assert_called_once()
 
 
-def test_render_error_view_engine_missing(mock_page, mock_controller, mock_i18n):
-    run_task = MagicMock()
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), run_task)
-
+def test_build_error_view_engine_missing(mock_i18n):
     context = StartupContext(error="db_engine_missing", detail=None)
     with patch("ui.startup_views.I18n", mock_i18n):
-        renderer._render_error_view(context)
-
-    # Check that error msg text is error_db_engine_missing using robust traversal helper
-    texts = _find_controls(mock_page, ft.Text)
+        view = _build_error_view(context, MagicMock(), MagicMock(), MagicMock())
+    texts = _find_controls(view, ft.Text)
     text_values = {t.value for t in texts if hasattr(t, "value")}
     assert "error_db_engine_missing" in text_values
 
 
-def test_render_onboarding(mock_page, mock_controller):
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), MagicMock())
+def test_build_onboarding_view(mock_controller):
     mock_wizard_cls = MagicMock()
-
     with patch("ui.views.onboarding_wizard.OnboardingWizard", mock_wizard_cls):
-        renderer._render_onboarding()
-
-    mock_wizard_cls.assert_called_once_with(mock_page, on_complete=mock_controller.onboarding_complete)
-    assert len(mock_page.controls) > 0
-
-
-def test_render_main_app(mock_page, mock_controller):
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), MagicMock())
-    mock_layout = MagicMock()
-    mock_news_svc = MagicMock()
-
-    with (
-        patch("ui.app_layout.AppLayout", return_value=mock_layout),
-        patch("services.news_subscription_service.NewsSubscriptionService", return_value=mock_news_svc),
-    ):
-        renderer._render_main_app()
-
-    mock_layout.show.assert_called_once()
-    mock_news_svc.add_listener.assert_called_once()
-
-    # Verify nested news alert callback when page has toast
-    on_news_alert_fn = mock_news_svc.add_listener.call_args[0][0]
-    mock_page.toast = MagicMock()
-    on_news_alert_fn("New stock alert!")
-    mock_page.toast.show.assert_called_once_with("📰 New stock alert!", toast_type="info")
+        view = _build_onboarding_view(mock_controller.onboarding_complete)
+    assert isinstance(view, ft.Container)
+    mock_wizard_cls.assert_called_once_with(on_complete=mock_controller.onboarding_complete)
 
 
-def test_render_main_app_no_toast(mock_page, mock_controller):
-    renderer = StartupViewRenderer(mock_page, mock_controller, MagicMock(), MagicMock(), MagicMock())
-    mock_layout = MagicMock()
-    mock_news_svc = MagicMock()
+# --- StartupView 契约守护 ---
 
-    with (
-        patch("ui.app_layout.AppLayout", return_value=mock_layout),
-        patch("services.news_subscription_service.NewsSubscriptionService", return_value=mock_news_svc),
-    ):
-        renderer._render_main_app()
 
-    on_news_alert_fn = mock_news_svc.add_listener.call_args[0][0]
+def test_startup_view_is_ft_component():
+    """StartupView 必须用 @ft.component 装饰 (声明式契约守护)."""
+    assert hasattr(StartupView, "__wrapped__"), "StartupView 必须用 @ft.component 装饰"
 
-    # Verify nested news alert callback when page doesn't have toast
-    if hasattr(mock_page, "toast"):
-        delattr(mock_page, "toast")
-    # This should not raise an error
-    on_news_alert_fn("New stock alert!")
+
+def test_startup_view_uses_use_dialog():
+    """DoD: dialog 必须通过 ft.use_dialog() 声明式管理 (§10.1), 禁止 show_dialog_fn/hide_dialog_fn 回归。"""
+    from pathlib import Path
+
+    import ui.startup_views as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    assert "ft.use_dialog(" in source, "必须使用 ft.use_dialog() 声明式管理 dialog"
+    assert "show_dialog_fn" not in source, "禁止 show_dialog_fn 命令式回调注入"
+    assert "hide_dialog_fn" not in source, "禁止 hide_dialog_fn 命令式回调注入"
+    assert "current_dialog_ref" not in source, "禁止 current_dialog_ref 命令式 ref 管理"
+    assert "_setup_dialog" not in source, "禁止 _setup_dialog 命令式 use_effect"
+    assert "page.show_dialog" not in source, "禁止 page.show_dialog 命令式 API"
+    assert "page.pop_dialog" not in source, "禁止 page.pop_dialog 命令式 API"

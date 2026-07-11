@@ -1,5 +1,18 @@
-"""
-Onboarding Wizard with Enhanced Navigation
+"""Onboarding Wizard — 声明式组件 (Phase F.1).
+
+从命令式容器子类重写为 ``@ft.component`` 函数组件范式
+(CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
+
+变更要点:
+- 旧命令式容器子类 → ``@ft.component def OnboardingWizard(on_complete)``
+- OnboardingViewModel + 4 个 config panel VM 通过 ``use_viewmodel(factory=)`` 内部模式实例化,
+  hook 负责实例化 + dispose on unmount
+- 消费已声明式 DatabaseConfigPanel/TushareConfigPanel/LLMConfigPanel/LocalModelConfigPanel (函数调用, vm props)
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+- 8 步状态机用 ``use_state`` + VM state.current_step 驱动条件渲染
+- page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+- 异步任务: ``page.run_task`` 调度; R2 CancelledError 不被 ``except Exception`` 捕获
+- 移除命令式生命周期回调 / 手动刷新 / page 引用持有 / resize 级联 / 命令式 VM 绑定 / locale 重建
 
 Steps (8 total):
 0. Welcome - Configuration overview
@@ -10,15 +23,10 @@ Steps (8 total):
 5. Data Sync (Optional)
 6. Schedule Setup (Optional)
 7. Complete
-
-Features:
-- Fixed navigation bar at bottom
-- Step-by-step validation with gradual persistence
-- Back navigation with re-validation
-- Component reuse (LLMConfigPanel, LocalModelConfigPanel)
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 
 import flet as ft
 
@@ -26,9 +34,15 @@ from ui.components.config_panels.database_config_panel import DatabaseConfigPane
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
-from ui.i18n import I18n, refresh_dropdown_options
+from ui.hooks import use_viewmodel
+from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.onboarding_view_model import OnboardingViewModel, STEP_CONFIGS
+from ui.viewmodels import Message
+from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
+from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
+from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
+from ui.viewmodels.onboarding_view_model import STEP_CONFIGS, OnboardingViewModel
+from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -40,1097 +54,1012 @@ DEFAULT_SYNC_YEARS = 3
 DEFAULT_SYNC_DAYS = DEFAULT_SYNC_YEARS * 365
 
 
-class OnboardingWizard(ft.Container):
-    """Step-by-step onboarding wizard with enhanced navigation."""
+# ============================================================================
+# Module-level pure helpers
+# ============================================================================
 
-    def __init__(self, page, on_complete=None):
-        super().__init__()
-        self.app_page = page
-        self.on_complete = on_complete
-        self.expand = True
-        self.bgcolor = AppColors.BACKGROUND
 
-        self.vm = OnboardingViewModel()
-        self._locale_subscription_id = None
-        self._panel_loading: bool = False
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
 
-        self._init_database_controls()
-        self._init_token_controls()
-        self._init_cloud_ai_controls()
-        self._init_local_model_controls()
-        self._init_sync_controls()
-        self._init_schedule_controls()
 
-        self.steps_content = [
-            self._build_welcome_step(),
-            self._build_database_step(),
-            self._build_token_step(),
-            self._build_cloud_ai_step(),
-            self._build_local_model_step(),
-            self._build_sync_step(),
-            self._build_schedule_step(),
-            self._build_complete_step(),
-        ]
+def _show_snack(msg: str, color: str) -> None:
+    """通过 ``page.show_toast`` 显示提示 (main.py:251 动态挂载).
 
-        self.step_container = ft.Container(  # pragma: no cover
-            content=self.steps_content[0],  # pragma: no cover
-        )  # pragma: no cover
+    CLAUDE.md §3.2 声明式 UI: 禁用 ``page.show_dialog(ft.SnackBar)`` 命令式 API.
+    """
+    page = _get_page()
+    if page is None:
+        logger.debug("[OnboardingWizard] page not available for show_snack")
+        return
+    if not hasattr(page, "show_toast"):
+        logger.warning("[OnboardingWizard] show_toast unavailable: %s", msg)
+        return
+    msg_type = "error" if color == AppColors.ERROR else "info"
+    page.show_toast(msg, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
 
-        self.step_indicators = ft.Row(  # pragma: no cover
-            self._build_step_indicators(),  # pragma: no cover
-            alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
-            vertical_alignment=ft.CrossAxisAlignment.START,  # pragma: no cover
-            visible=1 <= self.vm.current_step <= 6,  # pragma: no cover
-        )  # pragma: no cover
 
-        self.navigation_bar = ft.Container(  # pragma: no cover
-            content=self._build_navigation_buttons(),  # pragma: no cover
-            padding=ft.Padding.symmetric(horizontal=20, vertical=10),  # pragma: no cover
-            bgcolor=AppColors.SURFACE,  # pragma: no cover
-            border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
-        )  # pragma: no cover
+async def _default_on_complete() -> None:
+    """默认完成回调 (no-op)。"""
+    pass
 
-        self.step_content_container = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [self.step_container],  # pragma: no cover
-                scroll=ft.ScrollMode.AUTO,  # pragma: no cover
-                expand=True,  # pragma: no cover
-            ),  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
 
-        self.header_container = self._build_header()
-        self.header_container.visible = self.vm.current_step in (0, 7)
+async def _on_llm_test_connection(
+    provider: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+    **kwargs,
+) -> dict:
+    """LLM 连接测试回调 — 委托 OnboardingViewModel 静态方法。"""
+    return await OnboardingViewModel.test_llm_connection(
+        provider=provider,
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        **kwargs,
+    )
 
-        self.loading_overlay_text = ft.Text(  # pragma: no cover
-            I18n.get("wizard_validating"),  # pragma: no cover
-            size=14,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
 
-        self.loading_overlay = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    ft.ProgressRing(width=40, height=40, stroke_width=3),  # pragma: no cover
-                    self.loading_overlay_text,  # pragma: no cover
-                ],  # pragma: no cover
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-                alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
-            ),  # pragma: no cover
-            bgcolor=ft.Colors.with_opacity(0.7, AppColors.BACKGROUND),  # pragma: no cover
-            visible=False,  # pragma: no cover
-            expand=True,  # pragma: no cover
-            alignment=ft.Alignment.CENTER,  # pragma: no cover
-            on_click=lambda e: None,  # pragma: no cover
-        )  # pragma: no cover
+async def _on_verify_local_model(model_path: str, config: dict) -> bool:
+    """验证本地模型回调 — 委托 OnboardingViewModel 静态方法。"""
+    return await OnboardingViewModel.verify_local_model(model_path, config)
 
-        self.content = ft.Stack(  # pragma: no cover
-            controls=[  # pragma: no cover
-                ft.Column(  # pragma: no cover
-                    controls=[  # pragma: no cover
-                        ft.Container(height=5),  # pragma: no cover
-                        self.header_container,  # pragma: no cover
-                        self.step_indicators,  # pragma: no cover
-                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
-                        self.step_content_container,  # pragma: no cover
-                        self.navigation_bar,  # pragma: no cover
-                    ],  # pragma: no cover
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-                    expand=True,  # pragma: no cover
-                ),  # pragma: no cover
-                self.loading_overlay,  # pragma: no cover
-            ],  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
 
-        self.did_mount = self._on_mount
-        self.will_unmount = self._on_unmount
+async def _validate_cloud_ai(llm_vm: LLMConfigPanelViewModel) -> bool:
+    """Cloud AI 步骤验证: 连接测试 + 保存配置。"""
+    if await llm_vm.verify_connection():
+        if not await llm_vm.save_config():
+            logger.error("[OnboardingWizard] Failed to save LLM config")
+            _show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
+            return False
+        return True
+    return False
 
-        self._bind_vm()
 
-    def _bind_vm(self):  # pragma: no cover
-        self.vm.bind(
-            fn_validate_database=self.database_panel.save_config,
-            fn_validate_token=self.tushare_panel.verify_token,
-            fn_validate_cloud_ai=self._validate_cloud_ai_via_panel,
-            fn_validate_local_model=self._validate_local_model_via_panel,
-            fn_push_schedule_state=self._push_schedule_state,
-            on_step_changed=self._on_vm_step_changed,
-            on_sync_progress=self._on_vm_sync_progress,
-            on_sync_state_changed=self._on_vm_sync_state_changed,
-            on_validation_state_changed=self._on_vm_validation_state_changed,
-            on_complete=self.on_complete or self._default_on_complete,
-            on_schedule_time_normalized=self._on_schedule_time_normalized,
+async def _validate_local_model(local_model_vm: LocalModelConfigPanelViewModel) -> bool:
+    """Local Model 步骤验证: 模型验证 + 保存配置 (空路径跳过)。"""
+    model_path = local_model_vm.state.model_path.strip()
+    if not model_path:
+        return True
+    if await local_model_vm.verify_model():
+        if not await local_model_vm.save_config():
+            logger.error("[OnboardingWizard] Failed to save local model config")
+            _show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
+            return False
+        return True
+    return False
+
+
+def _render_message(msg: Message | None) -> str:
+    """渲染 Message 为本地化文本。"""
+    if msg is None:
+        return ""
+    return I18n.get(msg.key, **msg.params)
+
+
+def _create_overview_card(
+    icon: str,
+    color: str,
+    title_key: str,
+    desc_key: str,
+    required: bool,
+    is_hovered: bool,
+    on_hover: Callable[[ft.ControlEvent], None],
+) -> ft.Container:
+    """创建概览卡片 (纯函数, hover 状态由参数注入)。"""
+    required_text = I18n.get("wizard_required")
+    optional_text = I18n.get("wizard_optional")
+
+    if required:
+        badge_bgcolor = ft.Colors.with_opacity(0.9, color)
+        badge_text_color = AppColors.TEXT_ON_PRIMARY
+        dot_color = AppColors.TEXT_ON_PRIMARY
+    else:
+        badge_bgcolor = ft.Colors.with_opacity(0.6, AppColors.TEXT_SECONDARY)
+        badge_text_color = AppColors.TEXT_ON_PRIMARY
+        dot_color = AppColors.TEXT_ON_PRIMARY
+
+    badge = ft.Container(
+        content=ft.Row(
+            [
+                ft.Container(
+                    width=5,
+                    height=5,
+                    border_radius=3,
+                    bgcolor=dot_color,
+                ),
+                ft.Text(
+                    required_text if required else optional_text,
+                    size=9,
+                    weight=ft.FontWeight.W_600,
+                    color=badge_text_color,
+                ),
+            ],
+            spacing=4,
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+        bgcolor=badge_bgcolor,
+        border_radius=6,
+        padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+    )
+
+    icon_with_badge = ft.Stack(
+        [
+            ft.Container(
+                content=ft.Icon(icon, size=32, color=color),
+                width=52,
+                height=52,
+                border_radius=14,
+                bgcolor=ft.Colors.with_opacity(0.12, color),
+                alignment=ft.Alignment.CENTER,
+            ),
+            ft.Container(
+                content=badge,
+                top=-4,
+                right=-4,
+            ),
+        ],
+        width=64,
+        height=60,
+        clip_behavior=ft.ClipBehavior.NONE,
+    )
+
+    if is_hovered:
+        border = ft.Border.all(1.5, ft.Colors.with_opacity(0.5, color))
+        shadow = ft.BoxShadow(
+            spread_radius=1,
+            blur_radius=12,
+            color=ft.Colors.with_opacity(0.2, color),
+            offset=ft.Offset(0, 3),
+        )
+    else:
+        border = ft.Border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY))
+        shadow = ft.BoxShadow(
+            spread_radius=0,
+            blur_radius=8,
+            color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
+            offset=ft.Offset(0, 2),
         )
 
-    def _rebind_panel_callbacks(self):  # pragma: no cover
-        """Rebind panel operation callbacks (called after panel recreation on locale change)."""
-        self.vm.fn_validate_database = self.database_panel.save_config
-        self.vm.fn_validate_token = self.tushare_panel.verify_token
-        self.vm.fn_validate_cloud_ai = self._validate_cloud_ai_via_panel
-        self.vm.fn_validate_local_model = self._validate_local_model_via_panel
-        self.vm.fn_push_schedule_state = self._push_schedule_state
+    card_content = ft.Container(
+        padding=20,
+        border_radius=16,
+        bgcolor=ft.Colors.with_opacity(0.7, AppColors.SURFACE),
+        border=border,
+        shadow=shadow,
+        content=ft.Column(
+            [
+                icon_with_badge,
+                ft.Container(height=16),
+                ft.Text(
+                    I18n.get(title_key),
+                    size=16,
+                    weight=ft.FontWeight.W_700,
+                    color=AppColors.TEXT_PRIMARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=6),
+                ft.Text(
+                    I18n.get(desc_key),
+                    size=13,
+                    color=ft.Colors.with_opacity(0.85, AppColors.TEXT_SECONDARY),
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=0,
+        ),
+        on_hover=on_hover,
+        animate=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
+    )
 
-    async def _default_on_complete(self):  # pragma: no cover
+    return ft.Container(
+        col={"sm": 6, "md": 4, "lg": 4},
+        content=card_content,
+    )
+
+
+# ============================================================================
+# OnboardingWizard
+# ============================================================================
+
+
+@ft.component
+def OnboardingWizard(
+    on_complete: Callable[[], Awaitable[None]] | None = None,
+) -> ft.Container:
+    """逐步引导配置向导 (声明式).
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - OnboardingViewModel + 4 个 config panel VM 通过 ``use_viewmodel(factory=)`` 内部模式实例化
+    - 消费已声明式 DatabaseConfigPanel/TushareConfigPanel/LLMConfigPanel/LocalModelConfigPanel
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - 8 步状态机用 VM state.current_step 驱动条件渲染
+    - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+    - 异步任务: ``page.run_task`` 调度, R2 CancelledError 不被 ``except Exception`` 捕获
+
+    Args:
+        on_complete: 完成回调 (异步, 完成步骤触发)
+    """
+    # --- Subscribe to i18n + theme changes (auto-rerender) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
+
+    # --- OnboardingViewModel (内部模式: hook 实例化 + dispose on unmount) ---
+    state, onboarding_vm = use_viewmodel(factory=lambda: OnboardingViewModel())
+
+    # --- 4 config panel VM (内部模式, hook 负责 dispose) ---
+    # on_change 回调捕获 onboarding_vm (已通过 use_viewmodel 持久化, 稳定引用)
+    _db_state, database_vm = use_viewmodel(
+        factory=lambda: DatabaseConfigPanelViewModel(
+            load_password=True,
+            on_change=lambda: onboarding_vm.invalidate_step("database"),
+        )
+    )
+    _tushare_state, tushare_vm = use_viewmodel(
+        factory=lambda: TushareConfigPanelViewModel(
+            show_internal_loading=False,
+        )
+    )
+    _llm_state, llm_vm = use_viewmodel(
+        factory=lambda: LLMConfigPanelViewModel(
+            on_test_connection=_on_llm_test_connection,
+        )
+    )
+    _local_state, local_model_vm = use_viewmodel(
+        factory=lambda: LocalModelConfigPanelViewModel(
+            on_verify_model=_on_verify_local_model,
+            on_change=lambda: onboarding_vm.invalidate_step("local_model"),
+            show_internal_loading=False,
+        )
+    )
+
+    # --- Pure UI state ---
+    schedule_enabled, set_schedule_enabled = ft.use_state(True)
+    schedule_time, set_schedule_time = ft.use_state(ConfigHandler.get_auto_update_time())
+    language_value, set_language_value = ft.use_state(I18n.current_locale())
+    hovered_card, set_hovered_card = ft.use_state(-1)
+
+    # --- Bind panel methods to onboarding VM (每次渲染用最新闭包绑定, idempotent) ---
+    onboarding_vm.bind(
+        fn_validate_database=database_vm.save_config,
+        fn_validate_token=tushare_vm.verify_token,
+        fn_validate_cloud_ai=lambda: _validate_cloud_ai(llm_vm),
+        fn_validate_local_model=lambda: _validate_local_model(local_model_vm),
+        fn_push_schedule_state=lambda: onboarding_vm.set_schedule_state(
+            enabled=schedule_enabled,
+            time_str=schedule_time,
+        ),
+        on_complete=on_complete or _default_on_complete,
+    )
+
+    # --- Sync normalized schedule time from VM to UI input ---
+    def _sync_normalized_time() -> None:
+        if state.normalized_schedule_time and state.normalized_schedule_time != schedule_time:
+            set_schedule_time(state.normalized_schedule_time)
+
+    ft.use_effect(_sync_normalized_time, dependencies=[state.normalized_schedule_time])
+
+    # --- Cleanup: cancel sync on unmount ---
+    def _cleanup_setup() -> None:
         pass
 
-    # --- Panel validation bridges (View → VM callbacks) ---
-
-    async def _validate_cloud_ai_via_panel(self) -> bool:  # pragma: no cover
-        if await self.llm_config_panel.async_verify_connection():
-            if not await self.llm_config_panel.save_current_config():
-                logger.error("[OnboardingWizard] Failed to save LLM config")
-                self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
-                return False
-            return True
-        self._safe_update()
-        return False
-
-    async def _validate_local_model_via_panel(self) -> bool:  # pragma: no cover
-        model_path = self.local_model_panel.model_path_input.value.strip()
-        if not model_path:
-            return True
-        if await self.local_model_panel.async_verify_model():
-            if not await ThreadPoolManager().run_async(TaskType.IO, self.local_model_panel.save_config):
-                logger.error("[OnboardingWizard] Failed to save local model config")
-                self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
-                return False
-            return True
-        self._safe_update()
-        return False
-
-    def _push_schedule_state(self):  # pragma: no cover
-        self.vm.set_schedule_state(
-            enabled=self.schedule_enabled.value,
-            time_str=self.schedule_time.value,
-        )
-
-    def _on_schedule_time_normalized(self, normalized: str):  # pragma: no cover
-        self.schedule_time.value = normalized
-
-    # --- ViewModel → View notification callbacks ---
-
-    def _on_vm_step_changed(self):  # pragma: no cover
-        self._update_wizard()
-
-    def _on_vm_sync_progress(self, progress: float, message: str):  # pragma: no cover
-        self.sync_progress.value = progress
-        self.sync_status.value = message
-        self._safe_update()
-
-    def _on_vm_sync_state_changed(self):  # pragma: no cover
-        is_syncing = self.vm.sync_in_progress
-        self.btn_quick_sync.disabled = is_syncing
-        self.btn_full_sync.disabled = is_syncing
-        self.btn_cancel_sync.visible = is_syncing
-        self.btn_cancel_sync.disabled = not is_syncing
-        self.btn_sync_later.disabled = is_syncing
-        self._update_navigation_buttons()
-        self._safe_update()
-
-    def _on_vm_validation_state_changed(self):  # pragma: no cover
-        if self.vm.validation_in_progress:
-            self._show_loading_overlay(True)
-        elif not self._panel_loading:
-            self._show_loading_overlay(False)
-
-    def _init_database_controls(self):  # pragma: no cover
-        self.database_panel = DatabaseConfigPanel(
-            compact=True,
-            show_save_button=False,
-            show_header=False,
-            load_password=True,
-            on_change=lambda: self._on_input_change("database"),
-            on_loading_change=self._on_panel_loading_change,
-        )
-
-    def _init_token_controls(self):  # pragma: no cover
-        self.tushare_panel = TushareConfigPanel(
-            compact=True,
-            show_save_button=False,
-            show_register_link=True,
-            show_internal_loading=False,
-            on_loading_change=self._on_panel_loading_change,
-        )
-
-    def _init_cloud_ai_controls(self):  # pragma: no cover
-        self.llm_config_panel = LLMConfigPanel(
-            on_test_connection=self._on_llm_test_connection,
-            show_save_button=False,
-            compact=True,
-            on_loading_change=self._on_panel_loading_change,
-        )
-
-    def _init_local_model_controls(self):  # pragma: no cover
-        self.local_model_panel = LocalModelConfigPanel(
-            on_verify_model=self._on_verify_local_model,
-            show_save_button=False,
-            compact=True,
-            show_internal_loading=False,
-            on_change=lambda: self._on_input_change("local_model"),
-            on_loading_change=self._on_panel_loading_change,
-        )
-
-    def _on_panel_loading_change(self, loading: bool):  # pragma: no cover
-        """通用面板加载状态回调 - 仅控制遮罩显隐"""
-        self._panel_loading = loading
-        if loading:
-            self._show_loading_overlay(True)
-        elif not self.vm.validation_in_progress:
-            self._show_loading_overlay(False)
-        self._safe_update()
-
-    async def _on_llm_test_connection(
-        self,
-        provider: str,
-        model: str,
-        base_url: str,
-        api_key: str,
-        **kwargs,
-    ) -> dict:
-        """LLM 连接测试回调 — 委托 ViewModel"""
-        return await OnboardingViewModel.test_llm_connection(
-            provider=provider,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            **kwargs,
-        )
-
-    async def _on_verify_local_model(self, model_path: str, config: dict) -> bool:
-        """验证本地模型回调 — 委托 ViewModel"""
-        return await OnboardingViewModel.verify_local_model(model_path, config)
-
-    def _init_sync_controls(self):  # pragma: no cover
-        self.sync_progress = ft.ProgressBar(  # pragma: no cover
-            width=AppStyles.CONTROL_WIDTH_LG,  # pragma: no cover
-            value=0,  # pragma: no cover
-            color=AppColors.ACCENT,  # pragma: no cover
-            bgcolor=AppColors.BORDER,  # pragma: no cover
-        )  # pragma: no cover
-        self.sync_status = ft.Text(  # pragma: no cover
-            I18n.get("wizard_status_ready"),  # pragma: no cover
-            size=12,  # pragma: no cover
-            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-            text_align=ft.TextAlign.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_quick_sync = ft.Button(  # pragma: no cover
-            I18n.get("wizard_sync_quick"),  # pragma: no cover
-            icon=ft.Icons.FLASH_ON,  # pragma: no cover
-            style=AppStyles.accent_button(),  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_full_sync = ft.Button(  # pragma: no cover
-            I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),  # pragma: no cover
-            icon=ft.Icons.CLOUD_SYNC,  # pragma: no cover
-            style=AppStyles.primary_button(),  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_sync_later = ft.TextButton(  # pragma: no cover
-            I18n.get("wizard_btn_sync_later"),  # pragma: no cover
-            icon=ft.Icons.SCHEDULE,  # pragma: no cover
-            on_click=lambda e: self.app_page.run_task(self.vm.skip_sync),  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_cancel_sync = ft.Button(  # pragma: no cover
-            I18n.get("wizard_btn_cancel"),  # pragma: no cover
-            icon=ft.Icons.CANCEL,  # pragma: no cover
-            color=AppColors.ERROR,  # pragma: no cover
-            visible=False,  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_quick_sync.on_click = lambda e: self.app_page.run_task(self._on_quick_sync)  # pragma: no cover
-        self.btn_full_sync.on_click = lambda e: self.app_page.run_task(self._on_full_sync)  # pragma: no cover
-        self.btn_cancel_sync.on_click = lambda e: self.app_page.run_task(
-            self._on_cancel_sync_wizard
-        )  # pragma: no cover
-
-    def _init_schedule_controls(self):  # pragma: no cover
-        self.schedule_enabled = ft.Checkbox(  # pragma: no cover
-            label=I18n.get("wizard_schedule_label"),  # pragma: no cover
-            value=True,  # pragma: no cover
-            active_color=AppColors.PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-
-        from utils.config_handler import ConfigHandler  # pragma: no cover
-
-        default_time = ConfigHandler.get_auto_update_time()  # pragma: no cover
-
-        self.schedule_time = ft.TextField(  # pragma: no cover
-            label=I18n.get("wizard_schedule_time_label"),  # pragma: no cover
-            value=default_time,  # pragma: no cover
-            hint_text="HH:MM",  # pragma: no cover
-            width=150,  # pragma: no cover
-            text_align=ft.TextAlign.CENTER,  # pragma: no cover
-            border_color=AppColors.PRIMARY,  # pragma: no cover
-            label_style=ft.TextStyle(color=AppColors.PRIMARY),  # pragma: no cover
-        )  # pragma: no cover
-
-    def _on_input_change(self, step_id: str):  # pragma: no cover
-        self.vm.invalidate_step(step_id)
-
-    def _build_header(self):  # pragma: no cover
-        self.header_title = ft.Text(  # pragma: no cover
-            I18n.get("wizard_welcome_title"),  # pragma: no cover
-            size=32,  # pragma: no cover
-            weight=ft.FontWeight.BOLD,  # pragma: no cover
-            color=AppColors.PRIMARY,  # pragma: no cover
-            text_align=ft.TextAlign.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-        self.header_desc = ft.Text(  # pragma: no cover
-            I18n.get("wizard_welcome_desc_with_time"),  # pragma: no cover
-            size=16,  # pragma: no cover
-            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-            text_align=ft.TextAlign.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                self.header_title,  # pragma: no cover
-                self.header_desc,  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_step_indicators(self):  # pragma: no cover
-        # 仅在配置步骤 1~6 显示，欢迎页和完成页不显示
-        if not (1 <= self.vm.current_step <= 6):
-            return []
-
-        total_config_steps = 6
-        config_step = self.vm.current_step  # 1~6
-        progress_percent = config_step / total_config_steps
-
-        step_names = [
-            None,  # 0: 欢迎(不显示)
-            I18n.get("wizard_step_database"),
-            I18n.get("wizard_step_label_token"),
-            I18n.get("wizard_step_label_ai"),
-            I18n.get("wizard_step_local_model"),
-            I18n.get("wizard_step_label_sync"),
-            I18n.get("wizard_step_label_schedule"),
-            None,  # 7: 完成(不显示)
-        ]
-        current_step_name = step_names[self.vm.current_step] or ""
-
-        step_text = ft.Text(
-            f"{current_step_name}  ({config_step}/{total_config_steps})",
-            size=14,
-            weight=ft.FontWeight.W_600,
-            color=AppColors.TEXT_PRIMARY,
-        )
-
-        progress_bar = ft.Container(
-            content=ft.Stack(
-                [
-                    ft.Container(
-                        width=200,
-                        height=4,
-                        bgcolor=AppColors.BORDER,
-                        border_radius=2,
-                    ),
-                    ft.Container(
-                        width=200 * progress_percent,
-                        height=4,
-                        bgcolor=AppColors.PRIMARY,
-                        border_radius=2,
-                    ),
-                ],
-            ),
-            padding=ft.Padding.only(top=8),
-        )
-
-        return [
-            ft.Column(
-                [step_text, progress_bar],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=0,
-            )
-        ]
-
-    def _build_navigation_buttons(self):  # pragma: no cover
-        config = STEP_CONFIGS[self.vm.current_step]
-
-        buttons = []
-
-        if config.show_prev:
-            is_sync_step = config.id == "data_sync"
-            buttons.append(
-                ft.Button(
-                    I18n.get("wizard_btn_prev"),
-                    icon=ft.Icons.ARROW_BACK,
-                    on_click=lambda e: self.app_page.run_task(self._prev_step),
-                    style=AppStyles.secondary_button(),
-                    disabled=(self.vm.sync_in_progress and is_sync_step) or self.vm.validation_in_progress,
-                )
-            )
-        else:
-            buttons.append(ft.Container())
-
-        if config.show_skip:
-            buttons.append(
-                ft.TextButton(
-                    I18n.get(config.skip_text_key),
-                    on_click=lambda e: self.app_page.run_task(self._skip_step),
-                    disabled=self.vm.validation_in_progress,
-                )
-            )
-
-        if config.show_next:
-            buttons.append(
-                ft.Button(
-                    I18n.get(config.next_text_key),
-                    icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
-                    on_click=lambda e: self.app_page.run_task(self._next_step),
-                    style=AppStyles.primary_button(),
-                    disabled=self.vm.validation_in_progress,
-                )
-            )
-
-        return ft.Row(
-            buttons,
-            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        )
-
-    def _update_navigation_buttons(self):  # pragma: no cover
-        nav_row = self.navigation_bar.content
-        new_buttons = self._build_navigation_buttons()
-        nav_row.controls = new_buttons.controls  # type: ignore[union-attr]
-        self._safe_update()
-
-    def _build_welcome_step(self):  # pragma: no cover
-        # Language Selector  # pragma: no cover
-        self.wizard_language_dropdown = ft.Dropdown(  # pragma: no cover
-            label=I18n.get_language_label(),  # pragma: no cover
-            tooltip=I18n.get_language_label(),  # pragma: no cover
-            value=I18n.current_locale(),  # pragma: no cover
-            width=200,  # pragma: no cover
-            text_size=14,  # pragma: no cover
-            border_radius=8,  # pragma: no cover
-            content_padding=10,  # pragma: no cover
-            options=[  # pragma: no cover
-                ft.dropdown.Option(code, name)  # pragma: no cover
-                for code, name in I18n.get_language_options()  # pragma: no cover
-            ],  # pragma: no cover
-            on_select=self._on_language_change_wizard,  # pragma: no cover
-        )  # pragma: no cover
-
-        language_container = ft.Container(  # pragma: no cover
-            content=self.wizard_language_dropdown,  # pragma: no cover
-            alignment=ft.Alignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-        rocket_container = ft.Container(  # pragma: no cover
-            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=72, color=AppColors.PRIMARY),  # pragma: no cover
-            width=120,  # pragma: no cover
-            height=120,  # pragma: no cover
-            border_radius=60,  # pragma: no cover
-            bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),  # pragma: no cover
-            alignment=ft.Alignment.CENTER,  # pragma: no cover
-            shadow=ft.BoxShadow(  # pragma: no cover
-                spread_radius=2,  # pragma: no cover
-                blur_radius=24,  # pragma: no cover
-                color=ft.Colors.with_opacity(0.35, AppColors.PRIMARY),  # pragma: no cover
-                offset=ft.Offset(0, 4),  # pragma: no cover
-            ),  # pragma: no cover
-        )  # pragma: no cover
-
-        self.gradient_guide_text = ft.Text(  # pragma: no cover
-            I18n.get("wizard_welcome_guide"),  # pragma: no cover
-            size=20,  # pragma: no cover
-            weight=ft.FontWeight.W_600,  # pragma: no cover
-            text_align=ft.TextAlign.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-        gradient_title = ft.ShaderMask(  # pragma: no cover
-            content=self.gradient_guide_text,  # pragma: no cover
-            shader=ft.LinearGradient(  # pragma: no cover
-                begin=ft.Alignment.CENTER_LEFT,  # pragma: no cover
-                end=ft.Alignment.CENTER_RIGHT,  # pragma: no cover
-                colors=[AppColors.PRIMARY, AppColors.ACCENT],  # pragma: no cover
-            ),  # pragma: no cover
-            blend_mode=ft.BlendMode.SRC_IN,  # pragma: no cover
-        )  # pragma: no cover
-
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                language_container,  # pragma: no cover
-                ft.Container(height=16),  # pragma: no cover
-                rocket_container,  # pragma: no cover
-                ft.Container(height=16),  # pragma: no cover
-                gradient_title,  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                self._build_overview_cards(),  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_overview_cards(self):  # pragma: no cover
-        return ft.ResponsiveRow(
-            [
-                self._create_overview_card(
-                    icon=ft.Icons.STORAGE,
-                    color=AppColors.PRIMARY,
-                    title_key="wizard_overview_db_title",
-                    desc_key="wizard_overview_db_desc",
-                    required=True,
-                    gradient_index=0,
-                ),
-                self._create_overview_card(
-                    icon=ft.Icons.KEY,
-                    color=AppColors.PRIMARY,
-                    title_key="wizard_overview_token_title",
-                    desc_key="wizard_overview_token_desc",
-                    required=True,
-                    gradient_index=1,
-                ),
-                self._create_overview_card(
-                    icon=ft.Icons.CLOUD,
-                    color=AppColors.ACCENT,
-                    title_key="wizard_overview_cloud_ai_title",
-                    desc_key="wizard_overview_cloud_ai_desc",
-                    required=True,
-                    gradient_index=2,
-                ),
-                self._create_overview_card(
-                    icon=ft.Icons.PSYCHOLOGY,
-                    color=AppColors.ACCENT,
-                    title_key="wizard_overview_local_model_title",
-                    desc_key="wizard_overview_local_model_desc",
-                    required=False,
-                    gradient_index=3,
-                ),
-                self._create_overview_card(
-                    icon=ft.Icons.CLOUD_SYNC,
-                    color=AppColors.PRIMARY,
-                    title_key="wizard_overview_sync_title",
-                    desc_key="wizard_overview_sync_desc",
-                    required=False,
-                    gradient_index=4,
-                ),
-                self._create_overview_card(
-                    icon=ft.Icons.SCHEDULE,
-                    color=AppColors.ACCENT,
-                    title_key="wizard_overview_schedule_title",
-                    desc_key="wizard_overview_schedule_desc",
-                    required=False,
-                    gradient_index=5,
-                ),
-            ],
-            spacing=20,
-            run_spacing=20,
-        )
-
-    def _create_overview_card(  # pragma: no cover
-        self,
-        icon,
-        color,
-        title_key,
-        desc_key,
-        required=False,
-        gradient_index=0,
-    ):
-        required_text = I18n.get("wizard_required")
-        optional_text = I18n.get("wizard_optional")
-
-        if required:
-            badge_bgcolor = ft.Colors.with_opacity(0.9, color)
-            badge_text_color = AppColors.TEXT_ON_PRIMARY
-            dot_color = AppColors.TEXT_ON_PRIMARY
-        else:
-            badge_bgcolor = ft.Colors.with_opacity(0.6, AppColors.TEXT_SECONDARY)
-            badge_text_color = AppColors.TEXT_ON_PRIMARY
-            dot_color = AppColors.TEXT_ON_PRIMARY
-
-        badge = ft.Container(
-            content=ft.Row(
-                [
-                    ft.Container(
-                        width=5,
-                        height=5,
-                        border_radius=3,
-                        bgcolor=dot_color,
-                    ),
-                    ft.Text(
-                        required_text if required else optional_text,
-                        size=9,
-                        weight=ft.FontWeight.W_600,
-                        color=badge_text_color,
-                    ),
-                ],
-                spacing=4,
-                alignment=ft.MainAxisAlignment.CENTER,
-            ),
-            bgcolor=badge_bgcolor,
-            border_radius=6,
-            padding=ft.Padding.symmetric(horizontal=6, vertical=2),
-        )
-
-        icon_with_badge = ft.Stack(
-            [
-                ft.Container(
-                    content=ft.Icon(icon, size=32, color=color),
-                    width=52,
-                    height=52,
-                    border_radius=14,
-                    bgcolor=ft.Colors.with_opacity(0.12, color),
-                    alignment=ft.Alignment.CENTER,
-                ),
-                ft.Container(
-                    content=badge,
-                    top=-4,
-                    right=-4,
-                ),
-            ],
-            width=64,
-            height=60,
-            clip_behavior=ft.ClipBehavior.NONE,
-        )
-
-        card_content = ft.Container(
-            padding=20,
-            border_radius=16,
-            bgcolor=ft.Colors.with_opacity(0.7, AppColors.SURFACE),
-            border=ft.Border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY)),
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=8,
-                color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-            ),
-            content=ft.Column(
-                [
-                    icon_with_badge,
-                    ft.Container(height=16),
-                    ft.Text(
-                        I18n.get(title_key),
-                        size=16,
-                        weight=ft.FontWeight.W_700,
-                        color=AppColors.TEXT_PRIMARY,
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                    ft.Container(height=6),
-                    ft.Text(
-                        I18n.get(desc_key),
-                        size=13,
-                        color=ft.Colors.with_opacity(0.85, AppColors.TEXT_SECONDARY),
-                        text_align=ft.TextAlign.CENTER,
-                    ),
-                ],
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                spacing=0,
-            ),
-            on_hover=lambda e: self._on_card_hover(e, color),
-            animate=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
-        )
-
-        return ft.Container(
-            col={"sm": 6, "md": 4, "lg": 4},
-            content=card_content,
-        )
-
-    def _on_card_hover(self, e, color):  # pragma: no cover
-        if e.data == "true":
-            e.control.border = ft.Border.all(1.5, ft.Colors.with_opacity(0.5, color))
-            e.control.shadow = ft.BoxShadow(
-                spread_radius=1,
-                blur_radius=12,
-                color=ft.Colors.with_opacity(0.2, color),
-                offset=ft.Offset(0, 3),
-            )
-        else:
-            e.control.border = ft.Border.all(1, ft.Colors.with_opacity(0.15, AppColors.PRIMARY))
-            e.control.shadow = ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=8,
-                color=ft.Colors.with_opacity(0.1, ft.Colors.BLACK),
-                offset=ft.Offset(0, 2),
-            )
-        e.control.update()
-
-    def _build_database_step(self):  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.STORAGE, size=64, color=AppColors.PRIMARY),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_db_title"),  # pragma: no cover
-                    size=24,  # pragma: no cover
-                    weight=ft.FontWeight.W_500,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_db_desc"),  # pragma: no cover
-                    size=14,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                self.database_panel,  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_token_step(self):  # pragma: no cover
-        desc = I18n.get("wizard_step1_desc")  # pragma: no cover
-
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.KEY, size=64, color=AppColors.PRIMARY),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step1_title"),  # pragma: no cover
-                    size=24,  # pragma: no cover
-                    weight=ft.FontWeight.W_500,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    desc,  # pragma: no cover
-                    size=14,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                self.tushare_panel,  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_cloud_ai_step(self):  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.CLOUD, size=64, color=AppColors.PRIMARY),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step_cloud_ai_title"),  # pragma: no cover
-                    size=24,  # pragma: no cover
-                    weight=ft.FontWeight.W_500,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step_cloud_ai_desc"),  # pragma: no cover
-                    size=14,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=self.llm_config_panel,  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                    border_radius=8,  # pragma: no cover
-                    bgcolor=AppColors.SURFACE,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_local_model_step(self):  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.PSYCHOLOGY, size=64, color=AppColors.PRIMARY),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step_local_model_title"),  # pragma: no cover
-                    size=24,  # pragma: no cover
-                    weight=ft.FontWeight.W_500,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step_local_model_desc"),  # pragma: no cover
-                    size=14,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=self.local_model_panel,  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                    border_radius=8,  # pragma: no cover
-                    bgcolor=AppColors.SURFACE,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_sync_step(self):  # pragma: no cover
-        years = (  # pragma: no cover
-            ConfigHandler.get_init_history_years()  # pragma: no cover
-            if hasattr(ConfigHandler, "get_init_history_years")  # pragma: no cover
-            else DEFAULT_SYNC_YEARS  # pragma: no cover
-        )  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step3_title"),  # pragma: no cover
-                    size=24,  # pragma: no cover
-                    weight=ft.FontWeight.W_500,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),  # pragma: no cover
-                    size=14,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=ft.Column(  # pragma: no cover
-                        [  # pragma: no cover
-                            ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=20),  # pragma: no cover
-                            ft.Text(  # pragma: no cover
-                                I18n.get("wizard_sync_warning"),  # pragma: no cover
-                                size=12,  # pragma: no cover
-                                color=AppColors.WARNING,  # pragma: no cover
-                                text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                            ),  # pragma: no cover
-                        ],  # pragma: no cover
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-                    ),  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                    border_radius=8,  # pragma: no cover
-                    bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                ft.Row(  # pragma: no cover
-                    [  # pragma: no cover
-                        self.btn_quick_sync,  # pragma: no cover
-                        self.btn_full_sync,  # pragma: no cover
-                        self.btn_sync_later,  # pragma: no cover
-                        self.btn_cancel_sync,  # pragma: no cover
-                    ],  # pragma: no cover
-                    alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
-                    wrap=True,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                self.sync_progress,  # pragma: no cover
-                self.sync_status,  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_schedule_step(self):  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.SCHEDULE, size=64, color=AppColors.PRIMARY),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step4_title"),  # pragma: no cover
-                    size=24,  # pragma: no cover
-                    weight=ft.FontWeight.W_500,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step4_desc"),  # pragma: no cover
-                    size=14,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=20),  # pragma: no cover
-                ft.Row([self.schedule_enabled], alignment=ft.MainAxisAlignment.CENTER),  # pragma: no cover
-                ft.Container(height=15),  # pragma: no cover
-                ft.Row([self.schedule_time], alignment=ft.MainAxisAlignment.CENTER),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_schedule_note"),  # pragma: no cover
-                    size=12,  # pragma: no cover
-                    color=AppColors.TEXT_HINT,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    def _build_complete_step(self):  # pragma: no cover
-        return ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Icon(ft.Icons.CELEBRATION, size=80, color=AppColors.SUCCESS),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step5_title"),  # pragma: no cover
-                    size=32,  # pragma: no cover
-                    weight=ft.FontWeight.BOLD,  # pragma: no cover
-                    color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(height=10),  # pragma: no cover
-                ft.Text(  # pragma: no cover
-                    I18n.get("wizard_step5_desc"),  # pragma: no cover
-                    size=16,  # pragma: no cover
-                    color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-                    text_align=ft.TextAlign.CENTER,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-        )  # pragma: no cover
-
-    async def _next_step(self):  # pragma: no cover
-        UILogger.log_action("OnboardingWizard", "Click", f"next_step={self.vm.current_step}")
-        await self.vm.next_step()
-
-    async def _prev_step(self):  # pragma: no cover
-        UILogger.log_action("OnboardingWizard", "Click", f"prev_step={self.vm.current_step}")
-        await self.vm.prev_step()
-
-    async def _skip_step(self):  # pragma: no cover
-        UILogger.log_action("OnboardingWizard", "Click", f"skip_step={self.vm.current_step}")
-        await self.vm.skip_step()
-
-    async def _on_quick_sync(self):  # pragma: no cover
-        UILogger.log_action("OnboardingWizard", "Click", "btn_quick_sync")
-        await self.vm.start_sync(quick=True)
-
-    async def _on_full_sync(self):  # pragma: no cover
-        UILogger.log_action("OnboardingWizard", "Click", "btn_full_sync")
-        await self.vm.start_sync(quick=False)
-
-    async def _on_cancel_sync_wizard(self):  # pragma: no cover
-        UILogger.log_action("OnboardingWizard", "Click", "btn_cancel_sync")
-        await self.vm.cancel_sync()
-
-    def _update_wizard(self):  # pragma: no cover
-        self.step_indicators.controls = self._build_step_indicators()
-        self.step_indicators.visible = 1 <= self.vm.current_step <= 6
-        self.header_container.visible = self.vm.current_step in (0, 7)
-        self.step_container.content = self.steps_content[self.vm.current_step]
-        self.navigation_bar.content = self._build_navigation_buttons()
-        self._safe_update()
-
-    def _on_mount(self):  # pragma: no cover
-        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
-
-    def _on_unmount(self):  # pragma: no cover
-        if self._locale_subscription_id:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-        # Fire-and-forget: dispose() is synchronous and fast; Flet guarantees
-        # the page is still alive during will_unmount, so run_task is safe here.
-        if self.app_page:
-            self.app_page.run_task(self._cleanup_vm)
-
-    async def _cleanup_vm(self):  # pragma: no cover
-        if self.vm.sync_in_progress:
-            await self.vm.cancel_sync()
-        # 清理未提交的验证状态
-        from services.local_model_manager import LocalModelManager
-
-        LocalModelManager.cancel_verification_if_active()
-        self.vm.dispose()
-
-    def _on_locale_change(self):
-        try:
-            if hasattr(self, "header_title"):
-                self.header_title.value = I18n.get("wizard_welcome_title")
-            if hasattr(self, "header_desc"):
-                self.header_desc.value = I18n.get("wizard_welcome_desc_with_time")
-            if hasattr(self, "gradient_guide_text"):
-                self.gradient_guide_text.value = I18n.get("wizard_welcome_guide")
-            self.sync_status.value = I18n.get("wizard_status_ready")
-            self.btn_quick_sync.content = I18n.get("wizard_sync_quick")
-            self.btn_full_sync.content = I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS)
-            self.btn_cancel_sync.content = I18n.get("wizard_btn_cancel")
-            if hasattr(self, "btn_sync_later"):
-                self.btn_sync_later.content = I18n.get("wizard_btn_sync_later")
-            self.schedule_enabled.label = I18n.get("wizard_schedule_label")
-            self.schedule_time.label = I18n.get("wizard_schedule_time_label")
-            self.loading_overlay_text.value = I18n.get("wizard_validating")
-
-            if hasattr(self, "wizard_language_dropdown"):
-                self.wizard_language_dropdown.label = I18n.get_language_label()
-                self.wizard_language_dropdown.tooltip = I18n.get_language_label()
-                refresh_dropdown_options(
-                    self.wizard_language_dropdown,
-                    [ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
-                )
-
-            # 重建步骤内容（含子面板），保证外部触发的语言切换也能完整刷新
-            self._rebuild_steps_after_locale_change()
-            self._safe_update()
-        except Exception as e:
-            logger.warning("[OnboardingWizard] _on_locale_change failed: %s", e, exc_info=True)
-
-    def _rebuild_steps_after_locale_change(self):
-        """语言切换后刷新 steps_content 并级联调用子面板 locale 刷新方法。
-
-        不重建子面板实例：构造函数会触发 keyring IO（如 DatabaseConfigPanel._load_config），
-        违反 §5.8 纯 UI 规范。子面板已通过各自 did_mount() 订阅 I18n 通知，此处显式
-        级联调用作为兜底，确保刷新生效。schedule 控件不重建，用户输入自然保留。
-        """
-        # 级联调用子面板的 locale 刷新方法（纯 UI 文本更新，不触发 keyring IO）
-        for panel_attr, method_name in (
-            ("database_panel", "_on_locale_change"),
-            ("tushare_panel", "refresh_locale"),
-            ("llm_config_panel", "_on_locale_change"),
-            ("local_model_panel", "_on_locale_change"),
-        ):
-            panel = getattr(self, panel_attr, None)
-            if panel is None:
-                continue
-            method = getattr(panel, method_name, None)
-            if method is None:
-                continue
+    def _cleanup() -> None:
+        page = _get_page()
+        if page is None:
+            return
+
+        async def _do_cleanup() -> None:
             try:
-                method()
-            except Exception as e:
-                logger.debug("Onboarding panel %s locale refresh failed: %s", panel_attr, e, exc_info=True)
+                if onboarding_vm.sync_in_progress:
+                    await onboarding_vm.cancel_sync()
+            except Exception as exc:
+                logger.debug("[OnboardingWizard] Cleanup cancel sync failed: %s", exc, exc_info=True)
+            from services.local_model_manager import LocalModelManager
 
-        # 重建 steps_content 以更新步骤标题/描述等纯 UI 文本（子面板实例保持不变）
-        self.steps_content = [
-            self._build_welcome_step(),
-            self._build_database_step(),
-            self._build_token_step(),
-            self._build_cloud_ai_step(),
-            self._build_local_model_step(),
-            self._build_sync_step(),
-            self._build_schedule_step(),
-            self._build_complete_step(),
-        ]
+            LocalModelManager.cancel_verification_if_active()
 
-        self.step_container.content = self.steps_content[self.vm.current_step]
-        self.step_indicators.controls = self._build_step_indicators()
-        self._update_navigation_buttons()
+        page.run_task(_do_cleanup)
 
-    def _on_language_change_wizard(self, e):  # pragma: no cover
-        """Handle language change in Onboarding Wizard"""
-        if self.app_page:
-            self.app_page.run_task(self._do_language_change_wizard_async)
+    ft.use_effect(_cleanup_setup, dependencies=[], cleanup=_cleanup)
 
-    async def _do_language_change_wizard_async(self):  # pragma: no cover
+    # --- Async handlers ---
+    async def _do_language_change(new_locale: str) -> None:
+        """持久化 locale 并触发 I18n observable 重渲染。"""
         try:
-            new_locale = self.wizard_language_dropdown.value
             success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
             if not success:
-                self.wizard_language_dropdown.value = I18n.current_locale()
+                set_language_value(I18n.current_locale())
                 logger.warning("[OnboardingWizard] Failed to persist locale: %s", new_locale)
-                self._safe_update()
                 return
-            # I18n.set_locale 会自动触发 _on_locale_change → _rebuild_steps_after_locale_change
+            # I18n.set_locale 触发 observable → ft.use_state 自动重渲染
             I18n.set_locale(new_locale)
-
-            if self.app_page and getattr(self.app_page, "locale_configuration", None):
+            page = _get_page()
+            if page is not None and getattr(page, "locale_configuration", None):
                 try:
                     normalized = I18n.current_locale()
                     parts = normalized.split("_")
                     lang = parts[0]
                     country = parts[1] if len(parts) > 1 else None
-                    self.app_page.locale_configuration.current_locale = ft.Locale(lang, country)
-                    self.app_page.update()
+                    page.locale_configuration.current_locale = ft.Locale(lang, country)
                 except Exception as ex:
-                    logger.debug("[OnboardingWizard] Failed to update page locale configuration: %s", ex, exc_info=True)
+                    logger.debug(
+                        "[OnboardingWizard] Failed to update page locale configuration: %s",
+                        ex,
+                        exc_info=True,
+                    )
         except Exception as ex:
             logger.error("[OnboardingWizard] Language change failed: %s", DataSanitizer.sanitize_error(ex))
-            self._show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
+            _show_snack(I18n.get("sys_snack_save_err"), AppColors.ERROR)
 
-    def _show_snack(self, msg: str, color: str):  # pragma: no cover
-        if self.app_page:
-            snack = ft.SnackBar(ft.Text(msg), bgcolor=color)
-            self.app_page.show_dialog(snack)
+    async def _next_step() -> None:
+        UILogger.log_action("OnboardingWizard", "Click", f"next_step={state.current_step}")
+        await onboarding_vm.next_step()
 
-    def _safe_update(self):  # pragma: no cover
-        try:
-            if self.page:
-                self.update()
-        except Exception as exc:
-            logger.debug("[OnboardingWizard] UI update skipped: %s", exc, exc_info=True)
+    async def _prev_step() -> None:
+        UILogger.log_action("OnboardingWizard", "Click", f"prev_step={state.current_step}")
+        await onboarding_vm.prev_step()
 
-    def _show_loading_overlay(self, show: bool):  # pragma: no cover
-        self.loading_overlay.visible = show
-        self._update_navigation_buttons()
+    async def _skip_step() -> None:
+        UILogger.log_action("OnboardingWizard", "Click", f"skip_step={state.current_step}")
+        await onboarding_vm.skip_step()
 
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
-        # No responsive adjustment needed
+    async def _on_quick_sync() -> None:
+        UILogger.log_action("OnboardingWizard", "Click", "btn_quick_sync")
+        await onboarding_vm.start_sync(quick=True)
+
+    async def _on_full_sync() -> None:
+        UILogger.log_action("OnboardingWizard", "Click", "btn_full_sync")
+        await onboarding_vm.start_sync(quick=False)
+
+    async def _on_cancel_sync() -> None:
+        UILogger.log_action("OnboardingWizard", "Click", "btn_cancel_sync")
+        await onboarding_vm.cancel_sync()
+
+    # --- Event handlers (sync wrappers → page.run_task) ---
+    def _on_next(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_next_step)
+
+    def _on_prev(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_prev_step)
+
+    def _on_skip(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_skip_step)
+
+    def _on_quick_sync_click(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_on_quick_sync)
+
+    def _on_full_sync_click(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_on_full_sync)
+
+    def _on_cancel_sync_click(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_on_cancel_sync)
+
+    def _on_sync_later(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(onboarding_vm.skip_sync)
+
+    def _on_language_select(e: ft.ControlEvent) -> None:
+        new_locale = e.control.value
+        set_language_value(new_locale)
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_language_change, new_locale)
+
+    def _on_card_hover(idx: int) -> Callable[[ft.ControlEvent], None]:
+        def _hover(e: ft.ControlEvent) -> None:
+            set_hovered_card(idx if e.data == "true" else -1)
+
+        return _hover
+
+    # --- Step indicators (1~6 显示) ---
+    show_indicators = 1 <= state.current_step <= 6
+    step_names = [
+        None,
+        I18n.get("wizard_step_database"),
+        I18n.get("wizard_step_label_token"),
+        I18n.get("wizard_step_label_ai"),
+        I18n.get("wizard_step_local_model"),
+        I18n.get("wizard_step_label_sync"),
+        I18n.get("wizard_step_label_schedule"),
+        None,
+    ]
+    current_step_name = step_names[state.current_step] or ""
+    progress_percent = state.current_step / 6 if show_indicators else 0
+
+    step_indicators = ft.Row(
+        [
+            ft.Column(
+                [
+                    ft.Text(
+                        f"{current_step_name}  ({state.current_step}/6)",
+                        size=14,
+                        weight=ft.FontWeight.W_600,
+                        color=AppColors.TEXT_PRIMARY,
+                    ),
+                    ft.Container(
+                        content=ft.Stack(
+                            [
+                                ft.Container(
+                                    width=200,
+                                    height=4,
+                                    bgcolor=AppColors.BORDER,
+                                    border_radius=2,
+                                ),
+                                ft.Container(
+                                    width=200 * progress_percent,
+                                    height=4,
+                                    bgcolor=AppColors.PRIMARY,
+                                    border_radius=2,
+                                ),
+                            ],
+                        ),
+                        padding=ft.Padding.only(top=8),
+                    ),
+                ],
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                spacing=0,
+            )
+        ]
+        if show_indicators
+        else [],
+        alignment=ft.MainAxisAlignment.CENTER,
+        vertical_alignment=ft.CrossAxisAlignment.START,
+        visible=show_indicators,
+    )
+
+    # --- Header (step 0, 7 显示) ---
+    show_header = state.current_step in (0, 7)
+    header_container = ft.Column(
+        [
+            ft.Text(
+                I18n.get("wizard_welcome_title"),
+                size=32,
+                weight=ft.FontWeight.BOLD,
+                color=AppColors.PRIMARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+            ft.Text(
+                I18n.get("wizard_welcome_desc_with_time"),
+                size=16,
+                color=AppColors.TEXT_SECONDARY,
+                text_align=ft.TextAlign.CENTER,
+            ),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        visible=show_header,
+    )
+
+    # --- Step content (条件渲染) ---
+    step = state.current_step
+
+    if step == 0:
+        # Welcome step
+        language_dropdown = ft.Dropdown(
+            label=I18n.get_language_label(),
+            tooltip=I18n.get_language_label(),
+            value=language_value,
+            width=200,
+            text_size=14,
+            border_radius=8,
+            content_padding=10,
+            options=[ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
+            on_select=_on_language_select,
+        )
+
+        rocket_container = ft.Container(
+            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=72, color=AppColors.PRIMARY),
+            width=120,
+            height=120,
+            border_radius=60,
+            bgcolor=ft.Colors.with_opacity(0.1, AppColors.PRIMARY),
+            alignment=ft.Alignment.CENTER,
+            shadow=ft.BoxShadow(
+                spread_radius=2,
+                blur_radius=24,
+                color=ft.Colors.with_opacity(0.35, AppColors.PRIMARY),
+                offset=ft.Offset(0, 4),
+            ),
+        )
+
+        gradient_guide_text = ft.Text(
+            I18n.get("wizard_welcome_guide"),
+            size=20,
+            weight=ft.FontWeight.W_600,
+            text_align=ft.TextAlign.CENTER,
+        )
+        gradient_title = ft.ShaderMask(
+            content=gradient_guide_text,
+            shader=ft.LinearGradient(
+                begin=ft.Alignment.CENTER_LEFT,
+                end=ft.Alignment.CENTER_RIGHT,
+                colors=[AppColors.PRIMARY, AppColors.ACCENT],
+            ),
+            blend_mode=ft.BlendMode.SRC_IN,
+        )
+
+        overview_cards_data = [
+            (ft.Icons.STORAGE, AppColors.PRIMARY, "wizard_overview_db_title", "wizard_overview_db_desc", True, 0),
+            (ft.Icons.KEY, AppColors.PRIMARY, "wizard_overview_token_title", "wizard_overview_token_desc", True, 1),
+            (
+                ft.Icons.CLOUD,
+                AppColors.ACCENT,
+                "wizard_overview_cloud_ai_title",
+                "wizard_overview_cloud_ai_desc",
+                True,
+                2,
+            ),
+            (
+                ft.Icons.PSYCHOLOGY,
+                AppColors.ACCENT,
+                "wizard_overview_local_model_title",
+                "wizard_overview_local_model_desc",
+                False,
+                3,
+            ),
+            (
+                ft.Icons.CLOUD_SYNC,
+                AppColors.PRIMARY,
+                "wizard_overview_sync_title",
+                "wizard_overview_sync_desc",
+                False,
+                4,
+            ),
+            (
+                ft.Icons.SCHEDULE,
+                AppColors.ACCENT,
+                "wizard_overview_schedule_title",
+                "wizard_overview_schedule_desc",
+                False,
+                5,
+            ),
+        ]
+
+        step_content = ft.Column(
+            [
+                ft.Container(height=20),
+                ft.Container(
+                    content=language_dropdown,
+                    alignment=ft.Alignment.CENTER,
+                ),
+                ft.Container(height=16),
+                rocket_container,
+                ft.Container(height=16),
+                gradient_title,
+                ft.Container(height=20),
+                ft.ResponsiveRow(
+                    [
+                        _create_overview_card(
+                            icon=icon,
+                            color=color,
+                            title_key=title_key,
+                            desc_key=desc_key,
+                            required=required,
+                            is_hovered=(hovered_card == idx),
+                            on_hover=_on_card_hover(idx),
+                        )
+                        for icon, color, title_key, desc_key, required, idx in overview_cards_data
+                    ],
+                    spacing=20,
+                    run_spacing=20,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    elif step == 1:
+        # Database step
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.STORAGE, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_db_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_db_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                DatabaseConfigPanel(
+                    vm=database_vm,
+                    compact=True,
+                    show_save_button=False,
+                    show_header=False,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    elif step == 2:
+        # Token step
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.KEY, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step1_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step1_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                TushareConfigPanel(
+                    vm=tushare_vm,
+                    compact=True,
+                    show_save_button=False,
+                    show_register_link=True,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    elif step == 3:
+        # Cloud AI step
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.CLOUD, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step_cloud_ai_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step_cloud_ai_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                ft.Container(
+                    content=LLMConfigPanel(
+                        vm=llm_vm,
+                        compact=True,
+                        show_save_button=False,
+                    ),
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=AppColors.SURFACE,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    elif step == 4:
+        # Local Model step
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.PSYCHOLOGY, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step_local_model_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step_local_model_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                ft.Container(
+                    content=LocalModelConfigPanel(
+                        vm=local_model_vm,
+                        show_save_button=False,
+                        compact=True,
+                        show_internal_loading=False,
+                    ),
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=AppColors.SURFACE,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    elif step == 5:
+        # Data Sync step
+        years = (
+            ConfigHandler.get_init_history_years()
+            if hasattr(ConfigHandler, "get_init_history_years")
+            else DEFAULT_SYNC_YEARS
+        )
+        is_syncing = state.sync_in_progress
+
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step3_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=10),
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=20),
+                            ft.Text(
+                                I18n.get("wizard_sync_warning"),
+                                size=12,
+                                color=AppColors.WARNING,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=10,
+                    border_radius=8,
+                    bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
+                ),
+                ft.Container(height=20),
+                ft.Row(
+                    [
+                        ft.Button(
+                            content=I18n.get("wizard_sync_quick"),
+                            icon=ft.Icons.FLASH_ON,
+                            style=AppStyles.accent_button(),
+                            on_click=_on_quick_sync_click,
+                            disabled=is_syncing,
+                        ),
+                        ft.Button(
+                            content=I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),
+                            icon=ft.Icons.CLOUD_SYNC,
+                            style=AppStyles.primary_button(),
+                            on_click=_on_full_sync_click,
+                            disabled=is_syncing,
+                        ),
+                        ft.TextButton(
+                            content=I18n.get("wizard_btn_sync_later"),
+                            icon=ft.Icons.SCHEDULE,
+                            on_click=_on_sync_later,
+                            disabled=is_syncing,
+                        ),
+                        ft.Button(
+                            content=I18n.get("wizard_btn_cancel"),
+                            icon=ft.Icons.CANCEL,
+                            color=AppColors.ERROR,
+                            on_click=_on_cancel_sync_click,
+                            visible=is_syncing,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    wrap=True,
+                ),
+                ft.Container(height=20),
+                ft.ProgressBar(
+                    width=AppStyles.CONTROL_WIDTH_LG,
+                    value=state.sync_progress,
+                    color=AppColors.ACCENT,
+                    bgcolor=AppColors.BORDER,
+                ),
+                ft.Text(
+                    _render_message(state.sync_progress_message) or I18n.get("wizard_status_ready"),
+                    size=12,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    elif step == 6:
+        # Schedule step
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.SCHEDULE, size=64, color=AppColors.PRIMARY),
+                ft.Text(
+                    I18n.get("wizard_step4_title"),
+                    size=24,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step4_desc"),
+                    size=14,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+                ft.Container(height=20),
+                ft.Row(
+                    [
+                        ft.Checkbox(
+                            label=I18n.get("wizard_schedule_label"),
+                            value=schedule_enabled,
+                            active_color=AppColors.PRIMARY,
+                            on_change=lambda e: set_schedule_enabled(e.control.value),
+                        )
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
+                ft.Container(height=15),
+                ft.Row(
+                    [
+                        ft.TextField(
+                            label=I18n.get("wizard_schedule_time_label"),
+                            value=schedule_time,
+                            hint_text="HH:MM",
+                            width=150,
+                            text_align=ft.TextAlign.CENTER,
+                            border_color=AppColors.PRIMARY,
+                            label_style=ft.TextStyle(color=AppColors.PRIMARY),
+                            on_change=lambda e: set_schedule_time(e.control.value),
+                        )
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
+                ft.Text(
+                    I18n.get("wizard_schedule_note"),
+                    size=12,
+                    color=AppColors.TEXT_HINT,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    else:
+        # Complete step (step == 7)
+        step_content = ft.Column(
+            [
+                ft.Icon(ft.Icons.CELEBRATION, size=80, color=AppColors.SUCCESS),
+                ft.Text(
+                    I18n.get("wizard_step5_title"),
+                    size=32,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Container(height=10),
+                ft.Text(
+                    I18n.get("wizard_step5_desc"),
+                    size=16,
+                    color=AppColors.TEXT_SECONDARY,
+                    text_align=ft.TextAlign.CENTER,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    # --- Navigation buttons ---
+    config = STEP_CONFIGS[state.current_step]
+    nav_buttons: list[ft.Control] = []
+
+    if config.show_prev:
+        is_sync_step = config.id == "data_sync"
+        nav_buttons.append(
+            ft.Button(
+                content=I18n.get("wizard_btn_prev"),
+                icon=ft.Icons.ARROW_BACK,
+                on_click=_on_prev,
+                style=AppStyles.secondary_button(),
+                disabled=(state.sync_in_progress and is_sync_step) or state.validation_in_progress,
+            )
+        )
+    else:
+        nav_buttons.append(ft.Container())
+
+    if config.show_skip:
+        nav_buttons.append(
+            ft.TextButton(
+                content=I18n.get(config.skip_text_key),
+                on_click=_on_skip,
+                disabled=state.validation_in_progress,
+            )
+        )
+
+    if config.show_next:
+        nav_buttons.append(
+            ft.Button(
+                content=I18n.get(config.next_text_key),
+                icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
+                on_click=_on_next,
+                style=AppStyles.primary_button(),
+                disabled=state.validation_in_progress,
+            )
+        )
+
+    navigation_bar = ft.Container(
+        content=ft.Row(
+            nav_buttons,
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        padding=ft.Padding.symmetric(horizontal=20, vertical=10),
+        bgcolor=AppColors.SURFACE,
+        border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),
+    )
+
+    # --- Loading overlay ---
+    show_overlay = state.validation_in_progress
+    loading_overlay = ft.Container(
+        content=ft.Column(
+            [
+                ft.ProgressRing(width=40, height=40, stroke_width=3),
+                ft.Text(
+                    I18n.get("wizard_validating"),
+                    size=14,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+        bgcolor=ft.Colors.with_opacity(0.7, AppColors.BACKGROUND),
+        visible=show_overlay,
+        expand=True,
+        alignment=ft.Alignment.CENTER,
+        on_click=lambda e: None,
+    )
+
+    # --- Layout ---
+    return ft.Container(
+        expand=True,
+        bgcolor=AppColors.BACKGROUND,
+        content=ft.Stack(
+            controls=[
+                ft.Column(
+                    controls=[
+                        ft.Container(height=5),
+                        header_container,
+                        step_indicators,
+                        ft.Divider(height=10, color=ft.Colors.TRANSPARENT),
+                        ft.Container(
+                            content=ft.Column(
+                                [step_content],
+                                scroll=ft.ScrollMode.AUTO,
+                                expand=True,
+                            ),
+                            expand=True,
+                        ),
+                        navigation_bar,
+                    ],
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    expand=True,
+                ),
+                loading_overlay,
+            ],
+            expand=True,
+        ),
+    )

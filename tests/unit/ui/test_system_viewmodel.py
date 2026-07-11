@@ -3,10 +3,13 @@
 测试覆盖：
 - on_tier_changed 完整链路（set_tier → reload_rate_limiters → clear_capability_cache → probe → _emit_probe_result）
 - _emit_probe_result 三态分类（completed / tier_too_high / all_failed）
-- on_probe_completed 回调字段（None 时 warning 不抛异常，赋值时被调用）
+- subscribe + state.probe_result_version 通知（Phase 2 改造：替代 on_probe_completed 回调）
+- probe_in_progress state transitions（on_tier_changed / run_probe 执行期间 True→False）
+- 无订阅者时 logger.warning 不抛异常（M-5：自动 probe 在 TierApiPanel 未挂载时不静默丢失）
 """
 
 import logging
+from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,7 +20,27 @@ from ui.viewmodels.system_viewmodel import SystemViewModel
 pytestmark = pytest.mark.unit
 
 
-def _patch_full_chain(monkeypatch, *, probe_results: dict[str, bool | None], set_tier_success: bool = True):
+# --- Helpers ---
+
+
+def _count_transitions(snapshots, field_getter, initial) -> int:
+    """Count state transitions in snapshots for a given field.
+
+    A transition occurs when consecutive snapshots (including the initial state)
+    have different values for the field returned by field_getter(snapshots[i]).
+    The `initial` argument represents the state value before any snapshots.
+    """
+    transitions = 0
+    prev = initial
+    for s in snapshots:
+        value = field_getter(s)
+        if value != prev:
+            transitions += 1
+            prev = value
+    return transitions
+
+
+def _patch_full_chain(monkeypatch, *, probe_results: Mapping[str, bool | None], set_tier_success: bool = True):
     """统一 patch ConfigHandler / TushareClient / ThreadPoolManager。
 
     使 ThreadPoolManager.run_async 直接调用同步函数（避免线程池依赖），
@@ -48,12 +71,19 @@ def _patch_full_chain(monkeypatch, *, probe_results: dict[str, bool | None], set
     return mock_client, mock_ch
 
 
+def _subscribe(vm: SystemViewModel) -> list:
+    """Subscribe to vm state changes and return the snapshots list."""
+    snapshots: list = []
+    vm.subscribe(lambda s: snapshots.append(s))
+    return snapshots
+
+
 @pytest.mark.asyncio
 async def test_on_tier_changed_full_chain(monkeypatch):
     """on_tier_changed 完整链路：set_tier → reload_rate_limiters → clear_capability_cache → probe → _emit_probe_result。
 
     probe 返回 3 个 True + 1 个 False（非全失败、非 >50% False），应分类为 completed。
-    on_probe_completed 回调应被调用，返回 dict type == "completed"。
+    state.probe_result_version 应递增；last_probe_result 返回 dict type == "completed"。
     """
     probe_results = {
         "daily": True,
@@ -64,8 +94,7 @@ async def test_on_tier_changed_full_chain(monkeypatch):
     mock_client, mock_ch = _patch_full_chain(monkeypatch, probe_results=probe_results)
 
     vm = SystemViewModel()
-    callback = MagicMock()
-    vm.on_probe_completed = callback
+    snapshots = _subscribe(vm)
 
     result = await vm.on_tier_changed("points_5000")
 
@@ -77,8 +106,9 @@ async def test_on_tier_changed_full_chain(monkeypatch):
     mock_client.clear_capability_cache.assert_called_once()
     # 链路 4：probe_api_capabilities 被调用
     mock_client.probe_api_capabilities.assert_called_once()
-    # 链路 5：on_probe_completed 回调被调用
-    callback.assert_called_once()
+    # 链路 5：state.probe_result_version 递增（至少一次通知）
+    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert vm.last_probe_result is result
     # 返回值分类为 completed
     assert result["type"] == "completed"
     assert result["tier"] == "points_5000"
@@ -99,8 +129,7 @@ async def test_on_tier_changed_too_high_detection(monkeypatch):
     _patch_full_chain(monkeypatch, probe_results=probe_results)
 
     vm = SystemViewModel()
-    callback = MagicMock()
-    vm.on_probe_completed = callback
+    snapshots = _subscribe(vm)
 
     result = await vm.on_tier_changed("points_15000")
 
@@ -108,7 +137,8 @@ async def test_on_tier_changed_too_high_detection(monkeypatch):
     assert result["tier"] == "points_15000"
     assert result["false_count"] == 3
     assert result["total"] == 4
-    callback.assert_called_once()
+    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert vm.last_probe_result is result  # dual-track storage
 
 
 @pytest.mark.asyncio
@@ -123,35 +153,40 @@ async def test_on_tier_changed_all_failed_detection(monkeypatch):
     _patch_full_chain(monkeypatch, probe_results=probe_results)
 
     vm = SystemViewModel()
-    callback = MagicMock()
-    vm.on_probe_completed = callback
+    snapshots = _subscribe(vm)
 
     result = await vm.on_tier_changed("points_15000")
 
     assert result["type"] == "all_failed"
     assert result["tier"] == "points_15000"
-    callback.assert_called_once()
+    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert vm.last_probe_result is result  # dual-track storage
 
 
 @pytest.mark.asyncio
-async def test_viewmodel_probe_completed_callback(monkeypatch, caplog):
-    """on_probe_completed 回调字段：None 时 logger.warning 不抛异常，赋值时被调用。"""
+async def test_viewmodel_no_subscribers_logs_warning(monkeypatch, caplog):
+    """无订阅者时 logger.warning 不抛异常（M-5：自动 probe 在 TierApiPanel 未挂载时不静默丢失）。
+
+    Phase 2 改造：原 on_probe_completed is None 检查改为 not self._subscribers，
+    warning 消息改为 "no subscribers, probe result dropped"。
+    """
     probe_results = {"daily": True, "fina_indicator": True}
     _patch_full_chain(monkeypatch, probe_results=probe_results)
 
     vm = SystemViewModel()
-    # 不赋值 on_probe_completed（默认 None）
-    assert vm.on_probe_completed is None
+    # 不 subscribe（无订阅者）
 
     with caplog.at_level(logging.WARNING, logger="ui.viewmodels.system_viewmodel"):
         result = await vm.on_tier_changed("points_5000")
 
-    # 应记录 warning（M-5：自动 probe 在 TierApiPanel 未挂载时静默丢失 → 改为 warning）
+    # 应记录 warning（M-5：无订阅者时提示 TierApiPanel.did_mount 主动拉取）
     warning_messages = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("on_probe_completed is None" in msg for msg in warning_messages)
-    # 返回值仍为 completed（不应因回调缺失而失败）
+    assert any("no subscribers" in msg for msg in warning_messages)
+    # 返回值仍为 completed（不应因无订阅者而失败）
     assert result["type"] == "completed"
     assert result["available"] == 2
+    # last_probe_result 仍存储（供 did_mount 拉取）
+    assert vm.last_probe_result is result
 
 
 # ---------------------------------------------------------------------------
@@ -176,8 +211,8 @@ async def test_get_capability_cache_returns_client_cache(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_on_tier_changed_set_tier_exception_notifies_callback(monkeypatch):
-    """set_tushare_point_tier 抛异常：通知 on_probe_completed type=set_tier_failed，返回 dict。"""
+async def test_on_tier_changed_set_tier_exception_notifies_state(monkeypatch):
+    """set_tushare_point_tier 抛异常：通过 state 通知 type=set_tier_failed，返回 dict。"""
     mock_client = MagicMock(spec=TushareClient)
     mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
     mock_client.get_capability_cache = MagicMock(return_value={"daily": True})
@@ -200,22 +235,22 @@ async def test_on_tier_changed_set_tier_exception_notifies_callback(monkeypatch)
     monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
 
     vm = SystemViewModel()
-    callback = MagicMock()
-    vm.on_probe_completed = callback
+    snapshots = _subscribe(vm)
 
     result = await vm.on_tier_changed("points_15000")
 
     assert result["type"] == "set_tier_failed"
     assert result["tier"] == "points_5000"  # 回滚到旧档位
     assert "config file read-only" in result["error"]
-    callback.assert_called_once()
+    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert vm.last_probe_result is result  # dual-track storage
     # 链路应在此中断，未调用 reload/clear/probe
     mock_client.reload_rate_limiters.assert_not_called()
     mock_client.clear_capability_cache.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_on_tier_changed_set_tier_returns_false_notifies_callback(monkeypatch):
+async def test_on_tier_changed_set_tier_returns_false_notifies_state(monkeypatch):
     """set_tushare_point_tier 返回 False（档位无效）：通知 set_tier_failed，链路中断。"""
     mock_client = MagicMock(spec=TushareClient)
     mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
@@ -238,14 +273,14 @@ async def test_on_tier_changed_set_tier_returns_false_notifies_callback(monkeypa
     monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
 
     vm = SystemViewModel()
-    callback = MagicMock()
-    vm.on_probe_completed = callback
+    snapshots = _subscribe(vm)
 
     result = await vm.on_tier_changed("invalid_tier")
 
     assert result["type"] == "set_tier_failed"
     assert result["tier"] == "points_5000"
-    callback.assert_called_once()
+    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert vm.last_probe_result is result  # dual-track storage
     # 链路中断
     mock_client.reload_rate_limiters.assert_not_called()
     mock_client.probe_api_capabilities.assert_not_awaited()
@@ -279,7 +314,7 @@ async def test_on_tier_changed_probe_returns_empty_restores_snapshot(monkeypatch
     monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
 
     vm = SystemViewModel()
-    vm.on_probe_completed = MagicMock()
+    snapshots = _subscribe(vm)
 
     with caplog.at_level(logging.INFO, logger="ui.viewmodels.system_viewmodel"):
         result = await vm.on_tier_changed("points_5000")
@@ -292,6 +327,7 @@ async def test_on_tier_changed_probe_returns_empty_restores_snapshot(monkeypatch
     assert len(restore_logs) == 1
     # 最终 results 来自恢复后的 get_capability_cache
     assert result["type"] == "completed"
+    assert any(s.probe_result_version > 0 for s in snapshots)
 
 
 @pytest.mark.asyncio
@@ -308,8 +344,7 @@ async def test_run_probe_emits_result_with_current_tier(monkeypatch):
     monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
 
     vm = SystemViewModel()
-    callback = MagicMock()
-    vm.on_probe_completed = callback
+    snapshots = _subscribe(vm)
 
     result = await vm.run_probe()
 
@@ -318,7 +353,8 @@ async def test_run_probe_emits_result_with_current_tier(monkeypatch):
     assert result["tier"] == "points_5000"
     assert result["available"] == 1
     assert result["unavailable"] == 1
-    callback.assert_called_once()
+    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert vm.last_probe_result is result  # dual-track storage
 
 
 @pytest.mark.asyncio
@@ -328,7 +364,7 @@ async def test_emit_probe_result_unknown_count_in_completed_payload(monkeypatch)
     _patch_full_chain(monkeypatch, probe_results=probe_results)
 
     vm = SystemViewModel()
-    vm.on_probe_completed = MagicMock()
+    snapshots = _subscribe(vm)
 
     result = await vm.on_tier_changed("points_5000")
 
@@ -336,3 +372,119 @@ async def test_emit_probe_result_unknown_count_in_completed_payload(monkeypatch)
     assert result["available"] == 1
     assert result["unavailable"] == 0
     assert result["unknown"] == 2  # 2 个 None
+    assert any(s.probe_result_version > 0 for s in snapshots)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 新增：probe_in_progress state transition 覆盖
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_tier_changed_probe_in_progress_transitions(monkeypatch):
+    """on_tier_changed 执行期间 probe_in_progress: False → True → False（含异常路径重置）。"""
+    probe_results = {"daily": True}
+    _patch_full_chain(monkeypatch, probe_results=probe_results)
+
+    vm = SystemViewModel()
+    snapshots = _subscribe(vm)
+
+    await vm.on_tier_changed("points_5000")
+
+    # 正常路径：probe_in_progress 至少一次 True transition + 一次 False 回落
+    transitions = _count_transitions(snapshots, lambda s: s.probe_in_progress, initial=False)
+    assert transitions >= 2  # False→True, True→False
+    assert snapshots[-1].probe_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_on_tier_changed_probe_in_progress_reset_on_exception(monkeypatch):
+    """set_tier 抛异常时 probe_in_progress 在 finally 中重置为 False。"""
+    mock_client = MagicMock(spec=TushareClient)
+    mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
+    mock_client.get_capability_cache = MagicMock(return_value={"daily": True})
+    mock_client.clear_capability_cache = MagicMock()
+    mock_client.reload_rate_limiters = MagicMock()
+
+    async def _mock_run_async(task_type, func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    mock_tp = MagicMock()
+    mock_tp.return_value.run_async = _mock_run_async
+
+    mock_ch = MagicMock()
+    mock_ch.get_tushare_point_tier.return_value = "points_5000"
+    mock_ch.set_tushare_point_tier.side_effect = OSError("read-only")
+
+    monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
+
+    vm = SystemViewModel()
+    snapshots = _subscribe(vm)
+
+    await vm.on_tier_changed("points_15000")
+
+    # 异常路径：finally 仍重置 probe_in_progress
+    assert snapshots[-1].probe_in_progress is False
+    transitions = _count_transitions(snapshots, lambda s: s.probe_in_progress, initial=False)
+    assert transitions >= 2  # False→True, True→False
+
+
+@pytest.mark.asyncio
+async def test_run_probe_probe_in_progress_transitions(monkeypatch):
+    """run_probe 执行期间 probe_in_progress: False → True → False。"""
+    probe_results = {"daily": True}
+    mock_client = MagicMock(spec=TushareClient)
+    mock_client.probe_api_capabilities = AsyncMock(return_value=probe_results)
+
+    mock_ch = MagicMock()
+    mock_ch.get_tushare_point_tier.return_value = "points_5000"
+
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
+
+    vm = SystemViewModel()
+    snapshots = _subscribe(vm)
+
+    await vm.run_probe()
+
+    transitions = _count_transitions(snapshots, lambda s: s.probe_in_progress, initial=False)
+    assert transitions >= 2
+    assert snapshots[-1].probe_in_progress is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 新增：subscribe / dispose 契约
+# ---------------------------------------------------------------------------
+
+
+def test_subscribe_returns_unsubscribe_and_removes_callback():
+    """subscribe 返回的回调调用后，订阅者被移除，后续 _notify 不再触发。"""
+    vm = SystemViewModel()
+    received: list = []
+    unsub = vm.subscribe(lambda s: received.append(s))
+
+    vm._set_state(probe_in_progress=True)
+    assert len(received) == 1
+
+    unsub()
+    vm._set_state(probe_in_progress=False)
+    assert len(received) == 1  # unsubscribe 后不再接收
+
+
+def test_dispose_clears_state_and_subscribers():
+    """dispose 清空 _last_probe_result / _subscribers / _state。"""
+    vm = SystemViewModel()
+    received: list = []
+    vm.subscribe(lambda s: received.append(s))
+    vm._set_state(probe_in_progress=True, probe_result_version=5)
+
+    vm.dispose()
+
+    assert vm.state.probe_in_progress is False
+    assert vm.state.probe_result_version == 0
+    assert vm.last_probe_result is None
+    # dispose 后 _notify 无订阅者，received 不再增长
+    vm._set_state(probe_in_progress=True)
+    assert len(received) == 1  # dispose 前的 1 次

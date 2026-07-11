@@ -1,615 +1,393 @@
-"""
-Local Model Configuration Panel Component
+"""LocalModelConfigPanel — 声明式组件 (Phase 3.2.4).
 
-Provides a unified UI for configuring local GGUF models with:
-- Model file path selection
-- Inference timeout
-- Advanced settings (threads, GPU layers, batch size, context window, flash attention)
-- Model verification
-- i18n support with hot reload
+从命令式容器子类重写为 @ft.component 范式
+(CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook 已实现).
+
+变更要点:
+- 旧命令式 ``class LocalModelConfigPanel(ft.Container)`` → ``@ft.component def LocalModelConfigPanel(vm, ...)``
+- VM 由消费方实例化（AIBrainTab/OnboardingWizard 直接 new LocalModelConfigPanelViewModel）
+- View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
+- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
+- page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
+- FilePicker 通过 ``use_effect`` 注册到 ``page.services``，cleanup 时移除
+- LocalModelManager.cancel_verification_if_active() 在 use_effect cleanup 中调用
 """
 
 import logging
-import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 import flet as ft
 
 from ui.components.settings_widgets import SectionHeader
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
-from utils.config_handler import ConfigHandler
-from utils.thread_pool import TaskType, ThreadPoolManager
+from ui.viewmodels import Message
+from ui.viewmodels.local_model_config_panel_view_model import (
+    LocalModelConfigPanelViewModel,
+    LocalModelConfigState,
+)
 
 logger = logging.getLogger(__name__)
 
 _INPUT_WIDTH_SMALL = 190
 
+# --- Status display config ---
 
-class LocalModelConfigPanel(ft.Container):
-    """
-    Local Model Configuration Panel.
+_STATUS_ICON_MAP = {
+    "success": ft.Icons.CHECK_CIRCLE,
+    "error": ft.Icons.ERROR,
+    "warning": ft.Icons.WARNING,
+    "info": ft.Icons.INFO,
+}
 
-    Features:
-    - Model file path with file picker
-    - Inference timeout
-    - Advanced settings (expandable)
-    - Model verification
-    - i18n support with hot reload
+_STATUS_COLOR_MAP = {
+    "success": AppColors.SUCCESS,
+    "error": AppColors.ERROR,
+    "warning": AppColors.WARNING,
+    "info": AppColors.TEXT_SECONDARY,
+}
 
-    Args:
-        on_verify_model: Callback to verify a local model (required)
-        on_verify_success: Callback when verification succeeds (optional)
-        on_save: Callback when configuration is saved (optional)
-        on_change: Callback when any input changes (optional)
-        on_loading_change: Callback when loading state changes (optional)
-        show_save_button: Whether to show the save button (default: False)
-        compact: Whether to use compact layout for wizard (default: False)
-        show_internal_loading: Whether to show internal loading indicator (default: True)
-    """
 
-    def __init__(  # pragma: no cover
-        self,
-        on_verify_model: Callable[[str, dict], Awaitable[bool]],
-        on_verify_success: Callable | None = None,
-        on_save: Callable | None = None,
-        on_change: Callable | None = None,
-        on_loading_change: Callable[[bool], None] | None = None,
-        show_save_button: bool = False,
-        compact: bool = False,
-        show_internal_loading: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
+def _render_message(msg: Message | None) -> str:
+    """Render a Message to localized text via I18n.get."""
+    if msg is None:
+        return ""
+    return I18n.get(msg.key, **msg.params)
 
-        self.on_verify_model = on_verify_model
-        self.on_verify_success = on_verify_success
-        self.on_save = on_save
-        self.on_change = on_change
-        self.on_loading_change = on_loading_change
-        self._show_save_button = show_save_button
-        self._compact = compact
-        self._show_internal_loading = show_internal_loading
-        self._locale_subscription_id = None
-        self._is_verifying = False
 
-        self._build_ui()
+def _on_verify_click_factory(vm: LocalModelConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for verify button — submits vm.verify_model via page.run_task."""
 
-    def _build_ui(self):
-        local_cfg = ConfigHandler.get_local_ai_config()
+    def _on_verify_click(e: ft.ControlEvent) -> None:
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.verify_model)
+        except RuntimeError:
+            logger.debug("[LocalModelConfigPanel] page not available for verify_model")
 
-        self.model_path_input = ft.TextField(
-            label=I18n.get("settings_local_model_path"),
-            value=local_cfg.get("local_model_path", ""),
-            expand=True,
-            hint_text="C:/path/to/model.gguf",
-            read_only=False,
-            on_change=self._on_input_change,
-        )
+    return _on_verify_click
 
-        self.btn_select_file = ft.OutlinedButton(
-            content=I18n.get("settings_btn_select_file"),
-            icon=ft.Icons.FOLDER_OPEN,
-            on_click=self._on_select_file_click,
-        )
 
-        timeout_val = ConfigHandler.get_local_ai_timeout()
-        self.timeout_input = ft.TextField(
-            label=I18n.get("settings_local_ai_timeout"),
-            value=str(timeout_val) if timeout_val is not None else "",
-            width=_INPUT_WIDTH_SMALL,
-            keyboard_type=ft.KeyboardType.NUMBER,
-            hint_text="300",
-            on_change=self._on_input_change,
-        )
+def _on_save_click_factory(vm: LocalModelConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for save button — submits vm.save_config via page.run_task."""
 
-        self.threads_input = ft.Slider(
-            min=1,
-            max=16,
-            divisions=15,
-            value=local_cfg.get("n_threads", 4),
-            label="{value}",
-            tooltip=str(local_cfg.get("n_threads", 4)),
-            on_change=self._on_input_change,
-        )
+    def _on_save_click(e: ft.ControlEvent) -> None:
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.run_task(vm.save_config)
+        except RuntimeError:
+            logger.debug("[LocalModelConfigPanel] page not available for save_config")
 
-        current_gpu_layers = local_cfg.get("n_gpu_layers", -1)
-        is_gpu_auto = current_gpu_layers == -1
+    return _on_save_click
 
-        self.gpu_auto_switch = ft.Switch(
-            label=I18n.get("settings_local_gpu_auto"),
-            value=is_gpu_auto,
-            on_change=self._on_gpu_auto_change,
-        )
 
-        self.gpu_layers_input = ft.Slider(
-            min=0,
-            max=100,
-            divisions=100,
-            value=current_gpu_layers if not is_gpu_auto else 0,
-            label="{value}",
-            tooltip=str(current_gpu_layers if not is_gpu_auto else 0),
-            visible=not is_gpu_auto,
-            on_change=self._on_input_change,
-        )
-
-        self.batch_input = ft.Dropdown(
-            label=I18n.get("settings_local_batch"),
-            value=str(local_cfg.get("n_batch", 512)),
-            options=[ft.dropdown.Option(str(x)) for x in [512, 1024, 2048, 4096]],
-            width=_INPUT_WIDTH_SMALL,
-            on_select=self._on_input_change,
-        )
-
-        self.ctx_input = ft.Dropdown(
-            label=I18n.get("settings_local_ctx"),
-            value=str(local_cfg.get("n_ctx", 4096)),
-            options=[ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]],
-            width=_INPUT_WIDTH_SMALL,
-            on_select=self._on_input_change,
-        )
-
-        self.flash_attn_switch = ft.Switch(
-            label=I18n.get("settings_local_flash_attn"),
-            value=local_cfg.get("flash_attn", True),
-            on_change=self._on_input_change,
-        )
-
-        self.status_icon = ft.Icon(ft.Icons.INFO, visible=False, size=16)
-        self.status_text = ft.Text(
-            value="",
-            size=12,
-        )
-
-        self.progress_indicator = ft.ProgressRing(
-            visible=False,
-            width=20,
-            height=20,
-            stroke_width=2,
-        )
-
-        self.verify_button = ft.Button(
-            content=I18n.get("wizard_btn_verify_model"),
-            on_click=self._on_verify_click,
-            icon=ft.Icons.CHECK_CIRCLE,
-            style=AppStyles.secondary_button(),
-        )
-
-        self.save_button = ft.Button(
-            content=I18n.get("settings_save_config"),
-            on_click=self._on_save_click,
-            icon=ft.Icons.SAVE,
-            visible=self._show_save_button,
-            style=AppStyles.primary_button(),
-        )
-
-        self.file_picker = ft.FilePicker()
-
-        self._advanced_title = ft.Text(
-            I18n.get("ai_advanced_settings"),
-            size=14 if not self._compact else 12,
-            weight=ft.FontWeight.BOLD,
-        )
-        self._advanced_subtitle = ft.Text(
-            I18n.get("settings_hint_restart"),
-            size=11,
-            color=AppColors.WARNING,
-        )
-        self.advanced_tile = ft.ExpansionTile(
-            title=self._advanced_title,
-            subtitle=self._advanced_subtitle,
-            controls=[
-                ft.Container(height=10),
-                ft.ResponsiveRow(
-                    [
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    I18n.get("settings_local_threads"),
-                                    size=12,
-                                ),
-                                self.threads_input,
-                            ],
-                            col={"sm": 12, "md": 6},
-                        ),
-                        ft.Column(
-                            [
-                                ft.Text(
-                                    I18n.get("settings_local_gpu_layers"),
-                                    size=12,
-                                ),
-                                self.gpu_auto_switch,
-                                self.gpu_layers_input,
-                            ],
-                            col={"sm": 12, "md": 6},
-                        ),
-                        ft.Column(
-                            [self.batch_input],
-                            col={"sm": 6, "md": 4},
-                        ),
-                        ft.Column(
-                            [self.ctx_input],
-                            col={"sm": 6, "md": 4},
-                        ),
-                        ft.Column(
-                            [self.timeout_input],
-                            col={"sm": 12, "md": 4},
-                        ),
-                        ft.Column(
-                            [self.flash_attn_switch],
-                            col={"sm": 12, "md": 12},
-                        ),
-                    ],
-                    run_spacing=15,
-                ),
-            ],
-            expanded=False,
-        )
-
-        self._header_text = SectionHeader(I18n.get("settings_sec_local_ai"), title_key="settings_sec_local_ai")
-        self._header_text.visible = not self._compact
-
-        self._desc_text = ft.Text(
-            value=I18n.get("settings_local_ai_desc"),
-            size=12,
-            color=AppColors.TEXT_SECONDARY,
-            visible=not self._compact,
-        )
-
-        compact_main_align = ft.MainAxisAlignment.CENTER if self._compact else ft.MainAxisAlignment.START
-        compact_cross_align = ft.CrossAxisAlignment.CENTER if self._compact else ft.CrossAxisAlignment.START
-
-        action_buttons = ft.Row(
-            controls=[
-                self.verify_button,
-                self.save_button,
-                self.progress_indicator,
-            ],
-            alignment=compact_main_align,
-        )
-
-        form_content = ft.Column(
-            controls=[
-                self._header_text,
-                self._desc_text,
-                ft.Container(height=10) if not self._compact else ft.Container(height=5),
-                ft.Row(
-                    [
-                        self.model_path_input,
-                        self.btn_select_file,
-                    ],
-                    spacing=10,
-                    vertical_alignment=ft.CrossAxisAlignment.END,
-                    alignment=compact_main_align,
-                ),
-                ft.Container(height=10) if not self._compact else ft.Container(height=5),
-                self.advanced_tile,
-                ft.Container(height=10) if not self._compact else ft.Container(height=5),
-                action_buttons,
-                ft.Row(
-                    [self.status_icon, self.status_text],
-                    alignment=compact_main_align,
-                    spacing=5,
-                ),
-            ],
-            spacing=10 if not self._compact else 6,
-            horizontal_alignment=compact_cross_align,
-        )
-
-        if self._compact:
-            self.content = ft.Container(
-                content=form_content,
-                width=550,
-                alignment=ft.Alignment.CENTER,
-            )
-        else:
-            self.content = form_content
-
-    def _on_input_change(self, e):
-        if e is not None:
-            try:
-                if isinstance(e.control, ft.Slider):
-                    val = e.control.value
-                    if val is not None:
-                        e.control.tooltip = str(int(val) if val == int(val) else round(val, 2))
-                        e.control.update()
-            except AttributeError:
-                pass
-
-        if self.on_change:
-            self.on_change()
-
-    def _on_gpu_auto_change(self, e):
-        self.gpu_layers_input.visible = not self.gpu_auto_switch.value
-        self._safe_update()
-        if self.on_change:
-            self.on_change()
-
-    def reload_config(self):  # pragma: no cover
-        local_cfg = ConfigHandler.get_local_ai_config()
-        self.model_path_input.value = local_cfg.get("local_model_path", "")
-        timeout_val = ConfigHandler.get_local_ai_timeout()
-        self.timeout_input.value = str(timeout_val) if timeout_val is not None else ""
-        self.threads_input.value = local_cfg.get("n_threads", 4)
-        current_gpu_layers = local_cfg.get("n_gpu_layers", -1)
-        is_gpu_auto = current_gpu_layers == -1
-        self.gpu_auto_switch.value = is_gpu_auto
-        self.gpu_layers_input.value = current_gpu_layers if not is_gpu_auto else 0
-        self.gpu_layers_input.visible = not is_gpu_auto
-        self.batch_input.value = str(local_cfg.get("n_batch", 512))
-        self.ctx_input.value = str(local_cfg.get("n_ctx", 4096))
-        self.flash_attn_switch.value = local_cfg.get("flash_attn", True)
-        self._safe_update()
-
-    async def _on_select_file_click(self, e):
-        if not self.page:
-            return
-        result = await self.file_picker.pick_files(
+async def _select_file(vm: LocalModelConfigPanelViewModel, file_picker: ft.FilePicker) -> None:
+    """Open file picker and update vm.model_path on selection."""
+    try:
+        result = await file_picker.pick_files(
             allowed_extensions=["gguf"],
             dialog_title=I18n.get("settings_btn_select_file"),
         )
         if result and result.files and len(result.files) > 0:
-            self.model_path_input.value = result.files[0].path
-            self._safe_update()
-            if self.on_change:
-                self.on_change()
+            vm.update_model_path(result.files[0].path or "")
+    except Exception as e:
+        logger.error("[LocalModelConfigPanel] File pick failed: %s", e, exc_info=True)
 
-    def _on_verify_click(self, e):
-        if self._is_verifying:
-            self._show_warning(I18n.get("wizard_model_verifying"))
-            return
 
-        if self.page:
-            self.page.run_task(self._async_verify_and_notify)
+def _on_select_file_click_factory(
+    vm: LocalModelConfigPanelViewModel,
+    file_picker: ft.FilePicker,
+) -> Callable[[ft.ControlEvent], None]:
+    """Create on_click handler for file select button."""
 
-    async def _async_verify_and_notify(
-        self,
-    ):  # pragma: no cover — UI notification wrapper; async_verify_model() tested separately
-        result = await self.async_verify_model()
-        if result and self.on_verify_success:
-            self.on_verify_success()
-
-    def _on_save_click(self, e):
-        if self.page:
-            self.page.run_task(self._do_save_click_async)
-
-    async def _do_save_click_async(self):
+    def _on_select_file_click(e: ft.ControlEvent) -> None:
         try:
-            result = await ThreadPoolManager().run_async(TaskType.IO, self.save_config)
-            if result:
-                self._show_success(I18n.get("wizard_model_configured"))
-                if self.on_save:
-                    self.on_save()
-        except Exception as e:
-            logger.error("[LocalModelConfigPanel] Save failed: %s", e, exc_info=True)
-            self._show_error(I18n.get("sys_snack_save_err"))
+            page = ft.context.page
+            if page is not None:
+                page.run_task(_select_file, vm, file_picker)
+        except RuntimeError:
+            logger.debug("[LocalModelConfigPanel] page not available for file pick")
 
-    def verify_model(self) -> bool:  # pragma: no cover — stub method; async_verify_model() is the real implementation
-        return False
+    return _on_select_file_click
 
-    async def async_verify_model(self) -> bool:
-        model_path = (self.model_path_input.value or "").strip()
 
-        if not model_path:
-            self._show_error(I18n.get("wizard_err_model_required"))
-            return False
+@ft.component
+def LocalModelConfigPanel(
+    vm: LocalModelConfigPanelViewModel,
+    *,
+    show_save_button: bool = False,
+    compact: bool = False,
+    show_internal_loading: bool = True,
+) -> ft.Container:
+    """Local model configuration panel (declarative).
 
-        if not os.path.exists(model_path):
-            self._show_error(I18n.get("wizard_err_model_not_found"))
-            return False
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - VM 由消费方实例化（AIBrainTab/OnboardingWizard 直接 new LocalModelConfigPanelViewModel）
+    - View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
+    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - 无 page ref / 生命周期回调 / 手动刷新
 
-        if not model_path.lower().endswith(".gguf"):
-            self._show_error(I18n.get("wizard_err_model_format"))
-            return False
+    Args:
+        vm: 由消费方实例化的 LocalModelConfigPanelViewModel
+        show_save_button: 是否显示保存按钮（default: False）
+        compact: 是否使用紧凑布局（wizard 用，default: False）
+        show_internal_loading: 是否显示内部 loading 指示器（default: True）
+    """
+    # --- Subscribe to VM state changes (外部 VM 模式，VM 生命周期由消费方管理) ---
+    state, _ = use_viewmodel(vm=vm)
 
-        timeout_str = (self.timeout_input.value or "").strip()
+    # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
+    ft.use_state(I18n.get_observable_state)
+
+    # --- FilePicker lifecycle (register on page.services + cleanup) ---
+    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
+
+    def _setup_file_picker() -> None:
         try:
-            timeout = int(timeout_str) if timeout_str else 300
-            if not (0 < timeout <= 3600):
-                raise ValueError("Range")
-        except ValueError:
-            self._show_error(
-                I18n.get("ai_snack_invalid_range").format(
-                    field=I18n.get("settings_local_ai_timeout"),
-                    min=1,
-                    max=3600,
-                )
-            )
-            return False
+            page = ft.context.page
+            if page is not None and file_picker not in page.services:
+                page.services.append(file_picker)
+        except RuntimeError:
+            logger.debug("[LocalModelConfigPanel] page not available for FilePicker setup")
 
-        if self._is_verifying:
-            logger.warning("[LocalModelConfigPanel] Verification already in progress")
-            return False
-
-        self._is_verifying = True
-        self._show_warning(I18n.get("wizard_model_loading"))
-        self._set_loading_state(True)
-
+    def _cleanup_file_picker() -> None:
         try:
-            import asyncio
-
-            # Ensure Flet renders the loading mask even if the
-            # model is cached and returns instantly
-            await asyncio.sleep(0.5)
-
-            config = self.get_current_config()
-            success = await self.on_verify_model(model_path, config)
-
-            if not success:
-                self._show_error(I18n.get("wizard_err_model_load_failed"))
-                return False
-
-            self._show_success(I18n.get("wizard_model_configured"))
-            return True
-
-        except Exception as e:
-            logger.error("[LocalModelConfigPanel] Model verification failed: %s", e, exc_info=True)
-            self._show_error(I18n.get("wizard_err_model_load_failed"))
-            return False
-
-        finally:
-            self._is_verifying = False
-            self._set_loading_state(False)
-            self._safe_update()
-
-    def _set_loading_state(self, loading: bool):
-        if self._show_internal_loading:
-            self.progress_indicator.visible = loading
-            self.verify_button.disabled = loading
-            self.save_button.disabled = loading
-            self.btn_select_file.disabled = loading
-            self.model_path_input.disabled = loading
-
-        if self.on_loading_change:
-            self.on_loading_change(loading)
-
-    def save_config(self) -> bool:
-        model_path = (self.model_path_input.value or "").strip()
-        timeout_str = (self.timeout_input.value or "").strip()
-        timeout = int(timeout_str) if timeout_str else 300
-
-        # 限制 timeout 范围
-        timeout = max(1, min(timeout, 3600))
-
-        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value or 0)
-
-        try:
-            success = ConfigHandler.save_local_ai_config(
-                model_path=model_path,
-                timeout=timeout,
-                n_threads=int(self.threads_input.value or 4),
-                n_batch=int(self.batch_input.value or 512),
-                n_ctx=int(self.ctx_input.value or 2048),
-                flash_attn=self.flash_attn_switch.value,
-                n_gpu_layers=gpu_layers,
-            )
-        except (ValueError, TypeError) as e:
-            logger.error("[LocalModelConfigPanel] Invalid config values: %s", e, exc_info=True)
-            return False
-
-        if not success:
-            return False
-
-        # 提交验证模式（如果活跃）—— 仅 Onboarding 流程走此路径
-        from services.local_model_manager import LocalModelManager
-
-        LocalModelManager.commit_verification_if_active()
-
-        return True
-
-    def get_current_config(self) -> dict:
-        gpu_layers = -1 if self.gpu_auto_switch.value else int(self.gpu_layers_input.value or 0)
-
-        return {
-            "model_path": (self.model_path_input.value or "").strip(),
-            "timeout": int(self.timeout_input.value or 0) if (self.timeout_input.value or "").strip() else 300,
-            "n_threads": int(self.threads_input.value or 4),
-            "n_gpu_layers": gpu_layers,
-            "n_batch": int(self.batch_input.value or 512),
-            "n_ctx": int(self.ctx_input.value or 2048),
-            "flash_attn": self.flash_attn_switch.value,
-        }
-
-    def set_config(self, config: dict):  # pragma: no cover
-        self.model_path_input.value = config.get("model_path", "")
-        self.timeout_input.value = str(config.get("timeout", 300))
-        self.threads_input.value = config.get("n_threads", 4)
-
-        gpu_layers = config.get("n_gpu_layers", 0)
-        self.gpu_auto_switch.value = gpu_layers == -1
-        self.gpu_layers_input.value = gpu_layers if gpu_layers != -1 else 0
-        self.gpu_layers_input.tooltip = str(self.gpu_layers_input.value)
-        self.gpu_layers_input.visible = not self.gpu_auto_switch.value
-
-        self.batch_input.value = str(config.get("n_batch", 512))
-        self.ctx_input.value = str(config.get("n_ctx", 4096))
-        self.flash_attn_switch.value = config.get("flash_attn", True)
-
-        self._safe_update()
-
-    def _show_success(self, message: str):
-        self.status_text.value = message
-        self.status_text.color = AppColors.SUCCESS
-        self.status_icon.icon = ft.Icons.CHECK_CIRCLE  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.SUCCESS
-        self.status_icon.visible = True
-        self._safe_update()
-
-    def _show_error(self, message: str):
-        self.status_text.value = message
-        self.status_text.color = AppColors.ERROR
-        self.status_icon.icon = ft.Icons.ERROR  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.ERROR
-        self.status_icon.visible = True
-        self._safe_update()
-
-    def _show_warning(self, message: str):  # pragma: no cover
-        self.status_text.value = message
-        self.status_text.color = AppColors.WARNING
-        self.status_icon.icon = ft.Icons.WARNING  # type: ignore[reportAttributeAccessIssue]  # Flet Icon.icon is writable at runtime
-        self.status_icon.color = AppColors.WARNING
-        self.status_icon.visible = True
-        self._safe_update()
-
-    def _safe_update(self):  # pragma: no cover
-        try:
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.debug("Safe update skipped: %s", e, exc_info=True)
-
-    def did_mount(self):
-        if self.page:
-            self.page.services.append(self.file_picker)
-            self.page.update()
-
-        self._locale_subscription_id = I18n.subscribe(self._on_locale_change)
-        logger.debug("[LocalModelConfigPanel] Subscribed to locale changes")
-
-    def will_unmount(self):
-        if self.page and getattr(self, "file_picker", None) in self.page.services:
-            self.page.services.remove(self.file_picker)
-            self.page.update()
-
-        if self._locale_subscription_id:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-            logger.debug("[LocalModelConfigPanel] Unsubscribed from locale changes")
-
+            page = ft.context.page
+            if page is not None and file_picker in page.services:
+                page.services.remove(file_picker)
+        except RuntimeError:
+            pass
         # 清理未提交的验证状态
         from services.local_model_manager import LocalModelManager
 
-        LocalModelManager.cancel_verification_if_active()
-
-    def _on_locale_change(self):
         try:
-            if hasattr(self, "model_path_input"):
-                self.model_path_input.label = I18n.get("settings_local_model_path")
-            if hasattr(self, "btn_select_file"):
-                self.btn_select_file.content = I18n.get("settings_btn_select_file")
-            if hasattr(self, "timeout_input"):
-                self.timeout_input.label = I18n.get("settings_local_ai_timeout")
-            if hasattr(self, "gpu_auto_switch"):
-                self.gpu_auto_switch.label = I18n.get("settings_local_gpu_auto")
-            if hasattr(self, "batch_input"):
-                self.batch_input.label = I18n.get("settings_local_batch")
-            if hasattr(self, "ctx_input"):
-                self.ctx_input.label = I18n.get("settings_local_ctx")
-            if hasattr(self, "flash_attn_switch"):
-                self.flash_attn_switch.label = I18n.get("settings_local_flash_attn")
-            if hasattr(self, "verify_button"):
-                self.verify_button.content = I18n.get("wizard_btn_verify_model")
-            if hasattr(self, "save_button"):
-                self.save_button.content = I18n.get("settings_save_config")
-            if hasattr(self, "_header_text"):
-                self._header_text.update_locale()
-            if hasattr(self, "_desc_text"):
-                self._desc_text.value = I18n.get("settings_local_ai_desc")
-            if hasattr(self, "_advanced_title"):
-                self._advanced_title.value = I18n.get("ai_advanced_settings")
-            if hasattr(self, "_advanced_subtitle"):
-                self._advanced_subtitle.value = I18n.get("settings_hint_restart")
-
-            self._safe_update()
+            LocalModelManager.cancel_verification_if_active()
         except Exception as e:
-            logger.warning("[LocalModelConfigPanel] Failed to update locale: %s", e, exc_info=True)
+            logger.debug("[LocalModelConfigPanel] cleanup cancel_verification failed: %s", e, exc_info=True)
+
+    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
+
+    # --- Build form controls (driven by state) ---
+    is_gpu_auto = state.n_gpu_layers == -1
+    gpu_layers_display = 0 if is_gpu_auto else state.n_gpu_layers
+
+    model_path_input = ft.TextField(
+        label=I18n.get("settings_local_model_path"),
+        value=state.model_path,
+        expand=True,
+        hint_text="C:/path/to/model.gguf",
+        on_change=lambda e: vm.update_model_path(e.control.value),
+    )
+
+    btn_select_file = ft.OutlinedButton(
+        content=I18n.get("settings_btn_select_file"),
+        icon=ft.Icons.FOLDER_OPEN,
+        on_click=_on_select_file_click_factory(vm, file_picker),
+        disabled=state.is_verifying if show_internal_loading else False,
+    )
+
+    timeout_input = ft.TextField(
+        label=I18n.get("settings_local_ai_timeout"),
+        value=state.timeout,
+        width=_INPUT_WIDTH_SMALL,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        hint_text="300",
+        on_change=lambda e: vm.update_timeout(e.control.value),
+    )
+
+    threads_input = ft.Slider(
+        min=1,
+        max=16,
+        divisions=15,
+        value=float(state.n_threads),
+        label="{value}",
+        tooltip=str(state.n_threads),
+        on_change=lambda e: vm.update_threads(e.control.value),
+    )
+
+    gpu_auto_switch = ft.Switch(
+        label=I18n.get("settings_local_gpu_auto"),
+        value=is_gpu_auto,
+        on_change=lambda e: vm.update_gpu_auto(e.control.value),
+    )
+
+    gpu_layers_input = ft.Slider(
+        min=0,
+        max=100,
+        divisions=100,
+        value=float(gpu_layers_display),
+        label="{value}",
+        tooltip=str(gpu_layers_display),
+        visible=not is_gpu_auto,
+        on_change=lambda e: vm.update_gpu_layers(e.control.value),
+    )
+
+    batch_input = ft.Dropdown(
+        label=I18n.get("settings_local_batch"),
+        value=str(state.n_batch),
+        options=[ft.dropdown.Option(str(x)) for x in [512, 1024, 2048, 4096]],
+        width=_INPUT_WIDTH_SMALL,
+        on_select=lambda e: vm.update_batch(e.control.value or "512"),
+    )
+
+    ctx_input = ft.Dropdown(
+        label=I18n.get("settings_local_ctx"),
+        value=str(state.n_ctx),
+        options=[ft.dropdown.Option(str(x)) for x in [2048, 4096, 8192, 16384, 32768]],
+        width=_INPUT_WIDTH_SMALL,
+        on_select=lambda e: vm.update_ctx(e.control.value or "4096"),
+    )
+
+    flash_attn_switch = ft.Switch(
+        label=I18n.get("settings_local_flash_attn"),
+        value=state.flash_attn,
+        on_change=lambda e: vm.update_flash_attn(e.control.value),
+    )
+
+    # --- Status display (driven by state.status_message / status_type) ---
+    status_text = _render_message(state.status_message)
+    status_color = _STATUS_COLOR_MAP.get(state.status_type, AppColors.TEXT_SECONDARY)
+    status_icon_name = _STATUS_ICON_MAP.get(state.status_type, ft.Icons.INFO)
+
+    status_icon = ft.Icon(
+        status_icon_name,
+        visible=status_text != "",
+        size=16,
+        color=status_color,
+    )
+    status_text_ctrl = ft.Text(
+        status_text,
+        size=12,
+        color=status_color,
+    )
+
+    # --- Loading indicator ---
+    progress_indicator = ft.ProgressRing(
+        visible=state.is_verifying if show_internal_loading else False,
+        width=20,
+        height=20,
+        stroke_width=2,
+    )
+
+    # --- Buttons ---
+    verify_button = ft.Button(
+        content=I18n.get("wizard_btn_verify_model"),
+        on_click=_on_verify_click_factory(vm),
+        icon=ft.Icons.CHECK_CIRCLE,
+        style=AppStyles.secondary_button(),
+        disabled=state.is_verifying if show_internal_loading else False,
+    )
+
+    save_button = ft.Button(
+        content=I18n.get("settings_save_config"),
+        on_click=_on_save_click_factory(vm),
+        icon=ft.Icons.SAVE,
+        visible=show_save_button,
+        style=AppStyles.primary_button(),
+        disabled=state.is_saving if show_internal_loading else False,
+    )
+
+    # --- Advanced tile ---
+    advanced_title = ft.Text(
+        I18n.get("ai_advanced_settings"),
+        size=14 if not compact else 12,
+        weight=ft.FontWeight.BOLD,
+    )
+    advanced_subtitle = ft.Text(
+        I18n.get("settings_hint_restart"),
+        size=11,
+        color=AppColors.WARNING,
+    )
+    advanced_tile = ft.ExpansionTile(
+        title=advanced_title,
+        subtitle=advanced_subtitle,
+        controls=[
+            ft.Container(height=10),
+            ft.ResponsiveRow(
+                [
+                    ft.Column(
+                        [
+                            ft.Text(I18n.get("settings_local_threads"), size=12),
+                            threads_input,
+                        ],
+                        col={"sm": 12, "md": 6},
+                    ),
+                    ft.Column(
+                        [
+                            ft.Text(I18n.get("settings_local_gpu_layers"), size=12),
+                            gpu_auto_switch,
+                            gpu_layers_input,
+                        ],
+                        col={"sm": 12, "md": 6},
+                    ),
+                    ft.Column([batch_input], col={"sm": 6, "md": 4}),
+                    ft.Column([ctx_input], col={"sm": 6, "md": 4}),
+                    ft.Column([timeout_input], col={"sm": 12, "md": 4}),
+                    ft.Column([flash_attn_switch], col={"sm": 12, "md": 12}),
+                ],
+                run_spacing=15,
+            ),
+        ],
+        expanded=False,
+    )
+
+    # --- Header / desc ---
+    header_text = SectionHeader(I18n.get("settings_sec_local_ai"), title_key="settings_sec_local_ai")
+    header_text.visible = not compact
+
+    desc_text = ft.Text(
+        value=I18n.get("settings_local_ai_desc"),
+        size=12,
+        color=AppColors.TEXT_SECONDARY,
+        visible=not compact,
+    )
+
+    # --- Layout ---
+    compact_main_align = ft.MainAxisAlignment.CENTER if compact else ft.MainAxisAlignment.START
+    compact_cross_align = ft.CrossAxisAlignment.CENTER if compact else ft.CrossAxisAlignment.START
+
+    action_buttons = ft.Row(
+        controls=[verify_button, save_button, progress_indicator],
+        alignment=compact_main_align,
+    )
+
+    form_content = ft.Column(
+        controls=[
+            header_text,
+            desc_text,
+            ft.Container(height=10) if not compact else ft.Container(height=5),
+            ft.Row(
+                [model_path_input, btn_select_file],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.END,
+                alignment=compact_main_align,
+            ),
+            ft.Container(height=10) if not compact else ft.Container(height=5),
+            advanced_tile,
+            ft.Container(height=10) if not compact else ft.Container(height=5),
+            action_buttons,
+            ft.Row(
+                [status_icon, status_text_ctrl],
+                alignment=compact_main_align,
+                spacing=5,
+            ),
+        ],
+        spacing=10 if not compact else 6,
+        horizontal_alignment=compact_cross_align,
+    )
+
+    if compact:
+        return ft.Container(
+            content=form_content,
+            width=550,
+            alignment=ft.Alignment.CENTER,
+        )
+    return ft.Container(content=form_content)
+
+
+# --- Backward-compat: state type re-export for type checks ---
+__all__ = ["LocalModelConfigPanel", "LocalModelConfigPanelViewModel", "LocalModelConfigState"]

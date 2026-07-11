@@ -18,6 +18,7 @@ def reset_i18n():
     I18n._strings_cache = {}
     I18n._missing_keys = set()
     I18n._listeners = None
+    I18n._state = None
     I18n.initialize("zh_CN")
     yield
     I18n._initialized = False
@@ -25,6 +26,7 @@ def reset_i18n():
     I18n._strings_cache = {}
     I18n._missing_keys = set()
     I18n._listeners = None
+    I18n._state = None
 
 
 @pytest.fixture

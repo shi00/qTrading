@@ -1,76 +1,7 @@
 import asyncio
-from typing import Any
 
 import flet as ft
 from unittest.mock import MagicMock
-
-
-def _install_v1_compat_control_page_mock() -> None:
-    """V1 兼容桩：让 ``ft.Control.page`` 可读写、``update()`` 容忍未挂载情况。
-
-    V1 中 ``ft.Control.page`` 改为只读 property（通过 ``parent`` 链查找），
-    ``Control.update()`` 要求控件已挂载到 page，否则抛 ``RuntimeError``。
-    本项目测试代码与 5 处源码（``app_layout``/``task_center_view``/
-    ``failover_config_panel``（含 ``ProviderCredentialDialog``+
-    ``FailoverConfigPanel``）/``resizable_splitter``）依赖 V0 行为：直接
-    ``self.page = page`` 赋值、未挂载控件调用 ``update()`` 静默返回、
-    ``if self.page:`` 在未挂载时返回 falsy 而非抛异常。
-
-    本函数在测试环境下 monkey-patch ``ft.Control``，保持 V0 兼容行为：
-
-    - ``page`` property：getter 优先返回 ``__dict__['_mock_page']``，
-      未设过则走 V1 原生 ``parent`` 链查找；若原生查找抛 ``RuntimeError``
-      （控件未挂载），返回 ``None``（兼容 ``if self.page:`` 用法，V0 行为）；
-      setter 写入 ``__dict__``。
-    - ``update()``：若 ``_mock_page`` 与原生 ``parent`` 链均无 page，
-      静默返回（不抛 ``RuntimeError``），与 V0 行为兼容。
-
-    幂等：多次调用安全（仅 patch 一次，由 ``_mock_page_patched`` 标志守护）。
-    """
-    # NOTE(lazy): 全局 monkey-patch ft.Control 的测试侧 V0 兼容桩.
-    # ceiling: 测试套件（仅 tests/unit/ui/ 目录导入 mock_flet 时生效）.
-    # upgrade: 5 处源码（app_layout/task_center_view/failover_config_panel 的
-    #     ProviderCredentialDialog+FailoverConfigPanel/resizable_splitter）
-    #     改造为 did_mount() 阶段获取 page 后，移除本桩与 R18 配方；测试代码改用
-    #     PageRefMixin（ui/v1_compat.py）替代 _mock_page 注入.
-    if getattr(ft.Control, "_mock_page_patched", False):
-        return
-
-    # Any: fget 在 V1 只读 property 类型存根中推断为 None，运行时必为可调用对象
-    original_page_get: Any = ft.Control.page.fget
-    original_update: Any = ft.Control.update
-
-    @property
-    def page(self) -> ft.Page | None:
-        mock_page = self.__dict__.get("_mock_page", None)
-        if mock_page is not None:
-            return mock_page
-        # V0 兼容：未挂载时返回 None（不抛 RuntimeError），支持 `if self.page:` 用法
-        try:
-            return original_page_get(self)
-        except RuntimeError:
-            return None
-
-    @page.setter
-    def page(self, value: ft.Page | None) -> None:
-        self.__dict__["_mock_page"] = value
-
-    def update(self) -> None:
-        # V0 兼容：未挂载到 page 时静默返回（不抛 RuntimeError）
-        if self.__dict__.get("_mock_page", None) is None:
-            try:
-                original_page_get(self)
-            except RuntimeError:
-                return
-        original_update(self)
-
-    ft.Control.page = page  # type: ignore[method-assign]  # [reason: V1 Control.page 为只读 property，测试侧 monkey-patch 为可读写以兼容 V0 self.page = page 赋值]
-    ft.Control.update = update  # type: ignore[method-assign]  # [reason: V1 Control.update 未挂载时抛 RuntimeError，测试侧 patch 为静默返回以兼容 V0 行为]
-    ft.Control._mock_page_patched = True  # type: ignore[attr-defined]  # [reason: 幂等守护标志，标记 ft.Control 已被测试侧 monkey-patch，避免重复 patch]
-
-
-# 模块导入时一次性应用 V1 兼容桩，确保 UI 测试目录下所有测试均生效。
-_install_v1_compat_control_page_mock()
 
 
 class MockClientStorage:
@@ -147,6 +78,11 @@ class MockFletPage:
         self.pubsub.subscribe_all = MagicMock()
         self.pubsub.unsubscribe_all = MagicMock()
         self.pubsub.send_all = MagicMock()
+        self.pubsub.subscribe_topic = MagicMock()
+        self.pubsub.unsubscribe_topic = MagicMock()
+        self.pubsub.send_all_on_topic = MagicMock()
+        self.pubsub.send_others = MagicMock()
+        self.pubsub.send_others_on_topic = MagicMock()
         self._tasks = []
 
     @property

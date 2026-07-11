@@ -273,27 +273,33 @@ class TestPasswordLoading:
     """Tests for password loading functionality - Issue 2.1"""
 
     def test_database_panel_accepts_load_password_parameter(self):
-        """Test that DatabaseConfigPanel accepts load_password parameter"""
+        """Test that DatabaseConfigPanelViewModel accepts load_password parameter.
+
+        注：DatabaseConfigPanel 已重写为声明式组件，load_password 移至 VM 构造参数。
+        """
         import inspect
 
-        from ui.components.config_panels.database_config_panel import (
-            DatabaseConfigPanel,
+        from ui.viewmodels.database_config_panel_view_model import (
+            DatabaseConfigPanelViewModel,
         )
 
-        sig = inspect.signature(DatabaseConfigPanel.__init__)
+        sig = inspect.signature(DatabaseConfigPanelViewModel.__init__)
         params = list(sig.parameters.keys())
 
         assert "load_password" in params
 
     def test_database_panel_load_password_defaults_to_false(self):
-        """Test that load_password defaults to False for security"""
+        """Test that load_password defaults to False for security.
+
+        注：DatabaseConfigPanel 已重写为声明式组件，load_password 移至 VM 构造参数。
+        """
         import inspect
 
-        from ui.components.config_panels.database_config_panel import (
-            DatabaseConfigPanel,
+        from ui.viewmodels.database_config_panel_view_model import (
+            DatabaseConfigPanelViewModel,
         )
 
-        sig = inspect.signature(DatabaseConfigPanel.__init__)
+        sig = inspect.signature(DatabaseConfigPanelViewModel.__init__)
         load_password_param = sig.parameters.get("load_password")
 
         assert load_password_param is not None
@@ -322,219 +328,180 @@ class TestProgressCallbackSignature:
 
 
 class TestLocaleChangeSignature:
-    """Tests for _on_locale_change signature - §5.8 规范 2：零参签名"""
+    """声明式组件 locale change 契约守护 - §5.8 规范 2 由声明式范式替代
 
-    def test_llm_config_panel_locale_change_is_zero_arg(self):
-        """Test that LLMConfigPanel._on_locale_change takes no args other than self (§5.8 规范 2)"""
-        import inspect
+    所有 UI 组件已重写为 @ft.component 声明式组件，
+    通过 ft.use_state(I18n.get_observable_state) 自动重渲染，不再需要 _on_locale_change。
+    """
 
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+    def test_llm_config_panel_uses_i18n_observable_state(self):
+        """DoD: LLMConfigPanel 通过 ft.use_state(I18n.get_observable_state) 订阅 i18n（声明式）。"""
+        from pathlib import Path
 
-        sig = inspect.signature(LLMConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
+        import ui.components.config_panels.llm_config_panel as mod
 
-        assert params == ["self"]
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        assert "I18n.get_observable_state" in source, "LLMConfigPanel 必须订阅 I18n.get_observable_state"
 
-    def test_locale_change_callable_with_zero_args(self):
-        """Test that _on_locale_change can be called with zero args (matches I18n.subscribe contract)"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
-
-        # Should not raise TypeError about missing arguments
-        import inspect
-
-        sig = inspect.signature(LLMConfigPanel._on_locale_change)
-        # Verify no required args beyond self
-        required = [p for p in sig.parameters.values() if p.default is inspect.Parameter.empty]
-        assert required == [sig.parameters["self"]]
-
-    # --- 本次新修复的零参签名（必须校验 params == ["self"]）---
+    # --- 声明式组件契约守护（@ft.component + 无 _on_locale_change）---
 
     def test_app_layout_locale_change_is_zero_arg(self):
-        """AppLayout._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """AppLayout 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.app_layout import AppLayout
 
-        sig = inspect.signature(AppLayout._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(AppLayout, "__wrapped__"), "AppLayout 必须是 @ft.component 声明式组件"
+        assert not hasattr(AppLayout, "_on_locale_change"), "声明式 AppLayout 不应有 _on_locale_change"
 
     def test_onboarding_wizard_locale_change_is_zero_arg(self):
-        """OnboardingWizard._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """OnboardingWizard 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.onboarding_wizard import OnboardingWizard
 
-        sig = inspect.signature(OnboardingWizard._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(OnboardingWizard, "__wrapped__"), "OnboardingWizard 必须是 @ft.component 声明式组件"
+        assert not hasattr(OnboardingWizard, "_on_locale_change"), "声明式 OnboardingWizard 不应有 _on_locale_change"
 
     def test_ai_brain_tab_locale_change_is_zero_arg(self):
-        """AIBrainTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """AIBrainTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 
-        sig = inspect.signature(AIBrainTab._on_locale_change)
-        params = list(sig.parameters.keys())
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(AIBrainTab, "__wrapped__"), "AIBrainTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(AIBrainTab, "_on_locale_change"), "声明式 AIBrainTab 不应有 _on_locale_change"
 
-        assert params == ["self"]
-
-    # --- 零参签名（§5.8 规范 2：回调方法签名无参数）---
+    # --- 声明式组件契约守护（@ft.component + 无 _on_locale_change）---
 
     def test_database_config_panel_locale_change_is_zero_arg(self):
-        """DatabaseConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """DatabaseConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.components.config_panels.database_config_panel import (
             DatabaseConfigPanel,
         )
 
-        sig = inspect.signature(DatabaseConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(DatabaseConfigPanel, "__wrapped__"), "DatabaseConfigPanel 必须是 @ft.component 声明式组件"
+        assert not hasattr(DatabaseConfigPanel, "_on_locale_change"), (
+            "声明式 DatabaseConfigPanel 不应有 _on_locale_change"
+        )
 
     def test_failover_config_panel_locale_change_is_zero_arg(self):
-        """FailoverConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """FailoverConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.components.config_panels.failover_config_panel import (
             FailoverConfigPanel,
         )
 
-        sig = inspect.signature(FailoverConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(FailoverConfigPanel, "__wrapped__"), "FailoverConfigPanel 必须是 @ft.component 声明式组件"
+        assert not hasattr(FailoverConfigPanel, "_on_locale_change"), (
+            "声明式 FailoverConfigPanel 不应有 _on_locale_change"
+        )
 
     def test_local_model_config_panel_locale_change_is_zero_arg(self):
-        """LocalModelConfigPanel._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """LocalModelConfigPanel 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.components.config_panels.local_model_config_panel import (
             LocalModelConfigPanel,
         )
 
-        sig = inspect.signature(LocalModelConfigPanel._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(LocalModelConfigPanel, "__wrapped__"), "LocalModelConfigPanel 必须是 @ft.component 声明式组件"
+        assert not hasattr(LocalModelConfigPanel, "_on_locale_change"), (
+            "声明式 LocalModelConfigPanel 不应有 _on_locale_change"
+        )
 
     def test_system_tab_locale_change_is_zero_arg(self):
-        """SystemTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """SystemTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.system_tab import SystemTab
 
-        assert hasattr(SystemTab, "_on_locale_change")
-        sig = inspect.signature(SystemTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(SystemTab, "__wrapped__"), "SystemTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(SystemTab, "_on_locale_change"), "声明式 SystemTab 不应有 _on_locale_change"
 
     def test_automation_tab_locale_change_is_zero_arg(self):
-        """AutomationTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """AutomationTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.automation_tab import AutomationTab
 
-        assert hasattr(AutomationTab, "_on_locale_change")
-        sig = inspect.signature(AutomationTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(AutomationTab, "__wrapped__"), "AutomationTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(AutomationTab, "_on_locale_change"), "声明式 AutomationTab 不应有 _on_locale_change"
 
     def test_notifications_tab_locale_change_is_zero_arg(self):
-        """NotificationsTab._on_locale_change 必须零参（§5.8 规范 2）"""
-        import inspect
-
+        """NotificationsTab 已重写为声明式组件，通过 ft.use_state(I18n.get_observable_state) 自动重渲染，无需 _on_locale_change（§5.8 规范 2 由声明式范式替代）"""
         from ui.views.settings_tabs.automation_tab import NotificationsTab
 
-        assert hasattr(NotificationsTab, "_on_locale_change")
-        sig = inspect.signature(NotificationsTab._on_locale_change)
-        params = list(sig.parameters.keys())
-
-        assert params == ["self"]
+        # 声明式组件必须用 @ft.component 装饰，且不再定义 _on_locale_change
+        assert hasattr(NotificationsTab, "__wrapped__"), "NotificationsTab 必须是 @ft.component 声明式组件"
+        assert not hasattr(NotificationsTab, "_on_locale_change"), "声明式 NotificationsTab 不应有 _on_locale_change"
 
 
 class TestLLMProviderSwitch:
-    """Tests for LLM provider switch behavior - clears API Key"""
+    """Tests for LLM provider switch behavior.
 
-    def test_llm_config_panel_has_api_key_modified_flag(self):
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+    注：LLMConfigPanel 已重写为声明式组件（Phase 3.2.3），
+    provider 切换逻辑收敛进 VM.update_provider command，
+    api_key_modified flag 收敛进 VM state。
+    旧命令式 API 测试（_on_provider_change/_load_config/_api_key_modified）已移除。
+    """
 
-        assert hasattr(LLMConfigPanel, "__init__")
-        panel = LLMConfigPanel.__new__(LLMConfigPanel)
-        panel._api_key_modified = False
-        assert hasattr(panel, "_api_key_modified")
+    def test_llm_vm_has_update_provider(self):
+        """DoD: VM 暴露 update_provider command（声明式）。"""
+        from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 
-    def test_llm_config_panel_has_on_provider_change(self):
-        """Test that LLMConfigPanel has _on_provider_change method"""
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+        assert hasattr(LLMConfigPanelViewModel, "update_provider"), "VM 必须暴露 update_provider command"
 
-        assert hasattr(LLMConfigPanel, "_on_provider_change")
+    def test_llm_vm_state_has_api_key_modified_flag(self):
+        """DoD: VM state 包含 api_key_modified flag（声明式）。"""
+        from ui.viewmodels.llm_config_panel_view_model import LLMConfigState
 
-    def test_llm_config_panel_loads_saved_api_key(self):
-        """Test that LLMConfigPanel._load_config loads saved API Key"""
-        import inspect
+        assert hasattr(LLMConfigState, "__dataclass_fields__"), "LLMConfigState 必须是 dataclass"
+        assert "api_key_modified" in LLMConfigState.__dataclass_fields__, "state 必须包含 api_key_modified"
 
-        from ui.components.config_panels.llm_config_panel import LLMConfigPanel
+    def test_llm_vm_has_reload_config(self):
+        """DoD: VM 暴露 reload_config command（替代旧 _load_config）。"""
+        from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 
-        assert hasattr(LLMConfigPanel, "_load_config")
-
-        sig = inspect.signature(LLMConfigPanel._load_config)
-        assert sig is not None
+        assert hasattr(LLMConfigPanelViewModel, "reload_config"), "VM 必须暴露 reload_config command"
 
 
 class TestLocalModelAsyncVerification:
-    """Tests for local model async verification"""
+    """Tests for local model async verification.
 
-    def test_local_model_panel_has_async_verify_model(self):
-        """Test that LocalModelConfigPanel has async_verify_model method"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    注：LocalModelConfigPanel 已重写为声明式组件（Phase 3.2.4），
+    验证/保存逻辑收敛进 VM.verify_model / VM.save_config commands，
+    loading 状态收敛进 VM state.is_verifying。
+    旧命令式 API 测试（async_verify_model/_set_loading_state/progress_indicator）已移除。
+    """
+
+    def test_local_model_vm_has_verify_model(self):
+        """DoD: VM 暴露 verify_model command（声明式，替代旧 async_verify_model）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigPanelViewModel,
         )
 
-        assert hasattr(LocalModelConfigPanel, "async_verify_model")
+        assert hasattr(LocalModelConfigPanelViewModel, "verify_model"), "VM 必须暴露 verify_model command"
 
-    def test_local_model_panel_has_progress_indicator(self):
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_local_model_vm_has_save_config(self):
+        """DoD: VM 暴露 save_config command（声明式）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigPanelViewModel,
         )
 
-        panel = LocalModelConfigPanel.__new__(LocalModelConfigPanel)
-        panel.progress_indicator = None
-        assert hasattr(panel, "progress_indicator")
+        assert hasattr(LocalModelConfigPanelViewModel, "save_config"), "VM 必须暴露 save_config command"
 
-    def test_local_model_panel_has_set_loading_state(self):
-        """Test that LocalModelConfigPanel has _set_loading_state method"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_local_model_vm_state_has_is_verifying_flag(self):
+        """DoD: VM state 包含 is_verifying flag（声明式，替代旧 _set_loading_state）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigState,
         )
 
-        assert hasattr(LocalModelConfigPanel, "_set_loading_state")
+        assert hasattr(LocalModelConfigState, "__dataclass_fields__"), "LocalModelConfigState 必须是 dataclass"
+        assert "is_verifying" in LocalModelConfigState.__dataclass_fields__, "state 必须包含 is_verifying"
 
-    @pytest.mark.asyncio
-    async def test_async_verify_model_returns_false_for_empty_path(self):
-        """Test that async_verify_model returns False for empty path"""
-        from ui.components.config_panels.local_model_config_panel import (
-            LocalModelConfigPanel,
+    def test_local_model_vm_has_reload_config(self):
+        """DoD: VM 暴露 reload_config command（替代旧 _load_config）。"""
+        from ui.viewmodels.local_model_config_panel_view_model import (
+            LocalModelConfigPanelViewModel,
         )
 
-        # 用 __new__ 跳过 __init__（避免 Flet 控件初始化副作用）
-        panel = LocalModelConfigPanel.__new__(LocalModelConfigPanel)
-        panel.model_path_input = MagicMock()
-        panel.model_path_input.value = ""
-        panel._show_error = MagicMock()
-
-        result = await panel.async_verify_model()
-
-        assert result is False
-        # 空路径应触发错误提示
-        panel._show_error.assert_called_once()
+        assert hasattr(LocalModelConfigPanelViewModel, "reload_config"), "VM 必须暴露 reload_config command"
 
 
 class TestLocalModelManagerIntegration:

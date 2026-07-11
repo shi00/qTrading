@@ -1,5 +1,8 @@
 import asyncio
 import logging
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import Any
 
 import pandas as pd
 
@@ -12,6 +15,22 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class HomeState:
+    """HomeViewModel 的不可变状态快照。
+
+    大体积数据 (last_market_data / news_data) 不放入 state,
+    通过方法返回值或 last_* property 拉取 (dual-track)。
+    """
+
+    news_page: int = 0
+    has_more_news: bool = False
+    is_loading_more: bool = False
+    # dual-track versions (瞬态事件通知)
+    news_update_version: int = 0
+    market_update_version: int = 0
+
+
 class HomeViewModel:
     """
     ViewModel for HomeView.
@@ -19,51 +38,74 @@ class HomeViewModel:
     Follows "Supervising Controller" pattern.
     """
 
+    PAGE_SIZE = 20  # 常量,不放入 state
+
     def __init__(self):
         self.processor = DataProcessor()
 
-        # Pagination State
-        self.news_page = 0
-        self.PAGE_SIZE = 20
-        self.has_more_news = False
-        self.is_loading_more = False
+        # Internal state (frozen snapshot)
+        self._state = HomeState()
+        self._subscribers: list[Callable[[HomeState], None]] = []
 
-        # Data Cache
-        self.last_market_data = {}
-        self.news_data = None
-
-        # Callbacks (View binders)
-        self.on_news_update = None
-        self.on_market_update = None
+        # Data Cache (大体积数据,内部持有; View 通过方法返回值或 last_* property 拉取)
+        self.last_market_data: dict = {}
+        self.news_data: pd.DataFrame | None = None
+        self._last_news_update: tuple[Any, Any] | None = None
 
         # Concurrency Control
         self._load_generation = 0  # Prevent race conditions
 
-    def init(self, on_news_update, on_market_update):
-        """Initialize subscriptions and bind callbacks"""
-        self.on_news_update = on_news_update
-        self.on_market_update = on_market_update
+    @property
+    def state(self) -> HomeState:
+        return self._state
 
-        # Subscriptions
+    def subscribe(self, callback: Callable[[HomeState], None]) -> Callable[[], None]:
+        """订阅 state 变更,返回取消订阅函数。"""
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
+
+    def _notify(self) -> None:
+        for cb in self._subscribers:
+            try:
+                cb(self._state)
+            except Exception as e:
+                logger.warning("[HomeVM] Subscriber error: %s", e, exc_info=True)
+
+    def _set_state(self, **changes: Any) -> None:
+        self._state = replace(self._state, **changes)
+        self._notify()
+
+    @property
+    def last_news_update(self) -> tuple[Any, Any] | None:
+        """最近一次新闻服务更新事件 (update_type, data),dual-track 拉取。"""
+        return self._last_news_update
+
+    def init(self) -> None:
+        """Initialize subscriptions (无回调参数,View 通过 subscribe 订阅 state)。"""
         NewsSubscriptionService().add_listener(self._on_news_service_update)
         MarketDataService().add_listener(self._on_market_service_update)
 
-    def dispose(self):
+    def dispose(self) -> None:
         """Cleanup subscriptions"""
         try:
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
         except Exception as e:
             logger.warning("[HomeVM] Dispose error: %s", e, exc_info=True)
+        self._subscribers.clear()
 
     # --- Service Event Handlers ---
     def _on_news_service_update(self, update_type=None, data=None):
-        if self.on_news_update:
-            self.on_news_update(update_type, data)
+        self._last_news_update = (update_type, data)
+        self._set_state(news_update_version=self._state.news_update_version + 1)
 
     def _on_market_service_update(self):
-        if self.on_market_update:
-            self.on_market_update()
+        self._set_state(market_update_version=self._state.market_update_version + 1)
 
     # --- Data Actions ---
 
@@ -104,23 +146,33 @@ class HomeViewModel:
         Returns: (DataFrame, has_more)
         """
         self._load_generation += 1  # Invalidate pending loads
-        self.news_page = 0
-        await self._fetch_news_page(0)
-        return self.news_data, self.has_more_news
+        batch = await self._fetch_news_batch(0)
+
+        has_more = self._state.has_more_news  # batch 为 None 时保持不变
+        if batch is not None:
+            if batch.empty:
+                self.news_data = None
+                has_more = False
+            else:
+                self.news_data = batch
+                has_more = len(batch) >= self.PAGE_SIZE
+
+        self._set_state(news_page=0, has_more_news=has_more)
+        return self.news_data, has_more
 
     async def load_next_page(self):
         """
         Load next page of news.
         Returns: (new_batch_df, has_more) or (None, False)
         """
-        if self.is_loading_more or not self.has_more_news:
-            return None, self.has_more_news
+        if self._state.is_loading_more or not self._state.has_more_news:
+            return None, self._state.has_more_news
 
-        self.is_loading_more = True
+        self._set_state(is_loading_more=True)
         current_gen = self._load_generation
 
         try:
-            next_page = self.news_page + 1
+            next_page = self._state.news_page + 1
             new_batch = await self._fetch_news_batch(next_page)
 
             # Check if generation changed (e.g. Refresh clicked while loading)
@@ -141,28 +193,15 @@ class HomeViewModel:
                 else:
                     self.news_data = new_batch
 
-                self.news_page = next_page
+                has_more = len(new_batch) >= self.PAGE_SIZE
+                self._set_state(news_page=next_page, has_more_news=has_more)
+                return new_batch, has_more
 
-                # Check has more
-                self.has_more_news = len(new_batch) >= self.PAGE_SIZE
-                return new_batch, self.has_more_news
-            self.has_more_news = False
+            self._set_state(has_more_news=False)
             return pd.DataFrame(), False
 
         finally:
-            self.is_loading_more = False
-
-    async def _fetch_news_page(self, page):
-        """Helper to fetch specific page and update internal state"""
-        batch = await self._fetch_news_batch(page)
-
-        if batch is None:
-            return
-
-        if page == 0:
-            self.news_data = batch if not batch.empty else None
-
-        self.has_more_news = not batch.empty and len(batch) >= self.PAGE_SIZE
+            self._set_state(is_loading_more=False)
 
     async def _fetch_news_batch(self, page):
         try:
@@ -182,5 +221,4 @@ class HomeViewModel:
         """Reset state (e.g. on cache clear)"""
         self.last_market_data = {}
         self.news_data = None
-        self.has_more_news = False
-        self.news_page = 0
+        self._set_state(news_page=0, has_more_news=False)

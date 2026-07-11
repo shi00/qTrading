@@ -1,3 +1,21 @@
+"""data_view — 声明式组件 (Phase F.2).
+
+从命令式容器子类重写为 ft.component 装饰器 + use_viewmodel 范式
+(CLAUDE.md §3.2 MVVM, §3.3 use_viewmodel hook 已实现).
+
+变更要点:
+- 三个命令式 class (TableViewerTab/SQLConsoleTab/DataExplorerView) → ft.component 函数组件
+- DataExplorerView 通过 ``use_viewmodel(factory=)`` 内部模式实例化 DataExplorerViewModel
+- TableViewerTab/SQLConsoleTab 通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+- FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``, cleanup 时移除
+- PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
+- page 访问用 ``ft.context.page`` (try/except 守卫 RuntimeError)
+- 异步任务用 ``page.run_task``, R2 CancelledError 必须 raise
+- 消费声明式 PaginatedTable (函数调用, props 推送)
+- 移除全部命令式 API (did_mount/will_unmount/refresh_locale/update_theme/handle_resize/.update())
+"""
+
 import asyncio
 import datetime
 import logging
@@ -8,7 +26,10 @@ import flet as ft
 import pandas as pd
 
 from data.persistence.metadata_manager import MetaDataManager
-from ui.i18n import I18n, refresh_dropdown_options
+from ui.components.virtual_table import PaginatedTable
+from ui.hooks import use_viewmodel
+from ui.i18n import I18n
+from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
 from utils.correlation import ensure_correlation_id
@@ -20,667 +41,261 @@ from utils.time_utils import get_now
 logger = logging.getLogger(__name__)
 
 
-class TableViewerTab(ft.Container):
+# ============================================================================
+# Module-level pure helpers
+# ============================================================================
+
+
+def _get_page() -> ft.Page | None:
+    """安全获取 ``ft.context.page``, 未在渲染上下文时返回 None。"""
+    try:
+        return ft.context.page
+    except RuntimeError:
+        return None
+
+
+def _format_cell_value(val: object, col_name: str) -> str:
+    """格式化单元格值 (None/NaN → '-', 日期格式化)。"""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return "-"
+    if "date" in col_name.lower():
+        if isinstance(val, (datetime.date, datetime.datetime)):
+            return val.strftime("%Y-%m-%d")
+        if isinstance(val, str) and len(val) == 8 and val.isdigit():
+            return f"{val[:4]}-{val[4:6]}-{val[6:8]}"
+    return str(val)
+
+
+def _build_filter_op_options() -> list[ft.dropdown.Option]:
+    """构建过滤操作符选项。"""
+    return [
+        ft.dropdown.Option("="),
+        ft.dropdown.Option("LIKE"),
+        ft.dropdown.Option(">"),
+        ft.dropdown.Option("<"),
+        ft.dropdown.Option(">="),
+        ft.dropdown.Option("<="),
+        ft.dropdown.Option("!="),
+    ]
+
+
+def _build_table_selector_options(tables: tuple[str, ...]) -> list[ft.dropdown.Option]:
+    """构建表选择器选项 (locale 变更时由组件重渲染自动刷新)。"""
+    return [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in tables]
+
+
+def _build_filter_col_options(current_table: str, columns: tuple[str, ...]) -> list[ft.dropdown.Option]:
+    """构建过滤列选项。"""
+    return [
+        ft.dropdown.Option(
+            key=col,
+            text=MetaDataManager.get_column_alias(current_table, col),
+        )
+        for col in columns
+    ]
+
+
+def _build_table_columns_spec(current_table: str, columns: tuple[str, ...]) -> list[dict[str, object]]:
+    """构建 PaginatedTable columns spec (id/label/width)。"""
+    return [
+        {
+            "id": col,
+            "label": MetaDataManager.get_column_alias(current_table, col),
+            "width": 140,
+        }
+        for col in columns
+    ]
+
+
+def _df_to_rows(df: pd.DataFrame, columns: tuple[str, ...]) -> list[dict[str, str]]:
+    """DataFrame → PaginatedTable rows (dict 列表), 格式化日期/None。"""
+    if df.empty:
+        return []
+    return [{col: _format_cell_value(row.get(col), col) for col in columns} for _, row in df.iterrows()]
+
+
+def _build_sql_columns_spec(df: pd.DataFrame) -> list[dict[str, object]]:
+    """构建 SQL 结果表的 columns spec。"""
+    return [
+        {
+            "id": col,
+            "label": MetaDataManager.get_column_alias(None, col),
+            "width": 140,
+        }
+        for col in df.columns
+    ]
+
+
+def _df_to_sql_rows(df: pd.DataFrame) -> list[dict[str, str]]:
+    """SQL 结果 DataFrame → rows。"""
+    if df.empty:
+        return []
+    return [{str(col): _format_cell_value(val, str(col)) for col, val in row.items()} for _, row in df.iterrows()]
+
+
+def _ceil_div(n: int, d: int) -> int:
+    """向上取整除法 (d > 0)。"""
+    return -(-n // d) if d > 0 else 1
+
+
+# ============================================================================
+# TableViewerTab
+# ============================================================================
+
+
+@ft.component
+def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
+    """Tab 1: 可视化表浏览器 (声明式).
+
+    通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
+    FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``。
     """
-    Tab 1: Visual Table Explorer with Filtering and Pagination
-    Async implementation to prevent UI freezing.
-    """
+    # --- 订阅 VM state (外部模式) ---
+    state, _ = use_viewmodel(vm=vm)
 
-    def __init__(self, viewmodel: DataExplorerViewModel):
-        super().__init__()
-        self.vm = viewmodel
+    # --- i18n / theme 订阅 (自动重渲染) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-        self.save_file_picker = ft.FilePicker()  # pragma: no cover
+    # --- 本地 UI 状态 (输入框值, 用户覆盖) ---
+    filter_col_override, set_filter_col_override = ft.use_state(None)
+    filter_op_value, set_filter_op_value = ft.use_state("=")
+    filter_val_text, set_filter_val_text = ft.use_state("")
 
-        # UI Elements
-        self.table_selector = ft.Dropdown(  # pragma: no cover
-            width=250,  # pragma: no cover
-            label=I18n.get("data_select_table"),  # pragma: no cover
-            on_select=self._on_table_changed,  # pragma: no cover
-            disabled=True,  # pragma: no cover
-            bgcolor=AppColors.INPUT_BG,  # pragma: no cover
-            color=AppColors.INPUT_TEXT,  # pragma: no cover
-            border_color=AppColors.INPUT_BORDER,  # pragma: no cover
-            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),  # pragma: no cover
-        )  # pragma: no cover
+    effective_filter_col = (
+        filter_col_override
+        if filter_col_override is not None
+        else (state.table_columns[0] if state.table_columns else None)
+    )
 
-        # Loading Indicator
-        self.progress_bar = ft.ProgressBar(  # pragma: no cover
-            width=None,  # pragma: no cover
-            visible=False,  # pragma: no cover
-            color=AppColors.PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
+    # --- FilePicker 生命周期 (use_ref 持有 + use_effect 注册/移除) ---
+    file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
-        # Filtering
-        self.filter_col = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("data_filter_col"),  # pragma: no cover
-            width=150,  # pragma: no cover
-            bgcolor=AppColors.INPUT_BG,  # pragma: no cover
-            color=AppColors.INPUT_TEXT,  # pragma: no cover
-            border_color=AppColors.INPUT_BORDER,  # pragma: no cover
-            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),  # pragma: no cover
-        )  # pragma: no cover
-        self.filter_op = ft.Dropdown(  # pragma: no cover
-            label=I18n.get("data_filter_op"),  # pragma: no cover
-            width=100,  # pragma: no cover
-            options=[  # pragma: no cover
-                ft.dropdown.Option("="),  # pragma: no cover
-                ft.dropdown.Option("LIKE"),  # pragma: no cover
-                ft.dropdown.Option(">"),  # pragma: no cover
-                ft.dropdown.Option("<"),  # pragma: no cover
-                ft.dropdown.Option(">="),  # pragma: no cover
-                ft.dropdown.Option("<="),  # pragma: no cover
-                ft.dropdown.Option("!="),  # pragma: no cover
-            ],  # pragma: no cover
-            value="=",  # pragma: no cover
-            bgcolor=AppColors.INPUT_BG,  # pragma: no cover
-            color=AppColors.INPUT_TEXT,  # pragma: no cover
-            border_color=AppColors.INPUT_BORDER,  # pragma: no cover
-            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),  # pragma: no cover
-        )  # pragma: no cover
-        self.filter_val = ft.TextField(  # pragma: no cover
-            label=I18n.get("data_filter_val"),  # pragma: no cover
-            width=200,  # pragma: no cover
-            on_submit=self._on_query_click,  # pragma: no cover
-            bgcolor=AppColors.INPUT_BG,  # pragma: no cover
-            color=AppColors.INPUT_TEXT,  # pragma: no cover
-            border_color=AppColors.INPUT_BORDER,  # pragma: no cover
-            text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),  # pragma: no cover
-        )  # pragma: no cover
+    def _setup_file_picker() -> None:
+        page = _get_page()
+        if page is not None and file_picker not in page.services:
+            page.services.append(file_picker)
 
-        # Buttons
-        self.btn_query = ft.IconButton(  # pragma: no cover
-            ft.Icons.SEARCH,  # pragma: no cover
-            tooltip=I18n.get("common_query"),  # pragma: no cover
-            on_click=self._on_query_click,  # pragma: no cover
-            icon_color=AppColors.PRIMARY,  # pragma: no cover
-            icon_size=20,  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_refresh = ft.IconButton(  # pragma: no cover
-            ft.Icons.REFRESH,  # pragma: no cover
-            tooltip=I18n.get("common_refresh"),  # pragma: no cover
-            on_click=self._on_refresh_click,  # pragma: no cover
-            icon_size=20,  # pragma: no cover
-        )  # pragma: no cover
+    def _cleanup_file_picker() -> None:
+        page = _get_page()
+        if page is not None and file_picker in page.services:
+            page.services.remove(file_picker)
 
-        # Professional Financial DataTable
-        # Elegant Loading State - Modern centered card design
-        # Store text references for dynamic i18n updates
-        self._loading_text = ft.Text(  # pragma: no cover
-            I18n.get("data_loading"),  # pragma: no cover
-            size=16,  # pragma: no cover
-            weight=ft.FontWeight.W_500,  # pragma: no cover
-            color=AppColors.TEXT_PRIMARY,  # pragma: no cover
-        )  # pragma: no cover
-        self._loading_hint = ft.Text(  # pragma: no cover
-            I18n.get("data_loading_hint"),  # pragma: no cover
-            size=13,  # pragma: no cover
-            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-        )  # pragma: no cover
-        self._loading_widget = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    ft.Container(  # pragma: no cover
-                        content=ft.ProgressRing(  # pragma: no cover
-                            width=48,  # pragma: no cover
-                            height=48,  # pragma: no cover
-                            stroke_width=4,  # pragma: no cover
-                            color=AppColors.PRIMARY,  # pragma: no cover
-                        ),  # pragma: no cover
-                        padding=20,  # pragma: no cover
-                        border_radius=50,  # pragma: no cover
-                        bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),  # pragma: no cover
-                    ),  # pragma: no cover
-                    ft.Container(height=16),  # pragma: no cover
-                    self._loading_text,  # pragma: no cover
-                    self._loading_hint,  # pragma: no cover
-                ],  # pragma: no cover
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-                spacing=4,  # pragma: no cover
-            ),  # pragma: no cover
-            alignment=ft.Alignment.CENTER,  # pragma: no cover
-            expand=True,  # pragma: no cover
-            padding=40,  # pragma: no cover
-            bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),  # pragma: no cover
-            border_radius=12,  # pragma: no cover
-            border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),  # pragma: no cover
-        )  # pragma: no cover
+    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
 
-        self.data_table = ft.DataTable(  # pragma: no cover
-            columns=[  # pragma: no cover
-                ft.DataColumn(label=ft.Text(I18n.get("data_loading"))),  # pragma: no cover
-            ],  # pragma: no cover
-            rows=[],  # pragma: no cover
-            vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
-            horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),  # pragma: no cover
-            heading_row_color=AppColors.TABLE_HEADER_BG,  # pragma: no cover
-            heading_row_height=42,  # pragma: no cover
-            data_row_min_height=48,  # pragma: no cover
-            data_row_max_height=float("inf"),  # pragma: no cover
-            column_spacing=20,  # pragma: no cover
-            horizontal_margin=16,  # pragma: no cover
-            divider_thickness=0,  # pragma: no cover
-            show_checkbox_column=False,  # pragma: no cover
-            border_radius=8,  # pragma: no cover
-            border=ft.Border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
-        )  # pragma: no cover
-
-        # Scrollable table wrapper
-        self._table_scroll_wrapper = ft.Column(  # pragma: no cover
-            [ft.Row([self.data_table], scroll=ft.ScrollMode.ALWAYS)],  # pragma: no cover
-            expand=True,  # pragma: no cover
-            scroll=ft.ScrollMode.AUTO,  # pragma: no cover
-        )  # pragma: no cover
-
-        # Conditional content container - swaps between loading and table
-        self._grid_content = ft.Container(  # pragma: no cover
-            content=self._loading_widget,  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
-
-        # Pagination
-        self.btn_prev = ft.IconButton(  # pragma: no cover
-            ft.Icons.CHEVRON_LEFT,  # pragma: no cover
-            on_click=self._on_prev_page,  # pragma: no cover
-            disabled=True,  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_next = ft.IconButton(  # pragma: no cover
-            ft.Icons.CHEVRON_RIGHT,  # pragma: no cover
-            on_click=self._on_next_page,  # pragma: no cover
-            disabled=True,  # pragma: no cover
-        )  # pragma: no cover
-        self.txt_page = ft.Text(I18n.get("data_page_num").format(current=1, total=1))  # pragma: no cover
-        self.txt_count_info = ft.Text("", size=12, color=ft.Colors.GREY)  # pragma: no cover
-
-        self.content = self._build_layout()  # pragma: no cover
-
-    def _build_layout(self):  # pragma: no cover
-        # Toolbar
-        toolbar_content = ft.Row(  # pragma: no cover
-            [  # pragma: no cover
-                self.table_selector,  # pragma: no cover
-                ft.VerticalDivider(width=10, color=ft.Colors.TRANSPARENT),  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=ft.Row(  # pragma: no cover
-                        [  # pragma: no cover
-                            self.filter_col,  # pragma: no cover
-                            self.filter_op,  # pragma: no cover
-                            self.filter_val,  # pragma: no cover
-                            self.btn_query,  # pragma: no cover
-                            self.btn_refresh,  # pragma: no cover
-                        ],  # pragma: no cover
-                        spacing=5,  # pragma: no cover
-                    ),  # pragma: no cover
-                    padding=5,  # pragma: no cover
-                    border=ft.Border.all(1, AppColors.BORDER),  # pragma: no cover
-                    border_radius=8,  # pragma: no cover
-                    bgcolor=AppColors.SURFACE,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(expand=True),  # pragma: no cover
-                ft.PopupMenuButton(  # pragma: no cover
-                    icon=ft.Icons.MORE_VERT,  # pragma: no cover
-                    tooltip=I18n.get("common_more_actions"),  # pragma: no cover
-                    items=[  # pragma: no cover
-                        ft.PopupMenuItem(  # pragma: no cover
-                            content=I18n.get("data_export_current"),  # pragma: no cover
-                            icon=ft.Icons.DOWNLOAD,  # pragma: no cover
-                            on_click=lambda e: self.page.run_task(  # type: ignore[union-attr]  # pragma: no cover
-                                self._export_csv,  # pragma: no cover
-                                current_page=True,  # pragma: no cover
-                            ),  # pragma: no cover
-                        ),  # pragma: no cover
-                        ft.PopupMenuItem(  # pragma: no cover
-                            content=I18n.get("data_export_all"),  # pragma: no cover
-                            icon=ft.Icons.DRIVE_FILE_MOVE,  # pragma: no cover
-                            on_click=lambda e: self.page.run_task(  # pragma: no cover
-                                self._export_csv,  # pragma: no cover
-                                current_page=False,  # pragma: no cover
-                            ),  # pragma: no cover
-                        ),  # pragma: no cover
-                    ],  # pragma: no cover
-                ),  # pragma: no cover
-                # 右侧留白：ft.Row 不支持 padding（Flet 0.85.3），用 Container 间隔器替代
-                ft.Container(width=8),  # pragma: no cover
-            ],  # pragma: no cover
-            alignment=ft.MainAxisAlignment.START,  # pragma: no cover
-            spacing=10,  # pragma: no cover
-            scroll=ft.ScrollMode.AUTO,  # pragma: no cover
-        )  # pragma: no cover
-
-        # Update visuals for inputs to be 'Dense'
-        for ctrl in [  # pragma: no cover
-            self.table_selector,  # pragma: no cover
-            self.filter_col,  # pragma: no cover
-            self.filter_op,  # pragma: no cover
-            self.filter_val,  # pragma: no cover
-        ]:  # pragma: no cover
-            ctrl.height = 36  # pragma: no cover
-            ctrl.text_size = 13  # pragma: no cover
-            ctrl.content_padding = 10  # pragma: no cover
-            if hasattr(ctrl, "border"):  # pragma: no cover
-                ctrl.border = "outline"  # pragma: no cover
-
-        self.filter_op.content_padding = 5  # pragma: no cover
-
-        toolbar_container = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=toolbar_content,  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                    bgcolor=AppColors.SURFACE,  # pragma: no cover
-                ),  # pragma: no cover
-                self.progress_bar,  # pragma: no cover
-            ],  # pragma: no cover
-            spacing=0,  # pragma: no cover
-        )  # pragma: no cover
-
-        # Data Grid Container - Uses conditional content rendering
-        # Content is swapped between loading widget and table in _toggle_loading
-
-        # Pagination Bar
-        pagination_bar = ft.Container(  # pragma: no cover
-            content=ft.Row(  # pragma: no cover
-                [  # pragma: no cover
-                    self.txt_count_info,  # pragma: no cover
-                    ft.Container(expand=True),  # pragma: no cover
-                    self.btn_prev,  # pragma: no cover
-                    self.txt_page,  # pragma: no cover
-                    self.btn_next,  # pragma: no cover
-                ],  # pragma: no cover
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,  # pragma: no cover
-            ),  # pragma: no cover
-            padding=ft.Padding.symmetric(horizontal=20, vertical=5),  # pragma: no cover
-            bgcolor=AppColors.SURFACE,  # pragma: no cover
-            border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),  # pragma: no cover
-        )  # pragma: no cover
-
-        return ft.Column(  # pragma: no cover
-            [toolbar_container, self._grid_content, pagination_bar],  # pragma: no cover
-            expand=True,  # pragma: no cover
-            spacing=0,  # pragma: no cover
-        )  # pragma: no cover
-
-    def did_mount(self):  # pragma: no cover
-        if getattr(self, "_mounted", False):
+    # --- 异步加载逻辑 (R2: except Exception 不捕获 CancelledError) ---
+    async def _load_schema_and_data() -> None:
+        if state.is_loading:
             return
-        self._mounted = True
-        if self.page:
-            self.page.services.append(self.save_file_picker)
-            self.page.update()
-
-    def will_unmount(self):  # pragma: no cover
-        self._mounted = False
-        if self.page and getattr(self, "save_file_picker", None) in self.page.services:
-            self.page.services.remove(self.save_file_picker)
-            self.page.update()
-
-    def refresh_locale(self):
-        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
-
-        由父视图 DataExplorerView.refresh_locale 级联调用，自身不订阅 I18n。
-        """
         try:
-            # 令 MetaDataManager 缓存失效，确保后续 get_table_alias/get_column_alias 用新 locale
-            MetaDataManager.invalidate_cache()
-            self.table_selector.label = I18n.get("data_select_table")
-            refresh_dropdown_options(
-                self.table_selector,
-                [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in self.vm.tables_list],
-            )
-
-            self.filter_col.label = I18n.get("data_filter_col")
-            self._populate_filter_columns()
-
-            self.filter_op.label = I18n.get("data_filter_op")
-            refresh_dropdown_options(
-                self.filter_op,
-                [
-                    ft.dropdown.Option("="),
-                    ft.dropdown.Option("LIKE"),
-                    ft.dropdown.Option(">"),
-                    ft.dropdown.Option("<"),
-                    ft.dropdown.Option(">="),
-                    ft.dropdown.Option("<="),
-                    ft.dropdown.Option("!="),
-                ],
-            )
-
-            self.filter_val.label = I18n.get("data_filter_val")
-            self.btn_query.tooltip = I18n.get("common_query")
-            self.btn_refresh.tooltip = I18n.get("common_refresh")
-            self._loading_text.value = I18n.get("data_loading")
-            self._loading_hint.value = I18n.get("data_loading_hint")
-
-            # 重建表头以刷新列别名翻译
-            if self.vm.table_columns:
-                self._rebuild_table_columns()
-                self._rebuild_table_rows()
-                self._update_pagination_ui()
-            else:
-                # 加载占位文案
-                self.data_table.columns = [ft.DataColumn(label=ft.Text(I18n.get("data_loading")))]
-                self.data_table.rows = []
-
-            if self.page:
-                self.update()
+            await vm.load_table_schema(state.current_table)
+            await vm.query_data()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as e:
-            logger.warning("[TableViewerTab] refresh_locale error: %s", e, exc_info=True)
+            logger.error("[TableViewerTab] load_schema error: %s", e, exc_info=True)
+            page = _get_page()
+            if page is not None:
+                page.show_toast(I18n.get("data_err_load_schema"), "error")
 
-    async def did_mount_async(self):  # pragma: no cover
-        # Skip re-loading if tables already loaded (switching back to this view)
-        if self.vm.tables_loaded:
-            logger.debug("[TableViewerTab] Skipping re-load - tables already loaded")
+    async def _init_tables() -> None:
+        if state.tables_loaded:
             return
-
         try:
-            tables = await self.vm.init_tables()
-
-            # Update UI on main thread
-            self.table_selector.options = [
-                ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in tables
-            ]
-            self.table_selector.disabled = False
-
+            tables = await vm.init_tables()
             if tables:
-                self.table_selector.value = self.vm.current_table
-                await self._load_schema_and_data()
-
-            if self.page:
-                self.update()
-
+                await _load_schema_and_data()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as e:
-            logger.error("Error loading tables: %s", e, exc_info=True)
-            if self.page:
-                self.page.show_toast(I18n.get("data_err_load_schema"), "error")  # type: ignore[untyped]
+            logger.error("[TableViewerTab] init_tables error: %s", e, exc_info=True)
+            page = _get_page()
+            if page is not None:
+                page.show_toast(I18n.get("data_err_load_schema"), "error")
 
-    async def _on_table_changed(self, e):  # pragma: no cover
-        self.vm.current_table = self.table_selector.value
-        UILogger.log_action("TableViewerTab", "Select", f"table={self.vm.current_table}")
-        self.vm.reset_table_state()
-        self.filter_val.value = ""  # Clear filters
-        await self._load_schema_and_data()
+    # tables_loaded 变化时触发 (mount + cache_cleared stale 重载)
+    ft.use_effect(_init_tables, dependencies=[state.tables_loaded])
 
-    async def _toggle_loading(self, loading: bool):  # pragma: no cover
-        self.progress_bar.visible = loading
-
-        # Swap content: loading widget vs scrollable table
-        if loading:
-            # Update loading text with current locale (dynamic i18n)
-            self._loading_text.value = I18n.get("data_loading")
-            self._loading_hint.value = I18n.get("data_loading_hint")
-            self._grid_content.content = self._loading_widget
-        else:
-            self._grid_content.content = self._table_scroll_wrapper
-
-        self.btn_query.disabled = loading
-        self.btn_refresh.disabled = loading
-        self.btn_prev.disabled = loading or self.vm.current_page <= 1
-        self.btn_next.disabled = loading  # Will be updated after load
-        self.table_selector.disabled = loading
-        # Guard: only call update() if control is mounted to page
-        if self.page:
-            self.update()
-
-    async def _load_schema_and_data(self):  # pragma: no cover
-        # Prevent concurrent loading (race condition guard)
-        if self.vm.is_loading:
-            logger.debug("[TableViewerTab] Skipped load - already loading")
-            return
-
+    # --- 异步 handler (供 page.run_task 调度) ---
+    async def _do_table_change(new_table: str) -> None:
         try:
-            await self._toggle_loading(True)
+            vm.set_table(new_table)
+            UILogger.log_action("TableViewerTab", "Select", f"table={new_table}")
+            vm.reset_table_state()
+            set_filter_col_override(None)
+            set_filter_val_text("")
+            await _load_schema_and_data()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
 
-            # 1. Load schema via ViewModel
-            await self.vm.load_table_schema(self.vm.current_table)
-
-            # 2. Populate filter dropdown from vm state
-            self._populate_filter_columns()
-
-            # 3. Build DataTable columns from vm state
-            self._rebuild_table_columns()
-
-            # 4. Load data
-            await self.vm.query_data()
-
-            # 5. Render rows
-            self._rebuild_table_rows()
-            self._update_pagination_ui()
-
-        except Exception as e:
-            logger.error("Error loading schema: %s", e, exc_info=True)
-            if self.page:
-                self.page.show_toast(  # type: ignore[untyped]
-                    I18n.get("data_err_load_schema"),
-                    "error",
-                )
-        finally:
-            try:
-                await self._toggle_loading(False)
-            except Exception as toggle_err:
-                logger.debug("[_toggle_loading] finalization ignored: %s", toggle_err, exc_info=True)
-
-    def _populate_filter_columns(self):
-        """Fill filter column dropdown from vm.table_columns.
-
-        经 refresh_locale 调用时 options 含 i18n 别名，需强制 dirty（§5.8 规范 4）。
-        """
-        self.filter_col.options = [
-            ft.dropdown.Option(
-                key=col,
-                text=MetaDataManager.get_column_alias(self.vm.current_table, col),
-            )
-            for col in self.vm.table_columns
-        ]
-        if self.vm.table_columns:
-            self.filter_col.value = None  # 强制触发 dirty（Flet 对相等值短路，§5.8 规范 4）
-            self.filter_col.value = self.vm.table_columns[0]
-
-    def _rebuild_table_columns(self):  # pragma: no cover
-        """Rebuild DataTable columns from vm.table_columns and vm.numeric_cols."""
-        # 先清除 sort_column_index，避免 columns 被清空后 Dart 端 DataTable
-        # 同步状态时引用已失效的列索引触发 "Null check operator" 异常。
-        self.data_table.sort_column_index = None
-        self.data_table.columns = []
-        for idx, col in enumerate(self.vm.table_columns):
-            is_numeric = col in self.vm.numeric_cols
-            header_text = MetaDataManager.get_column_alias(self.vm.current_table, col)
-
-            self.data_table.columns.append(
-                ft.DataColumn(
-                    ft.Container(
-                        content=ft.Text(
-                            header_text,
-                            weight=ft.FontWeight.W_600,
-                            size=13,
-                            color=AppColors.TABLE_HEADER_TEXT,
-                            text_align=ft.TextAlign.CENTER,
-                        ),
-                        alignment=ft.Alignment.CENTER,
-                        expand=True,
-                        on_click=lambda e, i=idx: self.page.run_task(  # type: ignore[untyped]
-                            self._on_sort,
-                            i,
-                        ),
-                    ),
-                    numeric=is_numeric,
-                    on_sort=lambda e, i=idx: self.page.run_task(self._on_sort, i),  # type: ignore[untyped]
-                ),
-            )
-
-        # Reset sort state display
-        self.data_table.sort_column_index = self.vm.sort_col_index
-        self.data_table.sort_ascending = self.vm.sort_asc
-
-    def _rebuild_table_rows(self):  # pragma: no cover
-        """Rebuild DataTable rows from vm.current_data."""
-        df = self.vm.current_data
-        current_columns = self.vm.table_columns
-        self.data_table.rows = []
-        for idx, (_, row) in enumerate(df.iterrows()):
-            cells = []
-            for col_name in current_columns:
-                val = row.get(col_name)
-                is_numeric = col_name in self.vm.numeric_cols
-
-                # Formatting
-                str_val = str(val)
-                if val is None:
-                    str_val = "-"
-                elif "date" in col_name.lower():
-                    if isinstance(val, (datetime.date, datetime.datetime)):
-                        str_val = val.strftime("%Y-%m-%d")
-                    elif isinstance(val, str) and len(val) == 8 and val.isdigit():
-                        str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
-
-                # 仅对 market_news 表的长文本字段使用左对齐和自动换行
-                is_news_table = self.vm.current_table == "market_news"
-                is_long_text = is_news_table and col_name.lower() in (
-                    "content",
-                    "tags",
-                )
-
-                cell_text = ft.Text(
-                    str_val,
-                    size=13,
-                    max_lines=None if is_long_text else 1,  # 新闻内容不限制行数
-                    overflow=ft.TextOverflow.VISIBLE if is_long_text else ft.TextOverflow.ELLIPSIS,
-                    font_family="Roboto Mono"
-                    if is_numeric or "code" in col_name.lower() or "date" in col_name.lower()
-                    else None,
-                    color=AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT,
-                    text_align=ft.TextAlign.LEFT if is_long_text else ft.TextAlign.CENTER,  # 新闻内容左对齐
-                )
-
-                # 新闻内容使用左对齐容器，并设置固定宽度保证换行
-                if is_long_text:
-                    cell_container = ft.Container(
-                        content=cell_text,
-                        alignment=ft.Alignment.TOP_LEFT,
-                        expand=True,  # 自适应宽度确保换行
-                        padding=ft.Padding.symmetric(vertical=5),
-                    )
-                else:
-                    cell_container = ft.Container(
-                        content=cell_text,
-                        alignment=ft.Alignment.CENTER,
-                        expand=True,
-                    )
-
-                cells.append(ft.DataCell(cell_container))
-
-            row_color = AppColors.TABLE_ROW_ODD if idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
-            self.data_table.rows.append(ft.DataRow(cells=cells, color=row_color))
-
-    def _update_pagination_ui(self):  # pragma: no cover
-        """Update pagination controls from vm state."""
-        total_pages = max(1, -(-self.vm.total_rows // self.vm.page_size))  # ceil division
-        self.txt_count_info.value = I18n.get("data_total_rows").format(
-            count=self.vm.total_rows,
-        )
-        self.txt_page.value = I18n.get("data_page_num").format(
-            current=self.vm.current_page,
-            total=total_pages,
-        )
-        self.btn_prev.disabled = self.vm.current_page <= 1
-        self.btn_next.disabled = self.vm.current_page >= total_pages
-        self.data_table.sort_column_index = self.vm.sort_col_index
-        self.data_table.sort_ascending = self.vm.sort_asc
-
-    async def _on_query_click(self, e):  # pragma: no cover
+    async def _do_query() -> None:
         ensure_correlation_id()
         UILogger.log_action("TableViewerTab", "Click", "btn_query")
-        self.vm.set_filter(self.filter_col.value, self.filter_op.value, self.filter_val.value)
+        vm.set_filter(effective_filter_col or "", filter_op_value, filter_val_text)
         try:
-            await self._toggle_loading(True)
-            await self.vm.query_data(page=1)
-            self._rebuild_table_rows()
-            self._update_pagination_ui()
-        finally:
-            await self._toggle_loading(False)
+            await vm.query_data(page=1)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            logger.error("[TableViewerTab] query error: %s", e, exc_info=True)
 
-    async def _on_refresh_click(self, e):  # pragma: no cover
+    async def _do_refresh() -> None:
         ensure_correlation_id()
         UILogger.log_action("TableViewerTab", "Click", "btn_refresh")
         try:
-            await self._toggle_loading(True)
-            await self.vm.query_data()
-            self._rebuild_table_rows()
-            self._update_pagination_ui()
-        finally:
-            await self._toggle_loading(False)
+            await vm.query_data()
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            logger.error("[TableViewerTab] refresh error: %s", e, exc_info=True)
 
-    async def _on_sort(self, col_index):  # pragma: no cover
-        # Type Guard: Ensure col_index is an integer
-        if not isinstance(col_index, int):
-            logger.warning(
-                "[_on_sort] Invalid column index type: %s inside DataView. Expected int.",
-                type(col_index),
-            )
-            return
-
-        # Toggle sort direction
-        if self.vm.sort_col_index == col_index:
-            self.vm.set_sort(col_index, not self.vm.sort_asc)
-        else:
-            self.vm.set_sort(col_index, True)
-
+    async def _do_sort_query() -> None:
         try:
-            await self._toggle_loading(True)
-            self.vm.clear_error()
-            await self.vm.query_data(page=1)
-            self._rebuild_table_rows()
-            self._update_pagination_ui()
-        finally:
-            await self._toggle_loading(False)
+            await vm.query_data(page=1)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as e:
+            logger.error("[TableViewerTab] sort query error: %s", e, exc_info=True)
 
-    async def _on_prev_page(self, e):  # pragma: no cover
+    async def _do_prev_page() -> None:
         UILogger.log_action("TableViewerTab", "Click", "btn_prev_page")
-        if self.vm.current_page > 1:
+        if state.current_page > 1:
             try:
-                await self._toggle_loading(True)
-                await self.vm.query_data(page=self.vm.current_page - 1)
-                self._rebuild_table_rows()
-                self._update_pagination_ui()
-            finally:
-                await self._toggle_loading(False)
+                await vm.query_data(page=state.current_page - 1)
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+            except Exception as e:
+                logger.error("[TableViewerTab] prev page error: %s", e, exc_info=True)
 
-    async def _on_next_page(self, e):  # pragma: no cover
+    async def _do_next_page() -> None:
         UILogger.log_action("TableViewerTab", "Click", "btn_next_page")
-        total_pages = -(-self.vm.total_rows // self.vm.page_size)  # ceil division
-        if self.vm.current_page < total_pages:
+        total_pages = _ceil_div(state.total_rows, state.page_size)
+        if state.current_page < total_pages:
             try:
-                await self._toggle_loading(True)
-                await self.vm.query_data(page=self.vm.current_page + 1)
-                self._rebuild_table_rows()
-                self._update_pagination_ui()
-            finally:
-                await self._toggle_loading(False)
+                await vm.query_data(page=state.current_page + 1)
+            except asyncio.CancelledError:
+                raise  # R2: 必须传播
+            except Exception as e:
+                logger.error("[TableViewerTab] next page error: %s", e, exc_info=True)
 
-    async def _export_csv(self, current_page=True):  # pragma: no cover
+    async def _export_csv(current_page: bool = True) -> None:
         scope = "current_page" if current_page else "all"
         UILogger.log_action("TableViewerTab", "Click", f"export_csv={scope}")
         try:
-            if self.progress_bar.visible:
-                return
-            await self._toggle_loading(True)
-
-            df = await self.vm.export_data(current_page_only=current_page)
-
+            df = await vm.export_data(current_page_only=current_page)
             if df.empty:
-                self.page.show_toast(I18n.get("data_export_no_data"), "error")  # type: ignore[untyped]
-                await self._toggle_loading(False)
+                page = _get_page()
+                if page is not None:
+                    page.show_toast(I18n.get("data_export_no_data"), "error")
                 return
-
-            suffix = f"_p{self.vm.current_page}" if current_page else "_all"
+            suffix = f"_p{state.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"{self.vm.current_table}{suffix}_{timestamp}.csv"
-
-            filepath = await self.save_file_picker.save_file(
+            default_filename = f"{state.current_table}{suffix}_{timestamp}.csv"
+            filepath = await file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
                 file_name=default_filename,
                 allowed_extensions=["csv"],
             )
-
             if filepath:
                 try:
                     await ThreadPoolManager().run_async(
@@ -689,622 +304,582 @@ class TableViewerTab(ft.Container):
                     )
                     filename = os.path.basename(filepath)
                     msg = I18n.get("data_export_success", file=filename)
-                    self.page.show_toast(msg, "success")  # type: ignore[untyped]
+                    page = _get_page()
+                    if page is not None:
+                        page.show_toast(msg, "success")
                 except Exception as ex:
                     logger.error("Export write failed: %s", ex, exc_info=True)
-                    self.page.show_toast(  # type: ignore[untyped]
-                        I18n.get("data_export_fail"),
-                        "error",
-                    )
+                    page = _get_page()
+                    if page is not None:
+                        page.show_toast(I18n.get("data_export_fail"), "error")
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export failed traceback", exc_info=True)
-            self.page.show_toast(  # type: ignore[untyped]
-                I18n.get("data_export_fail"),
-                "error",
-            )
-        finally:
-            await self._toggle_loading(False)
+            page = _get_page()
+            if page is not None:
+                page.show_toast(I18n.get("data_export_fail"), "error")
 
-    def update_theme(self):  # pragma: no cover
-        """Update styles on theme change"""
-        for ctrl in [
-            self.table_selector,
-            self.filter_col,
-            self.filter_op,
-            self.filter_val,
-        ]:
-            ctrl.bgcolor = AppColors.INPUT_BG
-            ctrl.color = AppColors.INPUT_TEXT
-            ctrl.border_color = AppColors.INPUT_BORDER
-            ctrl.text_style = ft.TextStyle(color=AppColors.INPUT_TEXT)
-
-        self.btn_query.icon_color = AppColors.PRIMARY
-
-        self._loading_text.color = AppColors.TEXT_PRIMARY
-        self._loading_hint.color = AppColors.TEXT_SECONDARY
-
-        self.data_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
-        self.data_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
-        self.data_table.heading_row_color = AppColors.TABLE_HEADER_BG
-        self.data_table.border = ft.Border.all(1, AppColors.TABLE_BORDER)
-
-        for col in self.data_table.columns:
-            if isinstance(col.label, ft.Container) and isinstance(
-                col.label.content,
-                ft.Text,
-            ):
-                col.label.content.color = AppColors.TABLE_HEADER_TEXT
-
-        for i, row in enumerate(self.data_table.rows):  # type: ignore[arg-type]
-            row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
-            for cell in row.cells:
-                content = cell.content
-                if isinstance(content, ft.Container):
-                    content = content.content
-                if isinstance(content, ft.Text):
-                    is_numeric = "Roboto" in (content.font_family or "")
-                    content.color = AppColors.TABLE_CELL_NUMERIC if is_numeric else AppColors.TABLE_CELL_TEXT
-
-        if self.page:
-            self.update()
-
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
-        # No responsive adjustment needed
-
-
-class SQLConsoleTab(ft.Container):
-    """
-    Tab 2: Advanced SQL Console
-    Async implementation.
-    """
-
-    def __init__(self, viewmodel: DataExplorerViewModel):
-        super().__init__()
-        self.vm = viewmodel
-
-        self.sql_editor = ft.TextField(  # pragma: no cover
-            multiline=True,  # pragma: no cover
-            min_lines=5,  # pragma: no cover
-            max_lines=10,  # pragma: no cover
-            text_size=14,  # pragma: no cover
-            label=I18n.get("data_sql_label"),  # pragma: no cover
-            hint_text=I18n.get("data_sql_hint"),  # pragma: no cover
-            bgcolor=AppColors.INPUT_BG,  # pragma: no cover
-            color=AppColors.INPUT_TEXT,  # pragma: no cover
-            border_color=AppColors.INPUT_BORDER,  # pragma: no cover
-            cursor_color=AppColors.PRIMARY,  # pragma: no cover
-            hint_style=ft.TextStyle(color=AppColors.TEXT_HINT),  # pragma: no cover
-            text_style=ft.TextStyle(  # pragma: no cover
-                font_family="Consolas, monospace",  # pragma: no cover
-                color=AppColors.INPUT_TEXT,  # pragma: no cover
-            ),  # pragma: no cover
-        )  # pragma: no cover
-
-        self.btn_run = ft.Button(  # pragma: no cover
-            I18n.get("data_sql_execute"),  # pragma: no cover
-            icon=ft.Icons.PLAY_ARROW,  # pragma: no cover
-            style=AppStyles.primary_button(),  # pragma: no cover
-            on_click=self._run_query,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.progress_ring = ft.ProgressRing(  # pragma: no cover
-            width=16,  # pragma: no cover
-            height=16,  # pragma: no cover
-            stroke_width=2,  # pragma: no cover
-            visible=False,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.result_table = ft.DataTable(  # pragma: no cover
-            columns=[ft.DataColumn(label=ft.Text(I18n.get("data_sql_result")))],  # pragma: no cover
-            rows=[],  # pragma: no cover
-            vertical_lines=ft.BorderSide(1, AppColors.TABLE_GRID_V),  # pragma: no cover
-            horizontal_lines=ft.BorderSide(1, AppColors.TABLE_GRID_H),  # pragma: no cover
-            heading_row_color=AppColors.TABLE_HEADER_BG,  # pragma: no cover
-            border=ft.Border.all(1, AppColors.TABLE_BORDER),  # pragma: no cover
-            column_spacing=20,  # pragma: no cover
-            visible=False,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.empty_hint_text = ft.Text(  # pragma: no cover
-            I18n.get("data_sql_empty_hint"),  # pragma: no cover
-            color=AppColors.TEXT_HINT,  # pragma: no cover
-            size=14,  # pragma: no cover
-        )  # pragma: no cover
-        self.empty_state = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    ft.Container(height=40),  # pragma: no cover
-                    ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),  # pragma: no cover
-                    self.empty_hint_text,  # pragma: no cover
-                ],  # pragma: no cover
-                alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-            ),  # pragma: no cover
-            alignment=ft.Alignment.CENTER,  # pragma: no cover
-            visible=True,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.status_text = ft.Text(  # pragma: no cover
-            I18n.get("data_sql_ready"),  # pragma: no cover
-            size=12,  # pragma: no cover
-            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-        )  # pragma: no cover
-
-        self.date_fmt_hint_text = ft.Text(  # pragma: no cover
-            I18n.get("data_date_fmt_hint"),  # pragma: no cover
-            size=11,  # pragma: no cover
-            color=AppColors.TEXT_HINT,  # pragma: no cover
-        )  # pragma: no cover
-        self.btn_count = ft.OutlinedButton(  # pragma: no cover
-            I18n.get("data_btn_count"),  # pragma: no cover
-            style=AppStyles.outline_button(),  # pragma: no cover
-            on_click=lambda e: self._set_sql(  # pragma: no cover
-                "SELECT COUNT(*) FROM daily_quotes",  # pragma: no cover
-            ),  # pragma: no cover
-        )  # pragma: no cover
-
-        self.content = ft.Column(  # pragma: no cover
-            [  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=ft.Column(  # pragma: no cover
-                        [  # pragma: no cover
-                            self.sql_editor,  # pragma: no cover
-                            ft.Row(  # pragma: no cover
-                                [  # pragma: no cover
-                                    self.btn_run,  # pragma: no cover
-                                    self.progress_ring,  # pragma: no cover
-                                    ft.Container(expand=True),  # pragma: no cover
-                                    self.date_fmt_hint_text,  # pragma: no cover
-                                    ft.OutlinedButton(  # pragma: no cover
-                                        "SELECT * LIMIT 10",  # pragma: no cover
-                                        style=AppStyles.outline_button(),  # pragma: no cover
-                                        on_click=lambda e: self._set_sql(  # pragma: no cover
-                                            "SELECT * FROM stock_basic LIMIT 10",  # pragma: no cover
-                                        ),  # pragma: no cover
-                                    ),  # pragma: no cover
-                                    self.btn_count,  # pragma: no cover
-                                ],  # pragma: no cover
-                                vertical_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-                            ),  # pragma: no cover
-                        ],  # pragma: no cover
-                    ),  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                    bgcolor=AppColors.SURFACE,  # pragma: no cover
-                    border=ft.Border.only(  # pragma: no cover
-                        bottom=ft.BorderSide(1, AppColors.BORDER),  # pragma: no cover
-                    ),  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=ft.Column(  # pragma: no cover
-                        [
-                            self.empty_state,
-                            ft.Row([self.result_table], scroll=ft.ScrollMode.ALWAYS),
-                        ],  # pragma: no cover
-                        scroll=ft.ScrollMode.AUTO,  # pragma: no cover
-                    ),  # pragma: no cover
-                    expand=True,  # pragma: no cover
-                    padding=10,  # pragma: no cover
-                ),  # pragma: no cover
-                ft.Container(  # pragma: no cover
-                    content=self.status_text,  # pragma: no cover
-                    padding=5,  # pragma: no cover
-                    bgcolor=AppColors.SURFACE_VARIANT,  # pragma: no cover
-                ),  # pragma: no cover
-            ],  # pragma: no cover
-            expand=True,  # pragma: no cover
-            spacing=0,  # pragma: no cover
-            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,  # pragma: no cover
-        )  # pragma: no cover
-
-    def refresh_locale(self):
-        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
-
-        由父视图 DataExplorerView.refresh_locale 级联调用，自身不订阅 I18n。
-        注：status_text 为运行时动态文案，由 _run_query 流程自行管理，不在此刷新。
-        """
-        try:
-            MetaDataManager.invalidate_cache()
-            self.sql_editor.label = I18n.get("data_sql_label")
-            self.sql_editor.hint_text = I18n.get("data_sql_hint")
-            self.btn_run.content = I18n.get("data_sql_execute")
-            self.empty_hint_text.value = I18n.get("data_sql_empty_hint")
-            self.date_fmt_hint_text.value = I18n.get("data_date_fmt_hint")
-            self.btn_count.content = I18n.get("data_btn_count")
-            self.result_table.columns = [ft.DataColumn(label=ft.Text(I18n.get("data_sql_result")))]
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[SQLConsoleTab] refresh_locale error: %s", e, exc_info=True)
-
-    def _set_sql(self, sql):  # pragma: no cover
-        self.sql_editor.value = sql
-        self.sql_editor.update()
-
-    async def _run_query(self, e):
-        sql = self.sql_editor.value
-        if not sql:
+    # --- 同步事件 handler (调度 page.run_task) ---
+    def _on_table_changed(e: ft.ControlEvent) -> None:
+        new_table = e.control.value if e and e.control else None
+        if not new_table:
             return
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_table_change, new_table)
 
+    def _on_query_click(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_query)
+
+    def _on_refresh_click(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_refresh)
+
+    def _on_sort(col_id: str, new_asc: bool) -> None:
+        try:
+            col_index = state.table_columns.index(col_id)
+        except ValueError:
+            return
+        vm.set_sort(col_index, new_asc)
+        vm.clear_error()
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_sort_query)
+
+    def _on_prev_page(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_prev_page)
+
+    def _on_next_page(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_next_page)
+
+    def _on_export_current(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_export_csv, True)
+
+    def _on_export_all(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_export_csv, False)
+
+    # --- 派生渲染数据 ---
+    is_loading = state.is_loading
+    total_pages = _ceil_div(state.total_rows, state.page_size)
+    sort_col_id = (
+        state.table_columns[state.sort_col_index]
+        if state.sort_col_index is not None and 0 <= state.sort_col_index < len(state.table_columns)
+        else None
+    )
+    columns_spec = _build_table_columns_spec(state.current_table, state.table_columns)
+    rows_data = _df_to_rows(vm.current_data, state.table_columns)
+
+    # --- 构建 UI ---
+    table_selector = ft.Dropdown(
+        width=250,
+        label=I18n.get("data_select_table"),
+        value=state.current_table or None,
+        on_select=_on_table_changed,
+        disabled=is_loading or not state.tables_loaded,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+        options=_build_table_selector_options(state.tables_list),
+        height=36,
+        text_size=13,
+        content_padding=10,
+    )
+
+    filter_col = ft.Dropdown(
+        label=I18n.get("data_filter_col"),
+        width=150,
+        value=effective_filter_col,
+        on_select=lambda e: set_filter_col_override(e.control.value if e and e.control else None),
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+        options=_build_filter_col_options(state.current_table, state.table_columns),
+        height=36,
+        text_size=13,
+        content_padding=10,
+    )
+
+    filter_op = ft.Dropdown(
+        label=I18n.get("data_filter_op"),
+        width=100,
+        value=filter_op_value,
+        on_select=lambda e: set_filter_op_value(e.control.value if e and e.control else "="),
+        options=_build_filter_op_options(),
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+        height=36,
+        text_size=13,
+        content_padding=5,
+    )
+
+    filter_val = ft.TextField(
+        label=I18n.get("data_filter_val"),
+        width=200,
+        value=filter_val_text,
+        on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
+        on_submit=_on_query_click,
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+        text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
+        height=36,
+        text_size=13,
+        content_padding=10,
+    )
+
+    btn_query = ft.IconButton(
+        ft.Icons.SEARCH,
+        tooltip=I18n.get("common_query"),
+        on_click=_on_query_click,
+        icon_color=AppColors.PRIMARY,
+        icon_size=20,
+        disabled=is_loading,
+    )
+    btn_refresh = ft.IconButton(
+        ft.Icons.REFRESH,
+        tooltip=I18n.get("common_refresh"),
+        on_click=_on_refresh_click,
+        icon_size=20,
+        disabled=is_loading,
+    )
+
+    # 加载/空态 widget
+    loading_widget = ft.Container(
+        content=ft.Column(
+            [
+                ft.Container(
+                    content=ft.ProgressRing(
+                        width=48,
+                        height=48,
+                        stroke_width=4,
+                        color=AppColors.PRIMARY,
+                    ),
+                    padding=20,
+                    border_radius=50,
+                    bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
+                ),
+                ft.Container(height=16),
+                ft.Text(
+                    I18n.get("data_loading"),
+                    size=16,
+                    weight=ft.FontWeight.W_500,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.Text(
+                    I18n.get("data_loading_hint"),
+                    size=13,
+                    color=AppColors.TEXT_SECONDARY,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=4,
+        ),
+        alignment=ft.Alignment.CENTER,
+        expand=True,
+        padding=40,
+        bgcolor=ft.Colors.with_opacity(0.02, ft.Colors.BLACK),
+        border_radius=12,
+        border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
+    )
+
+    # 表格区域: 加载中显示 loading widget, 否则显示 PaginatedTable
+    if is_loading:
+        grid_content = loading_widget
+    elif state.table_columns:
+        grid_content = PaginatedTable(
+            rows=rows_data,
+            columns=columns_spec,
+            sort_col=sort_col_id,
+            sort_asc=state.sort_asc,
+            on_sort=_on_sort,
+        )
+    else:
+        grid_content = loading_widget
+
+    # 工具栏
+    toolbar_content = ft.Row(
+        [
+            table_selector,
+            ft.VerticalDivider(width=10, color=ft.Colors.TRANSPARENT),
+            ft.Container(
+                content=ft.Row(
+                    [filter_col, filter_op, filter_val, btn_query, btn_refresh],
+                    spacing=5,
+                ),
+                padding=5,
+                border=ft.Border.all(1, AppColors.BORDER),
+                border_radius=8,
+                bgcolor=AppColors.SURFACE,
+            ),
+            ft.Container(expand=True),
+            ft.PopupMenuButton(
+                icon=ft.Icons.MORE_VERT,
+                tooltip=I18n.get("common_more_actions"),
+                items=[
+                    ft.PopupMenuItem(
+                        content=I18n.get("data_export_current"),
+                        icon=ft.Icons.DOWNLOAD,
+                        on_click=_on_export_current,
+                    ),
+                    ft.PopupMenuItem(
+                        content=I18n.get("data_export_all"),
+                        icon=ft.Icons.DRIVE_FILE_MOVE,
+                        on_click=_on_export_all,
+                    ),
+                ],
+            ),
+            # 右侧留白: Row 不支持 padding, 用 Container 间隔器替代
+            ft.Container(width=8),
+        ],
+        alignment=ft.MainAxisAlignment.START,
+        spacing=10,
+        scroll=ft.ScrollMode.AUTO,
+    )
+
+    toolbar_container = ft.Column(
+        [
+            ft.Container(content=toolbar_content, padding=10, bgcolor=AppColors.SURFACE),
+            ft.ProgressBar(visible=is_loading, color=AppColors.PRIMARY),
+        ],
+        spacing=0,
+    )
+
+    # 分页栏
+    pagination_bar = ft.Container(
+        content=ft.Row(
+            [
+                ft.Text(
+                    I18n.get("data_total_rows").format(count=state.total_rows),
+                    size=12,
+                    color=ft.Colors.GREY,
+                ),
+                ft.Container(expand=True),
+                ft.IconButton(
+                    ft.Icons.CHEVRON_LEFT,
+                    on_click=_on_prev_page,
+                    disabled=is_loading or state.current_page <= 1,
+                ),
+                ft.Text(
+                    I18n.get("data_page_num").format(
+                        current=state.current_page,
+                        total=total_pages,
+                    )
+                ),
+                ft.IconButton(
+                    ft.Icons.CHEVRON_RIGHT,
+                    on_click=_on_next_page,
+                    disabled=is_loading or state.current_page >= total_pages,
+                ),
+            ],
+            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+        ),
+        padding=ft.Padding.symmetric(horizontal=20, vertical=5),
+        bgcolor=AppColors.SURFACE,
+        border=ft.Border.only(top=ft.BorderSide(1, AppColors.BORDER)),
+    )
+
+    return ft.Column(
+        [toolbar_container, ft.Container(content=grid_content, expand=True), pagination_bar],
+        expand=True,
+        spacing=0,
+    )
+
+
+# ============================================================================
+# SQLConsoleTab
+# ============================================================================
+
+
+@ft.component
+def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
+    """Tab 2: SQL 控制台 (声明式).
+
+    通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
+    SQL 结果通过 dual-track ``vm.sql_result`` property 拉取, ``state.sql_result_version``
+    变化触发重渲染。
+    """
+    # --- 订阅 VM state (外部模式) ---
+    state, _ = use_viewmodel(vm=vm)
+
+    # --- i18n / theme 订阅 (自动重渲染) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
+
+    # --- 本地 UI 状态 ---
+    sql_text, set_sql_text = ft.use_state("")
+    status_text, set_status_text = ft.use_state(I18n.get("data_sql_ready"))
+    status_color, set_status_color = ft.use_state(AppColors.TEXT_SECONDARY)
+
+    # --- 异步 handler (R2: except Exception 不捕获 CancelledError) ---
+    async def _run_query(e: ft.ControlEvent) -> None:
+        if not sql_text:
+            return
         UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
-        self.btn_run.disabled = True
-        self.progress_ring.visible = True
-        self.status_text.value = I18n.get("data_status_executing")
-        self.status_text.color = ft.Colors.BLUE
-        self.result_table.visible = False
-        self.empty_state.visible = False
-        self.update()
-
-        has_data = False
-
+        set_status_text(I18n.get("data_status_executing"))
+        set_status_color(ft.Colors.BLUE)
         try:
             start_time = time.time()
-
-            # Execute via ViewModel
-            result = await self.vm.execute_sql(sql)
-
+            result = await vm.execute_sql(sql_text)
             elapsed = time.time() - start_time
-
-            if result["success"]:
-                df = result["data"]
-                MAX_ROWS_UI = 100
-                display_df = df
-
-                if len(df) > MAX_ROWS_UI:
-                    self.status_text.value = I18n.get(
-                        "data_sql_success_truncated",
-                    ).format(time=elapsed, limit=MAX_ROWS_UI, rows=len(df))
-                    display_df = df.head(MAX_ROWS_UI)
-                else:
-                    self.status_text.value = I18n.get("data_sql_success").format(
-                        time=elapsed,
-                        rows=len(df),
-                    )
-                self.status_text.color = ft.Colors.GREEN
-
-                # Rebuild Table on Main Thread
-                self.result_table.columns = [
-                    ft.DataColumn(
-                        label=ft.Text(
-                            MetaDataManager.get_column_alias(None, col),
-                            weight=ft.FontWeight.BOLD,
-                            color=AppColors.TABLE_HEADER_TEXT,
-                        ),
-                    )
-                    for col in display_df.columns
-                ]
-
-                self.result_table.rows = []
-                for row_idx, (_, row) in enumerate(display_df.iterrows()):
-                    cells = []
-                    for idx, val in enumerate(row):
-                        col_name = display_df.columns[idx]
-                        if val is None or pd.isna(val):
-                            str_val = "-"
-                        else:
-                            str_val = str(val)
-                        if "date" in col_name.lower():
-                            if isinstance(val, (datetime.date, datetime.datetime)):
-                                str_val = val.strftime("%Y-%m-%d")
-                            elif isinstance(val, str) and len(val) == 8 and val.isdigit():
-                                str_val = f"{val[:4]}-{val[4:6]}-{val[6:8]}"
-                        cells.append(
-                            ft.DataCell(
-                                ft.Text(
-                                    str_val,
-                                    size=12,
-                                    color=AppColors.TABLE_CELL_TEXT,
-                                ),
-                            ),
+            if result.get("success"):
+                df = result.get("data")
+                if df is not None and not df.empty:
+                    MAX_ROWS_UI = 100
+                    if len(df) > MAX_ROWS_UI:
+                        set_status_text(
+                            I18n.get("data_sql_success_truncated").format(time=elapsed, limit=MAX_ROWS_UI, rows=len(df))
                         )
-
-                    row_color = AppColors.TABLE_ROW_ODD if row_idx % 2 == 0 else AppColors.TABLE_ROW_EVEN
-                    self.result_table.rows.append(
-                        ft.DataRow(cells=cells, color=row_color),
-                    )
-
-                has_data = True
-
+                    else:
+                        set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=len(df)))
+                    set_status_color(ft.Colors.GREEN)
+                else:
+                    set_status_text(I18n.get("data_sql_error"))
+                    set_status_color(AppColors.ERROR)
             else:
-                self.status_text.value = I18n.get("data_sql_error")
-                self.status_text.color = AppColors.ERROR
-                self.result_table.rows = []
-
-        except Exception as e:
-            self.status_text.value = I18n.get(
-                "data_sys_error",
-            )
-            self.status_text.color = AppColors.ERROR
-            self.result_table.rows = []
-            logger.error("SQL Execution error: %s", DataSanitizer.sanitize_error(e))
+                set_status_text(I18n.get("data_sql_error"))
+                set_status_color(AppColors.ERROR)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as exc:
+            set_status_text(I18n.get("data_sys_error"))
+            set_status_color(AppColors.ERROR)
+            logger.error("SQL Execution error: %s", DataSanitizer.sanitize_error(exc))
             logger.debug("SQL Execution error traceback", exc_info=True)
-        finally:
-            self.result_table.visible = has_data
-            self.empty_state.visible = not has_data
-            self.btn_run.disabled = False
-            self.progress_ring.visible = False
-            if self.page:
-                self.update()
 
-    def update_theme(self):  # pragma: no cover
-        """Update styles on theme change"""
-        self.sql_editor.bgcolor = AppColors.INPUT_BG
-        self.sql_editor.color = AppColors.INPUT_TEXT
-        self.sql_editor.border_color = AppColors.INPUT_BORDER
-        self.sql_editor.cursor_color = AppColors.PRIMARY
-        self.sql_editor.text_style = ft.TextStyle(
+    def _set_sql(sql: str) -> None:
+        set_sql_text(sql)
+
+    # --- 派生渲染数据 (dual-track: vm.sql_result property 拉取) ---
+    sql_result = vm.sql_result
+    has_data = bool(
+        sql_result and sql_result.get("success") and sql_result.get("data") is not None and not sql_result["data"].empty
+    )
+
+    if has_data:
+        df = sql_result["data"]
+        MAX_ROWS_UI = 100
+        display_df = df.head(MAX_ROWS_UI) if len(df) > MAX_ROWS_UI else df
+        result_cols = _build_sql_columns_spec(display_df)
+        result_rows = _df_to_sql_rows(display_df)
+    else:
+        result_cols = []
+        result_rows = []
+
+    is_executing = state.sql_is_executing
+
+    # --- 构建 UI ---
+    sql_editor = ft.TextField(
+        multiline=True,
+        min_lines=5,
+        max_lines=10,
+        text_size=14,
+        label=I18n.get("data_sql_label"),
+        hint_text=I18n.get("data_sql_hint"),
+        value=sql_text,
+        on_change=lambda e: set_sql_text(e.control.value if e and e.control else ""),
+        bgcolor=AppColors.INPUT_BG,
+        color=AppColors.INPUT_TEXT,
+        border_color=AppColors.INPUT_BORDER,
+        cursor_color=AppColors.PRIMARY,
+        hint_style=ft.TextStyle(color=AppColors.TEXT_HINT),
+        text_style=ft.TextStyle(
             font_family="Consolas, monospace",
             color=AppColors.INPUT_TEXT,
-        )
-        self.sql_editor.hint_style = ft.TextStyle(color=AppColors.TEXT_HINT)
+        ),
+    )
 
-        # Buttons
-        self.btn_run.style = AppStyles.primary_button()
+    btn_run = ft.Button(
+        I18n.get("data_sql_execute"),
+        icon=ft.Icons.PLAY_ARROW,
+        style=AppStyles.primary_button(),
+        on_click=_run_query,
+        disabled=is_executing,
+    )
 
-        self.result_table.vertical_lines = ft.BorderSide(1, AppColors.TABLE_GRID_V)
-        self.result_table.horizontal_lines = ft.BorderSide(1, AppColors.TABLE_GRID_H)
-        self.result_table.heading_row_color = AppColors.TABLE_HEADER_BG
-        self.result_table.border = ft.Border.all(1, AppColors.TABLE_BORDER)
+    progress_ring = ft.ProgressRing(
+        width=16,
+        height=16,
+        stroke_width=2,
+        visible=is_executing,
+    )
 
-        for col in self.result_table.columns:
-            if isinstance(col.label, ft.Text):
-                col.label.color = AppColors.TABLE_HEADER_TEXT
+    empty_hint_text = ft.Text(
+        I18n.get("data_sql_empty_hint"),
+        color=AppColors.TEXT_HINT,
+        size=14,
+    )
+    empty_state = ft.Container(
+        content=ft.Column(
+            [
+                ft.Container(height=40),
+                ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),
+                empty_hint_text,
+            ],
+            alignment=ft.MainAxisAlignment.CENTER,
+            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        alignment=ft.Alignment.CENTER,
+        visible=not has_data,
+    )
 
-        # Table Rows
-        for i, row in enumerate(self.result_table.rows):  # type: ignore[untyped]
-            row.color = AppColors.TABLE_ROW_ODD if i % 2 == 0 else AppColors.TABLE_ROW_EVEN
-            for cell in row.cells:
-                if isinstance(cell.content, ft.Text):
-                    cell.content.color = AppColors.TABLE_CELL_TEXT
+    result_table = ft.Container(
+        content=PaginatedTable(rows=result_rows, columns=result_cols),
+        visible=has_data,
+        expand=True,
+    )
 
-        # Empty State
-        if isinstance(self.empty_state.content, ft.Column):
-            for ctrl in self.empty_state.content.controls:
-                if isinstance(ctrl, ft.Icon | ft.Text):
-                    ctrl.color = AppColors.TEXT_HINT
+    return ft.Column(
+        [
+            ft.Container(
+                content=ft.Column(
+                    [
+                        sql_editor,
+                        ft.Row(
+                            [
+                                btn_run,
+                                progress_ring,
+                                ft.Container(expand=True),
+                                ft.Text(
+                                    I18n.get("data_date_fmt_hint"),
+                                    size=11,
+                                    color=AppColors.TEXT_HINT,
+                                ),
+                                ft.OutlinedButton(
+                                    "SELECT * LIMIT 10",
+                                    style=AppStyles.outline_button(),
+                                    on_click=lambda e: _set_sql("SELECT * FROM stock_basic LIMIT 10"),
+                                ),
+                                ft.OutlinedButton(
+                                    I18n.get("data_btn_count"),
+                                    style=AppStyles.outline_button(),
+                                    on_click=lambda e: _set_sql("SELECT COUNT(*) FROM daily_quotes"),
+                                ),
+                            ],
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                    ],
+                ),
+                padding=10,
+                bgcolor=AppColors.SURFACE,
+                border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.BORDER)),
+            ),
+            ft.Container(
+                content=ft.Column(
+                    [empty_state, result_table],
+                    scroll=ft.ScrollMode.AUTO,
+                ),
+                expand=True,
+                padding=10,
+            ),
+            ft.Container(
+                content=ft.Text(status_text, size=12, color=status_color),
+                padding=5,
+                bgcolor=AppColors.SURFACE_VARIANT,
+            ),
+        ],
+        expand=True,
+        spacing=0,
+        horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+    )
 
-        if self.page:
-            self.update()
 
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:
-        """窗口 resize 通知。当前布局自适应，无需响应式调整。"""
-        # No responsive adjustment needed
+# ============================================================================
+# DataExplorerView
+# ============================================================================
 
 
-class DataExplorerView(ft.Container):
+@ft.component
+def DataExplorerView() -> ft.Container:
+    """数据浏览器主视图 (声明式).
+
+    CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
+    - DataExplorerViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
+    - PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
+    - page 访问用 ``ft.context.page`` (try/except 守卫), 不持有 page 引用
+    - 子 Tab 通过 ``use_viewmodel(vm=)`` 外部模式订阅同一 VM
     """
-    Main View Container for Data Explorer
-    Refactored to use Lazy Loading to prevent UI freeze during tab switch.
-    """
+    # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
+    _state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
 
-    def __init__(self, viewmodel: DataExplorerViewModel | None = None):
-        super().__init__()
-        self.expand = True
-        self.vm = viewmodel or DataExplorerViewModel()
-        self._ui_built = False  # Track if UI has been built
-        self._pubsub_subscribed = False
-        self._mount_task = None
-        self._locale_subscription_id: object | None = None
-        self._loading_text = ft.Text(  # pragma: no cover
-            I18n.get("data_loading"),  # pragma: no cover
-            size=12,  # pragma: no cover
-            color=AppColors.TEXT_SECONDARY,  # pragma: no cover
-        )  # pragma: no cover
+    # --- i18n / theme 订阅 (自动重渲染) ---
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-        # Start with a loading state to ensure instant tab switching
-        self.loading_view = ft.Container(  # pragma: no cover
-            content=ft.Column(  # pragma: no cover
-                [  # pragma: no cover
-                    ft.ProgressRing(),  # pragma: no cover
-                    self._loading_text,  # pragma: no cover
-                ],  # pragma: no cover
-                alignment=ft.MainAxisAlignment.CENTER,  # pragma: no cover
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,  # pragma: no cover
-            ),  # pragma: no cover
-            alignment=ft.Alignment.CENTER,  # pragma: no cover
-            expand=True,  # pragma: no cover
-        )  # pragma: no cover
+    # --- Tab 选中状态 ---
+    selected_index, set_selected_index = ft.use_state(0)
 
-        self.content = self.loading_view  # pragma: no cover
+    # --- PubSub 订阅/退订 (topic 精准退订, 避免误伤其他视图订阅) ---
+    def _on_broadcast_message(topic: str, message: str) -> None:
+        if topic == CACHE_CLEARED_TOPIC and message == "cache_cleared":
+            vm.mark_tables_stale()
+            logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
 
-    def did_mount(self):  # pragma: no cover
-        """
-        Trigger lazy initialization.
-        """
-        if getattr(self, "_mounted", False):
-            return
-        self._mounted = True
-        self._locale_subscription_id = I18n.subscribe(self.refresh_locale)
-        if self.page:
-            self._mount_task = self.page.run_task(self.did_mount_async)  # type: ignore[untyped]
-
-    def will_unmount(self):  # pragma: no cover
-        """Clean up subscriptions when view is detached"""
-        self._mounted = False
-        if self._locale_subscription_id is not None:
-            I18n.unsubscribe(self._locale_subscription_id)
-            self._locale_subscription_id = None
-        if self.page and getattr(self, "_pubsub_subscribed", False):
-            try:
-                self.page.pubsub.unsubscribe(self._on_broadcast_message)  # type: ignore[untyped]
-            except Exception as exc:
-                logger.debug("[DataView] PubSub unsubscribe skipped: %s", exc, exc_info=True)
-            self._pubsub_subscribed = False
-        if self._mount_task:
-            self._mount_task.cancel()
-            self._mount_task = None
-        self.vm.dispose()
-
-    def refresh_locale(self):
-        """语言切换时刷新所有 I18n.get() 赋值的字段（纯 UI 操作）。
-
-        级联调用 table_tab 和 sql_tab 的 refresh_locale。
-        """
+    async def _setup_pubsub() -> None:
         try:
-            self._loading_text.value = I18n.get("data_loading")
-            if hasattr(self, "tabs"):
-                # 刷新 Tabs 标题（V1: 通过 _tab_bar.tabs 访问，label 替代 text）
-                if hasattr(self, "_tab_bar"):
-                    if len(self._tab_bar.tabs) >= 1:
-                        self._tab_bar.tabs[0].label = I18n.get("data_tab_explorer")
-                    if len(self._tab_bar.tabs) >= 2:
-                        self._tab_bar.tabs[1].label = I18n.get("data_tab_sql")
-                # 级联调用子 tab 的 refresh_locale
-                if hasattr(self, "table_tab"):
-                    self.table_tab.refresh_locale()
-                if hasattr(self, "sql_tab"):
-                    self.sql_tab.refresh_locale()
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[DataExplorerView] refresh_locale error: %s", e, exc_info=True)
+            page = ft.context.page
+            if page is not None:
+                page.pubsub.subscribe_topic(CACHE_CLEARED_TOPIC, _on_broadcast_message)
+        except RuntimeError:
+            pass
 
-    def handle_resize(self, width: float = 0, height: float = 0) -> None:  # pragma: no cover - UI 事件
-        """窗口 resize 通知（§5.9 规范3）。
-
-        本视图布局全部依赖 expand=True 自动适应，无需手动调整尺寸。
-        子 tab 若实现 handle_resize，则级联调用以确保响应式布局同步。
-        """
-        if not self._ui_built:
-            return
+    async def _cleanup_pubsub() -> None:
         try:
-            if hasattr(self, "table_tab") and hasattr(self.table_tab, "handle_resize"):
-                self.table_tab.handle_resize(width, height)
-            if hasattr(self, "sql_tab") and hasattr(self.sql_tab, "handle_resize"):
-                self.sql_tab.handle_resize(width, height)
-        except Exception as exc:
-            logger.debug("[DataExplorerView] handle_resize skipped: %s", exc, exc_info=True)
+            page = ft.context.page
+            if page is not None:
+                page.pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC)
+        except RuntimeError:
+            pass
 
-    async def did_mount_async(self):  # pragma: no cover
-        import time as _time
+    ft.use_effect(_setup_pubsub, dependencies=[], cleanup=_cleanup_pubsub)
 
-        _t0 = _time.perf_counter()
-        logger.debug("[PERF] >>> DataExplorerView.did_mount START")
-
-        # Subscribe to broadcast messages (only once)
-        if self.page and not self._pubsub_subscribed:
-            self.page.pubsub.subscribe(self._on_broadcast_message)
-            self._pubsub_subscribed = True
-
-        # Start lazy build if not done
-        if not self._ui_built:
-            await self._lazy_build_ui()
-            # _lazy_build_ui sets self.tabs if successful.
-            # We only mark built if we actually have the content we expect.
-            if hasattr(self, "tabs"):
-                self._ui_built = True
-
-        # Trigger data load for child tabs if needed
-        # Check if tabs exists to avoid AttributeError
-        if hasattr(self, "tabs") and self.tabs.selected_index == 0:
-            # Prevent double-loading if _lazy_build_ui just ran (it calls did_mount_async internaly)
-            # But TableViewerTab handles idempotency so it is safe.
-            await self.table_tab.did_mount_async()
-
-        logger.debug(
-            "[PERF] <<< DataExplorerView.did_mount END (sync part) took %.1fms",
-            (_time.perf_counter() - _t0) * 1000,
-        )
-
-    async def _lazy_build_ui(self):  # pragma: no cover
-        import time as _time
-
-        _t0 = _time.perf_counter()
-        logger.debug("[PERF] >>> DataExplorerView._lazy_build_ui START")
-
-        try:
-            # Check if still mounted after potential delay
-            if not self.page:
-                logger.debug(
-                    "[DataExplorerView] View unmounted before build, aborting.",
-                )
-                return
-
-            # Create complex tabs here
-            self.table_tab = TableViewerTab(self.vm)
-            self.sql_tab = SQLConsoleTab(self.vm)
-
-            # V1 Tabs 三件套：Tabs + TabBar + TabBarView（R12.b spike 定稿）
-            # 存储 _tab_bar 引用供 refresh_locale 更新 label
-            self._tab_bar = ft.TabBar(  # pragma: no cover
-                tabs=[  # pragma: no cover
-                    ft.Tab(  # pragma: no cover
-                        label=I18n.get("data_tab_explorer"),  # pragma: no cover
-                        icon=ft.Icons.TABLE_CHART,  # pragma: no cover
-                    ),  # pragma: no cover
-                    ft.Tab(  # pragma: no cover
-                        label=I18n.get("data_tab_sql"),  # pragma: no cover
-                        icon=ft.Icons.CODE,  # pragma: no cover
-                    ),  # pragma: no cover
-                ],  # pragma: no cover
-            )  # pragma: no cover
-            self.tabs = ft.Tabs(  # pragma: no cover
-                length=2,  # pragma: no cover
-                selected_index=0,  # pragma: no cover
-                animation_duration=300,  # pragma: no cover
-                expand=True,  # pragma: no cover
-                on_change=self._on_tab_changed,  # pragma: no cover
-                content=ft.Column(  # pragma: no cover
-                    expand=True,  # pragma: no cover
-                    controls=[  # pragma: no cover
-                        self._tab_bar,  # pragma: no cover
-                        ft.TabBarView(  # pragma: no cover
-                            expand=True,  # pragma: no cover
-                            controls=[self.table_tab, self.sql_tab],  # pragma: no cover
-                        ),  # pragma: no cover
-                    ],  # pragma: no cover
-                ),  # pragma: no cover
-            )  # pragma: no cover
-
-            # Swap content
-            self.content = self.tabs
-
-            if self.page:
-                self.update()
-                # Yield to Flet event loop to ensure child controls are fully mounted
-                # before triggering data load (prevents 'Control must be added to page first')
-                await asyncio.sleep(0)
-                # 生命周期兜底：若语言切换发生在 _lazy_build_ui 完成前，
-                # refresh_locale 会因 hasattr(self, "tabs") 为 False 而跳过级联，
-                # 此处构建完成后显式调用一次 refresh_locale 兜底（§5.8 规范 7）。
-                self.refresh_locale()
-
-        except Exception as e:
-            logger.error("Error building DataExplorerView: %s", e, exc_info=True)
-            self.content = ft.Text(f"Error loading view: {e}", color=ft.Colors.RED)
-            if self.page:
-                self.update()
-
-        logger.debug(
-            "[PERF] <<< DataExplorerView._lazy_build_ui END took %.1fms",
-            (_time.perf_counter() - _t0) * 1000,
-        )
-
-    def _on_tab_changed(self, e):  # pragma: no cover
-        if not self._ui_built:
-            return
-
-        tab_name = "table_viewer" if self.tabs.selected_index == 0 else "sql_console"
+    # --- 事件 handler ---
+    def _on_tab_changed(e: ft.ControlEvent) -> None:
+        new_index = e.control.selected_index if e and e.control else 0
+        set_selected_index(new_index)
+        tab_name = "table_viewer" if new_index == 0 else "sql_console"
         UILogger.log_action("DataExplorerView", "Navigate", f"tab={tab_name}")
 
-        # Trigger async mount for logic if needed
-        # We can use the page task to run async methods
-        if self.tabs.selected_index == 0:
-            self.page.run_task(self.table_tab.did_mount_async)  # type: ignore[untyped]
+    # --- 构建 UI (V1 Tabs 三件套: Tabs + TabBar + TabBarView) ---
+    tab_bar = ft.TabBar(
+        tabs=[
+            ft.Tab(label=I18n.get("data_tab_explorer"), icon=ft.Icons.TABLE_CHART),
+            ft.Tab(label=I18n.get("data_tab_sql"), icon=ft.Icons.CODE),
+        ],
+    )
+    tabs = ft.Tabs(
+        length=2,
+        selected_index=selected_index,
+        animation_duration=300,
+        expand=True,
+        on_change=_on_tab_changed,
+        content=ft.Column(
+            expand=True,
+            controls=[
+                tab_bar,
+                ft.TabBarView(
+                    expand=True,
+                    controls=[TableViewerTab(vm=vm), SQLConsoleTab(vm=vm)],
+                ),
+            ],
+        ),
+    )
 
-    def _on_broadcast_message(self, message):  # pragma: no cover
-        if message == "cache_cleared":
-            # Reset tables_loaded flag to force reload on next mount
-            if self._ui_built:
-                self.vm.tables_loaded = False
-            logger.debug(
-                "[DataExplorerView] Cache cleared - will reload data on next view",
-            )
-
-    def update_theme(self):  # pragma: no cover
-        """Update styles on theme change"""
-        if hasattr(self, "table_tab"):
-            self.table_tab.update_theme()
-        if hasattr(self, "sql_tab"):
-            self.sql_tab.update_theme()
+    return ft.Container(content=tabs, expand=True)

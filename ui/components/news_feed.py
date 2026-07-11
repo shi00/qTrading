@@ -1,5 +1,20 @@
-import logging
+"""news_feed — 声明式组件 (Phase B.2).
+
+从命令式容器子类重写为 ``@ft.component`` 函数组件范式
+(CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
+
+变更要点:
+- 旧命令式容器子类 → ``@ft.component def NewsFeed(news_items, ...)``
+- 移除所有命令式 API（批量替换/前插/后插/标签更新/locale 刷新/theme 刷新/手动刷新）
+- i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+- 状态驱动渲染: news_items/has_more 由消费方通过 props 推送触发重渲染
+  (增量更新在声明式下由消费方推送完整 list，组件直接渲染)
+- 情感检测 ``_detect_sentiment`` / tag 翻译 ``_translate_tag`` 保留为模块级纯函数
+- content→id 映射不再必要（声明式下 tag 更新由消费方推送新 news_items 触发重渲染）
+"""
+
 import re
+from collections.abc import Callable
 
 import flet as ft
 import pandas as pd
@@ -7,342 +22,179 @@ import pandas as pd
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 
-logger = logging.getLogger(__name__)
+_POSITIVE_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
+_NEGATIVE_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "miss")
 
 
-class NewsFeed(ft.Container):
+def _detect_sentiment(content: str) -> str:
+    """Detect sentiment using word-boundary matching (case-insensitive)."""
+    if not content:
+        return "neutral"
+    text = content.lower()
+    pos_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in _POSITIVE_KEYWORDS)
+    neg_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in _NEGATIVE_KEYWORDS)
+    if pos_count > neg_count:
+        return "positive"
+    if neg_count > pos_count:
+        return "negative"
+    return "neutral"
+
+
+def _translate_tag(raw_tag: str) -> str:
+    """Translate tag using I18n with fallback."""
+    if not raw_tag:
+        return ""
+    tags = [t.strip() for t in raw_tag.split(",") if t.strip()]
+    translated_parts = []
+    for t in tags:
+        tk = f"tag_{t.lower()}"
+        tv = I18n.get(tk, default=t)
+        translated_parts.append(tv)
+    return ",".join(translated_parts) if translated_parts else raw_tag
+
+
+def _build_news_item(row, news_id: str) -> ft.Container:
+    """Build a single news item container (pure function).
+
+    Receives a DataFrame row + key, no state dependency.
     """
-    News Feed Component
-    Displays a scrollable list of news items.
+    raw_tag = row.get("tags", "") or ""
+    translated_tag = _translate_tag(raw_tag)
+
+    content = str(row.get("content", "") or "")
+    time_str = str(row.get("publish_time", "") or "")
+
+    sentiment = _detect_sentiment(content)
+    if sentiment == "positive":
+        bg_color = ft.Colors.with_opacity(0.1, AppColors.UP)
+    elif sentiment == "negative":
+        bg_color = ft.Colors.with_opacity(0.1, AppColors.DOWN)
+    else:
+        bg_color = ft.Colors.TRANSPARENT
+
+    return ft.Container(
+        key=news_id,
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Text(
+                            translated_tag,
+                            color=AppColors.ACCENT,
+                            weight=ft.FontWeight.BOLD,
+                            size=12,
+                        ),
+                        ft.Text(
+                            time_str[-8:],
+                            color=AppColors.TEXT_SECONDARY,
+                            size=12,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                ft.Text(content, size=14, color=AppColors.TEXT_PRIMARY),
+            ],
+        ),
+        padding=10,
+        bgcolor=bg_color,
+        border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.DIVIDER)),
+    )
+
+
+@ft.component
+def NewsFeed(
+    news_items: pd.DataFrame | None = None,
+    has_more: bool = False,
+    on_load_more_click: Callable[[ft.ControlEvent], None] | None = None,
+) -> ft.Container:
+    """News feed component (declarative).
+
+    CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
+    - news_items/has_more 由消费方通过 props 推送触发重渲染
+      (替代旧批量替换/前插/后插命令式 API)
+    - tag 更新由消费方推送新 news_items props 触发重渲染
+      (替代旧标签更新命令式 API)
+    - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
+      (替代旧 locale/theme 刷新命令式 API)
+
+    Args:
+        news_items: 新闻数据 DataFrame (content/publish_time/tags 列)，
+                    None 或空时显示空状态
+        has_more: 是否显示"加载更多"按钮
+        on_load_more_click: "加载更多"按钮点击回调
     """
+    # Subscribe to i18n + theme changes (triggers auto-rerender)
+    ft.use_state(I18n.get_observable_state)
+    ft.use_state(AppColors.get_observable_state)
 
-    _news_id_counter: int = 0  # 类属性，递增计数器，为每条新闻分配唯一 ID
+    style = AppStyles.card()
 
-    def __init__(self, on_load_more_click=None):
-        style = AppStyles.card()
-        super().__init__()
-        self.expand = True
-        self.bgcolor = style["bgcolor"]  # type: ignore[untyped]
-        self.border_radius = style["border_radius"]  # type: ignore[untyped]
-        self.border = style.get("border")
-        self.padding = 10
-        self.on_load_more_click = on_load_more_click
+    # --- Empty state ---
+    if news_items is None or news_items.empty:
+        return ft.Container(
+            content=ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Icon(
+                            ft.Icons.ARTICLE_OUTLINED,
+                            size=48,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
+                        ft.Text(
+                            I18n.get("home_news_empty"),
+                            color=AppColors.TEXT_HINT,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                alignment=ft.Alignment.CENTER,
+                expand=True,
+            ),
+            expand=True,
+            bgcolor=style.get("bgcolor"),
+            border_radius=style.get("border_radius"),
+            border=style.get("border"),
+            padding=10,
+        )
 
-        # Internal State
-        self._cached_news = pd.DataFrame()  # Cache for theme reloading
-        self._cached_has_more = False
-        self._content_to_ids: dict[str, list[int]] = {}  # content → news_id 列表映射
+    # --- Build news items ---
+    controls: list[ft.Control] = [_build_news_item(row, str(i)) for i, (_, row) in enumerate(news_items.iterrows())]
 
-        self.news_list = ft.ListView(
+    # --- Load more button ---
+    if has_more:
+        controls.append(
+            ft.Container(
+                content=ft.Button(
+                    content=ft.Text(
+                        I18n.get("news_load_more"),
+                        color=ft.Colors.WHITE,
+                    ),
+                    style=ft.ButtonStyle(
+                        bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
+                        shape=ft.RoundedRectangleBorder(radius=8),
+                    ),
+                    on_click=on_load_more_click,
+                    height=40,
+                    width=120,
+                ),
+                alignment=ft.Alignment.CENTER,
+                padding=ft.Padding.only(top=10, bottom=10),
+            )
+        )
+
+    # --- News list ---
+    return ft.Container(
+        content=ft.ListView(
+            controls=controls,
             spacing=10,
             padding=10,
             auto_scroll=False,
             expand=True,
-        )
-
-        # I18n Refs
-        self.empty_text = ft.Text(
-            I18n.get("home_news_empty"),
-            color=AppColors.TEXT_HINT,
-        )
-
-        self.empty_state = ft.Container(
-            content=ft.Column(
-                [
-                    ft.Icon(
-                        ft.Icons.ARTICLE_OUTLINED,
-                        size=48,
-                        color=AppColors.TEXT_SECONDARY,
-                    ),
-                    self.empty_text,
-                ],
-                alignment=ft.MainAxisAlignment.CENTER,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-            ),
-            alignment=ft.Alignment.CENTER,
-            expand=True,
-        )
-
-        self.load_more_text = ft.Text(I18n.get("news_load_more"), color=ft.Colors.WHITE)
-
-        self.load_more_btn = ft.Container(
-            content=ft.Button(
-                content=self.load_more_text,
-                style=ft.ButtonStyle(
-                    bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
-                    shape=ft.RoundedRectangleBorder(radius=8),
-                ),
-                on_click=self._handle_load_more,
-                height=40,
-                width=120,
-            ),
-            alignment=ft.Alignment.CENTER,
-            padding=ft.Padding.only(top=10, bottom=10),
-        )
-
-        # Initial Content
-        self.content = self.empty_state
-
-        # Track if we are showing list or empty state
-        self._showing_list = False
-
-    def update_locale(self):
-        """Update static text when locale changes"""
-        try:
-            self.empty_text.value = I18n.get("home_news_empty")
-            self.load_more_text.value = I18n.get("news_load_more")
-            # 重建已渲染新闻项，刷新 tag 翻译（_translate_tag 在渲染时固化，与 update_theme 一致）
-            if not self._cached_news.empty:
-                self.set_news(self._cached_news, self._cached_has_more)
-            if self.page:
-                self.update()
-        except Exception as e:
-            logger.warning("[NewsFeed] update_locale failed: %s", e, exc_info=True)
-
-    def update_theme(self):
-        """Re-render list on theme change"""
-        # bgcolor 使用 ft.Colors.SURFACE 语义 token（__init__ 中设置），自动随主题切换，无需重新赋值。
-        # Update static texts (only if not using semantic tokens, but here we are)
-        # self.empty_text.color = AppColors.TEXT_HINT  <-- Automatic
-        # self.load_more_text.color = AppColors.PRIMARY_LIGHT <-- Automatic
-
-        # Re-render list from cache
-        if not self._cached_news.empty:
-            self.set_news(self._cached_news, self._cached_has_more)
-
-        if self.page:
-            self.update()
-
-    async def _handle_load_more(self, e):
-        if self.on_load_more_click:
-            await self.on_load_more_click(e)
-
-    def set_news(self, news_data: pd.DataFrame, has_more: bool = False):
-        """
-        Full replace of news list (e.g. on first load or refresh).
-        """
-        self._cached_news = news_data if news_data is not None else pd.DataFrame()
-        self._cached_has_more = has_more
-
-        if news_data is None or news_data.empty:
-            self.content = self.empty_state
-            self._showing_list = False
-            if self.page:
-                self.update()
-            return
-
-        # Switch to list view if needed
-        if not self._showing_list:
-            self.content = self.news_list
-            self._showing_list = True
-            # Need to update container to show the list
-            if self.page:
-                self.update()
-
-        # Rebuild items
-        self._content_to_ids = {}
-        controls = []
-        for _, row in news_data.iterrows():
-            self._news_id_counter += 1
-            news_id = self._news_id_counter
-            controls.append(self._build_news_item(row, news_id))
-            content = str(row.get("content", "") or "")
-            self._content_to_ids.setdefault(content, []).append(news_id)
-
-        if has_more:
-            controls.append(self.load_more_btn)
-
-        self.news_list.controls = controls
-        if self.page:
-            self.news_list.update()
-
-    def _translate_tag(self, raw_tag: str) -> str:
-        """Translate tag using I18n with fallback."""
-        if not raw_tag:
-            return ""
-        tags = [t.strip() for t in raw_tag.split(",") if t.strip()]
-        translated_parts = []
-        for t in tags:
-            tk = f"tag_{t.lower()}"
-            tv = I18n.get(tk, default=t)
-            translated_parts.append(tv)
-        return ",".join(translated_parts) if translated_parts else raw_tag
-
-    def update_news_tag(self, content: str, tags: str):
-        """
-        Update tag for news items matching the given content (TAG_UPDATE).
-
-        Uses ``_content_to_ids`` to locate all news_ids for the content, then
-        precisely targets each control via its ``key`` attribute. This ensures
-        all duplicate-content items are updated (not just the first match).
-        """
-        if not content or not self.news_list.controls:
-            return
-
-        translated_tag = self._translate_tag(tags)
-        news_ids = self._content_to_ids.get(content, [])
-        if not news_ids:
-            return
-
-        # Build a lookup from key → control for O(1) precise targeting
-        key_to_item: dict[str, ft.Control] = {}
-        for item in self.news_list.controls:
-            if item == self.load_more_btn:
-                continue
-            key_val = getattr(item, "key", None)
-            if key_val is not None:
-                key_to_item[str(key_val)] = item
-
-        for news_id in news_ids:
-            key_str = str(news_id)
-            item = key_to_item.get(key_str)
-            if item is None:
-                continue
-            try:
-                col = item.content  # type: ignore[untyped]
-                if not isinstance(col, ft.Column):
-                    continue
-                row = col.controls[0] if col.controls else None
-                if not isinstance(row, ft.Row):
-                    continue
-                for row_ctrl in row.controls:
-                    if isinstance(row_ctrl, ft.Text) and row_ctrl.weight == ft.FontWeight.BOLD:
-                        row_ctrl.value = translated_tag
-                        break
-            except Exception as e:
-                logger.warning("[NewsFeed] Error updating tag: %s", e, exc_info=True)
-                continue
-
-        if self.page:
-            self.news_list.update()
-
-    def prepend_news(self, news_data: pd.DataFrame):
-        """
-        Insert new items at the top (Real-time updates).
-        """
-        if news_data is None or news_data.empty:
-            return
-
-        # Update cache
-        if self._cached_news.empty:
-            self._cached_news = news_data
-        else:
-            self._cached_news = pd.concat(
-                [news_data, self._cached_news],
-                ignore_index=True,
-            )
-
-        # Ensure we are in list mode
-        if not self._showing_list:
-            self.set_news(news_data, has_more=False)
-            return
-
-        new_items = []
-        # Reverse iteration to keep order correct when inserting at 0
-        for i in range(len(news_data) - 1, -1, -1):
-            row = news_data.iloc[i]
-            self._news_id_counter += 1
-            news_id = self._news_id_counter
-            new_items.append(self._build_news_item(row, news_id))
-            content = str(row.get("content", "") or "")
-            self._content_to_ids.setdefault(content, []).append(news_id)
-
-        # Insert at top
-        for item in new_items:
-            self.news_list.controls.insert(0, item)
-
-        if self.page:
-            self.news_list.update()
-
-    def append_news(self, news_data: pd.DataFrame, has_more: bool):
-        """
-        Append items at the bottom (Load More).
-        """
-        # Remove load more btn first if it exists
-        if self.news_list.controls and self.news_list.controls[-1] == self.load_more_btn:
-            self.news_list.controls.pop()
-
-        for _, row in news_data.iterrows():
-            self._news_id_counter += 1
-            news_id = self._news_id_counter
-            self.news_list.controls.append(self._build_news_item(row, news_id))
-            content = str(row.get("content", "") or "")
-            self._content_to_ids.setdefault(content, []).append(news_id)
-
-        # Update Cache
-        if not news_data.empty:
-            if self._cached_news.empty:
-                self._cached_news = news_data
-            else:
-                self._cached_news = pd.concat(
-                    [self._cached_news, news_data],
-                    ignore_index=True,
-                )
-        self._cached_has_more = has_more
-
-        if has_more:
-            self.news_list.controls.append(self.load_more_btn)
-
-        if self.page:
-            self.news_list.update()
-
-    _POSITIVE_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
-    _NEGATIVE_KEYWORDS = ("plunge", "crash", "fall", "down", "loss", "bearish", "miss")
-
-    @classmethod
-    def _detect_sentiment(cls, content: str) -> str:
-        """Detect sentiment using word-boundary matching (case-insensitive)."""
-        if not content:
-            return "neutral"
-        text = content.lower()
-        pos_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in cls._POSITIVE_KEYWORDS)
-        neg_count = sum(len(re.findall(rf"\b{kw}\b", text)) for kw in cls._NEGATIVE_KEYWORDS)
-        if pos_count > neg_count:
-            return "positive"
-        if neg_count > pos_count:
-            return "negative"
-        return "neutral"
-
-    def _build_news_item(self, row, news_id: int):
-        raw_tag = row.get("tags", "") or ""
-        translated_tag = self._translate_tag(raw_tag)
-
-        content = str(row.get("content", "") or "")
-        time_str = str(row.get("publish_time", "") or "")
-
-        sentiment = self._detect_sentiment(content)
-        if sentiment == "positive":
-            bg_color = ft.Colors.with_opacity(0.1, AppColors.UP)
-        elif sentiment == "negative":
-            bg_color = ft.Colors.with_opacity(0.1, AppColors.DOWN)
-        else:
-            bg_color = ft.Colors.TRANSPARENT
-
-        item = ft.Container(
-            key=str(news_id),
-            content=ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Text(
-                                translated_tag,
-                                color=AppColors.ACCENT,
-                                weight=ft.FontWeight.BOLD,
-                                size=12,
-                            ),
-                            ft.Text(
-                                time_str[-8:],
-                                color=AppColors.TEXT_SECONDARY,
-                                size=12,
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    ),
-                    ft.Text(content, size=14, color=AppColors.TEXT_PRIMARY),
-                ],
-            ),
-            padding=10,
-            bgcolor=bg_color,
-            border=ft.Border.only(bottom=ft.BorderSide(1, AppColors.DIVIDER)),
-        )
-        return item
+        ),
+        expand=True,
+        bgcolor=style.get("bgcolor"),
+        border_radius=style.get("border_radius"),
+        border=style.get("border"),
+        padding=10,
+    )

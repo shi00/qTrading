@@ -101,8 +101,8 @@ class TestSafeOpenUrl:
             mock_open.assert_called_once_with(url)
 
 
-class TestSafeOpenUrlSnackBar:
-    """SEC-010: 非白名单链接应弹窗提示"链接已拦截"。"""
+class TestSafeOpenUrlToast:
+    """SEC-010: 非白名单链接应 toast 提示"链接已拦截"。"""
 
     def _make_event_with_page(self, url):
         e = MagicMock()
@@ -112,20 +112,20 @@ class TestSafeOpenUrlSnackBar:
         return e
 
     @patch("ui.components._markdown_safe.webbrowser.open")
-    def test_non_whitelisted_url_shows_snack_bar(self, mock_open):
+    def test_non_whitelisted_url_shows_toast(self, mock_open):
         e = self._make_event_with_page("https://evil.com/phish")
         safe_open_url(e)
         mock_open.assert_not_called()
-        # SnackBar 应通过 page.show_dialog 显示
-        assert e.control.page.show_dialog.called
+        # 应通过 page.show_toast 显示拦截提示
+        assert e.control.page.show_toast.called
 
     @patch("ui.components._markdown_safe.webbrowser.open")
-    def test_whitelisted_url_does_not_show_snack_bar(self, mock_open):
+    def test_whitelisted_url_does_not_show_toast(self, mock_open):
         e = self._make_event_with_page("https://eastmoney.com/stock")
         safe_open_url(e)
         mock_open.assert_called_once_with("https://eastmoney.com/stock")
-        # 白名单链接不应触发 SnackBar
-        assert not e.control.page.show_dialog.called
+        # 白名单链接不应触发 toast
+        assert not e.control.page.show_toast.called
 
     @patch("ui.components._markdown_safe.webbrowser.open")
     def test_non_whitelisted_url_without_page_falls_back_to_log(self, mock_open):
@@ -137,8 +137,11 @@ class TestSafeOpenUrlSnackBar:
         mock_open.assert_not_called()
 
     @patch("ui.components._markdown_safe.webbrowser.open")
-    def test_snack_bar_exception_falls_back_to_log(self, mock_open):
+    def test_toast_exception_falls_back_to_log(self, mock_open):
+        """show_toast 抛异常时降级为 logger.warning。"""
         e = self._make_event_with_page("https://evil.com/phish")
-        e.control.page.show_dialog.side_effect = RuntimeError("page closed")
-        safe_open_url(e)
-        mock_open.assert_not_called()
+        e.control.page.show_toast.side_effect = RuntimeError("page closed")
+        with patch("ui.components._markdown_safe.logger") as mock_logger:
+            safe_open_url(e)
+            mock_open.assert_not_called()
+            mock_logger.warning.assert_called()

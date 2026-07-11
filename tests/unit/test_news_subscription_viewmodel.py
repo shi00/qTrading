@@ -91,7 +91,7 @@ class TestHistoryModeBuffer:
                 "ai_buffer": ["chunk3"],
             }
             vm._discarded_buffer = ["chunk1", "chunk2"]
-            vm.mode = "HISTORY"
+            vm._set_state(mode="HISTORY")
 
             vm.switch_to_realtime()
 

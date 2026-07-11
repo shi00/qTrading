@@ -1,365 +1,272 @@
-"""BacktestConfigPanel 单元测试"""
+"""BacktestConfigPanel 测试（声明式 V1）。
+
+测试策略：
+1. 纯函数 ``_get_config_from_state`` 单测（类型转换/默认值/stamp_duty 分段逻辑）
+2. 契约守护测试（grep 命令式禁止模式 = 0）
+
+声明式组件的渲染逻辑由 Flet 框架保证，不测组件实例化（参考 3.2.1-3.2.4 范式）。
+"""
 
 from datetime import date, timedelta
-from unittest.mock import MagicMock, PropertyMock, patch
 
-import flet as ft
 import pytest
 
-from ui.components.backtest.backtest_config_panel import BacktestConfigPanel
+from ui.components.backtest.backtest_config_panel import _get_config_from_state
 
 pytestmark = pytest.mark.unit
 
 
-@pytest.fixture
-def mock_page() -> MagicMock:
-    page = MagicMock()
-    page.show_dialog = MagicMock()
-    page.services = []
-    return page
+class TestGetConfigFromState:
+    """_get_config_from_state 纯函数单测。"""
 
+    @pytest.fixture
+    def today(self) -> date:
+        return date.today()
 
-@pytest.fixture
-def mock_callback() -> MagicMock:
-    return MagicMock()
+    @pytest.fixture
+    def one_year_ago(self, today: date) -> date:
+        return today - timedelta(days=365)
 
-
-@pytest.fixture
-def panel(mock_callback: MagicMock) -> BacktestConfigPanel:
-    with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
-        mock_i18n.return_value = "mock_text"
-        return BacktestConfigPanel(on_run_backtest=mock_callback)
-
-
-class TestBacktestConfigPanel:
-    def test_init_with_callback(self, mock_callback: MagicMock) -> None:
-        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_text"
-            panel = BacktestConfigPanel(on_run_backtest=mock_callback)
-
-        assert panel.on_run_backtest == mock_callback
-        assert panel._strategy_key is None
-
-    def test_init_with_strategy_key(self, mock_callback: MagicMock) -> None:
-        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_text"
-            panel = BacktestConfigPanel(on_run_backtest=mock_callback, strategy_key="test_strategy")
-
-        assert panel._strategy_key == "test_strategy"
-
-    def test_build_content(self, panel: BacktestConfigPanel) -> None:
-        content = panel._build_content()
-
-        assert isinstance(content, ft.Column)
-        assert len(content.controls) > 0
-
-    def test_get_config_default_values(self, panel: BacktestConfigPanel) -> None:
-        panel.initial_capital_input.value = "1000000"
-        panel.max_position_input.value = "50"
-        panel.rebalance_dropdown.value = "signal"
-        panel.commission_slider.value = 3
-        panel.stamp_duty_auto_checkbox.value = False
-        panel.stamp_duty_slider.value = 1
-        panel.slippage_slider.value = 5
-
-        config = panel.get_config()
-
+    def test_default_values(self, today: date, one_year_ago: date) -> None:
+        """默认值：initial_capital=1000000, max_positions=50, rebalance=signal, commission=3‱, slippage=5bps。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="signal",
+            max_positions_str="50",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=0.5,
+            slippage=5.0,
+        )
+        assert config["start_date"] == one_year_ago
+        assert config["end_date"] == today
         assert config["initial_capital"] == 1_000_000.0
         assert config["max_position_count"] == 50
         assert config["rebalance_freq"] == "signal"
         assert config["commission_rate"] == 3 / 10000
-        assert config["stamp_duty_rate"] == 1 / 1000
+        assert config["stamp_duty_rate"] is None  # auto=True
         assert config["slippage_bps"] == 5.0
 
-    def test_get_config_custom_values(self, panel: BacktestConfigPanel) -> None:
-        panel.initial_capital_input.value = "500000"
-        panel.max_position_input.value = "30"
-        panel.rebalance_dropdown.value = "weekly"
-        panel.commission_slider.value = 5
-        panel.stamp_duty_auto_checkbox.value = False
-        panel.stamp_duty_slider.value = 2
-        panel.slippage_slider.value = 10
-
-        config = panel.get_config()
-
+    def test_custom_values(self, today: date, one_year_ago: date) -> None:
+        """自定义值。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="500000",
+            rebalance_freq="weekly",
+            max_positions_str="30",
+            commission=5.0,
+            stamp_duty_auto=False,
+            stamp_duty_rate=2.0,
+            slippage=10.0,
+        )
         assert config["initial_capital"] == 500_000.0
         assert config["max_position_count"] == 30
         assert config["rebalance_freq"] == "weekly"
         assert config["commission_rate"] == 5 / 10000
-        assert config["stamp_duty_rate"] == 2 / 1000
+        assert config["stamp_duty_rate"] == 2 / 1000  # ‰ → 小数
         assert config["slippage_bps"] == 10.0
 
-    def test_get_config_invalid_initial_capital(self, panel: BacktestConfigPanel) -> None:
-        panel.initial_capital_input.value = "invalid_number"
-
-        config = panel.get_config()
-
+    def test_invalid_initial_capital_falls_back(self, today: date, one_year_ago: date) -> None:
+        """非法 initial_capital 兜底 1000000。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="invalid_number",
+            rebalance_freq="signal",
+            max_positions_str="50",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=0.5,
+            slippage=5.0,
+        )
         assert config["initial_capital"] == 1_000_000.0
 
-    def test_get_config_invalid_max_positions(self, panel: BacktestConfigPanel) -> None:
-        panel.max_position_input.value = "invalid_number"
-
-        config = panel.get_config()
-
+    def test_invalid_max_positions_falls_back(self, today: date, one_year_ago: date) -> None:
+        """非法 max_positions 兜底 50。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="signal",
+            max_positions_str="invalid_number",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=0.5,
+            slippage=5.0,
+        )
         assert config["max_position_count"] == 50
 
-    def test_get_config_empty_initial_capital(self, panel: BacktestConfigPanel) -> None:
-        panel.initial_capital_input.value = ""
-
-        config = panel.get_config()
-
+    def test_empty_initial_capital_falls_back(self, today: date, one_year_ago: date) -> None:
+        """空 initial_capital 兜底 1000000。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="",
+            rebalance_freq="signal",
+            max_positions_str="50",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=0.5,
+            slippage=5.0,
+        )
         assert config["initial_capital"] == 1_000_000.0
 
-    def test_get_config_empty_max_positions(self, panel: BacktestConfigPanel) -> None:
-        panel.max_position_input.value = ""
-
-        config = panel.get_config()
-
+    def test_empty_max_positions_falls_back(self, today: date, one_year_ago: date) -> None:
+        """空 max_positions 兜底 50。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="signal",
+            max_positions_str="",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=0.5,
+            slippage=5.0,
+        )
         assert config["max_position_count"] == 50
 
-    def test_get_config_slider_fallback_values(self, panel: BacktestConfigPanel) -> None:
-        panel.commission_slider.value = 0
-        panel.stamp_duty_auto_checkbox.value = False
-        panel.stamp_duty_slider.value = 1
-        panel.slippage_slider.value = 0
+    def test_slider_zero_values_respected(self, today: date, one_year_ago: date) -> None:
+        """Slider 0 值被尊重（资金路径精度）：commission=0 → 0.0，slippage=0 → 0.0，stamp_duty_auto=False + slider=0 → 0.0。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="signal",
+            max_positions_str="50",
+            commission=0,
+            stamp_duty_auto=False,
+            stamp_duty_rate=0,
+            slippage=0,
+        )
+        assert config["commission_rate"] == 0.0  # 0 ‱ → 0.0（免佣金）
+        assert config["stamp_duty_rate"] == 0.0  # 0 ‰ → 0.0（0 印花税）
+        assert config["slippage_bps"] == 0.0  # 0 bps（无滑点）
 
-        config = panel.get_config()
-
-        assert config["commission_rate"] == 3 / 10000
-        assert config["stamp_duty_rate"] == 1 / 1000
-        assert config["slippage_bps"] == 5.0
-
-    def test_get_config_none_rebalance_freq(self, panel: BacktestConfigPanel) -> None:
-        panel.rebalance_dropdown.value = None
-
-        config = panel.get_config()
-
+    def test_none_rebalance_freq_falls_back(self, today: date, one_year_ago: date) -> None:
+        """rebalance_freq=None 兜底 signal。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="",
+            max_positions_str="50",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=0.5,
+            slippage=5.0,
+        )
         assert config["rebalance_freq"] == "signal"
 
-    def test_on_run_click_with_callback(self, panel: BacktestConfigPanel, mock_callback: MagicMock) -> None:
-        mock_event = MagicMock()
-
-        panel._on_run_click(mock_event)
-
-        mock_callback.assert_called_once()
-        config = mock_callback.call_args[0][0]
-        assert "start_date" in config
-        assert "end_date" in config
-        assert "initial_capital" in config
-
-    def test_on_run_click_without_callback(self) -> None:
-        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_text"
-            panel = BacktestConfigPanel(on_run_backtest=None)
-
-        mock_event = MagicMock()
-
-        panel._on_run_click(mock_event)
-
-    def test_on_start_date_change(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
-        panel.page = mock_page
-        panel.start_date_btn.page = mock_page
-        panel.start_date_btn.update = MagicMock()
-
-        new_date = date(2024, 6, 1)
-        mock_event = MagicMock()
-        mock_event.control.value = new_date
-
-        panel._on_start_date_change(mock_event)
-
-        assert panel.start_date_value == new_date
-        assert panel.start_date_btn.content == "2024-06-01"
-        panel.start_date_btn.update.assert_called_once()
-
-    def test_on_start_date_change_none_value(self, panel: BacktestConfigPanel) -> None:
-        original_date = panel.start_date_value
-        mock_event = MagicMock()
-        mock_event.control.value = None
-
-        panel._on_start_date_change(mock_event)
-
-        assert panel.start_date_value == original_date
-
-    def test_on_end_date_change(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
-        panel.page = mock_page
-        panel.end_date_btn.page = mock_page
-        panel.end_date_btn.update = MagicMock()
-
-        new_date = date(2024, 12, 31)
-        mock_event = MagicMock()
-        mock_event.control.value = new_date
-
-        panel._on_end_date_change(mock_event)
-
-        assert panel.end_date_value == new_date
-        assert panel.end_date_btn.content == "2024-12-31"
-        panel.end_date_btn.update.assert_called_once()
-
-    def test_on_end_date_change_none_value(self, panel: BacktestConfigPanel) -> None:
-        original_date = panel.end_date_value
-        mock_event = MagicMock()
-        mock_event.control.value = None
-
-        panel._on_end_date_change(mock_event)
-
-        assert panel.end_date_value == original_date
-
-    def test_set_strategy_key(self, panel: BacktestConfigPanel) -> None:
-        panel.set_strategy_key("new_strategy")
-
-        assert panel._strategy_key == "new_strategy"
-
-    def test_default_date_range(self, panel: BacktestConfigPanel) -> None:
-        today = date.today()
-        one_year_ago = today - timedelta(days=365)
-
-        assert panel.start_date_value == one_year_ago
-        assert panel.end_date_value == today
-
-    def test_on_stamp_duty_auto_change_to_auto(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_slider.update = MagicMock()
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = MagicMock()
-
-        mock_event = MagicMock()
-        mock_event.control.value = True
-
-        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_auto_text"
-            panel._on_stamp_duty_auto_change(mock_event)
-
-        assert panel.stamp_duty_slider.disabled is True
-        assert panel.stamp_duty_text.value == "mock_auto_text"
-        panel.stamp_duty_slider.update.assert_called_once()
-        panel.stamp_duty_text.update.assert_called_once()
-
-    def test_on_stamp_duty_auto_change_to_manual(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_slider.value = 1.0
-        panel.stamp_duty_slider.update = MagicMock()
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = MagicMock()
-
-        mock_event = MagicMock()
-        mock_event.control.value = False
-
-        panel._on_stamp_duty_auto_change(mock_event)
-
-        assert panel.stamp_duty_slider.disabled is False
-        assert panel.stamp_duty_text.value == "1.0‰"
-        panel.stamp_duty_slider.update.assert_called_once()
-        panel.stamp_duty_text.update.assert_called_once()
-
-    def test_on_stamp_duty_auto_change_with_page(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_slider.update = MagicMock()
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = MagicMock()
-
-        mock_event = MagicMock()
-        mock_event.control.value = True
-
-        panel._on_stamp_duty_auto_change(mock_event)
-
-        panel.stamp_duty_slider.update.assert_called_once()
-        panel.stamp_duty_text.update.assert_called_once()
-
-    def test_on_stamp_duty_auto_change_without_page(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_slider.update = MagicMock()
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = None
-
-        mock_event = MagicMock()
-        mock_event.control.value = True
-
-        panel._on_stamp_duty_auto_change(mock_event)
-
-        panel.stamp_duty_slider.update.assert_not_called()
-        panel.stamp_duty_text.update.assert_not_called()
-
-    def test_on_stamp_duty_slider_change_manual(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_auto_checkbox.value = False
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = MagicMock()
-
-        mock_event = MagicMock()
-        mock_event.control.value = 1.5
-
-        panel._on_stamp_duty_slider_change(mock_event)
-
-        assert panel.stamp_duty_text.value == "1.5‰"
-        panel.stamp_duty_text.update.assert_called_once()
-
-    def test_on_stamp_duty_slider_change_auto_mode(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_auto_checkbox.value = True
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = MagicMock()
-
-        mock_event = MagicMock()
-        mock_event.control.value = 1.5
-
-        panel._on_stamp_duty_slider_change(mock_event)
-
-        panel.stamp_duty_text.update.assert_not_called()
-
-    def test_on_stamp_duty_slider_change_without_page(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_auto_checkbox.value = False
-        panel.stamp_duty_text.update = MagicMock()
-        panel.page = None
-
-        mock_event = MagicMock()
-        mock_event.control.value = 1.5
-
-        panel._on_stamp_duty_slider_change(mock_event)
-
-        assert panel.stamp_duty_text.value == "1.5‰"
-        panel.stamp_duty_text.update.assert_not_called()
-
-    def test_get_config_stamp_duty_auto_true(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_auto_checkbox.value = True
-
-        config = panel.get_config()
-
+    def test_stamp_duty_auto_true_returns_none(self, today: date, one_year_ago: date) -> None:
+        """stamp_duty_auto=True → stamp_duty_rate=None。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="signal",
+            max_positions_str="50",
+            commission=3.0,
+            stamp_duty_auto=True,
+            stamp_duty_rate=2.0,  # auto=True 时此值被忽略
+            slippage=5.0,
+        )
         assert config["stamp_duty_rate"] is None
 
-    def test_get_config_stamp_duty_slider_none(self, panel: BacktestConfigPanel) -> None:
-        panel.stamp_duty_auto_checkbox.value = False
-        type(panel.stamp_duty_slider).value = PropertyMock(return_value=None)
+    def test_stamp_duty_auto_false_slider_zero_returns_zero(self, today: date, one_year_ago: date) -> None:
+        """stamp_duty_auto=False + slider=0 → stamp_duty_rate=0.0（0 值被尊重，资金路径精度）。"""
+        config = _get_config_from_state(
+            start_date=one_year_ago,
+            end_date=today,
+            initial_capital_str="1000000",
+            rebalance_freq="signal",
+            max_positions_str="50",
+            commission=3.0,
+            stamp_duty_auto=False,
+            stamp_duty_rate=0,
+            slippage=5.0,
+        )
+        assert config["stamp_duty_rate"] == 0.0
 
-        config = panel.get_config()
 
-        assert config["stamp_duty_rate"] is None
+class TestBacktestConfigPanelContract:
+    """契约守护测试：声明式组件禁止命令式模式。"""
 
-        del type(panel.stamp_duty_slider).value
+    def test_no_imperative_patterns(self) -> None:
+        """grep 命令式禁止模式 = 0（did_mount/will_unmount/refresh_locale/.update()/class X(ft.Container)）。"""
+        from pathlib import Path
 
-    def test_did_mount_and_unmount(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
-        panel.page = mock_page
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
 
-        # V1: DatePicker 通过 page.show_dialog 打开，did_mount/will_unmount 不再管理 overlay
-        panel.did_mount()
-        panel.will_unmount()
+        forbidden_patterns = [
+            "def did_mount",
+            "def will_unmount",
+            "def refresh_locale",
+            "self.update()",
+            "class BacktestConfigPanel(ft.Container)",
+            "class BacktestConfigPanel(ft.UserControl)",
+            "PageRefMixin",
+        ]
+        for pattern in forbidden_patterns:
+            assert pattern not in content, f"禁止命令式模式: {pattern}"
 
-    def test_show_start_picker(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
-        panel.page = mock_page
-        mock_event = MagicMock()
+    def test_is_declarative_component(self) -> None:
+        """验证是 @ft.component 声明式组件。"""
+        from pathlib import Path
 
-        panel._show_start_picker(mock_event)
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
 
-        mock_page.show_dialog.assert_called_once_with(panel.start_date_picker)
+        assert "@ft.component" in content
+        assert "def BacktestConfigPanel(" in content
 
-    def test_show_end_picker(self, panel: BacktestConfigPanel, mock_page: MagicMock) -> None:
-        panel.page = mock_page
-        mock_event = MagicMock()
+    def test_no_strategy_key_dead_code(self) -> None:
+        """验证 _strategy_key 死代码已删除（检查代码模式，允许 docstring 提及符号名）。"""
+        import re
+        from pathlib import Path
 
-        panel._show_end_picker(mock_event)
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
 
-        mock_page.show_dialog.assert_called_once_with(panel.end_date_picker)
+        # 检查代码模式（属性访问/赋值、方法定义、方法调用），docstring 提及符号名不算违规
+        assert not re.search(r"self\._strategy_key\b", content), "不应再有 self._strategy_key 属性访问"
+        assert not re.search(r"def\s+set_strategy_key\s*\(", content), "不应再有 set_strategy_key 方法定义"
+        assert not re.search(r"\.set_strategy_key\s*\(", content), "不应再有 set_strategy_key 方法调用"
 
-    def test_refresh_locale_preserves_dropdown_value(self, panel: BacktestConfigPanel) -> None:
-        """§5.8 规范 4：refresh_locale 重建 options 后 value 必须保留。"""
-        panel.rebalance_dropdown.value = "signal"
-        original_value = panel.rebalance_dropdown.value
-        with patch("ui.components.backtest.backtest_config_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_text"
-            panel.refresh_locale()
-        assert panel.rebalance_dropdown.value == original_value
-        assert panel.rebalance_dropdown.options is not None
-        assert len(panel.rebalance_dropdown.options) > 0
+    def test_uses_i18n_observable_state(self) -> None:
+        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        from pathlib import Path
+
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
+
+        assert "ft.use_state(I18n.get_observable_state)" in content
+
+    def test_date_picker_uses_declarative_use_dialog(self) -> None:
+        """DoD: DatePicker 必须通过 ft.use_dialog() 声明式管理（§10.1），禁止 use_ref + page.show_dialog 回归。"""
+        from pathlib import Path
+
+        panel_path = (
+            Path(__file__).parent.parent.parent.parent / "ui" / "components" / "backtest" / "backtest_config_panel.py"
+        )
+        content = panel_path.read_text(encoding="utf-8")
+
+        # 正向守护：必须使用 ft.use_dialog
+        assert "ft.use_dialog(" in content, "DatePicker 必须通过 ft.use_dialog() 声明式管理"
+        # 反向守护：禁止命令式 dialog 管理 API 回归
+        assert "page.show_dialog" not in content, "禁止 page.show_dialog 命令式 API"
+        assert "page.pop_dialog" not in content, "禁止 page.pop_dialog 命令式 API"
+        # 反向守护：DatePicker 不应与 use_ref 混用（命令式实例缓存）
+        assert "use_ref" not in content, "禁止 use_ref 缓存 DatePicker 实例"

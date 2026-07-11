@@ -3,20 +3,25 @@
 Extracts business logic from OnboardingWizard into a pure ViewModel.
 Holds step navigation, validation, sync state, and config persistence.
 No Flet control references.
+
+Phase 2 改造: frozen dataclass state snapshot + subscribe/_notify。
+保留 fn_* (View→VM 函数注入) 和 on_complete (异步完成回调)；
+移除 on_step_changed / on_sync_progress / on_sync_state_changed /
+on_validation_state_changed / on_schedule_time_normalized (替换为 state 字段)。
 """
 
 import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
-from utils.error_classifier import classify_error, get_error_message
+from utils.error_classifier import classify_error
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +136,25 @@ STEP_CONFIGS = [
 ]
 
 
+# ------------------------------------------------------------------
+# State snapshot (frozen dataclass)
+# ------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OnboardingState:
+    """OnboardingViewModel 的不可变状态快照。View 通过 subscribe 接收。"""
+
+    current_step: int = 0
+    sync_in_progress: bool = False
+    validation_in_progress: bool = False
+    sync_progress: float = 0.0
+    sync_progress_message: Message | None = None
+    schedule_enabled: bool = True
+    schedule_time: str = "16:30"
+    normalized_schedule_time: str = "16:30"
+
+
 class OnboardingViewModel:
     """ViewModel for OnboardingWizard — MVVM-003 fix.
 
@@ -141,34 +165,54 @@ class OnboardingViewModel:
     def __init__(self, data_processor: DataProcessor | None = None):
         self._data_processor = data_processor
 
-        # --- Step navigation state ---
-        self.current_step: int = 0
-        self.step_validated: dict[str, bool] = {}
+        # --- Internal mutable state (not exposed via state snapshot) ---
+        self._step_validated: dict[str, bool] = {}
+        self._schedule_enabled: bool = True
+        self._schedule_time: str = "16:30"
 
-        # --- Sync state ---
-        self.sync_in_progress: bool = False
-        self.validation_in_progress: bool = False
-
-        # --- Panel operation callbacks (View injects) ---
+        # --- Panel operation callbacks (View injects, View→VM function) ---
         self.fn_validate_database: Callable[[], Awaitable[bool]] | None = None
         self.fn_validate_token: Callable[[], Awaitable[bool]] | None = None
         self.fn_validate_cloud_ai: Callable[[], Awaitable[bool]] | None = None
         self.fn_validate_local_model: Callable[[], Awaitable[bool]] | None = None
-
-        # --- Push schedule state from View controls into VM ---
         self.fn_push_schedule_state: Callable[[], None] | None = None
 
-        # --- View notification callbacks ---
-        self.on_step_changed: Callable[[], None] | None = None
-        self.on_sync_progress: Callable[[float, str], None] | None = None
-        self.on_sync_state_changed: Callable[[], None] | None = None
-        self.on_validation_state_changed: Callable[[], None] | None = None
+        # --- Async completion callback (special: not a simple state notification) ---
         self.on_complete: Callable[[], Awaitable[None]] | None = None
-        self.on_schedule_time_normalized: Callable[[str], None] | None = None
 
-        # --- Schedule state (pushed from View) ---
-        self._schedule_enabled: bool = True
-        self._schedule_time: str = "16:30"
+        # --- State snapshot + subscribers ---
+        self._state: OnboardingState = OnboardingState()
+        self._subscribers: list[Callable[[OnboardingState], None]] = []
+
+    # ------------------------------------------------------------------
+    # State / subscribe / notify
+    # ------------------------------------------------------------------
+
+    @property
+    def state(self) -> OnboardingState:
+        return self._state
+
+    def subscribe(self, callback: Callable[[OnboardingState], None]) -> Callable[[], None]:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def _notify(self) -> None:
+        snapshot = self._state
+        for cb in list(self._subscribers):
+            cb(snapshot)
+
+    def _set_state(self, **changes) -> None:
+        self._state = replace(self._state, **changes)
+        self._notify()
+
+    # ------------------------------------------------------------------
+    # Properties (compat with existing View tests, Phase 4 will remove setters)
+    # ------------------------------------------------------------------
 
     @property
     def data_processor(self) -> DataProcessor:
@@ -177,8 +221,36 @@ class OnboardingViewModel:
         return self._data_processor
 
     @property
+    def current_step(self) -> int:
+        return self._state.current_step
+
+    @current_step.setter
+    def current_step(self, value: int) -> None:
+        self._set_state(current_step=value)
+
+    @property
+    def sync_in_progress(self) -> bool:
+        return self._state.sync_in_progress
+
+    @sync_in_progress.setter
+    def sync_in_progress(self, value: bool) -> None:
+        self._set_state(sync_in_progress=value)
+
+    @property
+    def validation_in_progress(self) -> bool:
+        return self._state.validation_in_progress
+
+    @validation_in_progress.setter
+    def validation_in_progress(self, value: bool) -> None:
+        self._set_state(validation_in_progress=value)
+
+    @property
+    def step_validated(self) -> dict[str, bool]:
+        return self._step_validated
+
+    @property
     def normalized_schedule_time(self) -> str:
-        return self._schedule_time
+        return self._state.normalized_schedule_time
 
     # ------------------------------------------------------------------
     # bind / dispose
@@ -192,27 +264,17 @@ class OnboardingViewModel:
         fn_validate_cloud_ai: Callable[[], Awaitable[bool]],
         fn_validate_local_model: Callable[[], Awaitable[bool]],
         fn_push_schedule_state: Callable[[], None],
-        on_step_changed: Callable[[], None],
-        on_sync_progress: Callable[[float, str], None],
-        on_sync_state_changed: Callable[[], None],
-        on_validation_state_changed: Callable[[], None],
         on_complete: Callable[[], Awaitable[None]],
-        on_schedule_time_normalized: Callable[[str], None],
     ):
         self.fn_validate_database = fn_validate_database
         self.fn_validate_token = fn_validate_token
         self.fn_validate_cloud_ai = fn_validate_cloud_ai
         self.fn_validate_local_model = fn_validate_local_model
         self.fn_push_schedule_state = fn_push_schedule_state
-        self.on_step_changed = on_step_changed
-        self.on_sync_progress = on_sync_progress
-        self.on_sync_state_changed = on_sync_state_changed
-        self.on_validation_state_changed = on_validation_state_changed
         self.on_complete = on_complete
-        self.on_schedule_time_normalized = on_schedule_time_normalized
 
     def dispose(self):
-        if self.sync_in_progress:
+        if self._state.sync_in_progress:
             logger.warning(
                 "[OnboardingVM] dispose() called while sync in progress; callbacks cleared, DataProcessor will self-complete"
             )
@@ -221,22 +283,19 @@ class OnboardingViewModel:
         self.fn_validate_cloud_ai = None
         self.fn_validate_local_model = None
         self.fn_push_schedule_state = None
-        self.on_step_changed = None
-        self.on_sync_progress = None
-        self.on_sync_state_changed = None
-        self.on_validation_state_changed = None
         self.on_complete = None
-        self.on_schedule_time_normalized = None
+        self._subscribers.clear()
+        self._state = OnboardingState()
 
     # ------------------------------------------------------------------
     # Step Navigation
     # ------------------------------------------------------------------
 
     def invalidate_step(self, step_id: str):
-        self.step_validated[step_id] = False
+        self._step_validated[step_id] = False
 
     async def next_step(self):
-        config = STEP_CONFIGS[self.current_step]
+        config = STEP_CONFIGS[self._state.current_step]
 
         if config.validate_before_next:
             if not await self.validate_and_persist_current_step():
@@ -247,26 +306,20 @@ class OnboardingViewModel:
                 await self.on_complete()
             return
 
-        if self.current_step < len(STEP_CONFIGS) - 1:
-            self.current_step += 1
-            if self.on_step_changed:
-                self.on_step_changed()
+        if self._state.current_step < len(STEP_CONFIGS) - 1:
+            self.current_step = self._state.current_step + 1
 
     async def prev_step(self):
-        config = STEP_CONFIGS[self.current_step]
+        config = STEP_CONFIGS[self._state.current_step]
         if config.validate_before_next:
-            self.step_validated[config.id] = False
+            self._step_validated[config.id] = False
 
-        if self.current_step > 0:
-            self.current_step -= 1
-            if self.on_step_changed:
-                self.on_step_changed()
+        if self._state.current_step > 0:
+            self.current_step = self._state.current_step - 1
 
     async def skip_step(self):
-        if self.current_step < len(STEP_CONFIGS) - 1:
-            self.current_step += 1
-            if self.on_step_changed:
-                self.on_step_changed()
+        if self._state.current_step < len(STEP_CONFIGS) - 1:
+            self.current_step = self._state.current_step + 1
 
     # ------------------------------------------------------------------
     # Validation
@@ -274,9 +327,9 @@ class OnboardingViewModel:
 
     async def validate_and_persist_current_step(self) -> bool:
         ensure_correlation_id()
-        config = STEP_CONFIGS[self.current_step]
+        config = STEP_CONFIGS[self._state.current_step]
 
-        if self.step_validated.get(config.id, False):
+        if self._step_validated.get(config.id, False):
             return True
 
         validators: dict[str, Callable[[], Awaitable[bool]] | None] = {
@@ -298,7 +351,7 @@ class OnboardingViewModel:
         try:
             result = await validator()
             if result:
-                self.step_validated[config.id] = True
+                self._step_validated[config.id] = True
             return result
         finally:
             self._set_validation_in_progress(False)
@@ -321,8 +374,7 @@ class OnboardingViewModel:
                 time_str = "16:30"
 
         self._schedule_time = time_str
-        if self.on_schedule_time_normalized:
-            self.on_schedule_time_normalized(time_str)
+        self._set_state(schedule_time=time_str, normalized_schedule_time=time_str)
 
         try:
             await ThreadPoolManager().run_async(
@@ -341,11 +393,14 @@ class OnboardingViewModel:
     def set_schedule_state(self, enabled: bool, time_str: str):
         self._schedule_enabled = enabled
         self._schedule_time = time_str
+        self._set_state(
+            schedule_enabled=enabled,
+            schedule_time=time_str,
+            normalized_schedule_time=time_str,
+        )
 
     def _set_validation_in_progress(self, in_progress: bool):
         self.validation_in_progress = in_progress
-        if self.on_validation_state_changed:
-            self.on_validation_state_changed()
 
     # ------------------------------------------------------------------
     # Data Sync
@@ -353,18 +408,18 @@ class OnboardingViewModel:
 
     async def start_sync(self, quick: bool = False):
         ensure_correlation_id()
-        self.sync_in_progress = True
-        if self.on_sync_state_changed:
-            self.on_sync_state_changed()
-
-        if self.on_sync_progress:
-            self.on_sync_progress(0, I18n.get("wizard_status_init"))
+        self._set_state(
+            sync_in_progress=True,
+            sync_progress=0.0,
+            sync_progress_message=Message("wizard_status_init"),
+        )
 
         try:
 
             def progress_callback(current, total, message):
-                if self.on_sync_progress:
-                    self.on_sync_progress(current / 100, message)
+                # NOTE(lazy): message 是 service 层(DataProcessor)传入的已翻译字符串,作为 key 透传.
+                #   ceiling: service 层产出 i18n key + params. upgrade: DataProcessor.progress_callback 重构.
+                self._set_state(sync_progress=current / 100, sync_progress_message=Message(key=message))
 
             result = await self.data_processor.initialize_system(
                 progress_callback=progress_callback,
@@ -372,42 +427,51 @@ class OnboardingViewModel:
             )
 
             if result:
-                if self.on_sync_progress:
-                    self.on_sync_progress(1.0, I18n.get("wizard_status_done"))
+                self._set_state(
+                    sync_progress=1.0,
+                    sync_progress_message=Message("wizard_status_done"),
+                )
                 await asyncio.sleep(1)
                 await self.next_step()
             else:
-                if self.on_sync_progress:
-                    self.on_sync_progress(0, I18n.get("wizard_status_cancelled"))
+                self._set_state(
+                    sync_progress=0.0,
+                    sync_progress_message=Message("wizard_status_cancelled"),
+                )
 
         except asyncio.CancelledError:
             logger.warning("[OnboardingVM] Sync cancelled during shutdown.")
             raise
         except Exception as e:
             error_info = classify_error(e, context="general")
-            if self.on_sync_progress:
-                self.on_sync_progress(0, get_error_message(error_info))
+            self._set_state(
+                sync_progress=0.0,
+                sync_progress_message=Message(
+                    error_info.get("message_key", "common_err_unknown"),
+                    error_info.get("format_args") or {},
+                ),
+            )
         finally:
-            self.sync_in_progress = False
-            if self.on_sync_state_changed:
-                self.on_sync_state_changed()
+            self._set_state(sync_in_progress=False)
 
     async def cancel_sync(self):
         try:
             if self._data_processor:
                 await self._data_processor.stop()
-            if self.on_sync_progress:
-                self.on_sync_progress(0, I18n.get("wizard_status_cancelled"))
+            self._set_state(
+                sync_progress=0.0,
+                sync_progress_message=Message("wizard_status_cancelled"),
+            )
         except Exception as e:
             logger.warning("[OnboardingVM] Failed to cancel sync: %s", e, exc_info=True)
         finally:
-            self.sync_in_progress = False
-            if self.on_sync_state_changed:
-                self.on_sync_state_changed()
+            self._set_state(sync_in_progress=False)
 
     async def skip_sync(self):
-        if self.on_sync_progress:
-            self.on_sync_progress(0, I18n.get("wizard_status_skip"))
+        self._set_state(
+            sync_progress=0.0,
+            sync_progress_message=Message("wizard_status_skip"),
+        )
         await self.next_step()
 
     # ------------------------------------------------------------------

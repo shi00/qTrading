@@ -1,9 +1,10 @@
 """回测 ViewModel
 
-遵循项目 MVVM 模式：
+遵循项目 MVVM 模式（V1 声明式范式）：
+- frozen dataclass BacktestState + subscribe/_notify
 - 调用 BacktestService 运行回测
 - 通过 TaskManager.submit_task() 异步执行
-- 管理回测状态和结果
+- 管理回测状态和结果（_result 内部持有，result_version 通知 View 拉取）
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import date
 
 from core.i18n import I18n
@@ -19,21 +21,35 @@ from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.base_strategy import get_strategy_registry
+from ui.viewmodels import Message
 
 logger = logging.getLogger(__name__)
 
 TASK_NAME_PREFIX = "backtest"
 
 
+@dataclass(frozen=True)
+class BacktestState:
+    """BacktestViewModel 的不可变状态快照。"""
+
+    is_running: bool = False
+    progress: float = 0.0
+    progress_message: Message | None = None
+    status_message: Message | None = None
+    status_color: str = ""
+    # Incremented when _result changes; View pulls vm.result on change (dual-track, §3.0.4).
+    result_version: int = 0
+
+
 class BacktestViewModel:
     """
-    回测 ViewModel。
+    回测 ViewModel（V1 声明式范式）。
 
     职责：
-    1. 管理回测配置状态
+    1. 管理回测配置状态（frozen BacktestState snapshot）
     2. 调用 BacktestService 运行回测
     3. 通过 TaskManager 异步执行
-    4. 猡理回测结果和状态
+    4. 管理回测结果（_result 内部持有，result_version 通知 View 拉取）
     """
 
     def __init__(
@@ -62,34 +78,39 @@ class BacktestViewModel:
         self.service = service
 
         self._result: BacktestResult | None = None
-        self._is_running: bool = False
         self._task_id: str | None = None
+        self._state: BacktestState = BacktestState()
+        self._subscribers: list[Callable[[BacktestState], None]] = []
 
-        self.on_update: Callable | None = None
-        self.on_status: Callable[[str, str], None] | None = None
-        self.on_progress: Callable[[float, str], None] | None = None
-        self.on_result: Callable[[BacktestResult], None] | None = None
+    @property
+    def state(self) -> BacktestState:
+        return self._state
 
-    def bind(
-        self,
-        on_update: Callable | None = None,
-        on_status: Callable[[str, str], None] | None = None,
-        on_progress: Callable[[float, str], None] | None = None,
-        on_result: Callable[[BacktestResult], None] | None = None,
-    ):
-        """绑定 View 回调。"""
-        self.on_update = on_update
-        self.on_status = on_status
-        self.on_progress = on_progress
-        self.on_result = on_result
+    def subscribe(self, callback: Callable[[BacktestState], None]) -> Callable[[], None]:
+        """订阅状态变更。返回取消订阅函数。"""
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def _notify(self) -> None:
+        snapshot = self._state
+        for cb in list(self._subscribers):
+            cb(snapshot)
+
+    def _set_state(self, **changes) -> None:
+        self._state = replace(self._state, **changes)
+        self._notify()
 
     def dispose(self):
         """清理资源。"""
-        self.on_update = None
-        self.on_status = None
-        self.on_progress = None
-        self.on_result = None
         self._result = None
+        self._task_id = None
+        self._subscribers.clear()
+        self._state = BacktestState()
 
     @property
     def result(self) -> BacktestResult | None:
@@ -97,7 +118,7 @@ class BacktestViewModel:
 
     @property
     def is_running(self) -> bool:
-        return self._is_running
+        return self.state.is_running
 
     def get_available_strategies(self) -> dict[str, str]:
         """获取可用策略列表。"""
@@ -148,28 +169,39 @@ class BacktestViewModel:
 
         ensure_correlation_id()
 
-        if self._is_running:
-            if self.on_status:
-                self.on_status(I18n.get("backtest_already_running"), "orange")
+        if self.state.is_running:
+            self._set_state(
+                status_message=Message("backtest_already_running"),
+                status_color="orange",
+            )
             return
 
-        self._is_running = True
         self._result = None
         self._task_id = None
-
-        if self.on_status:
-            self.on_status(I18n.get("backtest_starting"), "blue")
-        if self.on_progress:
-            self.on_progress(0.0, I18n.get("backtest_initializing"))
+        self._set_state(
+            is_running=True,
+            progress=0.0,
+            progress_message=Message("backtest_initializing"),
+            status_message=Message("backtest_starting"),
+            status_color="blue",
+        )
 
         async def _execute_backtest(task_id: str, **kwargs):
             try:
 
                 def _progress_callback(progress: float, message: str):
-                    if not self._is_running:
+                    if not self.state.is_running:
                         return
-                    if self.on_progress:
-                        self.on_progress(progress, message)
+                    # NOTE(lazy): message 是 service/engine 层硬编码英文字符串(非 i18n key),
+                    #   暂以原字符串作为 Message.key 直接透传。当前 BacktestView 未消费此字段
+                    #   (legacy 命令式 _on_vm_progress 走 str 回调,与 state 解耦),无渲染影响。
+                    #   ceiling: Phase 3-4 BacktestView 声明式重写时改为 service 传 i18n key +
+                    #   params 或新增 backtest_progress 通用 key。
+                    #   upgrade: Phase 3-4 BacktestView 声明式重写.
+                    self._set_state(
+                        progress=progress,
+                        progress_message=Message(message, {}),
+                    )
                     TaskManager().update_progress(task_id, progress, message)
 
                 def _cancel_check() -> bool:
@@ -185,16 +217,14 @@ class BacktestViewModel:
                 )
 
                 self._result = result
-
-                if self.on_result:
-                    self.on_result(result)
-                if self.on_status:
-                    self.on_status(
-                        I18n.get("backtest_completed").format(duration=result.duration_ms),
-                        "green",
-                    )
-                if self.on_update:
-                    self.on_update()
+                self._set_state(
+                    status_message=Message(
+                        "backtest_completed",
+                        {"duration": result.duration_ms},
+                    ),
+                    status_color="green",
+                    result_version=self.state.result_version + 1,
+                )
 
                 return I18n.get("backtest_success").format(sharpe=f"{result.metrics['sharpe_ratio']:.2f}")
 
@@ -202,13 +232,17 @@ class BacktestViewModel:
                 raise
             except Exception as e:
                 logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
-                if self.on_status:
-                    self.on_status(I18n.get("backtest_failed"), "red")
+                self._set_state(
+                    status_message=Message("backtest_failed"),
+                    status_color="red",
+                )
                 raise
             finally:
-                self._is_running = False
-                if self.on_progress:
-                    self.on_progress(1.0, I18n.get("backtest_done"))
+                self._set_state(
+                    is_running=False,
+                    progress=1.0,
+                    progress_message=Message("backtest_done"),
+                )
 
         strategy_obj = get_strategy_registry().get(strategy_key)
         name_key = getattr(strategy_obj, "name_key", None) if strategy_obj else None
@@ -223,9 +257,11 @@ class BacktestViewModel:
         self._task_id = task_id
 
         if task_id is None:
-            self._is_running = False
-            if self.on_status:
-                self.on_status(I18n.get("backtest_task_rejected"), "orange")
+            self._set_state(
+                is_running=False,
+                status_message=Message("backtest_task_rejected"),
+                status_color="orange",
+            )
 
     def cancel_backtest(self) -> None:
         if self._task_id:

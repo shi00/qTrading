@@ -3,14 +3,12 @@
 TDD RED phase: these tests define the expected ViewModel contract.
 """
 
-import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import flet as ft
 import pytest
 
-from tests.unit.ui.conftest import set_page
 from ui.viewmodels.onboarding_view_model import (
+    OnboardingState,
     OnboardingViewModel,
     STEP_CONFIGS,
     StepConfig,
@@ -18,14 +16,35 @@ from ui.viewmodels.onboarding_view_model import (
 
 pytestmark = pytest.mark.unit
 
+
+# --- Helpers ---
+
+
+def _count_transitions(snapshots, field_getter, initial) -> int:
+    """Count state transitions in snapshots for a given field.
+
+    A transition occurs when consecutive snapshots (including the initial state)
+    have different values for the field returned by field_getter(snapshots[i]).
+    The `initial` argument represents the state value before any snapshots.
+    """
+    transitions = 0
+    prev = initial
+    for s in snapshots:
+        value = field_getter(s)
+        if value != prev:
+            transitions += 1
+            prev = value
+    return transitions
+
+
 # --- I18n mock (autouse, returns key as value) ---
 
 
 @pytest.fixture(autouse=True)
 def _mock_i18n():
-    with patch("ui.viewmodels.onboarding_view_model.I18n") as mock_i18n:
-        mock_i18n.get = MagicMock(side_effect=lambda key, **kwargs: key)
-        yield mock_i18n
+    mock_i18n = MagicMock()
+    mock_i18n.get = MagicMock(side_effect=lambda key, **kwargs: key)
+    yield mock_i18n
 
 
 # --- Fixtures ---
@@ -38,21 +57,27 @@ def vm():
 
 
 @pytest.fixture
-def bound_vm(vm):
-    """ViewModel with all callbacks bound to MagicMocks or AsyncMocks."""
+def snapshots():
+    """List to collect OnboardingState snapshots from bound_vm."""
+    return []
+
+
+@pytest.fixture
+def bound_vm(vm, snapshots):
+    """ViewModel with fn_* callbacks and on_complete bound to MagicMocks/AsyncMocks.
+
+    Phase 2 改造: on_* 通知回调移除,改用 state snapshot + subscribe。
+    snapshots fixture 自动订阅 bound_vm 的 state 变化。
+    """
     vm.bind(
         fn_validate_database=AsyncMock(return_value=True),
         fn_validate_token=AsyncMock(return_value=True),
         fn_validate_cloud_ai=AsyncMock(return_value=True),
         fn_validate_local_model=AsyncMock(return_value=True),
         fn_push_schedule_state=MagicMock(),
-        on_step_changed=MagicMock(),
-        on_sync_progress=MagicMock(),
-        on_sync_state_changed=MagicMock(),
-        on_validation_state_changed=MagicMock(),
         on_complete=AsyncMock(),
-        on_schedule_time_normalized=MagicMock(),
     )
+    vm.subscribe(lambda s: snapshots.append(s))
     return vm
 
 
@@ -125,24 +150,31 @@ class TestOnboardingVMBind:
             fn_validate_cloud_ai=cb_async,
             fn_validate_local_model=cb_async,
             fn_push_schedule_state=cb,
-            on_step_changed=cb,
-            on_sync_progress=cb,
-            on_sync_state_changed=cb,
-            on_validation_state_changed=cb,
             on_complete=cb_async,
-            on_schedule_time_normalized=cb,
         )
         assert vm.fn_validate_database is cb_async
-        assert vm.on_step_changed is cb
+        assert vm.fn_push_schedule_state is cb
         assert vm.on_complete is cb_async
 
     def test_dispose_clears_callbacks(self, bound_vm):
         bound_vm.dispose()
         assert bound_vm.fn_validate_database is None
         assert bound_vm.fn_validate_token is None
-        assert bound_vm.on_step_changed is None
         assert bound_vm.on_complete is None
-        assert bound_vm.on_schedule_time_normalized is None
+        assert bound_vm.state == OnboardingState()
+
+    def test_state_defaults(self, vm):
+        assert vm.state == OnboardingState()
+
+    def test_notifies_subscribers(self, vm):
+        received: list = []
+        unsub = vm.subscribe(lambda s: received.append(s))
+        vm._set_state(current_step=3)
+        assert len(received) == 1
+        assert received[0].current_step == 3
+        unsub()
+        vm._set_state(current_step=5)
+        assert len(received) == 1
 
 
 # =====================================================================
@@ -151,10 +183,11 @@ class TestOnboardingVMBind:
 
 
 class TestOnboardingVMNavigation:
-    async def test_next_step_advances(self, bound_vm):
+    async def test_next_step_advances(self, bound_vm, snapshots):
         await bound_vm.next_step()
         assert bound_vm.current_step == 1
-        bound_vm.on_step_changed.assert_called_once()
+        assert bound_vm.state.current_step == 1
+        assert any(s.current_step == 1 for s in snapshots)
 
     async def test_next_step_validates_required(self, bound_vm):
         bound_vm.current_step = 1  # database step
@@ -167,7 +200,7 @@ class TestOnboardingVMNavigation:
         bound_vm.validate_and_persist_current_step = AsyncMock(return_value=False)
         await bound_vm.next_step()
         assert bound_vm.current_step == 1
-        bound_vm.on_step_changed.assert_not_called()
+        assert bound_vm.state.current_step == 1
 
     async def test_next_step_on_complete_calls_callback(self, bound_vm):
         bound_vm.current_step = 7  # complete step
@@ -180,17 +213,18 @@ class TestOnboardingVMNavigation:
         await bound_vm.next_step()
         assert bound_vm.current_step == 7
 
-    async def test_prev_step_goes_back(self, bound_vm):
+    async def test_prev_step_goes_back(self, bound_vm, snapshots):
         bound_vm.current_step = 3
         await bound_vm.prev_step()
         assert bound_vm.current_step == 2
-        bound_vm.on_step_changed.assert_called_once()
+        assert bound_vm.state.current_step == 2
+        assert any(s.current_step == 2 for s in snapshots)
 
     async def test_prev_step_does_not_go_below_zero(self, bound_vm):
         bound_vm.current_step = 0
         await bound_vm.prev_step()
         assert bound_vm.current_step == 0
-        bound_vm.on_step_changed.assert_not_called()
+        assert bound_vm.state.current_step == 0
 
     async def test_prev_step_resets_validation(self, bound_vm):
         bound_vm.current_step = 1  # database step validates_before_next
@@ -198,11 +232,12 @@ class TestOnboardingVMNavigation:
         await bound_vm.prev_step()
         assert bound_vm.step_validated["database"] is False
 
-    async def test_skip_step_advances(self, bound_vm):
+    async def test_skip_step_advances(self, bound_vm, snapshots):
         bound_vm.current_step = 4  # local_model step
         await bound_vm.skip_step()
         assert bound_vm.current_step == 5
-        bound_vm.on_step_changed.assert_called_once()
+        assert bound_vm.state.current_step == 5
+        assert any(s.current_step == 5 for s in snapshots)
 
     async def test_skip_step_does_not_exceed_max(self, bound_vm):
         bound_vm.current_step = 7
@@ -268,13 +303,18 @@ class TestOnboardingVMValidation:
         assert result is False
         assert bound_vm.step_validated.get("database") is not True
 
-    async def test_validation_sets_validation_in_progress(self, bound_vm):
+    async def test_validation_sets_validation_in_progress(self, bound_vm, snapshots):
         bound_vm.current_step = 1
         await bound_vm.validate_and_persist_current_step()
         assert bound_vm.validation_in_progress is False  # finally resets
-        bound_vm.on_validation_state_changed.assert_any_call()
-        # Called twice: True then False
-        assert bound_vm.on_validation_state_changed.call_count == 2
+        # validation_in_progress transitions: False→True, True→False
+        transitions = 0
+        prev = False
+        for s in snapshots:
+            if s.validation_in_progress != prev:
+                transitions += 1
+                prev = s.validation_in_progress
+        assert transitions == 2
 
     async def test_validation_clears_progress_on_exception(self, bound_vm):
         bound_vm.fn_validate_database = AsyncMock(side_effect=RuntimeError("BOOM"))
@@ -301,7 +341,7 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         assert bound_vm.step_validated["schedule"] is True
-        bound_vm.on_schedule_time_normalized.assert_called_with("16:30")
+        assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_invalid_time_defaults(self, bound_vm, mock_config_handler):
         self._setup_schedule_vm(bound_vm, mock_config_handler)
@@ -309,7 +349,7 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         assert bound_vm._schedule_time == "16:30"
-        bound_vm.on_schedule_time_normalized.assert_called_with("16:30")
+        assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_empty_time_defaults(self, bound_vm, mock_config_handler):
         self._setup_schedule_vm(bound_vm, mock_config_handler)
@@ -317,6 +357,7 @@ class TestOnboardingVMScheduleValidation:
         result = await bound_vm.validate_and_persist_current_step()
         assert result is True
         assert bound_vm._schedule_time == "16:30"
+        assert bound_vm.state.normalized_schedule_time == "16:30"
 
     async def test_saves_to_config_handler(self, bound_vm, mock_config_handler):
         self._setup_schedule_vm(bound_vm, mock_config_handler)
@@ -351,6 +392,9 @@ class TestOnboardingVMScheduleValidation:
         assert vm._schedule_enabled is False
         assert vm._schedule_time == "09:00"
         assert vm.normalized_schedule_time == "09:00"
+        assert vm.state.schedule_enabled is False
+        assert vm.state.schedule_time == "09:00"
+        assert vm.state.normalized_schedule_time == "09:00"
 
 
 # =====================================================================
@@ -364,10 +408,12 @@ class TestOnboardingVMSync:
         bound_vm._data_processor = mock_data_processor
         return bound_vm
 
-    async def test_start_sync_sets_state(self, sync_vm):
+    async def test_start_sync_sets_state(self, sync_vm, snapshots):
         await sync_vm.start_sync(quick=True)
         assert sync_vm.sync_in_progress is False  # finally resets
-        sync_vm.on_sync_state_changed.assert_any_call()
+        # sync_in_progress transitions: False→True (start), True→False (finally)
+        transitions = _count_transitions(snapshots, lambda s: s.sync_in_progress, initial=False)
+        assert transitions == 2
 
     async def test_start_sync_calls_initialize_system(self, sync_vm, mock_data_processor):
         await sync_vm.start_sync(quick=True)
@@ -380,54 +426,67 @@ class TestOnboardingVMSync:
         call_kwargs = mock_data_processor.initialize_system.call_args[1]
         assert call_kwargs["quick"] is False
 
-    async def test_start_sync_success_advances(self, sync_vm, mock_data_processor):
+    async def test_start_sync_success_advances(self, sync_vm, mock_data_processor, snapshots):
         sync_vm.current_step = 5  # data_sync step
         sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
         sync_vm.next_step.assert_awaited_once()
-        sync_vm.on_sync_progress.assert_any_call(1.0, "wizard_status_done")
+        assert any(
+            s.sync_progress == 1.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_done"
+            for s in snapshots
+        )
 
-    async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor):
-        """on_sync_state_changed must be called exactly twice on success: once for start, once for end.
-        Before the fix, it was called 3 times (start + manual end + finally end)."""
+    async def test_start_sync_success_no_double_end_notification(self, sync_vm, mock_data_processor, snapshots):
+        """sync_in_progress must transition exactly twice on success: True at start, False in finally.
+        Before the fix, it was 3 transitions (start + manual end + finally end)."""
         sync_vm.current_step = 5
         sync_vm.next_step = AsyncMock()
         with patch("ui.viewmodels.onboarding_view_model.asyncio.sleep", new_callable=AsyncMock):
             await sync_vm.start_sync(quick=True)
-        # 2 calls: sync_in_progress=True at start, sync_in_progress=False in finally
-        assert sync_vm.on_sync_state_changed.call_count == 2
+        # 2 transitions: False→True at start, True→False in finally
+        transitions = _count_transitions(snapshots, lambda s: s.sync_in_progress, initial=False)
+        assert transitions == 2
 
-    async def test_start_sync_cancelled_result(self, sync_vm, mock_data_processor):
+    async def test_start_sync_cancelled_result(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.initialize_system = AsyncMock(return_value=False)
         sync_vm.next_step = AsyncMock()
         await sync_vm.start_sync(quick=True)
         sync_vm.next_step.assert_not_awaited()
-        sync_vm.on_sync_progress.assert_any_call(0, "wizard_status_cancelled")
+        assert any(
+            s.sync_progress == 0.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_cancelled"
+            for s in snapshots
+        )
 
-    async def test_start_sync_exception(self, sync_vm, mock_data_processor):
+    async def test_start_sync_exception(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.initialize_system = AsyncMock(side_effect=RuntimeError("sync failed"))
         with (
             patch(
                 "ui.viewmodels.onboarding_view_model.classify_error",
-                return_value={"type": "general"},
-            ),
-            patch(
-                "ui.viewmodels.onboarding_view_model.get_error_message",
-                return_value="Error occurred",
+                return_value={"message_key": "common_err_unknown", "format_args": {}},
             ),
         ):
             await sync_vm.start_sync(quick=True)
         assert sync_vm.sync_in_progress is False
-        sync_vm.on_sync_state_changed.assert_any_call()
+        # sync_in_progress transitioned to True at start, then to False in finally
+        assert any(s.sync_in_progress is True for s in snapshots)
 
-    async def test_start_sync_progress_callback(self, sync_vm, mock_data_processor):
+    async def test_start_sync_progress_callback(self, sync_vm, mock_data_processor, snapshots):
         await sync_vm.start_sync(quick=True)
         call_kwargs = mock_data_processor.initialize_system.call_args[1]
         assert "progress_callback" in call_kwargs
         cb = call_kwargs["progress_callback"]
         cb(75, 100, "Three quarters")
-        sync_vm.on_sync_progress.assert_any_call(0.75, "Three quarters")
+        assert any(
+            s.sync_progress == 0.75
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "Three quarters"
+            for s in snapshots
+        )
 
     async def test_cancel_sync(self, sync_vm, mock_data_processor):
         await sync_vm.cancel_sync()
@@ -439,21 +498,32 @@ class TestOnboardingVMSync:
         await sync_vm.cancel_sync()
         assert sync_vm.sync_in_progress is False
 
-    async def test_cancel_sync_exception(self, sync_vm, mock_data_processor):
+    async def test_cancel_sync_exception(self, sync_vm, mock_data_processor, snapshots):
         mock_data_processor.stop = AsyncMock(side_effect=RuntimeError("stop failed"))
         await sync_vm.cancel_sync()
         assert sync_vm.sync_in_progress is False
-        sync_vm.on_sync_state_changed.assert_any_call()
+        # cancel_sync 在 finally 中调用 _set_state(sync_in_progress=False),产生 snapshot
+        assert len(snapshots) >= 1
 
-    async def test_skip_sync(self, sync_vm):
+    async def test_skip_sync(self, sync_vm, snapshots):
         sync_vm.next_step = AsyncMock()
         await sync_vm.skip_sync()
-        sync_vm.on_sync_progress.assert_any_call(0, "wizard_status_skip")
+        assert any(
+            s.sync_progress == 0.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_skip"
+            for s in snapshots
+        )
         sync_vm.next_step.assert_awaited_once()
 
-    async def test_start_sync_quick_check_progress_init(self, sync_vm):
+    async def test_start_sync_quick_check_progress_init(self, sync_vm, snapshots):
         await sync_vm.start_sync(quick=True)
-        sync_vm.on_sync_progress.assert_any_call(0, "wizard_status_init")
+        assert any(
+            s.sync_progress == 0.0
+            and s.sync_progress_message is not None
+            and s.sync_progress_message.key == "wizard_status_init"
+            for s in snapshots
+        )
 
 
 # =====================================================================
@@ -509,15 +579,21 @@ class TestOnboardingVMServiceDelegation:
 
 
 class TestOnboardingVMValidationState:
-    async def test_set_validation_in_progress_notifies(self, bound_vm):
+    async def test_set_validation_in_progress_notifies(self, bound_vm, snapshots):
         bound_vm._set_validation_in_progress(True)
         assert bound_vm.validation_in_progress is True
-        bound_vm.on_validation_state_changed.assert_called_once()
+        # validation_in_progress transitioned from False to True (1 transition)
+        transitions = _count_transitions(snapshots, lambda s: s.validation_in_progress, initial=False)
+        assert transitions == 1
+        assert snapshots[-1].validation_in_progress is True
 
-    async def test_clear_validation_in_progress_notifies(self, bound_vm):
+    async def test_clear_validation_in_progress_notifies(self, bound_vm, snapshots):
         bound_vm._set_validation_in_progress(False)
         assert bound_vm.validation_in_progress is False
-        bound_vm.on_validation_state_changed.assert_called_once()
+        # _set_state fires _notify even when value is unchanged (False→False, no transition)
+        # 但订阅者仍然收到通知
+        assert len(snapshots) == 1
+        assert snapshots[-1].validation_in_progress is False
 
 
 # =====================================================================
@@ -667,423 +743,3 @@ class TestOnboardingWizardModuleContract:
             "set_onboarding_complete should NOT be called in onboarding_wizard.py - "
             "it should only be called in main.py after service initialization"
         )
-
-
-# =====================================================================
-# Test: OnboardingWizard View (merged from test_onboarding_wizard.py)
-# =====================================================================
-
-
-class _OnboardingWizardBase:
-    """OnboardingWizard View 测试基类，提供统一的 mock fixture 和工厂方法。"""
-
-    patches: list
-
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n, mock_app_colors, mock_app_styles):
-        self.mock_i18n = mock_i18n
-        self.mock_ac = mock_app_colors
-        self.mock_as = mock_app_styles
-        self.mock_ch = MagicMock()
-        # ThreadPoolManager mock: run_async 直接同步调用 func 并返回结果，
-        # 避免 _do_language_change_wizard_async 等协程测试依赖真实线程池。
-        self.mock_tpm = MagicMock()
-        self.mock_tpm.return_value.run_async = AsyncMock(
-            side_effect=lambda task_type, func, *args, **kwargs: func(*args, **kwargs)
-        )
-        self.patches = [
-            patch("ui.views.onboarding_wizard.I18n", self.mock_i18n),
-            patch("ui.views.onboarding_wizard.AppColors", self.mock_ac),
-            patch("ui.views.onboarding_wizard.AppStyles", self.mock_as),
-            patch("ui.views.onboarding_wizard.ConfigHandler", self.mock_ch),
-            patch("ui.views.onboarding_wizard.ThreadPoolManager", self.mock_tpm),
-            patch("ui.viewmodels.onboarding_view_model.DataProcessor"),
-            patch("ui.views.onboarding_wizard.DatabaseConfigPanel", MagicMock()),
-            patch("ui.views.onboarding_wizard.TushareConfigPanel", MagicMock()),
-            patch("ui.views.onboarding_wizard.LLMConfigPanel", MagicMock()),
-            patch("ui.views.onboarding_wizard.LocalModelConfigPanel", MagicMock()),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
-
-    def _make_wizard(self, mock_page, on_complete=None):
-        from ui.views.onboarding_wizard import OnboardingWizard
-
-        return OnboardingWizard(mock_page, on_complete=on_complete)
-
-
-class TestOnboardingWizardNavigation(_OnboardingWizardBase):
-    """OnboardingWizard View 导航行为测试。"""
-
-    def test_initial_step_is_zero(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        assert wizard.vm.current_step == 0
-
-    async def test_next_step_advances(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard._update_wizard = MagicMock()
-        await wizard._next_step()
-        assert wizard.vm.current_step == 1
-
-    async def test_next_step_blocks_on_validation_failure(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 1
-        wizard.vm.validate_and_persist_current_step = AsyncMock(return_value=False)
-        await wizard._next_step()
-        assert wizard.vm.current_step == 1
-
-    async def test_prev_step_does_not_go_below_zero(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 0
-        await wizard._prev_step()
-        assert wizard.vm.current_step == 0
-
-
-class TestOnboardingWizardRendering(_OnboardingWizardBase):
-    """OnboardingWizard View 渲染行为测试。"""
-
-    def test_update_wizard_updates_step_container(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 1
-        wizard._update_wizard()
-        assert wizard.step_container.content == wizard.steps_content[1]
-
-    def test_update_wizard_shows_indicators_for_config_steps(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 3
-        wizard._update_wizard()
-        assert wizard.step_indicators.visible is True
-
-    def test_update_wizard_hides_indicators_for_welcome(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 0
-        wizard._update_wizard()
-        assert wizard.step_indicators.visible is False
-
-    def test_update_wizard_hides_indicators_for_complete(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 7
-        wizard._update_wizard()
-        assert wizard.step_indicators.visible is False
-
-    def test_update_wizard_shows_header_for_welcome(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 0
-        wizard._update_wizard()
-        assert wizard.header_container.visible is True
-
-    def test_update_wizard_shows_header_for_complete(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 7
-        wizard._update_wizard()
-        assert wizard.header_container.visible is True
-
-    def test_update_wizard_hides_header_for_config_steps(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 3
-        wizard._update_wizard()
-        assert wizard.header_container.visible is False
-
-    def test_on_vm_step_changed_triggers_update_wizard(self, mock_page):
-        """VM 步骤变更回调触发 View 更新"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.current_step = 3
-        wizard._update_wizard = MagicMock()
-        wizard._on_vm_step_changed()
-        wizard._update_wizard.assert_called_once()
-
-
-class TestOnboardingWizardI18n(_OnboardingWizardBase):
-    """OnboardingWizard View 国际化行为测试。"""
-
-    def test_on_locale_change_updates_header_title(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        original_title = wizard.header_title
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_title" else key
-        wizard._on_locale_change()
-        assert original_title.value == "en_wizard_welcome_title"
-        assert wizard.header_title is original_title
-
-    def test_on_locale_change_updates_header_desc(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        original_desc = wizard.header_desc
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: (
-            f"en_{key}" if key == "wizard_welcome_desc_with_time" else key
-        )
-        wizard._on_locale_change()
-        assert original_desc.value == "en_wizard_welcome_desc_with_time"
-        assert wizard.header_desc is original_desc
-
-    def test_on_locale_change_updates_gradient_guide_text(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        original_text = wizard.gradient_guide_text
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_welcome_guide" else key
-        wizard._on_locale_change()
-        # _on_locale_change 先更新 original_text.value，再调用 _rebuild_steps_after_locale_change 重建
-        # 重建会创建新的 gradient_guide_text 对象，但 original_text.value 已被更新
-        assert original_text.value == "en_wizard_welcome_guide"
-        # 重建后的新引用也应具有正确的 value
-        assert wizard.gradient_guide_text.value == "en_wizard_welcome_guide"
-
-    def test_on_locale_change_preserves_dropdown_value(self, mock_page):
-        """§5.8 规范 4：_on_locale_change 重建 options 后 value 必须保留。"""
-        self.mock_i18n.current_locale.return_value = "zh_CN"
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.wizard_language_dropdown.value = "zh_CN"
-        original_value = wizard.wizard_language_dropdown.value
-        wizard._on_locale_change()
-        assert wizard.wizard_language_dropdown.value == original_value
-        assert wizard.wizard_language_dropdown.options is not None
-        assert len(wizard.wizard_language_dropdown.options) > 0
-
-    def test_on_locale_change_updates_btn_sync_later_text(self, mock_page):
-        """§5.8 规范 3：_on_locale_change 必须更新 btn_sync_later.text（避免重建步骤时丢失翻译）"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        original_btn = wizard.btn_sync_later
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if key == "wizard_btn_sync_later" else key
-        wizard._on_locale_change()
-        assert original_btn.content == "en_wizard_btn_sync_later"
-        assert wizard.btn_sync_later is original_btn
-
-    def test_header_title_is_in_ui_tree(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        header_column = wizard.header_container
-        assert wizard.header_title in header_column.controls
-        assert wizard.header_desc in header_column.controls
-
-    async def test_on_language_change_wizard_preserves_header_reference(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        original_header_container = wizard.header_container
-        original_header_title = wizard.header_title
-        original_header_desc = wizard.header_desc
-        wizard.wizard_language_dropdown = MagicMock()
-        wizard.wizard_language_dropdown.value = "en_US"
-        await wizard._do_language_change_wizard_async()
-        assert wizard.header_container is original_header_container
-        assert wizard.header_title is original_header_title
-        assert wizard.header_desc is original_header_desc
-
-    async def test_on_language_change_wizard_updates_header_title_directly(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        original_title = wizard.header_title
-        original_desc = wizard.header_desc
-        self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"en_{key}" if "welcome" in key else key
-        # 模拟 I18n.set_locale 触发回调（mock_i18n.set_locale 不会自动触发）
-        self.mock_i18n.set_locale.side_effect = lambda locale: wizard._on_locale_change()
-        wizard.wizard_language_dropdown = MagicMock()
-        wizard.wizard_language_dropdown.value = "en_US"
-        await wizard._do_language_change_wizard_async()
-        assert original_title.value == "en_wizard_welcome_title"
-        assert original_desc.value == "en_wizard_welcome_desc_with_time"
-        assert wizard.header_title is original_title
-        self.mock_ch.set_locale.assert_called_with("en_US")
-
-    async def test_on_language_change_wizard_updates_locale_configuration(self, mock_page):
-        import flet as ft
-
-        mock_page.locale_configuration = MagicMock()
-        mock_page.locale_configuration.current_locale = ft.Locale("zh", "CN")
-        mock_page.update = MagicMock()
-
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.wizard_language_dropdown = MagicMock()
-        wizard.wizard_language_dropdown.value = "en_US"
-        self.mock_i18n.current_locale.return_value = "en_US"
-        await wizard._do_language_change_wizard_async()
-
-        assert mock_page.locale_configuration.current_locale.language_code == "en"
-        assert mock_page.locale_configuration.current_locale.country_code == "US"
-        mock_page.update.assert_called()
-
-    async def test_on_language_change_wizard_persist_failure_skips_i18n_set(self, mock_page):
-        """ConfigHandler.set_locale 返回 False 时，不切换 I18n，回滚 dropdown。"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard._safe_update = MagicMock()
-        self.mock_ch.set_locale.return_value = False
-        self.mock_i18n.current_locale.return_value = "zh_CN"
-        wizard.wizard_language_dropdown = MagicMock()
-        wizard.wizard_language_dropdown.value = "en_US"
-
-        await wizard._do_language_change_wizard_async()
-
-        self.mock_i18n.set_locale.assert_not_called()
-        assert wizard.wizard_language_dropdown.value == "zh_CN"
-
-    async def test_language_change_rebinds_panel_callbacks(self, mock_page):
-        """语言切换后 VM 回调指向新面板"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.wizard_language_dropdown = MagicMock()
-        wizard.wizard_language_dropdown.value = "en_US"
-        await wizard._do_language_change_wizard_async()
-        # 验证回调已更新为新面板的方法
-        assert wizard.vm.fn_validate_database is not None
-        assert wizard.vm.fn_validate_database is wizard.database_panel.save_config
-        assert wizard.vm.fn_validate_token is wizard.tushare_panel.verify_token
-
-
-class TestOnboardingWizardLifecycle(_OnboardingWizardBase):
-    """OnboardingWizard View 生命周期行为测试。"""
-
-    def test_on_mount_subscribes_i18n(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        wizard._on_mount()
-        self.mock_i18n.subscribe.assert_called_once()
-        assert wizard._locale_subscription_id == "sub_id"
-
-    def test_on_unmount_unsubscribes_i18n(self, mock_page):
-        wizard = self._make_wizard(mock_page)
-        wizard._locale_subscription_id = "sub_id"
-        wizard._on_unmount()
-        self.mock_i18n.unsubscribe.assert_called_once_with("sub_id")
-        assert wizard._locale_subscription_id is None
-
-    async def test_cleanup_vm_cancels_sync_and_disposes(self, mock_page):
-        """卸载时取消进行中的同步并清理 VM"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.sync_in_progress = True
-        wizard.vm.cancel_sync = AsyncMock()
-        wizard.vm.dispose = MagicMock()
-        await wizard._cleanup_vm()
-        wizard.vm.cancel_sync.assert_awaited_once()
-        wizard.vm.dispose.assert_called_once()
-
-    async def test_cleanup_vm_disposes_without_sync(self, mock_page):
-        """卸载时无进行中同步，直接清理 VM"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.sync_in_progress = False
-        wizard.vm.cancel_sync = AsyncMock()
-        wizard.vm.dispose = MagicMock()
-        await wizard._cleanup_vm()
-        wizard.vm.cancel_sync.assert_not_awaited()
-        wizard.vm.dispose.assert_called_once()
-
-
-class TestOnboardingWizardLoading(_OnboardingWizardBase):
-    """OnboardingWizard View 加载遮罩行为测试。"""
-
-    def test_on_panel_loading_change_shows_overlay_when_loading(self, mock_page):
-        """面板加载中 → 遮罩显示"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard._on_panel_loading_change(True)
-        assert wizard.loading_overlay.visible is True
-
-    def test_on_panel_loading_change_hides_overlay_when_not_loading_and_not_validating(self, mock_page):
-        """面板加载完成 + VM 校验完成 → 遮罩隐藏"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard.vm.validation_in_progress = False
-        wizard._on_panel_loading_change(False)
-        assert wizard.loading_overlay.visible is False
-
-    def test_on_panel_loading_change_keeps_overlay_when_validating(self, mock_page):
-        """面板加载完成但 VM 校验中 → 遮罩保持显示"""
-        wizard = self._make_wizard(mock_page)
-        set_page(wizard, mock_page)
-        wizard._show_loading_overlay(True)
-        wizard.vm.validation_in_progress = True
-        wizard._on_panel_loading_change(False)
-        assert wizard.loading_overlay.visible is True
-
-
-class TestOnboardingWizardLocaleRebuild(_OnboardingWizardBase):
-    """OnboardingWizard 语言切换重建行为测试（§5.8 规范 3/6）。"""
-
-    def test_rebuild_cascades_panel_locale_refresh(self, mock_page):
-        """§5.8 规范 6：语言切换后级联调用子面板 locale 刷新方法（不重建子面板，避免 keyring IO）"""
-        wizard = self._make_wizard(mock_page)
-        panels_and_methods = [
-            (wizard.database_panel, "_on_locale_change"),
-            (wizard.tushare_panel, "refresh_locale"),
-            (wizard.llm_config_panel, "_on_locale_change"),
-            (wizard.local_model_panel, "_on_locale_change"),
-        ]
-        for panel, method_name in panels_and_methods:
-            setattr(panel, method_name, MagicMock())
-
-        wizard._rebuild_steps_after_locale_change()
-
-        for panel, method_name in panels_and_methods:
-            getattr(panel, method_name).assert_called_once()
-
-    def test_rebuild_does_not_recreate_panels(self, mock_page):
-        """§5.8 规范 3 纯 UI：语言切换后子面板实例必须保持不变（构造函数会触发 keyring IO）"""
-        wizard = self._make_wizard(mock_page)
-        original_panels = {
-            "database_panel": wizard.database_panel,
-            "tushare_panel": wizard.tushare_panel,
-            "llm_config_panel": wizard.llm_config_panel,
-            "local_model_panel": wizard.local_model_panel,
-        }
-
-        wizard._rebuild_steps_after_locale_change()
-
-        for attr, original_panel in original_panels.items():
-            assert getattr(wizard, attr) is original_panel
-
-    def test_rebuild_preserves_schedule_values(self, mock_page):
-        """§5.8 规范 3：重建后必须保留 schedule_enabled.value 和 schedule_time.value"""
-        wizard = self._make_wizard(mock_page)
-        # 模拟用户在 schedule 控件上的未保存输入
-        wizard.schedule_enabled.value = False
-        wizard.schedule_time.value = "09:00"
-
-        wizard._rebuild_steps_after_locale_change()
-
-        assert wizard.schedule_enabled.value is False
-        assert wizard.schedule_time.value == "09:00"
-
-
-class TestOnboardingWizardResponsiveRowCol(_OnboardingWizardBase):
-    """v4.3 §6 响应式栅格：卡片墙 ResponsiveRow 子元素必须指定 col 参数。"""
-
-    def _find_responsive_rows(self, control):
-        """递归收集控件树中所有 ft.ResponsiveRow。"""
-        rows: list[ft.ResponsiveRow] = []
-        if not isinstance(control, ft.Control):
-            return rows
-        if isinstance(control, ft.ResponsiveRow):
-            rows.append(control)
-        controls = getattr(control, "controls", None)
-        if isinstance(controls, list):
-            for child in controls:
-                rows.extend(self._find_responsive_rows(child))
-        content = getattr(control, "content", None)
-        if isinstance(content, ft.Control):
-            rows.extend(self._find_responsive_rows(content))
-        return rows
-
-    def test_overview_cards_responsive_row_children_have_col(self, mock_page):
-        """overview_cards 卡片墙 ResponsiveRow 子元素必须有非 None 的 col。"""
-        wizard = self._make_wizard(mock_page)
-        rows = self._find_responsive_rows(wizard)
-        assert len(rows) >= 1, "OnboardingWizard 应至少有一个 ResponsiveRow (overview cards)"
-        for row in rows:
-            assert len(row.controls) > 0, "ResponsiveRow 不应为空"
-            for child in row.controls:
-                assert child.col is not None, f"ResponsiveRow 子元素 {type(child).__name__} 缺失 col 配置"

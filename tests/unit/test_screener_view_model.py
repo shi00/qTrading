@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from ui.components.virtual_table import PaginatedTable
+from ui.components.virtual_table import next_sort_state
 from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
 
 pytestmark = pytest.mark.unit
@@ -34,19 +34,19 @@ class TestScreenerViewModelInit:
     def test_initial_state(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
         assert vm._full_results is None
-        assert vm.page_no == 1
-        assert vm.page_size == 50
-        assert vm.total_pages == 0
-        assert vm.total_items == 0
-        assert vm.sort_column is None
-        assert vm.sort_ascending is True
+        assert vm.state.page_no == 1
+        assert vm.state.page_size == 50
+        assert vm.state.total_pages == 0
+        assert vm.state.total_items == 0
+        assert vm.state.sort_column is None
+        assert vm.state.sort_ascending is True
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_initial_mode_realtime(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
-        assert vm.mode == "REALTIME"
+        assert vm.state.mode == "REALTIME"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
@@ -58,29 +58,15 @@ class TestScreenerViewModelInit:
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
-    def test_callbacks_none(self, mock_dp, mock_sm, mock_rm):
+    def test_state_defaults(self, mock_dp, mock_sm, mock_rm):
+        """VM 不再有回调属性；state 字段覆盖原回调承载的 UI 状态。"""
         vm = ScreenerViewModel()
-        assert vm.on_update is None
-        assert vm.on_log is None
-        assert vm.on_status is None
-        assert vm.on_progress is None
-
-
-class TestScreenerViewModelBind:
-    @patch("ui.viewmodels.screener_view_model.ReviewManager")
-    @patch("ui.viewmodels.screener_view_model.StrategyManager")
-    @patch("ui.viewmodels.screener_view_model.DataProcessor")
-    def test_bind_sets_callbacks(self, mock_dp, mock_sm, mock_rm):
-        vm = ScreenerViewModel()
-        cb_update = MagicMock()
-        cb_log = MagicMock()
-        cb_status = MagicMock()
-        cb_progress = MagicMock()
-        vm.bind(cb_update, cb_log, cb_status, cb_progress)
-        assert vm.on_update is cb_update
-        assert vm.on_log is cb_log
-        assert vm.on_status is cb_status
-        assert vm.on_progress is cb_progress
+        assert vm.state.loading is False
+        assert vm.state.status_message is None
+        assert vm.state.status_color == ""
+        assert vm.state.logs == ()
+        assert vm.state.task_unlocked is False
+        assert vm.state.data_version == 0
 
 
 class TestScreenerViewModelSortState:
@@ -89,14 +75,14 @@ class TestScreenerViewModelSortState:
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_sort_column_default_none(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
-        assert vm.sort_column is None
+        assert vm.state.sort_column is None
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_sort_ascending_default_true(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
-        assert vm.sort_ascending is True
+        assert vm.state.sort_ascending is True
 
 
 class TestScreenerViewModelAiUpdateInterval:
@@ -116,14 +102,13 @@ class TestSortDirectionConsistency:
     async def test_sort_data_accepts_ascending_param(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
         vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
-        vm.sort_column = "A"
-        vm.sort_ascending = True
+        vm._set_state(sort_column="A", sort_ascending=True)
 
         with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("A", ascending=False)
 
-        assert vm.sort_ascending is False
+        assert vm.state.sort_ascending is False
 
     @pytest.mark.asyncio
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -132,14 +117,13 @@ class TestSortDirectionConsistency:
     async def test_sort_data_ascending_default_toggles(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
         vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
-        vm.sort_column = "A"
-        vm.sort_ascending = True
+        vm._set_state(sort_column="A", sort_ascending=True)
 
         with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("A")
 
-        assert vm.sort_ascending is False
+        assert vm.state.sort_ascending is False
 
     @pytest.mark.asyncio
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
@@ -148,46 +132,44 @@ class TestSortDirectionConsistency:
     async def test_vm_new_column_defaults_ascending(self, mock_dp, mock_sm, mock_rm):
         vm = ScreenerViewModel()
         vm._full_results = pd.DataFrame({"A": [3, 1, 2], "B": [1, 2, 3]})
-        vm.sort_column = "A"
-        vm.sort_ascending = False
+        vm._set_state(sort_column="A", sort_ascending=False)
 
         with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tpm:
             mock_tpm.return_value.run_async = AsyncMock(side_effect=lambda t, f, *a, **k: f(*a, **k))
             await vm.sort_data("B")
 
-        assert vm.sort_ascending is True
+        assert vm.state.sort_ascending is True
 
     def test_paginated_table_new_column_defaults_ascending(self):
-        table = PaginatedTable()
-        table.sort_col = "A"
-        table.sort_asc = False
-
-        table._handle_sort_click("B")
-
-        assert table.sort_asc is True
+        # PaginatedTable 已声明式重写 (Phase B.3), 排序逻辑抽为纯函数 next_sort_state
+        new_col, new_asc = next_sort_state("A", False, "B")
+        assert new_col == "B"
+        assert new_asc is True
 
 
 class TestScreenerViewModelDispose:
-    def test_dispose_clears_large_references_and_callbacks(self, vm):
-        vm.on_update = MagicMock()
-        vm.on_log = MagicMock()
-        vm.on_status = MagicMock()
-        vm.on_progress = MagicMock()
-        vm.on_log_stream_start = MagicMock()
+    def test_dispose_clears_large_references_and_state(self, vm):
         vm._full_results = pd.DataFrame({"ts_code": ["000001.SZ"]})
         vm._ai_buffer = [{"ts_code": "000001.SZ"}]
         vm._realtime_snapshot = {"ts_code": "000001.SZ"}
 
         vm.dispose()
 
-        assert vm.on_update is None
-        assert vm.on_log is None
-        assert vm.on_status is None
-        assert vm.on_progress is None
-        assert vm.on_log_stream_start is None
         assert vm._full_results is None
         assert vm._ai_buffer == []
         assert vm._realtime_snapshot is None
+        # State reset to defaults
+        assert vm.state.loading is False
+        assert vm.state.page_no == 1
+        assert vm.state.mode == "REALTIME"
+        assert vm.state.logs == ()
+
+    def test_dispose_clears_stream_buffers(self, vm):
+        """P1-3: dispose 必须清空 _stream_buffers 防止资源泄漏。"""
+        vm.start_stream_card("stock_1")
+        assert len(vm._stream_buffers) == 1
+        vm.dispose()
+        assert len(vm._stream_buffers) == 0
 
 
 class TestScreenerViewModelPagination:
@@ -196,24 +178,22 @@ class TestScreenerViewModelPagination:
         vm._full_results = df
         vm._update_pagination()
 
-        assert vm.total_items == 100
-        assert vm.total_pages == 2
+        assert vm.state.total_items == 100
+        assert vm.state.total_pages == 2
 
-        assert vm.page_no == 1
+        assert vm.state.page_no == 1
         page_data = vm.get_current_page_data()
         assert len(page_data) == 50
         assert page_data.iloc[0]["A"] == 0
 
         vm.change_page(1)
-        assert vm.page_no == 2
-        vm._update_pagination()
+        assert vm.state.page_no == 2
         page_data = vm.get_current_page_data()
         assert len(page_data) == 50
         assert page_data.iloc[0]["A"] == 50
 
         vm.change_page(1)
-        vm._update_pagination()
-        assert vm.page_no == 2
+        assert vm.state.page_no == 2  # already at last page
 
 
 class TestScreenerViewModelSorting:
@@ -223,20 +203,18 @@ class TestScreenerViewModelSorting:
         vm._full_results = df
 
         await vm.sort_data("A")
-        assert vm.sort_column == "A"
-        assert vm.sort_ascending
+        assert vm.state.sort_column == "A"
+        assert vm.state.sort_ascending
         assert vm._full_results.iloc[0]["A"] == 1
 
         await vm.sort_data("A")
-        assert not vm.sort_ascending
+        assert not vm.state.sort_ascending
         assert vm._full_results.iloc[0]["A"] == 3
 
 
 class TestScreenerViewModelAIStreaming:
     @pytest.mark.asyncio
     async def test_ai_streaming_buffer(self, vm):
-        vm.on_update = MagicMock()
-        vm.on_log = MagicMock()
         vm._full_results = pd.DataFrame(columns=["name", "ai_score"])
         vm._main_loop = asyncio.get_running_loop()
 
@@ -247,7 +225,10 @@ class TestScreenerViewModelAIStreaming:
         vm._on_ai_result_stream(row2)
 
         assert len(vm._ai_buffer) == 2
-        assert vm.on_log.call_count == 2
+        # Logs appended to state (replaces on_log callback)
+        assert len(vm.state.logs) == 2
+        assert vm.state.logs[0].name == "S1"
+        assert vm.state.logs[1].name == "S2"
 
         await vm._flush_ai_buffer()
 
@@ -258,8 +239,6 @@ class TestScreenerViewModelAIStreaming:
     @pytest.mark.asyncio
     async def test_flush_ai_buffer_missing_ai_reason_column(self, vm):
         """AI 结果只返回 ai_score 而无 ai_reason 时，flush 不应抛 KeyError，并补齐空 ai_reason 列。"""
-        vm.on_update = MagicMock()
-        vm.on_log = MagicMock()
         vm._full_results = pd.DataFrame(columns=["name", "ai_score"])
         vm._main_loop = asyncio.get_running_loop()
 
@@ -270,14 +249,11 @@ class TestScreenerViewModelAIStreaming:
         assert "ai_reason" in vm._full_results.columns
         assert len(vm._full_results) == 1
         assert vm._full_results.iloc[0]["ai_reason"] == ""
-        # ai_score 仍被正确置顶排序
         assert vm._full_results.iloc[0]["ai_score"] == 90
 
     @pytest.mark.asyncio
     async def test_flush_ai_buffer_with_both_ai_columns(self, vm):
         """ai_score 与 ai_reason 同时存在时，flush 正常工作且保留 ai_reason 原值。"""
-        vm.on_update = MagicMock()
-        vm.on_log = MagicMock()
         vm._full_results = pd.DataFrame(columns=["name", "ai_score", "ai_reason"])
         vm._main_loop = asyncio.get_running_loop()
 
@@ -287,7 +263,6 @@ class TestScreenerViewModelAIStreaming:
         await vm._flush_ai_buffer()
 
         assert len(vm._full_results) == 2
-        # 按 ai_score 降序，S1 在前
         assert vm._full_results.iloc[0]["name"] == "S1"
         assert vm._full_results.iloc[0]["ai_reason"] == "good"
         assert vm._full_results.iloc[1]["ai_reason"] == "ok"
@@ -435,6 +410,7 @@ class TestScreenerViewModelRunStrategy:
 
     @pytest.mark.asyncio
     async def test_run_strategy_reports_degraded_context_status(self, vm):
+        """策略降级运行时，state 中间快照应包含 orange 降级状态。"""
         result_df = pd.DataFrame(
             {
                 "ts_code": ["000001.SZ"],
@@ -462,7 +438,11 @@ class TestScreenerViewModelRunStrategy:
                 },
             }
         )
-        vm.on_status = MagicMock()
+
+        # Subscribe to capture intermediate state snapshots (degraded status is
+        # overwritten by success status after strategy completes).
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
 
         submitted_coro = []
 
@@ -484,12 +464,14 @@ class TestScreenerViewModelRunStrategy:
 
         assert len(submitted_coro) == 1
         await submitted_coro[0]
-        status_calls = vm.on_status.call_args_list
-        assert any(("策略降级运行" in (args[0] if args else "") and args[1] == "orange") for args, _ in status_calls)
+
+        # At some point, degraded status (orange) was set
+        degraded = [s for s in snapshots if s.status_color == "orange" and s.status_message]
+        assert len(degraded) >= 1
 
     @pytest.mark.asyncio
     async def test_run_strategy_failure_reverts_loading_and_shows_error(self, vm):
-        """策略执行失败时，is_loading 恢复为 False 并通过 on_status 显示错误 i18n key。"""
+        """策略执行失败时，state.loading 恢复为 False 且 status_color 为 red。"""
         mock_strategy = MagicMock()
         mock_strategy.name = "test_strategy"
         mock_strategy.name_key = "test_strategy_name"
@@ -502,11 +484,6 @@ class TestScreenerViewModelRunStrategy:
                 "trade_date": datetime.date(2024, 12, 31),
             }
         )
-
-        on_progress = MagicMock()
-        on_status = MagicMock()
-        vm.on_progress = on_progress
-        vm.on_status = on_status
 
         submitted_coro = []
 
@@ -530,18 +507,13 @@ class TestScreenerViewModelRunStrategy:
         with pytest.raises(RuntimeError, match="Strategy execution crashed"):
             await submitted_coro[0]
 
-        # Verify is_loading reverts: on_progress called with False
-        on_progress.assert_any_call(False)
-        # Verify on_status called with error i18n key (screener_exec_error) and red color
-        error_status_calls = [args for args, _ in on_status.call_args_list if len(args) >= 2 and args[1] == "red"]
-        assert len(error_status_calls) >= 1
-        # The error message should contain the i18n key content for screener_exec_error
-        error_msg = error_status_calls[-1][0]
-        assert "screener_exec_error" in error_msg or "执行中出错" in error_msg or "Execution Error" in error_msg
+        # Final state: loading reverted, error status set
+        assert vm.state.loading is False
+        assert vm.state.status_color == "red"
 
     @pytest.mark.asyncio
     async def test_run_strategy_cancellation_cleans_up_state(self, vm):
-        """策略执行取消时，状态正确清理。"""
+        """策略执行取消时，state.loading 恢复为 False 且 status_color 为 orange。"""
         mock_strategy = MagicMock()
         mock_strategy.name = "test_strategy"
         mock_strategy.name_key = "test_strategy_name"
@@ -554,11 +526,6 @@ class TestScreenerViewModelRunStrategy:
                 "trade_date": datetime.date(2024, 12, 31),
             }
         )
-
-        on_progress = MagicMock()
-        on_status = MagicMock()
-        vm.on_progress = on_progress
-        vm.on_status = on_status
 
         submitted_coro = []
 
@@ -582,13 +549,9 @@ class TestScreenerViewModelRunStrategy:
         with pytest.raises(asyncio.CancelledError):
             await submitted_coro[0]
 
-        # Verify is_loading reverts: on_progress called with False
-        on_progress.assert_any_call(False)
-        # Verify on_status called with cancellation i18n key (screener_cancelled) and orange color
-        cancel_status_calls = [args for args, _ in on_status.call_args_list if len(args) >= 2 and args[1] == "orange"]
-        assert len(cancel_status_calls) >= 1
-        cancel_msg = cancel_status_calls[-1][0]
-        assert "screener_cancelled" in cancel_msg or "取消" in cancel_msg or "cancelled" in cancel_msg.lower()
+        # Final state: loading reverted, cancellation status set
+        assert vm.state.loading is False
+        assert vm.state.status_color == "orange"
 
 
 class TestSortHelper:
@@ -612,30 +575,29 @@ class TestUpdatePagination:
     def test_calculates_total_items(self, vm):
         vm._full_results = pd.DataFrame({"A": range(75)})
         vm._update_pagination()
-        assert vm.total_items == 75
+        assert vm.state.total_items == 75
 
     def test_calculates_total_pages(self, vm):
         vm._full_results = pd.DataFrame({"A": range(75)})
         vm._update_pagination()
-        assert vm.total_pages == 2
+        assert vm.state.total_pages == 2
 
     def test_exact_page_boundary(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        assert vm.total_pages == 2
+        assert vm.state.total_pages == 2
 
     def test_none_results(self, vm):
         vm._full_results = None
         vm._update_pagination()
-        assert vm.total_items == 0
-        assert vm.total_pages == 0
+        assert vm.state.total_items == 0
+        assert vm.state.total_pages == 0
 
 
 class TestGetCurrentPageData:
     def test_returns_sliced_dataframe(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
-        vm.page_no = 1
-        vm.page_size = 50
+        vm._set_state(page_no=1, page_size=50)
         vm._update_pagination()
         page = vm.get_current_page_data()
         assert len(page) == 50
@@ -643,8 +605,7 @@ class TestGetCurrentPageData:
 
     def test_second_page(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
-        vm.page_no = 2
-        vm.page_size = 50
+        vm._set_state(page_no=2, page_size=50)
         vm._update_pagination()
         page = vm.get_current_page_data()
         assert len(page) == 50
@@ -665,38 +626,43 @@ class TestChangePage:
     def test_increment_within_bounds(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.page_no = 1
+        vm._set_state(page_no=1)
         vm.change_page(1)
-        assert vm.page_no == 2
+        assert vm.state.page_no == 2
 
     def test_decrement_within_bounds(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.page_no = 2
+        vm._set_state(page_no=2)
         vm.change_page(-1)
-        assert vm.page_no == 1
+        assert vm.state.page_no == 1
 
     def test_does_not_go_below_one(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.page_no = 1
+        vm._set_state(page_no=1)
         vm.change_page(-1)
-        assert vm.page_no == 1
+        assert vm.state.page_no == 1
 
     def test_does_not_exceed_total_pages(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.page_no = 2
+        vm._set_state(page_no=2)
         vm.change_page(1)
-        assert vm.page_no == 2
+        assert vm.state.page_no == 2
 
-    def test_calls_on_update(self, vm):
+    def test_notifies_subscribers(self, vm):
+        """change_page 通过 _set_state 通知订阅者（替代原 on_update 回调）。"""
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.on_update = MagicMock()
-        vm.page_no = 1
+        vm._set_state(page_no=1)
+
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
         vm.change_page(1)
-        vm.on_update.assert_called_once()
+
+        assert len(snapshots) >= 1
+        assert snapshots[-1].page_no == 2
 
 
 class TestChangePageSize:
@@ -704,46 +670,49 @@ class TestChangePageSize:
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
         vm.change_page_size(25)
-        assert vm.page_size == 25
+        assert vm.state.page_size == 25
 
     def test_resets_to_page_one(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.page_no = 2
+        vm._set_state(page_no=2)
         vm.change_page_size(25)
-        assert vm.page_no == 1
+        assert vm.state.page_no == 1
 
     def test_ignores_non_positive(self, vm):
-        vm.page_size = 50
+        vm._set_state(page_size=50)
         vm.change_page_size(0)
-        assert vm.page_size == 50
+        assert vm.state.page_size == 50
 
     def test_ignores_negative(self, vm):
-        vm.page_size = 50
+        vm._set_state(page_size=50)
         vm.change_page_size(-10)
-        assert vm.page_size == 50
+        assert vm.state.page_size == 50
 
     def test_ignores_same_size(self, vm):
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.page_no = 2
+        vm._set_state(page_no=2)
         vm.change_page_size(50)
-        assert vm.page_no == 2
+        assert vm.state.page_no == 2
 
-    def test_calls_on_update(self, vm):
+    def test_notifies_subscribers(self, vm):
+        """change_page_size 通过 _notify 通知订阅者（替代原 on_update 回调）。"""
         vm._full_results = pd.DataFrame({"A": range(100)})
         vm._update_pagination()
-        vm.on_update = MagicMock()
+
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
         vm.change_page_size(25)
-        vm.on_update.assert_called_once()
+
+        assert len(snapshots) >= 1
+        assert snapshots[-1].page_size == 25
 
 
 class TestSwitchToHistory:
     def test_snapshots_state(self, vm):
         vm._full_results = pd.DataFrame({"A": [1, 2]})
-        vm.page_no = 3
-        vm.sort_column = "A"
-        vm.sort_ascending = False
+        vm._set_state(page_no=3, sort_column="A", sort_ascending=False)
         vm._ai_buffer = [{"x": 1}]
         vm.switch_to_history()
         assert vm._realtime_snapshot["page_no"] == 3
@@ -751,26 +720,40 @@ class TestSwitchToHistory:
         assert vm._realtime_snapshot["sort_ascending"] is False
         assert vm._realtime_snapshot["ai_buffer"] == [{"x": 1}]
 
+    def test_snapshots_stream_cards_and_buffers(self, vm):
+        """P1-3: switch_to_history 必须快照 stream_cards 和 stream_buffers。"""
+        vm.start_stream_card("stock_1")
+        vm.switch_to_history()
+        assert vm._realtime_snapshot["stream_cards"] != ()
+        assert len(vm._realtime_snapshot["stream_cards"]) == 1
+        assert vm._realtime_snapshot["stream_cards"][0].name == "stock_1"
+        assert len(vm._realtime_snapshot["stream_buffers"]) == 1
+
+    def test_clears_stream_cards_and_buffers_on_switch(self, vm):
+        """P1-3: switch_to_history 后 state.stream_cards 和 _stream_buffers 必须清空。"""
+        vm.start_stream_card("stock_1")
+        vm.switch_to_history()
+        assert vm.state.stream_cards == ()
+        assert len(vm._stream_buffers) == 0
+
     def test_clears_results(self, vm):
         vm._full_results = pd.DataFrame({"A": [1]})
         vm.switch_to_history()
         assert vm._full_results is None
 
     def test_resets_page_and_sort(self, vm):
-        vm.page_no = 5
-        vm.sort_column = "B"
-        vm.sort_ascending = False
+        vm._set_state(page_no=5, sort_column="B", sort_ascending=False)
         vm.switch_to_history()
-        assert vm.page_no == 1
-        assert vm.sort_column is None
-        assert vm.sort_ascending is True
+        assert vm.state.page_no == 1
+        assert vm.state.sort_column is None
+        assert vm.state.sort_ascending is True
 
     def test_changes_mode(self, vm):
         vm.switch_to_history()
-        assert vm.mode == "HISTORY"
+        assert vm.state.mode == "HISTORY"
 
     def test_noop_if_already_history(self, vm):
-        vm.mode = "HISTORY"
+        vm._set_state(mode="HISTORY")
         vm._full_results = pd.DataFrame({"A": [1]})
         vm.switch_to_history()
         assert vm._full_results is not None
@@ -779,15 +762,22 @@ class TestSwitchToHistory:
 class TestSwitchToRealtime:
     def test_restores_snapshot(self, vm):
         vm._full_results = pd.DataFrame({"A": [1, 2]})
-        vm.page_no = 3
-        vm.sort_column = "A"
-        vm.sort_ascending = False
+        vm._set_state(page_no=3, sort_column="A", sort_ascending=False)
         vm._ai_buffer = [{"x": 1}]
         vm.switch_to_history()
         vm.switch_to_realtime()
-        assert vm.page_no == 3
-        assert vm.sort_column == "A"
-        assert vm.sort_ascending is False
+        assert vm.state.page_no == 3
+        assert vm.state.sort_column == "A"
+        assert vm.state.sort_ascending is False
+
+    def test_restores_stream_cards_and_buffers(self, vm):
+        """P1-3: switch_to_realtime 必须恢复 stream_cards 和 _stream_buffers。"""
+        vm.start_stream_card("stock_1")
+        vm.switch_to_history()
+        vm.switch_to_realtime()
+        assert len(vm.state.stream_cards) == 1
+        assert vm.state.stream_cards[0].name == "stock_1"
+        assert len(vm._stream_buffers) == 1
 
     def test_clears_snapshot(self, vm):
         vm._full_results = pd.DataFrame({"A": [1]})
@@ -798,7 +788,7 @@ class TestSwitchToRealtime:
     def test_changes_mode(self, vm):
         vm.switch_to_history()
         vm.switch_to_realtime()
-        assert vm.mode == "REALTIME"
+        assert vm.state.mode == "REALTIME"
 
     def test_merges_discarded_buffer(self, vm):
         vm._full_results = pd.DataFrame({"A": [1]})
@@ -809,17 +799,24 @@ class TestSwitchToRealtime:
         assert {"y": 2} in vm._ai_buffer
 
     def test_noop_if_already_realtime(self, vm):
-        vm.mode = "REALTIME"
-        vm.on_update = MagicMock()
+        """REALTIME 模式下 switch_to_realtime 不通知订阅者。"""
+        vm._set_state(mode="REALTIME")
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
         vm.switch_to_realtime()
-        vm.on_update.assert_not_called()
+        assert len(snapshots) == 0
 
-    def test_calls_on_update(self, vm):
+    def test_notifies_subscribers(self, vm):
+        """从 HISTORY 切回 REALTIME 时通知订阅者（替代原 on_update 回调）。"""
         vm._full_results = pd.DataFrame({"A": [1]})
         vm.switch_to_history()
-        vm.on_update = MagicMock()
+
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
         vm.switch_to_realtime()
-        vm.on_update.assert_called_once()
+
+        assert len(snapshots) >= 1
+        assert snapshots[-1].mode == "REALTIME"
 
 
 class TestGetExportData:
@@ -868,55 +865,51 @@ class TestTaskManagerSubscription:
         mock_tm_cls.return_value.unsubscribe.assert_called_once_with(vm._on_tasks_updated)
 
     def test_on_tasks_updated_triggers_unlock_when_no_running_tasks(self, vm):
+        """策略任务完成时，state.task_unlocked 设为 True（替代原 on_task_unlock 回调）。"""
         vm._strategy_submitted = True
-        vm.on_task_unlock = MagicMock()
         vm._on_tasks_updated([])
-        vm.on_task_unlock.assert_called_once()
+        assert vm.state.task_unlocked is True
         assert vm._strategy_submitted is False
 
     def test_on_tasks_updated_no_unlock_when_tasks_running(self, vm):
         vm._strategy_submitted = True
-        vm.on_task_unlock = MagicMock()
         mock_task = MagicMock()
         mock_task.name = f"{TASK_NAME_PREFIX}: test"
         mock_task.status.name = "RUNNING"
         vm._on_tasks_updated([mock_task])
-        vm.on_task_unlock.assert_not_called()
+        assert vm.state.task_unlocked is False
         assert vm._strategy_submitted is True
 
     def test_on_tasks_updated_no_unlock_without_submission(self, vm):
         vm._strategy_submitted = False
-        vm.on_task_unlock = MagicMock()
         vm._on_tasks_updated([])
-        vm.on_task_unlock.assert_not_called()
+        assert vm.state.task_unlocked is False
 
     def test_on_tasks_updated_no_unlock_when_queued(self, vm):
         vm._strategy_submitted = True
-        vm.on_task_unlock = MagicMock()
         mock_task = MagicMock()
         mock_task.name = f"{TASK_NAME_PREFIX}: test"
         mock_task.status.name = "QUEUED"
         vm._on_tasks_updated([mock_task])
-        vm.on_task_unlock.assert_not_called()
+        assert vm.state.task_unlocked is False
 
     def test_on_tasks_updated_unlocks_when_task_completed(self, vm):
         vm._strategy_submitted = True
-        vm.on_task_unlock = MagicMock()
         mock_task = MagicMock()
         mock_task.name = f"{TASK_NAME_PREFIX}: test"
         mock_task.status.name = "COMPLETED"
         vm._on_tasks_updated([mock_task])
-        vm.on_task_unlock.assert_called_once()
+        assert vm.state.task_unlocked is True
         assert vm._strategy_submitted is False
 
     def test_on_tasks_updated_ignores_non_strategy_tasks(self, vm):
         vm._strategy_submitted = True
-        vm.on_task_unlock = MagicMock()
         mock_task = MagicMock()
         mock_task.name = "other_task"
         mock_task.status.name = "RUNNING"
         vm._on_tasks_updated([mock_task])
-        vm.on_task_unlock.assert_called_once()
+        # Non-strategy task doesn't block unlock
+        assert vm.state.task_unlocked is True
 
     @patch("ui.viewmodels.screener_view_model.TaskManager")
     def test_dispose_unsubscribes(self, mock_tm_cls, vm):
@@ -929,6 +922,7 @@ class TestTaskManagerSubscription:
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
-    def test_on_task_unlock_initially_none(self, mock_dp, mock_sm, mock_rm):
+    def test_task_unlocked_initially_false(self, mock_dp, mock_sm, mock_rm):
+        """VM 不再有 on_task_unlock 回调；state.task_unlocked 默认为 False。"""
         vm = ScreenerViewModel()
-        assert vm.on_task_unlock is None
+        assert vm.state.task_unlocked is False

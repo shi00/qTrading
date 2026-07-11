@@ -16,12 +16,14 @@ def reset_i18n():
     I18n._strings_cache = {}
     I18n._missing_keys = set()
     I18n._listeners = None
+    I18n._state = None
     yield
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
     I18n._missing_keys = set()
     I18n._listeners = None
+    I18n._state = None
 
 
 class TestLocaleResourceIntegrity:
