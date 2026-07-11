@@ -19,7 +19,7 @@ from collections.abc import Callable
 import flet as ft
 import pandas as pd
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 _POSITIVE_KEYWORDS = ("surge", "rally", "up", "gain", "bullish", "beat", "exceed")
@@ -124,7 +124,7 @@ def NewsFeed(
         on_load_more_click: "加载更多"按钮点击回调
     """
     # Subscribe to i18n + theme changes (triggers auto-rerender)
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     style = AppStyles.card()

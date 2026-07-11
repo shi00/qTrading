@@ -3,7 +3,7 @@
 变更要点（Phase 3.2.7）：
 - 旧命令式 ``ft.AlertDialog`` 子类 → ``@ft.component def StockDetailDialog(...)``
 - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
 - K 线图通过 ``use_effect`` 异步加载，``chart_content`` state 驱动渲染
 - 移除命令式生命周期回调、手动 update、``show_dialog``/``pop_dialog``、
   ``refresh_locale``、``update_data``
@@ -22,7 +22,7 @@ import flet as ft
 
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_png
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
@@ -558,7 +558,7 @@ def StockDetailDialog(
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
     - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - K 线图通过 ``use_effect`` 异步加载，``chart_content`` state 驱动渲染
     - 无 ``did_mount``/``will_unmount``/手动 update/``show_dialog``/``pop_dialog``
 
@@ -570,7 +570,7 @@ def StockDetailDialog(
         on_close: 关闭回调（消费方用于清理引用）
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- dialog 显隐 state（从 prop 初始化）---
     open_, set_open = ft.use_state(open_state)

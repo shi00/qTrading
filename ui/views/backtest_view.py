@@ -22,7 +22,7 @@ import flet as ft
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
 from utils.log_decorators import UILogger
@@ -43,7 +43,7 @@ def BacktestView() -> ft.Container:
     """
     state, vm = use_viewmodel(BacktestViewModel)
     # 订阅 i18n + theme 变化（locale/theme 切换时自动重渲染）
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- UI local state ---

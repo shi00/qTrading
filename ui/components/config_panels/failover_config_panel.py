@@ -8,7 +8,7 @@
 - 旧命令式 AlertDialog 子类 + V0 page-ref mixin → ``@ft.component def ProviderCredentialDialog(vm)``
 - VM 由消费方实例化（AIBrainTab 需要 ``vm.reload_config`` / ``vm.save_config`` 引用）
 - View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - Dialog 用条件渲染 + ``ft.use_dialog`` hook（Phase 3.0.2 模式）
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新、命令式 dialog 挂载/卸载 API
 - page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
@@ -21,7 +21,7 @@ import flet as ft
 
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.failover_config_panel_view_model import (
@@ -165,7 +165,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式:
     - ``use_viewmodel(vm=vm)`` 订阅 VM state 变化
-    - ``ft.use_state(I18n.get_observable_state)`` 自动重渲染 on locale switch
+    - ``ft.use_state(get_observable_state)`` 自动重渲染 on locale switch
     - Dialog 用条件渲染 + ``ft.use_dialog`` hook（state.dialog_open 驱动）
     - 无 did_mount/will_unmount/refresh_locale/show_dialog/pop_dialog/.update()
 
@@ -176,7 +176,7 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     state, _ = use_viewmodel(vm=vm)
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- Dialog form controls (driven by state) ---
     provider_options = _build_provider_options(state.dialog_is_edit, state.dialog_existing_providers)
@@ -391,7 +391,7 @@ def FailoverConfigPanel(
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
     - VM 由消费方实例化（AIBrainTab 直接 new FailoverConfigPanelViewModel）
     - View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - Dialog 通过内嵌 ProviderCredentialDialog(vm=vm) 条件渲染
     - 无 page ref / 生命周期回调 / 手动刷新
 
@@ -403,7 +403,7 @@ def FailoverConfigPanel(
     state, _ = use_viewmodel(vm=vm)
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- Build list items (driven by state.failover_items) ---
     if not state.failover_items:

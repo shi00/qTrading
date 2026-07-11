@@ -36,7 +36,7 @@ from ui.components.settings_widgets import (
     SettingRow,
 )
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
@@ -188,7 +188,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- DataSourceViewModel (内部模式: hook 实例化 + 卸载时 dispose) ---

@@ -426,9 +426,9 @@ class TestTierApiPanelContract:
         assert "use_viewmodel(vm=" in content
 
     def test_uses_i18n_observable_state(self) -> None:
-        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        """验证通过 ft.use_state(get_observable_state) 订阅 i18n 自动重渲染。"""
         content = self._read_panel_content()
-        assert "ft.use_state(I18n.get_observable_state)" in content
+        assert "ft.use_state(get_observable_state)" in content
 
     def test_uses_ft_context_page(self) -> None:
         """验证通过 ft.context.page 访问 page（try/except RuntimeError 守卫）。"""

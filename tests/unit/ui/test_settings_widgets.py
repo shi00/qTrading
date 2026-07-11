@@ -130,9 +130,9 @@ class TestSettingsWidgetsContract:
         assert "AppColors.get_observable_state" in _raw_source()
 
     def test_section_header_subscribes_i18n(self):
-        """DoD: SectionHeader 必须订阅 I18n.get_observable_state（title_key 重渲染）。"""
-        assert "I18n.get_observable_state" in _raw_source()
+        """DoD: SectionHeader 必须订阅 get_observable_state（title_key 重渲染）。"""
+        assert "get_observable_state" in _raw_source()
 
     def test_setting_row_subscribes_i18n(self):
-        """DoD: SettingRow 必须订阅 I18n.get_observable_state（title_key/subtitle_key 重渲染）。"""
-        assert "I18n.get_observable_state" in _raw_source()
+        """DoD: SettingRow 必须订阅 get_observable_state（title_key/subtitle_key 重渲染）。"""
+        assert "get_observable_state" in _raw_source()

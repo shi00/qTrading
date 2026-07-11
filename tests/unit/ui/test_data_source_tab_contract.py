@@ -139,8 +139,8 @@ class TestDataSourceTabContract:
         assert "use_ref(ActionChip" not in source, "不应使用 use_ref 缓存 ActionChip"
 
     def test_subscribes_i18n(self):
-        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
-        assert "I18n.get_observable_state" in _raw_source(), "必须订阅 I18n.get_observable_state"
+        """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""
+        assert "get_observable_state" in _raw_source(), "必须订阅 get_observable_state"
 
     def test_subscribes_theme(self):
         """DoD: 必须订阅 AppColors.get_observable_state (theme 自动重渲染)。"""

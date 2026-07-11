@@ -22,7 +22,7 @@ from typing import Any
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
@@ -115,7 +115,7 @@ def AppLayout() -> ft.Container:
     - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Pure UI state ---

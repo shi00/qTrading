@@ -30,7 +30,7 @@ from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n, translate_strategy_name
+from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
 from utils.log_decorators import UILogger
@@ -250,7 +250,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
 
     # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- 本地 UI 状态 ---

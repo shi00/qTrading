@@ -115,8 +115,8 @@ class TestSettingsViewContract:
         assert "update_theme" not in _code_source()
 
     def test_subscribes_i18n(self):
-        """DoD: SettingsView 必须订阅 I18n.get_observable_state（i18n 自动重渲染）。"""
-        assert "I18n.get_observable_state" in _raw_source()
+        """DoD: SettingsView 必须订阅 get_observable_state（i18n 自动重渲染）。"""
+        assert "get_observable_state" in _raw_source()
 
     def test_uses_use_state_for_tab(self):
         """DoD: Tab 切换必须用 use_state 驱动（条件渲染）。"""

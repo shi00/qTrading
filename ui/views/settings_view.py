@@ -6,7 +6,7 @@
 变更要点:
 - 旧命令式 class 子类 → ``@ft.component def SettingsView()``
 - Tab 切换由 ``use_state(current_tab)`` 驱动，条件渲染当前激活 tab
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除所有命令式生命周期回调与手动刷新方法
 - 3 个命令式 tabs (DataSourceTab/AIBrainTab/SystemTab) 仍命令式实例化（Phase E 待重写）
 - DatabaseTab/AutomationTab/NotificationsTab 已声明式 (Phase A.2/D.4)，直接函数调用
@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
@@ -106,12 +106,12 @@ def SettingsView() -> ft.Container:
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
     - ``use_state(current_tab)`` 驱动 tab 切换（条件渲染）
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 无 VM（纯 UI 容器）
     - page 在渲染时捕获 (供 _show_snack 闭包在 run_task 回调中使用)
     """
     current_tab, set_current_tab = ft.use_state(0)
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- Capture page at render time for _show_snack closure ---
     # ft.context.page 在 page.run_task 回调中不可用 (Renderer 上下文未跨 run_task 传播),

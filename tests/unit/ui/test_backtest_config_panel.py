@@ -244,7 +244,7 @@ class TestBacktestConfigPanelContract:
         assert not re.search(r"\.set_strategy_key\s*\(", content), "不应再有 set_strategy_key 方法调用"
 
     def test_uses_i18n_observable_state(self) -> None:
-        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        """验证通过 ft.use_state(get_observable_state) 订阅 i18n 自动重渲染。"""
         from pathlib import Path
 
         panel_path = (
@@ -252,7 +252,7 @@ class TestBacktestConfigPanelContract:
         )
         content = panel_path.read_text(encoding="utf-8")
 
-        assert "ft.use_state(I18n.get_observable_state)" in content
+        assert "ft.use_state(get_observable_state)" in content
 
     def test_date_picker_uses_declarative_use_dialog(self) -> None:
         """DoD: DatePicker 必须通过 ft.use_dialog() 声明式管理（§10.1），禁止 use_ref + page.show_dialog 回归。"""

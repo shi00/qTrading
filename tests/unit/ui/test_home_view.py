@@ -94,9 +94,9 @@ class TestHomeViewDeclarativeContract:
         assert "use_viewmodel(HomeViewModel)" in content
 
     def test_uses_observable_state_i18n(self) -> None:
-        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染."""
+        """验证通过 ft.use_state(get_observable_state) 订阅 i18n 自动重渲染."""
         content = _read_source()
-        assert "ft.use_state(I18n.get_observable_state)" in content
+        assert "ft.use_state(get_observable_state)" in content
 
     def test_uses_observable_state_theme(self) -> None:
         """验证通过 ft.use_state(AppColors.get_observable_state) 订阅 theme 自动重渲染."""

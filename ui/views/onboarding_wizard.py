@@ -35,7 +35,7 @@ from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
@@ -287,7 +287,7 @@ def OnboardingWizard(
         on_complete: 完成回调 (异步, 完成步骤触发)
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- OnboardingViewModel (内部模式: hook 实例化 + dispose on unmount) ---

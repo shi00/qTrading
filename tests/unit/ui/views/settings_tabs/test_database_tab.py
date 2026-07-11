@@ -113,11 +113,11 @@ class TestDatabaseTabContract:
         assert "use_viewmodel" in source, "DatabaseTab 必须使用 use_viewmodel hook"
 
     def test_database_tab_uses_i18n_observable_state(self):
-        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        """DoD: 必须通过 ft.use_state(get_observable_state) 订阅 i18n 变化。"""
         import ui.views.settings_tabs.database_tab as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "I18n.get_observable_state" in source, "DatabaseTab 必须订阅 I18n.get_observable_state"
+        assert "get_observable_state" in source, "DatabaseTab 必须订阅 get_observable_state"
 
     def test_database_tab_uses_theme_observable_state(self):
         """DoD: 必须通过 ft.use_state(AppColors.get_observable_state) 订阅 theme 变化。"""

@@ -7,7 +7,7 @@
 - 旧命令式 ``class LLMConfigPanel(ft.Container)`` → ``@ft.component def LLMConfigPanel(vm, ...)``
 - VM 由消费方实例化（AIBrainTab/OnboardingWizard 需要 ``vm.save_config`` / ``vm.verify_connection`` 引用）
 - View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
 - page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
 - provider/model options 由 View 从 LLM_PROVIDERS + 当前 locale 构建（tag 需 i18n）
@@ -20,7 +20,7 @@ import flet as ft
 
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
@@ -266,7 +266,7 @@ def LLMConfigPanel(
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
     - VM 由消费方实例化（AIBrainTab/OnboardingWizard 直接 new LLMConfigPanelViewModel）
     - View 通过 ``use_viewmodel(vm=vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 无 page ref / 生命周期回调 / 手动刷新
 
     Args:
@@ -279,7 +279,7 @@ def LLMConfigPanel(
     state, _ = use_viewmodel(vm=vm)
 
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- Build form controls (driven by state) ---
     input_width = 360

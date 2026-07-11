@@ -88,7 +88,7 @@ def ResizableSplitter(
         min_width: 左侧最小宽度
         max_width: 左侧最大宽度
         on_resize: 宽度变化回调 (可选, 用于触发子控件刷新, 签名 () -> None)
-        drag_interval: 拖拽事件节流毫秒数, 默认 16ms (~60fps)
+        drag_interval: 拖拽事件节流毫秒数, 默认 16ms (~60fps). NOTE(lazy): 匹配显示器刷新率. ceiling: 低性能设备 60fps reconcile 可能掉帧. upgrade: 设备性能检测或用户反馈掉帧时改 33ms.
         collapsible: 是否允许折叠左侧栏
         collapsed: 初始是否折叠左侧栏
     """

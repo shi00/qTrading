@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 TASK_NAME_PREFIX = "strategy_screening"
 
 # Stream card throttle and limit (moved from View, VM owns card lifecycle)
+# NOTE(lazy): 流式节流 50ms (~20fps) 平衡流畅度与 reconcile 压力. ceiling: 策略结果行数 >5000 时 20fps 可能卡顿. upgrade: 行数突破 ceiling 或用户反馈卡顿时改 33ms/动态节流.
 _STREAM_THROTTLE = 0.05  # seconds
 _MAX_LOG_CARDS = 10
 

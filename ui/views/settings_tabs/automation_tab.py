@@ -20,7 +20,7 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SettingRow
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -107,7 +107,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Pure UI state (ConfigHandler 读写) ---
@@ -433,7 +433,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
     """
     # --- Subscribe to i18n + theme changes ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Pure UI state ---

@@ -104,8 +104,8 @@ class TestMarketDashboardContract:
         assert "_page_ref" not in _code_source()
 
     def test_subscribes_i18n(self):
-        """DoD: 必须订阅 I18n.get_observable_state（i18n 自动重渲染）。"""
-        assert "I18n.get_observable_state" in _raw_source()
+        """DoD: 必须订阅 get_observable_state（i18n 自动重渲染）。"""
+        assert "get_observable_state" in _raw_source()
 
     def test_subscribes_app_colors(self):
         """DoD: 必须订阅 AppColors.get_observable_state（theme 自动重渲染）。"""
