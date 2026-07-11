@@ -397,6 +397,50 @@ async def _teardown_page(fp: FletPage) -> None:
         await context.close()
 
 
+async def _ensure_locale_zh(fp: FletPage) -> None:
+    """语言状态污染安全网：确保 flet_app 内存中的 I18n locale 为 zh_CN。
+
+    test_settings_language_switch 切换语言后，其 finally 块可能因 CanvasKit
+    渲染延迟/snackbar 干扰而恢复失败，导致 flet_app 内存 locale 仍是 en_US。
+    pristine_config fixture 只还原磁盘配置和测试进程 I18n，不还原 app 内存 locale。
+    本函数作为最后防线，在 e2e_page teardown 时检查并恢复中文，避免污染后续测试。
+
+    设计要点：
+    - 快速检查 has_text(nav_settings_zh)：正常测试几乎无开销（中文存在则 early return）
+    - 恢复失败只 warning 不抛出：避免掩盖原始测试失败
+    - R2: asyncio.CancelledError 必须 raise
+    """
+    nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
+    try:
+        if await fp.has_text(nav_settings_zh):
+            return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[e2e_page] locale 安全网 has_text 检查失败: %s", e, exc_info=True)
+        return
+
+    logger.warning("[e2e_page] 检测到语言污染（找不到中文导航文本），尝试通过 UI 恢复 zh_CN")
+    try:
+        nav_settings_en = I18n.get("nav_settings", locale="en_US")
+        await fp.click_text(nav_settings_en, timeout_ms=8000)
+        tab_system_en = I18n.get("settings_tab_system", locale="en_US")
+        await fp.click_text(tab_system_en, timeout_ms=8000)
+        lang_label_en = I18n.get("settings_language", locale="en_US")
+        lang_zh = I18n.get("settings_lang_zh")
+        await fp.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
+        for _ in range(25):
+            if await fp.has_text(nav_settings_zh):
+                logger.info("[e2e_page] locale 安全网成功恢复 zh_CN")
+                return
+            await fp.page.wait_for_timeout(200)
+        logger.warning("[e2e_page] locale 安全网未能确认中文恢复")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[e2e_page] locale 安全网恢复失败: %s", e, exc_info=True)
+
+
 def _parse_asyncpg_dsn(sqlalchemy_url: str) -> str:
     """将 SQLAlchemy asyncpg DSN 转换为 asyncpg 原生 DSN。
 
@@ -746,6 +790,12 @@ def wizard_app(tmp_path_factory):
 async def e2e_page(e2e_browser, flet_app: AppServer, request):
     fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
     yield fp
+    # [PITFALL FIX] 语言状态污染安全网
+    # test_settings_language_switch 的 finally 块可能因 CanvasKit 渲染延迟/snackbar 干扰
+    # 而恢复失败，导致 flet_app 内存中的 I18n locale 仍是 en_US。
+    # pristine_config 只还原磁盘配置和测试进程 I18n，不还原 app 内存 locale。
+    # 此处作为最后防线，通过 UI 检查并恢复 app 语言到 zh_CN，确保后续测试找到中文文本。
+    await _ensure_locale_zh(fp)
     await _teardown_page(fp)
 
 

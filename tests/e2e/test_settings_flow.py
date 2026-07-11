@@ -111,17 +111,16 @@ async def test_settings_language_switch(e2e_page):
     tab_system = I18n.get("settings_tab_system")
     await e2e_page.click_text(tab_system, timeout_ms=8000)
 
-    # 切换语言为 English
-    # 注意：语言下拉框的实际 label 是 get_language_label()（如 "简体中文 / English"），而不是 "语言"
-    actual_lang_label = I18n.get_language_label()
-    await e2e_page.expect_text(actual_lang_label, timeout_ms=10000)  # Wait for the tab to render
-
-    # 等待前一个测试的 Snackbar 动画完成，防止 CanvasKit 吞噬点击事件
-    await e2e_page.page.wait_for_timeout(1000)
-
+    # 等待 System tab 渲染完成（语言设置行 title 出现）
+    # [PITFALL FIX] 不用 get_language_label()（如 "简体中文 / English"），因为 CanvasKit
+    # 渲染下含斜杠的复合文本无法被 expect_text 的选择器匹配，改用简单文本 "语言"
     lang_label = I18n.get("settings_language")
     lang_en = I18n.get("settings_lang_en")
     lang_zh = I18n.get("settings_lang_zh")
+    await e2e_page.expect_text(lang_label, timeout_ms=10000)  # Wait for the tab to render
+
+    # 等待前一个测试的 Snackbar 动画完成，防止 CanvasKit 吞噬点击事件
+    await e2e_page.page.wait_for_timeout(1000)
 
     try:
         await e2e_page.select_dropdown(lang_label, lang_en, timeout_ms=10000)
@@ -136,9 +135,10 @@ async def test_settings_language_switch(e2e_page):
         theme_label_en = I18n.get("settings_theme")
         await e2e_page.expect_text(theme_label_en, timeout_ms=10000)
 
-        # 切回中文之前的验证
-        actual_lang_label_en = I18n.get_language_label()
-        await e2e_page.expect_text(actual_lang_label_en, timeout_ms=10000)
+        # 切回中文之前的验证：确认设置页文案已切换为英文
+        # [PITFALL FIX] 不用 get_language_label()，同上原因（CanvasKit 不匹配含斜杠文本）
+        lang_label_en = I18n.get("settings_language")  # "Language" (locale=en_US)
+        await e2e_page.expect_text(lang_label_en, timeout_ms=10000)
     finally:
         # [PITFALL FIX] 必须还原 flet_app 内存中的 I18n locale！
         # 坑点：pristine_config fixture 只还原磁盘配置文件和测试进程 I18n，
@@ -146,7 +146,6 @@ async def test_settings_language_switch(e2e_page):
         #       这会导致后续测试（settings_tabs/smoke/task_center）寻找中文导航文本时全部超时失败。
         # 应对：通过 UI 主动切换回中文，触发 app 进程的 I18n.set_locale("zh_CN")。
         # 此时 app 已是英文界面，dropdown label 显示为 "Language"。
-        lang_label_en = I18n.get("settings_language", locale="en_US")
         try:
             await e2e_page.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
             # 轮询等待中文导航文本重新出现，确认 locale 已还原
