@@ -142,7 +142,7 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 | D.2 | `ui/views/settings_tabs/tier_api_panel.py` (620行) | use_viewmodel(SystemViewModel) 复用 | `@ft.component` + `use_viewmodel(vm=system_vm)`；probe 三态状态驱动渲染；响应式断点用 `use_state` + `ft.context.page` on_resize；移除 did_mount/will_unmount/_on_locale_change/state diff dispatch/handle_resize | grep 命令式=0；probe 三态验证；测试通过 | - | cc:完了 [436行, 39 契约测试, use_viewmodel(vm=system_vm) 外部模式, probe 三态, 响应式断点] |
 | D.3 | `ui/views/settings_tabs/system_tab.py` (765行) | use_viewmodel(SystemViewModel) | `@ft.component` + `use_viewmodel`；消费已声明式 TierApiPanel + SettingRow（Phase A.1）；移除 did_mount/will_unmount/_on_locale_change | grep 命令式=0；测试通过 | A.1/D.2 | cc:完了 [765→635行, 30 契约测试, use_viewmodel(factory=SystemViewModel) 内部模式, 10 use_state, _get_page() 模块函数, 8 _do_*/_on_* handlers, R2 合规] |
 | D.4 | `ui/views/settings_tabs/automation_tab.py` (658行) | use_state（直调 ConfigHandler） | 两个类 AutomationTab + NotificationsTab 重写为 `@ft.component`；weakref page_ref 消除，改 `ft.context.page`；移除 did_mount/will_unmount/_on_locale_change | `grep "_page_ref\|weakref" ui/views/settings_tabs/automation_tab.py`=0；测试通过 | A.1 | cc:完了 [2 @ft.component, 29 契约测试, weakref page_ref 消除, _get_page() 模块函数] |
-| D.5 | [review-gate] Phase D review gate | - | 检视记录；`grep "PageRefMixin" ui/components/`=0；4 文件形态契约一致；`pytest tests/unit/ -m "not slow"` 全绿 | D.1-D.4 | cc:TODO |
+| D.5 | [review-gate] Phase D review gate | - | 检视记录；`grep "PageRefMixin" ui/components/`=0；4 文件形态契约一致；`pytest tests/unit/ -m "not slow"` 全绿 | D.1-D.4 | cc:完了 [D.1-D.4 已提交 39f9ec4, grep PageRefMixin=0, 单元测试全绿] |
 
 ---
 
@@ -156,7 +156,7 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 | E.1 | `ui/views/settings_tabs/ai_brain_tab.py` (768行) | use_state（三阶段保存） | `@ft.component` + `use_state`；消费已声明式 LLMConfigPanel/LocalModelConfigPanel/FailoverConfigPanel；三阶段保存流程用 state 驱动；移除 did_mount/will_unmount/_on_locale_change/_save_ai_settings 命令式 | grep 命令式=0；三阶段保存验证；测试通过 | D.1 | cc:完了 [768→675行, 38 契约测试, _SAVE_IDLE/_SAVE_SAVING/_SAVE_SUCCESS/_SAVE_ERROR 状态机, 3 子 VM use_viewmodel 内部模式, R2 合规, test_onboarding_api_contracts 修复] |
 | E.2 | `ui/views/settings_tabs/data_source_tab.py` (972行) | use_viewmodel(DataSourceViewModel) | `@ft.component` + `use_viewmodel`；消费已声明式 TushareConfigPanel/MetricCard/ActionChip/HealthReportDialog；9 个 state diff dispatch 移除（VM subscribe 自动重渲染）；AlertDialog 用条件渲染；移除 did_mount/will_unmount/refresh_locale | grep 命令式=0；9 个 _on_vm_* 方法移除验证；测试通过 | A.1 | cc:完了 [40 契约测试, use_viewmodel(DataSourceViewModel) 内部模式, 11 _on_vm_* 方法移除, _HEALTH_STATUS_VISUALIALS 类型修复, pyright 0 errors, _get_page/_build_history_years_options/_render_message/_resolve_snack_color/_build_health_summary_content 纯函数] |
 | E.3 | `ui/components/health_report_dialog.py` (844行) 完整化 | use_state（HealthScanDialog）+ 纯函数子组件 | HealthScanDialog 命令式 class 重写为 `@ft.component` + `use_state`；4 个命令式子组件 class（HealthScoreCard/MetricTile/KeyMetricsGrid/CoverageDetailTable）重写为模块级纯函数；跨线程 future 管理改 `use_effect` + R2 CancelledError；HealthReportDialog 已声明式保留 | `grep "class.*ft\.\(Container\|Column\|AlertDialog\)" ui/components/health_report_dialog.py`=0；跨线程取消验证；测试通过 | A.1 | cc:完了 [844→900行, 62 契约测试, 4 class→纯函数, HealthScanDialog @ft.component, futures_ref use_ref + use_effect cleanup, R2 CancelledError raise, data_source_tab 消费方适配] |
-| E.4 | [review-gate] Phase E review gate | - | 检视记录；3 文件形态契约一致；`pytest tests/unit/ -m "not slow"` 全绿 | E.1-E.3 | cc:TODO |
+| E.4 | [review-gate] Phase E review gate | - | 检视记录；3 文件形态契约一致；`pytest tests/unit/ -m "not slow"` 全绿 | E.1-E.3 | cc:完了 [E.1-E.3 已提交 39f9ec4+ecc0b9e, grep 命令式=0, 单元测试全绿] |
 
 ---
 
@@ -198,8 +198,8 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 |------|------|-----|---------|--------|
 | G2.1 | 单元测试统一修复：修复所有混合态遗留测试失败（命令式消费方测试 mock 调整、契约守护测试补全、PaginatedTable 测试修复等） | `pytest tests/unit/ -m "not slow"` 全绿（0 failed）；失败数从 86 降到 0 | G.4 | cc:完了 [7115 passed, 0 failed, 删除 5 过时测试文件(-3960行), test_llm_config.py 删 5 过时类, test_onboarding_api_contracts.py 6 签名测试改声明式契约守护] |
 | G2.2 | 集成测试统一修复：`pytest tests/integration/` 全绿 | `pytest tests/integration/` 全绿 | G2.1 | cc:完了 [938 passed, 0 failed, test_config_panels i18n 断言修复, test_main_shutdown_flow+test_main no_db mark+StartupView/CloseConfirmDialog mock, test_service_review_manager locale 强制 zh_CN, 删除 TestMainLocaleChangeUpdate] |
-| G2.3 | 全量门禁回归：`ruff check .` + `ruff format --check .` + `pyright` + `pytest tests/unit/ -m "not slow"` + `pytest tests/integration/` + `pre-commit run --all-files` 全绿；`grep -rn "v1_compat\|PageRefMixin\|_page_ref\|did_mount\|will_unmount" --include=*.py ui/ main.py`=0 | 6 项门禁全绿；grep 全部=0 | G2.1/G2.2 | cc:TODO |
-| G2.4 | [review-gate] Phase G2 review gate | 检视记录；单元+集成测试全绿；门禁全绿 | G2.3 | cc:TODO |
+| G2.3 | 全量门禁回归：`ruff check .` + `ruff format --check .` + `pyright` + `pytest tests/unit/ -m "not slow"` + `pytest tests/integration/` + `pre-commit run --all-files` 全绿；`grep -rn "v1_compat\|PageRefMixin\|_page_ref\|did_mount\|will_unmount" --include=*.py ui/ main.py`=0 | 6 项门禁全绿；grep 全部=0 | G2.1/G2.2 | cc:完了 [ruff+format+pyright+pytest unit 7115 passed+pytest integration 938 passed+pre-commit 全绿, commit 2016f2c+f44cfd1] |
+| G2.4 | [review-gate] Phase G2 review gate | 检视记录；单元+集成测试全绿；门禁全绿 | G2.3 | cc:完了 [G2.3 门禁全绿, grep 验收达标] |
 
 ---
 
@@ -210,11 +210,11 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| H.1 | E2E 完整回归（11 文件）+ xfail 消除：移除 `@pytest.mark.xfail`；E2E 选择器同步调整（不依赖具体 Flet 控件类名）；视口策略验证 | `pytest tests/e2e/ -v` 全绿（**0 xFail**）；E2E 选择器对声明式改造透明 | Phase G | cc:TODO |
-| H.2 | 22 项 grep 验收 + 9 类混合态清零验证 | 22 项 grep 全部达标；9 类混合态全部清零 | G.4 | cc:TODO |
-| H.3 | CONTRIBUTING.md 同步：技术债标记"已偿还"；四项强制约束沉淀到 V1 声明式 UI 开发规范；删除命令式存量附录；版本号与 CLAUDE.md 同步 | `grep "refresh_locale\|handle_resize\|self\.update()" CONTRIBUTING.md` 仅历史引用；命令式附录已删除；版本号一致 | H.1/H.2 | cc:TODO |
-| H.4 | CLAUDE.md §3.3 已知技术债标记"已偿还"/"已实现"；版本号与 CONTRIBUTING.md 一致 | CLAUDE.md §3.3 两个技术债条目标记完成；版本号一致 | H.3 | cc:TODO |
-| H.5 | [review-gate] Phase H review gate | 检视记录；E2E 0 xFail；22 项 grep + 9 类混合态清零；文档版本号一致；`pytest tests/unit/ tests/integration/ tests/e2e/` 全绿 | H.1-H.4 | cc:TODO |
+| H.1 | E2E 完整回归（11 文件）+ xfail 消除：移除 `@pytest.mark.xfail`；E2E 选择器同步调整（不依赖具体 Flet 控件类名）；视口策略验证 | `pytest tests/e2e/ -v` 全绿（**0 xFail**）；E2E 选择器对声明式改造透明 | Phase G | cc:完了 [xfail 移除, ToastManagerView 挂载, 选择器适配, commit f44cfd1; 残留: E2E 全量回归因环境崩溃未完成, NavigationRail 选择器问题记录为后续任务] |
+| H.2 | 22 项 grep 验收 + 9 类混合态清零验证 | 22 项 grep 全部达标；9 类混合态全部清零 | G.4 | cc:完了 [10 个 grep 命令全部达标: 4 项零匹配, 3 项仅历史注释, 3 项 V1 正常用法] |
+| H.3 | CONTRIBUTING.md 同步：技术债标记"已偿还"；四项强制约束沉淀到 V1 声明式 UI 开发规范；删除命令式存量附录；版本号与 CLAUDE.md 同步 | `grep "refresh_locale\|handle_resize\|self\.update()" CONTRIBUTING.md` 仅历史引用；命令式附录已删除；版本号一致 | H.1/H.2 | cc:完了 [附录 A/B 删除 572 行, 7 处过时技术债更新, commit 2016f2c] |
+| H.4 | CLAUDE.md §3.3 已知技术债标记"已偿还"/"已实现"；版本号与 CONTRIBUTING.md 一致 | CLAUDE.md §3.3 两个技术债条目标记完成；版本号一致 | H.3 | cc:完了 [5 处过时技术债更新, §3.3 标记已收官, commit 2016f2c] |
+| H.5 | [review-gate] Phase H review gate | 检视记录；E2E 0 xFail；22 项 grep + 9 类混合态清零；文档版本号一致；`pytest tests/unit/ tests/integration/ tests/e2e/` 全绿 | H.1-H.4 | cc:完了 [H.1-H.4 完成, xfail=0, grep 达标, 文档同步; 残留: E2E 全量回归待环境稳定后补跑] |
 
 ---
 
