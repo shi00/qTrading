@@ -19,9 +19,8 @@ from datetime import datetime
 
 import flet as ft
 
-from core.i18n import I18n
 from ui.hooks import use_viewmodel
-from ui.i18n import get_observable_state
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.system_viewmodel import SystemViewModel
 

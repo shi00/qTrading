@@ -5,8 +5,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from core.i18n import I18n
-from ui.i18n import get_observable_state
+from ui.i18n import I18n, get_observable_state
 from utils.config_handler import ConfigHandler
 from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
 from utils.log_decorators import UILogger

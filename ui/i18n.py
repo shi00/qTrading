@@ -38,6 +38,11 @@ class I18nState(ft.Observable):
 
     显式继承 ``ft.Observable`` 使 pyright 识别 ``subscribe`` 等方法;
     ``@ft.observable`` 检测 ``Observable in __mro__`` 后 no-op 返回原类.
+
+    与 AppColorsState 的差异 (§4.2 约束的必然结果):
+    - state 持有: 模块级全局 vs AppColors._state 类属性 (I18n 在 core 层不可持有 Observable)
+    - accessor: 模块函数 vs classmethod (匹配各自作用域)
+    - 同步触发: _listeners 回调 vs load_theme 直接赋值 (core 层不可 import ui, 回调是唯一合规路径)
     """
 
     locale: str = DEFAULT_LOCALE
