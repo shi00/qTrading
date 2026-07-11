@@ -190,6 +190,79 @@ class TestDataSourceViewModelSubscribe:
         assert len(snapshots) == prev_count
 
 
+class TestDataSourceViewModelDisposeCancelsTasks:
+    """R.1.2: dispose() 必须先取消所有活跃任务再清引用，防止孤儿任务。"""
+
+    def test_dispose_cancels_all_active_tasks(self, vm, mock_task_manager):
+        """dispose() 遍历 _active_task_ids 逐一调 cancel_task（R.1.2）。"""
+        vm._active_task_ids = {
+            "daily_sync": "task_001",
+            "ai_concept_sync": "task_002",
+        }
+        vm._set_state(
+            is_syncing=True,
+            active_key="daily_sync",
+            health_checking=True,
+            init_sync_running=True,
+            progress=0.5,
+            progress_message=Message("msg"),
+        )
+        vm._emit_snack(Message("snack"), "success")
+        vm._emit_health_result({"status": "green"})
+        vm._emit_health_error("err")
+
+        vm.dispose()
+
+        assert mock_task_manager.cancel_task.call_count == 2
+        mock_task_manager.cancel_task.assert_any_call("task_001")
+        mock_task_manager.cancel_task.assert_any_call("task_002")
+        assert vm._active_task_ids == {}
+        assert vm._subscribers == []
+        # 完整 state 重置断言（与 R.1.1 对齐）
+        assert vm.state.is_syncing is False
+        assert vm.state.active_key is None
+        assert vm.state.health_checking is False
+        assert vm.state.init_sync_running is False
+        assert vm.state.init_sync_cancellable is False
+        assert vm.state.init_sync_final_status is None
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
+        assert vm.state.health_result_version == 0
+        assert vm.state.snack_version == 0
+        assert vm.state.cache_cleared_version == 0
+        assert vm.state.health_error_version == 0
+        # dual-track 属性
+        assert vm.last_snack is None
+        assert vm.last_health_result is None
+        assert vm.last_health_error is None
+
+    def test_dispose_cancels_non_cancellable_task(self, vm, mock_task_manager):
+        """dispose() 对 cancellable=False 任务仍调 cancel_task（TaskManager 内部 no-op，R.1.2）。"""
+        vm._active_task_ids = {"cache_clear": "task_003"}
+
+        vm.dispose()
+
+        mock_task_manager.cancel_task.assert_called_once_with("task_003")
+        assert vm._active_task_ids == {}
+
+    def test_dispose_no_active_tasks_is_noop(self, vm, mock_task_manager):
+        """dispose() 在无活跃任务时不应调用 cancel_task（幂等性，R.1.2）。"""
+        vm.dispose()
+
+        mock_task_manager.cancel_task.assert_not_called()
+        assert vm._active_task_ids == {}
+
+    def test_dispose_is_idempotent(self, vm, mock_task_manager):
+        """dispose() 连续调用两次：第二次不应重复调 cancel_task（R.1.2 幂等性）。"""
+        vm._active_task_ids = {"daily_sync": "task_001"}
+
+        vm.dispose()
+        vm.dispose()
+
+        mock_task_manager.cancel_task.assert_called_once_with("task_001")
+        assert vm._active_task_ids == {}
+
+
 class TestDataSourceViewModelCheckHealth:
     async def test_check_health_success(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         await bound_vm.check_health()
