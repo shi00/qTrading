@@ -376,15 +376,12 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     return fp
 
 
-async def _teardown_page(fp: FletPage) -> None:
+async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None:
+    """Function 级 teardown：失败时保存 trace + screenshot，关闭 context。"""
     pw_context = fp.get_context()
     if not pw_context:
         return
-    _, _, context, page, request = pw_context
-    failed = any(
-        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
-        for when in ("setup", "call")
-    )
+    _, _, context, page, _request = pw_context
     try:
         if failed:
             ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -393,6 +390,8 @@ async def _teardown_page(fp: FletPage) -> None:
             await context.tracing.stop(path=str(ARTIFACT_DIR / f"{name}-trace.zip"))
         else:
             await context.tracing.stop()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[e2e_teardown] tracing stop failed: %s", e)
     finally:
         await context.close()
 
@@ -788,22 +787,35 @@ def wizard_app(tmp_path_factory):
 
 @pytest.fixture
 async def e2e_page(e2e_browser, flet_app: AppServer, request):
+    """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
+
+    性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。
+    CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
+    """
     fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
+    if request.node.get_closest_marker("slow"):
+        fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
     yield fp
-    # [PITFALL FIX] 语言状态污染安全网
-    # test_settings_language_switch 的 finally 块可能因 CanvasKit 渲染延迟/snackbar 干扰
-    # 而恢复失败，导致 flet_app 内存中的 I18n locale 仍是 en_US。
-    # pristine_config 只还原磁盘配置和测试进程 I18n，不还原 app 内存 locale。
-    # 此处作为最后防线，通过 UI 检查并恢复 app 语言到 zh_CN，确保后续测试找到中文文本。
-    await _ensure_locale_zh(fp)
-    await _teardown_page(fp)
+    # 语言安全网：mutates_config 用例可能污染 flet_app 内存 locale
+    if request.node.get_closest_marker("mutates_config"):
+        await _ensure_locale_zh(fp)
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
 
 
 @pytest.fixture
 async def wizard_page(e2e_browser, wizard_app: AppServer, request):
+    """Function 级 Page（向导测试）：每用例独立 context，无状态污染。"""
     fp = await _make_page(e2e_browser, wizard_app, request)
     yield fp
-    await _teardown_page(fp)
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
 
 
 @pytest.fixture(autouse=True)

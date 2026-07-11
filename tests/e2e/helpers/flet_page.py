@@ -168,7 +168,6 @@ class FletPage:
                 # 通过 selection 替换机制正确更新 TextEditingController。
                 await self.page.keyboard.press("Control+A")
                 await self.page.keyboard.type(value, delay=30)
-                await self.page.wait_for_timeout(50)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "fill_textbox: keyboard.type failed for '%s', falling back to fill(): %s",
@@ -454,7 +453,8 @@ class FletPage:
             raise RuntimeError(f"Timeout waiting for option '{option_text}' (key: '{opt_match_key}') to appear")
 
         # 等待选项渲染稳定（CanvasKit 动画收尾），防止点击被动画吞噬
-        await self.page.wait_for_timeout(350)
+        # 200ms 取 CanvasKit 动画上限（通常 100-200ms），CI 高负载时更安全
+        await self.page.wait_for_timeout(200)
         clicked = await click_option()
         if not clicked:
             raise RuntimeError(f"Failed to click option '{option_text}' (key: '{opt_match_key}')")

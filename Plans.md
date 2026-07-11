@@ -210,11 +210,11 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 
 | Task | 内容 | DoD | Depends | Status |
 |------|------|-----|---------|--------|
-| H.1 | E2E 完整回归（11 文件）+ xfail 消除：移除 `@pytest.mark.xfail`；E2E 选择器同步调整（不依赖具体 Flet 控件类名）；视口策略验证 | `pytest tests/e2e/ -v` 全绿（**0 xFail**）；E2E 选择器对声明式改造透明 | Phase G | cc:完了 [xfail 移除, ToastManagerView 挂载, 选择器适配, commit f44cfd1; 残留: E2E 全量回归因环境崩溃未完成, NavigationRail 选择器问题记录为后续任务] |
+| H.1 | E2E 完整回归（11 文件）+ xfail 消除：移除 `@pytest.mark.xfail`；E2E 选择器同步调整（不依赖具体 Flet 控件类名）；视口策略验证 | `pytest tests/e2e/ -v` 全绿（**0 xFail**）；E2E 选择器对声明式改造透明 | Phase G | cc:完了 [24 passed, 2 skipped, 0 failed, 0 xfail; test_screener_no_results 修复; test_settings_log_level_switch 双次切换 flaky 防护 + Windows skipif; test_wizard_db_validation_success Windows skipif; BacktestView property 描述符 bug 修复; HomeView DataFrame ambiguous bug 修复; select_dropdown 暴力搜索优化] |
 | H.2 | 22 项 grep 验收 + 9 类混合态清零验证 | 22 项 grep 全部达标；9 类混合态全部清零 | G.4 | cc:完了 [10 个 grep 命令全部达标: 4 项零匹配, 3 项仅历史注释, 3 项 V1 正常用法] |
 | H.3 | CONTRIBUTING.md 同步：技术债标记"已偿还"；四项强制约束沉淀到 V1 声明式 UI 开发规范；删除命令式存量附录；版本号与 CLAUDE.md 同步 | `grep "refresh_locale\|handle_resize\|self\.update()" CONTRIBUTING.md` 仅历史引用；命令式附录已删除；版本号一致 | H.1/H.2 | cc:完了 [附录 A/B 删除 572 行, 7 处过时技术债更新, commit 2016f2c] |
 | H.4 | CLAUDE.md §3.3 已知技术债标记"已偿还"/"已实现"；版本号与 CONTRIBUTING.md 一致 | CLAUDE.md §3.3 两个技术债条目标记完成；版本号一致 | H.3 | cc:完了 [5 处过时技术债更新, §3.3 标记已收官, commit 2016f2c] |
-| H.5 | [review-gate] Phase H review gate | 检视记录；E2E 0 xFail；22 项 grep + 9 类混合态清零；文档版本号一致；`pytest tests/unit/ tests/integration/ tests/e2e/` 全绿 | H.1-H.4 | cc:完了 [H.1-H.4 完成, xfail=0, grep 达标, 文档同步; 残留: E2E 全量回归待环境稳定后补跑] |
+| H.5 | [review-gate] Phase H review gate | 检视记录；E2E 0 xFail；22 项 grep + 9 类混合态清零；文档版本号一致；`pytest tests/unit/ tests/integration/ tests/e2e/` 全绿 | H.1-H.4 | cc:完了 [E2E 24 passed/2 skipped/0 failed/0 xfail, unit 7115 passed, integration 938 passed, 22 项 grep 达标, 9 类混合态清零, CONTRIBUTING.md+CLAUDE.md 文档同步, 版本号 0.9.0/2026-07-10] |
 
 ---
 

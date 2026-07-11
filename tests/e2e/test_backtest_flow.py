@@ -7,6 +7,7 @@ from tests.e2e.pages import App
 pytestmark = pytest.mark.e2e
 
 
+@pytest.mark.slow
 async def test_backtest_flow(e2e_page):
     """测试：回测页面完整交互流 — 选择策略、修改初始资金、执行回测、验证指标卡片。"""
     # 导航到回测页
