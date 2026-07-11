@@ -251,7 +251,10 @@ async def _cleanup_mvd_data(test_engine: AsyncEngine):
         await conn.execute(delete(DailyQuotes).where(DailyQuotes.ts_code.in_(["000001.SZ", "600000.SH"])))
         # L0
         await conn.execute(delete(TradeCal).where(TradeCal.exchange == "SSE"))
-        await conn.execute(delete(StockBasic).where(StockBasic.ts_code.in_(["000001.SZ", "600000.SH"])))
+        # StockBasic 全表清理（非仅 MVD 股票）：TestDatabaseBase.asyncTearDown 不清理数据，
+        # 其末尾测试残留的非 MVD 股票会导致 prompt_validator 的 check_multi_period_data /
+        # check_field_exists 随机抽样到无财务数据的股票，injector 返回 False。
+        await conn.execute(delete(StockBasic))
 
 
 @dataclass
@@ -504,19 +507,9 @@ def _reset_thread_pool():
     ThreadPoolManager._reset_singleton()
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def db_schema_ready(request):
-    """Ensure database schema is ready before each test.
-
-    Skip for tests that use isolated database fixtures (e.g., migrated_db_engine,
-    metadata_db_engine, etc.) to avoid conflicting with their own database setup.
-
-    Skip for tests marked ``no_db`` (e.g., flet_test_page probe) — 这类测试
-    不需要 DB，不应触发 ``test_engine`` 创建。``test_engine`` 改为延迟加载
-    避免被 autouse fixture 强制依赖（方案 §3.3.3 DoD）。
-    """
-    # Skip for tests that use isolated database fixtures
-    isolated_fixtures = {
+# 使用隔离 DB 的 fixture 列表（与 db_schema_ready 配合跳过 test_engine 依赖）
+_ISOLATED_DB_FIXTURES = frozenset(
+    {
         "migrated_db_engine",
         "partial_db_engine",
         "empty_status_db_engine",
@@ -530,20 +523,45 @@ async def db_schema_ready(request):
         "db_via_init_db",
         "db_via_alembic",
     }
-    fixture_names = set(request.fixturenames)
+)
 
-    # no_db marker: 完全跳过 DB schema 初始化（不调用 test_engine）
+
+@pytest.fixture(autouse=True)
+def _test_engine_dep(request):
+    """同步解析 test_engine，避免在 async fixture 内调用 getfixturevalue 触发
+    ``Runner.run() cannot be called from a running event loop``。
+
+    pytest-asyncio 对 async fixture 的首次 setup 需调用 ``runner.run()``，
+    若 ``getfixturevalue`` 在已运行的事件循环（即另一个 async fixture setup）中
+    调用，则抛 RuntimeError。将解析移至 sync fixture 可在无事件循环时完成 setup。
+
+    no_db / isolated fixture 场景返回 None，不触发 test_engine 创建。
+    """
     if request.node.get_closest_marker("no_db"):
-        yield
-        return
+        return None
+    if _ISOLATED_DB_FIXTURES & set(request.fixturenames):
+        return None
+    return request.getfixturevalue("test_engine")
 
-    if not (isolated_fixtures & fixture_names):
-        # 延迟加载 test_engine，仅在需要 DB 的测试中创建
-        test_engine = request.getfixturevalue("test_engine")
+
+@pytest_asyncio.fixture(autouse=True)
+async def db_schema_ready(request, _test_engine_dep):
+    """Ensure database schema is ready before each test.
+
+    Skip for tests that use isolated database fixtures (e.g., migrated_db_engine,
+    metadata_db_engine, etc.) to avoid conflicting with their own database setup.
+
+    Skip for tests marked ``no_db`` (e.g., flet_test_page probe) — 这类测试
+    不需要 DB，不应触发 ``test_engine`` 创建。
+
+    test_engine 通过同步 fixture ``_test_engine_dep`` 解析，避免在 async 上下文
+    中调用 ``getfixturevalue`` 触发 ``Runner.run()`` 嵌套事件循环错误。
+    """
+    if _test_engine_dep is not None:
         from data.persistence.db_migrator import DatabaseMigrator
 
         with override_db_url(TEST_DB_URL):
-            await DatabaseMigrator.init_db(test_engine, auto_migrate=True)
+            await DatabaseMigrator.init_db(_test_engine_dep, auto_migrate=True)
 
     yield
 
