@@ -76,6 +76,63 @@ class TestBacktestViewModel:
         assert vm.state.status_color == ""
         assert vm.state.progress == 0.0
 
+    def test_dispose_cancels_running_task(self):
+        """dispose() 必须先取消运行中任务再清引用，防止孤儿任务（R.1.1）。"""
+        vm = BacktestViewModel()
+        vm._task_id = "running_task_001"
+        vm._set_state(is_running=True, progress=0.5, status_color="blue")
+        mock_result = MagicMock()
+        vm._result = mock_result
+
+        with patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls:
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm_cls.return_value = mock_tm
+
+            vm.dispose()
+
+            mock_tm.cancel_task.assert_called_once_with("running_task_001")
+
+        assert vm._task_id is None
+        assert vm.result is None
+        assert vm.state.is_running is False
+        assert vm.state.progress == 0.0
+        assert vm.state.status_color == ""
+        assert vm.state.status_message is None
+        assert vm.state.progress_message is None
+        assert vm.state.result_version == 0
+
+    def test_dispose_no_running_task_is_noop(self):
+        """dispose() 在无运行任务时不应调用 cancel_task（幂等性，R.1.1）。"""
+        vm = BacktestViewModel()
+
+        with patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls:
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm_cls.return_value = mock_tm
+
+            vm.dispose()
+
+            mock_tm.cancel_task.assert_not_called()
+
+        assert vm._task_id is None
+
+    def test_dispose_is_idempotent(self):
+        """dispose() 连续调用两次：第二次不应重复调 cancel_task（R.1.1 幂等性）。"""
+        vm = BacktestViewModel()
+        vm._task_id = "running_task_001"
+
+        with patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls:
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm_cls.return_value = mock_tm
+
+            vm.dispose()
+            vm.dispose()
+
+            mock_tm.cancel_task.assert_called_once_with("running_task_001")
+
+        assert vm._task_id is None
+        assert vm.result is None
+        assert vm.state.is_running is False
+
     def test_result_property(self):
         """测试 result 属性。"""
         vm = BacktestViewModel()

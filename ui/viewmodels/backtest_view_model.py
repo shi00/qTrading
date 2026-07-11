@@ -106,7 +106,8 @@ class BacktestViewModel:
         self._notify()
 
     def dispose(self):
-        """清理资源。"""
+        """清理资源：先取消运行中任务（防孤儿），再清引用与状态。"""
+        self.cancel_backtest()
         self._result = None
         self._task_id = None
         self._subscribers.clear()
