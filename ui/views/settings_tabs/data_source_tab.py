@@ -37,6 +37,7 @@ from ui.components.settings_widgets import (
 )
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n
+from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel
@@ -245,7 +246,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_msg_saved"), color=AppColors.SUCCESS)
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error(
                 "[DataSourceTab] Tushare save failed: %s",
@@ -262,7 +263,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             if show_snack_callback:
                 show_snack_callback(I18n.get("common_saved"), color=AppColors.SUCCESS)
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[DataSourceTab] HistoryRange | Failed to set config: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -274,7 +275,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         try:
             await vm.check_health()
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[DataSourceTab] Health check failed: %s", DataSanitizer.sanitize_error(ex))
 
@@ -328,7 +329,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             set_health_report_data(report)
             set_health_report_open(True)
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as ex:
             from utils.error_classifier import classify_error, get_error_message
 
@@ -521,11 +522,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     ft.use_effect(_on_health_error_version_change, dependencies=[state.health_error_version])
 
-    # --- Dual-track effect: cache_cleared_version → broadcast PubSub ---
+    # --- Dual-track effect: cache_cleared_version → broadcast PubSub (topic 模式) ---
     def _on_cache_cleared_version_change() -> None:
         page = _get_page()
         if page is not None:
-            page.pubsub.send_all("cache_cleared")
+            page.pubsub.send_all_on_topic(CACHE_CLEARED_TOPIC, "cache_cleared")
 
     ft.use_effect(_on_cache_cleared_version_change, dependencies=[state.cache_cleared_version])
 

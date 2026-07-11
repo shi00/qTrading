@@ -78,6 +78,11 @@ class MockFletPage:
         self.pubsub.subscribe_all = MagicMock()
         self.pubsub.unsubscribe_all = MagicMock()
         self.pubsub.send_all = MagicMock()
+        self.pubsub.subscribe_topic = MagicMock()
+        self.pubsub.unsubscribe_topic = MagicMock()
+        self.pubsub.send_all_on_topic = MagicMock()
+        self.pubsub.send_others = MagicMock()
+        self.pubsub.send_others_on_topic = MagicMock()
         self._tasks = []
 
     @property

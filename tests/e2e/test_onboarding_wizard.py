@@ -120,17 +120,6 @@ async def test_wizard_db_validation_failure(wizard_page):
     assert not await wizard_page.has_text(token_title)
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Flet 0.85.3 a11y 模式下两段独立缺陷叠加："
-        "(1) Flutter issue #129324 — Playwright el.type() 不触发 DOM→Flutter 反向同步，"
-        "已通过 fill_textbox 改用 Control+A + page.keyboard.type 缓解（输入同步已恢复）；"
-        "(2) _on_vm_step_changed → _update_wizard → _safe_update 静默吞掉 self.update() 异常"
-        "（logger.debug 级别未启用，被 try/except 隐藏），导致 ViewModel.current_step 已前进"
-        "但 Flutter UI 仍停留在 DB 步骤。根因独立于输入同步，需独立排查 _safe_update 异常源。"
-    ),
-    strict=False,
-)
 async def test_wizard_db_validation_success(wizard_page):
     """测试：数据库校验成功后前进到 Token 步骤（A 类门禁，用 CI 测试库）。"""
     from tests.conftest import _get_test_db_url

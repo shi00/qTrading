@@ -109,17 +109,18 @@ class TestHomeViewDeclarativeContract:
         assert "ft.context.page" in content
 
     def test_uses_pubsub_use_effect(self) -> None:
-        """验证 PubSub 用 use_effect(setup, [], cleanup=cleanup) 模式 (Phase 3.0.3)."""
+        """验证 PubSub 用 use_effect(setup, [], cleanup=cleanup) topic 模式."""
         content = _read_source()
-        assert "page.pubsub.subscribe" in content
-        assert "page.pubsub.unsubscribe" in content
+        assert "page.pubsub.subscribe_topic" in content
+        assert "page.pubsub.unsubscribe_topic" in content
         assert "ft.use_effect(" in content
         assert "cleanup=" in content
 
-    def test_pubsub_unsubscribe_zero_arg(self) -> None:
-        """验证 PubSub unsubscribe 零参整批退订 (R2 兼容, Flet 0.85.3 API)."""
+    def test_pubsub_uses_topic_unsubscribe(self) -> None:
+        """验证 PubSub 用 unsubscribe_topic 精准退订 (避免误伤其他视图订阅)."""
         content = _read_source()
-        assert "page.pubsub.unsubscribe()" in content
+        assert "page.pubsub.unsubscribe_topic(" in content
+        assert "page.pubsub.unsubscribe()" not in content
 
     def test_consumes_declarative_market_dashboard(self) -> None:
         """验证消费声明式 MarketDashboard(data=...) props 推送."""

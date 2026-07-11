@@ -10,9 +10,10 @@
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
 - 状态驱动: ConfigHandler 读写用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
-- 异步任务: ``page.run_task`` 调度; R2 CancelledError 不被 ``except Exception`` 捕获
+- 异步任务: ``page.run_task`` 调度; R2 CancelledError 显式 raise
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 
@@ -116,7 +117,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     ai_time, set_ai_time = ft.use_state(ConfigHandler.get_ai_concept_schedule_time())
     ai_engine, set_ai_engine = ft.use_state(ConfigHandler.get_ai_concept_search_engine())
 
-    # --- Async save handlers (R2: except Exception 不捕获 CancelledError) ---
+    # --- Async save handlers (R2: CancelledError 显式 raise) ---
     async def _do_schedule_toggle(new_enabled: bool) -> None:
         try:
             await ThreadPoolManager().run_async(
@@ -126,6 +127,8 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
                 show_snack_callback(
                     I18n.get("settings_snack_auto_on") if new_enabled else I18n.get("settings_snack_auto_off"),
                 )
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] schedule toggle save failed: %s", ex, exc_info=True)
             set_auto_enabled(not new_enabled)
@@ -137,6 +140,8 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"auto_update_time": new_time})
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] schedule time save failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -149,6 +154,8 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
                 show_snack_callback(
                     I18n.get("settings_snack_auto_on") if new_enabled else I18n.get("settings_snack_auto_off"),
                 )
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] ai concept toggle save failed: %s", ex, exc_info=True)
             set_ai_enabled(not new_enabled)
@@ -164,6 +171,8 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             )
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] ai concept time save failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -178,6 +187,8 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             )
             if show_snack_callback:
                 show_snack_callback(I18n.get("common_saved"))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] ai concept search engine save failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -431,7 +442,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     news_enabled, set_news_enabled = ft.use_state(bool(enable_news))
     interval_val, set_interval_val = ft.use_state(str(news_interval))
 
-    # --- Async save handlers (R2: except Exception 不捕获 CancelledError) ---
+    # --- Async save handlers (R2: CancelledError 显式 raise) ---
     async def _do_news_toggle(new_enabled: bool) -> None:
         try:
             await ThreadPoolManager().run_async(
@@ -442,6 +453,8 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
                     show_snack_callback(I18n.get("settings_snack_news_on"))
             elif show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_news_off"))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[NotificationsTab] news toggle save failed: %s", ex, exc_info=True)
             set_news_enabled(not new_enabled)
@@ -458,6 +471,8 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
             logger.warning("[NotificationsTab] interval invalid value: %s", new_val)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[NotificationsTab] interval save failed: %s", ex, exc_info=True)
             if show_snack_callback:

@@ -162,6 +162,41 @@ class TestSystemTabContract:
 
 
 # ============================================================================
+# R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)
+# ============================================================================
+
+
+class TestR2CancelledErrorPropagation:
+    """R2 红线: asyncio.CancelledError 必须显式 raise, 不被 except Exception 吞没。"""
+
+    def test_has_cancelled_error_guard(self):
+        """DoD: 含 await 的 async handler 必须有 except asyncio.CancelledError: raise。"""
+        code = _raw_source()
+        assert "except asyncio.CancelledError:" in code, "必须有 CancelledError 捕获"
+        assert "raise  # R2" in code, "CancelledError 必须 raise (R2)"
+
+    def test_cancelled_error_guard_count_meets_threshold(self):
+        """DoD: system_tab 含 8 个 async handler, CancelledError 守卫应 >= 8 处。"""
+        code = _raw_source()
+        guard_count = code.count("except asyncio.CancelledError:")
+        assert guard_count >= 8, f"R2 违规: system_tab 应至少 8 处 CancelledError 守卫, 实际 {guard_count}"
+
+    def test_no_bare_exception_swallows_cancelled_error(self):
+        """DoD: 外层 async handler 的 except Exception 前必须有 CancelledError 守卫。
+
+        system_tab 有 1 个内层同步 except Exception (locale_configuration 设置, 无 await),
+        不需要 CancelledError 守卫。因此守卫数 >= except Exception 数 - 1。
+        """
+        code = _raw_source()
+        except_exception_count = code.count("except Exception")
+        cancelled_guard_count = code.count("except asyncio.CancelledError")
+        # 允许 1 个内层同步 except Exception (无 await, 不需守卫)
+        assert cancelled_guard_count >= except_exception_count - 1, (
+            f"R2 违规: {except_exception_count} 处 except Exception 但仅 {cancelled_guard_count} 处 CancelledError 守卫"
+        )
+
+
+# ============================================================================
 # 模块级纯函数测试
 # ============================================================================
 

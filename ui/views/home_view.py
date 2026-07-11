@@ -28,6 +28,7 @@ from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n
+from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors
 from ui.viewmodels.home_view_model import HomeViewModel
 from utils.correlation import ensure_correlation_id
@@ -68,9 +69,9 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
 
     # --- Handlers ---
 
-    def _on_broadcast_message(message: str) -> None:
-        """PubSub 全局事件处理 (cache_cleared → 清空状态)."""
-        if message == "cache_cleared":
+    def _on_broadcast_message(topic: str, message: str) -> None:
+        """PubSub topic 事件处理 (cache_cleared → 清空状态)."""
+        if topic == CACHE_CLEARED_TOPIC and message == "cache_cleared":
             vm.clear_state()
             set_market_data({})
             set_news_items(pd.DataFrame())
@@ -95,7 +96,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
             else:
                 set_has_more(False)
         except asyncio.CancelledError:
-            raise  # R2: CancelledError 必须传播
+            raise  # R2: 必须传播
         except Exception as exc:
             logger.error("[HomeView] Load more failed: %s", DataSanitizer.sanitize_error(exc))
 
@@ -109,7 +110,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
             set_news_items(ndata if ndata is not None else pd.DataFrame())
             set_has_more(more)
         except asyncio.CancelledError:
-            raise  # R2: CancelledError 必须传播
+            raise  # R2: 必须传播
         except Exception as exc:
             logger.error("[HomeView] Load failed: %s", DataSanitizer.sanitize_error(exc))
 
@@ -119,7 +120,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
             await vm.init_data()
             await _load_data()
         except asyncio.CancelledError:
-            raise  # R2: CancelledError 必须传播
+            raise  # R2: 必须传播
         except Exception as exc:
             logger.error("[HomeView] Init failed: %s", exc, exc_info=True)
 
@@ -129,7 +130,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
         try:
             page = ft.context.page
             if page is not None:
-                page.pubsub.subscribe(_on_broadcast_message)
+                page.pubsub.subscribe_topic(CACHE_CLEARED_TOPIC, _on_broadcast_message)
         except RuntimeError:
             pass
 
@@ -137,7 +138,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
         try:
             page = ft.context.page
             if page is not None:
-                page.pubsub.unsubscribe()  # 零参整批退订 (R2 兼容)
+                page.pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC)
         except RuntimeError:
             pass
 
@@ -153,7 +154,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
             data = await vm.get_cached_market_data()
             set_market_data(data or {})
         except asyncio.CancelledError:
-            raise  # R2: CancelledError 必须传播
+            raise  # R2: 必须传播
         except Exception as exc:
             logger.debug("[HomeView] Market update failed: %s", exc, exc_info=True)
 
@@ -186,7 +187,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
                 set_news_items(ndata if ndata is not None else pd.DataFrame())
                 set_has_more(more)
         except asyncio.CancelledError:
-            raise  # R2: CancelledError 必须传播
+            raise  # R2: 必须传播
         except Exception as exc:
             logger.debug("[HomeView] News update failed: %s", exc, exc_info=True)
 

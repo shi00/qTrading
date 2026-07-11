@@ -2,8 +2,8 @@
 
 纯逻辑验证（不依赖 ``ft.run_async``，Windows 可运行）：
 - R2 CancelledError 传播：run_task 启动的任务在 cleanup 中取消时必须传播
-- grep 守护：spike 组件用 use_effect 订阅/退订，零参 unsubscribe
-- API 验证：page.run_task 返回 Future，pubsub.unsubscribe 零参
+- grep 守护：spike 组件用 use_effect 订阅/退订，topic 精准退订
+- API 验证：page.run_task 返回 Future，pubsub.unsubscribe_topic 带 topic 参数
 
 渲染行为验证在 ``tests/integration/test_spike_pubsub_runtask.py``（Windows skip）。
 """
@@ -25,11 +25,11 @@ def test_spike_pubsub_view_is_ft_component():
 
 
 def test_spike_pubsub_uses_use_effect_for_subscribe():
-    """DoD 5: spike 必须用 use_effect 订阅 pubsub（非命令式 __init__）。"""
+    """DoD 5: spike 必须用 use_effect 订阅 pubsub（topic 模式，非命令式 __init__）。"""
     source = inspect.getsource(_spike_pubsub_view)
     assert "ft.use_effect" in source, "spike 必须用 use_effect 订阅 pubsub"
-    assert "page.pubsub.subscribe" in source, "spike 必须在 setup 中订阅"
-    assert "page.pubsub.unsubscribe()" in source, "spike 必须在 cleanup 中零参退订"
+    assert "page.pubsub.subscribe_topic" in source, "spike 必须在 setup 中用 subscribe_topic 订阅"
+    assert "page.pubsub.unsubscribe_topic" in source, "spike 必须在 cleanup 中用 unsubscribe_topic 退订"
 
 
 def test_spike_pubsub_no_imperative_patterns():
@@ -70,17 +70,18 @@ async def test_run_task_cancel_propagates_cancelled_error():
     assert cancelled.is_set(), "CancelledError 必须在任务内部传播（R2）"
 
 
-def test_pubsub_unsubscribe_is_zero_arg():
-    """DoD 7: 验证 PubSubClient.unsubscribe() 零参（Flet 0.85.3 API）。
+def test_pubsub_unsubscribe_topic_takes_topic_arg():
+    """DoD 7: 验证 PubSubClient.unsubscribe_topic(topic) 带 topic 参数（Flet 0.85.3 API）。
 
-    零参 unsubscribe 按 session 整批退订，非按 callback 退订。
+    topic 精准退订避免误伤其他视图订阅（相比零参 unsubscribe 整批退订）。
     """
     from flet.pubsub.pubsub_client import PubSubClient
 
-    sig = inspect.signature(PubSubClient.unsubscribe)
-    # 零参数（除 self 外）
+    sig = inspect.signature(PubSubClient.unsubscribe_topic)
+    # 带 topic 参数（除 self 外）
     params = [p for p in sig.parameters.values() if p.name != "self"]
-    assert len(params) == 0, f"unsubscribe 应零参（除 self），实际参数: {params}"
+    assert len(params) == 1, f"unsubscribe_topic 应带 1 个 topic 参数（除 self），实际参数: {params}"
+    assert params[0].name == "topic", f"参数名应为 topic，实际: {params[0].name}"
 
 
 def test_page_run_task_returns_future():

@@ -3,7 +3,7 @@
 View 组合（@ft.component + use_state）由集成测试覆盖（flet_test_page fixture）。
 本单元测试聚焦：
 - 契约守护（grep 检查禁止的命令式模式）
-- 纯辅助函数（_get_tab_button_style / _show_snack / _build_tabs）行为
+- 纯辅助函数（_get_tab_button_style / _show_snack_impl / _build_tabs）行为
 参照 test_settings_widgets.py / test_task_center_view.py 模式。
 """
 
@@ -161,101 +161,87 @@ def _get_tab_button_style_safe(is_selected: bool) -> ft.ButtonStyle:
 
 
 # ---------------------------------------------------------------------------
-# 纯函数测试：_show_snack
+# 纯函数测试：_show_snack_impl
 # ---------------------------------------------------------------------------
 
 
 class TestShowSnack:
-    """_show_snack：通过 ft.context.page 触发 toast/snackbar fallback。"""
+    """_show_snack_impl：通过 page 引用触发 toast/snackbar fallback。
+
+    SettingsView 渲染时捕获 page, 闭包调用 _show_snack_impl(page, ...)。
+    本测试直接验证 _show_snack_impl 的纯逻辑 (不依赖 ft.context)。
+    """
 
     def test_show_snack_no_page_returns_silently(self):
-        """ft.context.page 抛 RuntimeError 时静默返回。"""
-        from ui.views.settings_view import _show_snack
+        """page=None 时静默返回 (对应渲染时 ft.context.page 抛 RuntimeError)."""
+        from ui.views.settings_view import _show_snack_impl
 
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            mock_ctx.page.__class__ = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
-            type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
-            # 应静默返回，不抛异常
-            _show_snack("msg")
-            # 验证未到达 page 访问后续代码
+        # 应静默返回，不抛异常
+        _show_snack_impl(None, "msg")
 
     def test_show_snack_with_show_toast_info(self):
         """page.show_toast 存在时按默认 info 类型触发。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
         mock_page.show_toast = MagicMock()
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _show_snack("hello")
-            mock_page.show_toast.assert_called_once_with("hello", type="info")
+        _show_snack_impl(mock_page, "hello")
+        mock_page.show_toast.assert_called_once_with("hello", type="info")
 
     def test_show_snack_with_error_color_calls_error(self):
         """color=AppColors.ERROR → msg_type=error。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
         mock_page.show_toast = MagicMock()
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _show_snack("err", color=AppColors.ERROR)
-            mock_page.show_toast.assert_called_once_with("err", type="error")
+        _show_snack_impl(mock_page, "err", color=AppColors.ERROR)
+        mock_page.show_toast.assert_called_once_with("err", type="error")
 
     def test_show_snack_with_success_color_calls_success(self):
         """color=AppColors.SUCCESS → msg_type=success。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
         mock_page.show_toast = MagicMock()
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _show_snack("ok", color=AppColors.SUCCESS)
-            mock_page.show_toast.assert_called_once_with("ok", type="success")
+        _show_snack_impl(mock_page, "ok", color=AppColors.SUCCESS)
+        mock_page.show_toast.assert_called_once_with("ok", type="success")
 
     def test_show_snack_with_warning_color_calls_warning(self):
         """color=AppColors.WARNING → msg_type=warning。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
         mock_page.show_toast = MagicMock()
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _show_snack("warn", color=AppColors.WARNING)
-            mock_page.show_toast.assert_called_once_with("warn", type="warning")
+        _show_snack_impl(mock_page, "warn", color=AppColors.WARNING)
+        mock_page.show_toast.assert_called_once_with("warn", type="warning")
 
     def test_show_snack_with_string_color_compat(self):
         """color="success" 字符串 → msg_type=success (兼容 database_tab 调用)。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
         mock_page.show_toast = MagicMock()
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            _show_snack("saved", color="success")
-            mock_page.show_toast.assert_called_once_with("saved", type="success")
+        _show_snack_impl(mock_page, "saved", color="success")
+        mock_page.show_toast.assert_called_once_with("saved", type="success")
 
     def test_show_snack_no_show_toast_logs_warning(self):
         """page 无 show_toast 方法时，降级为 logger.warning，不调 show_dialog。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
         mock_page = MagicMock()
         del mock_page.show_toast  # 删除属性，使 hasattr 返回 False
         mock_page.show_dialog = MagicMock()
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: mock_page)
-            with patch("ui.views.settings_view.logger") as mock_logger:
-                _show_snack("fallback", color=ft.Colors.BLUE)
-                mock_logger.warning.assert_called_once()
-                mock_page.show_dialog.assert_not_called()
+        with patch("ui.views.settings_view.logger") as mock_logger:
+            _show_snack_impl(mock_page, "fallback", color=ft.Colors.BLUE)
+            mock_logger.warning.assert_called_once()
+            mock_page.show_dialog.assert_not_called()
 
     def test_show_snack_none_page_returns_silently(self):
         """page 为 None 时静默返回。"""
-        from ui.views.settings_view import _show_snack
+        from ui.views.settings_view import _show_snack_impl
 
-        with patch("ui.views.settings_view.ft.context") as mock_ctx:
-            type(mock_ctx).page = property(lambda self: None)
-            # 应静默返回，不抛异常
-            _show_snack("msg")
+        # 应静默返回，不抛异常
+        _show_snack_impl(None, "msg")
 
 
 # ---------------------------------------------------------------------------

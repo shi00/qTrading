@@ -169,8 +169,8 @@ class TestDataViewDeclarativeContract:
     def test_pubsub_in_use_effect_with_cleanup(self):
         """DoD: PubSub 必须用 use_effect + cleanup 订阅/退订。"""
         code = _code_source()
-        assert "page.pubsub.subscribe" in code, "PubSub 必须在 use_effect setup 中订阅"
-        assert "page.pubsub.unsubscribe" in code, "PubSub 必须在 use_effect cleanup 中退订"
+        assert "page.pubsub.subscribe_topic" in code, "PubSub 必须在 use_effect setup 中用 subscribe_topic 订阅"
+        assert "page.pubsub.unsubscribe_topic" in code, "PubSub 必须在 use_effect cleanup 中用 unsubscribe_topic 退订"
         assert "ft.use_effect(_setup_pubsub" in code, "PubSub 必须通过 use_effect 注册"
         assert "cleanup=_cleanup_pubsub" in code, "PubSub 必须注册 cleanup 退订函数"
 

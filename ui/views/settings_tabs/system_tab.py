@@ -9,7 +9,7 @@
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 状态驱动: text/dropdown value 用 ``use_state`` (声明式自动重渲染)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
-- 异步保存: ``page.run_task`` 调度; R2 CancelledError 不被 ``except Exception`` 捕获
+- 异步保存: ``page.run_task`` 调度; R2 CancelledError 显式 raise
 - 移除命令式生命周期回调 / 手动刷新 / page 引用持有 / resize 级联
 """
 
@@ -85,7 +85,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - 状态驱动: text/dropdown value 用 ``use_state``
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
-    - 异步保存: ``page.run_task`` 调度, R2 CancelledError 不被 ``except Exception`` 捕获
+    - 异步保存: ``page.run_task`` 调度, R2 CancelledError 显式 raise
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -110,7 +110,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     no_proxy_value, set_no_proxy_value = ft.use_state(",".join(ConfigHandler.get_no_proxy_domains()))
     diagnostics_exporting, set_diagnostics_exporting = ft.use_state(False)
 
-    # --- Async handlers (R2: except Exception 不捕获 CancelledError) ---
+    # --- Async handlers (R2: CancelledError 显式 raise) ---
     async def _do_language_change(new_locale: str) -> None:
         try:
             success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
@@ -136,6 +136,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                     )
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_language_changed"))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[SystemTab] Language | Change failed: %s", DataSanitizer.sanitize_error(ex))
             logger.debug("[SystemTab] Language | Change failed traceback", exc_info=True)
@@ -149,9 +151,11 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             if page is not None:
                 from ui.theme import apply_page_theme
 
-                apply_page_theme(page, new_theme)  # type: ignore[untyped]
+                apply_page_theme(page, new_theme)  # type: ignore[untyped]  # [reason: apply_page_theme 为动态挂载函数, 无类型存根]
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_theme_updated"))
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[SystemTab] Theme | Change failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -165,6 +169,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             update_log_level(new_level)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_log_label") + ": " + new_level)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[SystemTab] LogLevel | Change failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -186,6 +192,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except ValueError:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[SystemTab] Concurrency | Save failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -226,6 +234,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except ValueError:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[SystemTab] DBPool | Save failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -262,6 +272,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         except ValueError:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
@@ -280,6 +292,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             from utils.proxy_manager import ProxyManager
 
             ThreadPoolManager().submit(TaskType.IO, ProxyManager.reapply_proxy_policy)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[SystemTab] No-proxy domains save failed: %s", ex, exc_info=True)
             if show_snack_callback:
@@ -297,6 +311,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                     I18n.get("settings_diagnostics_success").format(path=zip_path),
                     color=AppColors.SUCCESS,
                 )
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as ex:
             logger.error(
                 "[SystemTab] Diagnostics | Export failed: %s",

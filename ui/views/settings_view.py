@@ -52,37 +52,6 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
     )
 
 
-def _show_snack(message: str, color: str | None = None, **kwargs) -> None:
-    """Centralized toast handler — uses ``page.show_toast`` (动态挂载于 main.py).
-
-    CLAUDE.md §3.2 声明式 UI: 禁用 ``page.show_dialog(ft.SnackBar(...))`` 命令式 API,
-    统一用 ``page.show_toast`` (main.py:251 动态挂载).
-
-    Args:
-        message: Toast message
-        color: Optional color hint — AppColors.ERROR/SUCCESS/WARNING/INFO
-               (兼容字符串 "error"/"success"/"warning"/"info" 调用方)
-        **kwargs: Reserved (ignored, for backward-compat call sites)
-    """
-    try:
-        page = ft.context.page
-    except RuntimeError:
-        logger.debug("[SettingsView] page not available for show_snack")
-        return
-    if page is None or not hasattr(page, "show_toast"):
-        logger.warning("[SettingsView] show_toast unavailable: %s", message)
-        return
-
-    msg_type = "info"
-    if color == AppColors.ERROR or color == "error":
-        msg_type = "error"
-    elif color == AppColors.SUCCESS or color == "success":
-        msg_type = "success"
-    elif color == AppColors.WARNING or color == "warning":
-        msg_type = "warning"
-    page.show_toast(message, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
-
-
 def _build_tabs(show_snack: Callable) -> list[ft.Control]:
     """Instantiate all 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab).
 
@@ -101,6 +70,36 @@ def _build_tabs(show_snack: Callable) -> list[ft.Control]:
     ]
 
 
+def _show_snack_impl(
+    page: ft.Page | None,
+    message: str,
+    color: str | None = None,
+    **kwargs: object,
+) -> None:
+    """显示 toast/snackbar (纯逻辑, 供 SettingsView 闭包与单元测试调用).
+
+    Args:
+        page: 渲染时捕获的 ft.Page 引用 (None 时静默返回).
+        message: toast 文本.
+        color: AppColors token 或 "error"/"success"/"warning" 字符串, 决定 msg_type.
+
+    Note:
+        page 在 SettingsView 渲染时捕获, 供 run_task 回调中使用
+        (ft.context.page 在 run_task 回调中不可用, 见 SettingsView docstring).
+    """
+    if page is None or not hasattr(page, "show_toast"):
+        logger.warning("[SettingsView] show_toast unavailable: %s", message)
+        return
+    msg_type = "info"
+    if color == AppColors.ERROR or color == "error":
+        msg_type = "error"
+    elif color == AppColors.SUCCESS or color == "success":
+        msg_type = "success"
+    elif color == AppColors.WARNING or color == "warning":
+        msg_type = "warning"
+    page.show_toast(message, type=msg_type)  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+
+
 @ft.component
 def SettingsView() -> ft.Container:
     """Settings view — declarative shell container.
@@ -109,10 +108,21 @@ def SettingsView() -> ft.Container:
     - ``use_state(current_tab)`` 驱动 tab 切换（条件渲染）
     - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
     - 无 VM（纯 UI 容器）
-    - 无 page ref / 生命周期回调 / 手动刷新
+    - page 在渲染时捕获 (供 _show_snack 闭包在 run_task 回调中使用)
     """
     current_tab, set_current_tab = ft.use_state(0)
     ft.use_state(I18n.get_observable_state)
+
+    # --- Capture page at render time for _show_snack closure ---
+    # ft.context.page 在 page.run_task 回调中不可用 (Renderer 上下文未跨 run_task 传播),
+    # 在渲染时捕获 page 引用, 供异步回调中的 snackbar/toast 使用。
+    try:
+        _page = ft.context.page
+    except RuntimeError:
+        _page = None
+
+    def _show_snack(message: str, color: str | None = None, **kwargs: object) -> None:
+        _show_snack_impl(_page, message, color, **kwargs)
 
     # --- Build tabs ---
     tabs = _build_tabs(_show_snack)

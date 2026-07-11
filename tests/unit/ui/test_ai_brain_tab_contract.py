@@ -173,6 +173,30 @@ class TestAIBrainTabContract:
 
 
 # ============================================================================
+# R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)
+# ============================================================================
+
+
+class TestR2CancelledErrorPropagation:
+    """R2 红线: asyncio.CancelledError 必须显式 raise, 不被 except Exception 吞没。"""
+
+    def test_has_cancelled_error_guard(self):
+        """DoD: 含 await 的 async handler 必须有 except asyncio.CancelledError: raise。"""
+        code = _raw_source()
+        assert "except asyncio.CancelledError:" in code, "必须有 CancelledError 捕获"
+        assert "raise  # R2" in code, "CancelledError 必须 raise (R2)"
+
+    def test_no_bare_exception_swallows_cancelled_error(self):
+        """DoD: except Exception 前必须有 except asyncio.CancelledError 守卫。"""
+        code = _raw_source()
+        except_exception_count = code.count("except Exception")
+        cancelled_guard_count = code.count("except asyncio.CancelledError")
+        assert cancelled_guard_count >= except_exception_count, (
+            f"R2 违规: {except_exception_count} 处 except Exception 但仅 {cancelled_guard_count} 处 CancelledError 守卫"
+        )
+
+
+# ============================================================================
 # 三阶段保存状态机契约
 # ============================================================================
 

@@ -11,10 +11,11 @@
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
 - 三阶段保存流程用 ``use_state(save_state)`` 驱动 (idle/saving/success/error)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
-- 异步保存: ``page.run_task`` 调度; R2 CancelledError 不被 ``except Exception`` 捕获
+- 异步保存: ``page.run_task`` 调度; R2 CancelledError 显式 raise
 - 移除命令式生命周期回调 / 手动刷新 / page 引用持有 / resize 级联
 """
 
+import asyncio
 import logging
 import os
 from collections.abc import Callable
@@ -143,7 +144,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - 三阶段保存流程用 ``use_state(save_state)`` 驱动 (idle/saving/success/error)
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
-    - 异步保存: ``page.run_task`` 调度, R2 CancelledError 不被 ``except Exception`` 捕获
+    - 异步保存: ``page.run_task`` 调度, R2 CancelledError 显式 raise
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -191,7 +192,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
 
         采用三阶段模式: 先验证所有输入 → 再统一保存 → 最后统一重载。
         避免部分保存导致磁盘与内存不一致。
-        R2: ``except Exception`` 不捕获 ``asyncio.CancelledError`` (BaseException)。
+        R2: CancelledError 显式 raise。
         """
         from services.ai_service import AIService
         from services.local_model_manager import LocalModelManager
@@ -361,6 +362,8 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 show_snack_callback(I18n.get("settings_snack_ai_saved"))
 
             set_save_state(_SAVE_SUCCESS)
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
         except Exception as e:
             from utils.error_classifier import classify_error, classify_severity
 

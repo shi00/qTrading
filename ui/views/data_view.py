@@ -29,6 +29,7 @@ from data.persistence.metadata_manager import MetaDataManager
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n
+from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
 from utils.correlation import ensure_correlation_id
@@ -190,7 +191,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             await vm.load_table_schema(state.current_table)
             await vm.query_data()
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] load_schema error: %s", e, exc_info=True)
             page = _get_page()
@@ -205,7 +206,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             if tables:
                 await _load_schema_and_data()
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] init_tables error: %s", e, exc_info=True)
             page = _get_page()
@@ -225,7 +226,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             set_filter_val_text("")
             await _load_schema_and_data()
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
 
     async def _do_query() -> None:
         ensure_correlation_id()
@@ -234,7 +235,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         try:
             await vm.query_data(page=1)
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] query error: %s", e, exc_info=True)
 
@@ -244,7 +245,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         try:
             await vm.query_data()
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] refresh error: %s", e, exc_info=True)
 
@@ -252,7 +253,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         try:
             await vm.query_data(page=1)
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("[TableViewerTab] sort query error: %s", e, exc_info=True)
 
@@ -262,7 +263,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             try:
                 await vm.query_data(page=state.current_page - 1)
             except asyncio.CancelledError:
-                raise
+                raise  # R2: 必须传播
             except Exception as e:
                 logger.error("[TableViewerTab] prev page error: %s", e, exc_info=True)
 
@@ -273,7 +274,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             try:
                 await vm.query_data(page=state.current_page + 1)
             except asyncio.CancelledError:
-                raise
+                raise  # R2: 必须传播
             except Exception as e:
                 logger.error("[TableViewerTab] next page error: %s", e, exc_info=True)
 
@@ -312,7 +313,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                     if page is not None:
                         page.show_toast(I18n.get("data_export_fail"), "error")
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as e:
             logger.error("Export failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("Export failed traceback", exc_info=True)
@@ -655,7 +656,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                 set_status_text(I18n.get("data_sql_error"))
                 set_status_color(AppColors.ERROR)
         except asyncio.CancelledError:
-            raise
+            raise  # R2: 必须传播
         except Exception as exc:
             set_status_text(I18n.get("data_sys_error"))
             set_status_color(AppColors.ERROR)
@@ -825,9 +826,9 @@ def DataExplorerView() -> ft.Container:
     # --- Tab 选中状态 ---
     selected_index, set_selected_index = ft.use_state(0)
 
-    # --- PubSub 订阅/退订 (Phase 3.0.3 模式) ---
-    def _on_broadcast_message(message: str) -> None:
-        if message == "cache_cleared":
+    # --- PubSub 订阅/退订 (topic 精准退订, 避免误伤其他视图订阅) ---
+    def _on_broadcast_message(topic: str, message: str) -> None:
+        if topic == CACHE_CLEARED_TOPIC and message == "cache_cleared":
             vm.mark_tables_stale()
             logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
 
@@ -835,7 +836,7 @@ def DataExplorerView() -> ft.Container:
         try:
             page = ft.context.page
             if page is not None:
-                page.pubsub.subscribe(_on_broadcast_message)
+                page.pubsub.subscribe_topic(CACHE_CLEARED_TOPIC, _on_broadcast_message)
         except RuntimeError:
             pass
 
@@ -843,7 +844,7 @@ def DataExplorerView() -> ft.Container:
         try:
             page = ft.context.page
             if page is not None:
-                page.pubsub.unsubscribe()
+                page.pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC)
         except RuntimeError:
             pass
 
