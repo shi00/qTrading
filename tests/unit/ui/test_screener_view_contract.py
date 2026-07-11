@@ -156,15 +156,21 @@ class TestScreenerViewContract:
         """DoD: PubSub (TaskManager) 订阅必须通过 use_effect + cleanup 退订。"""
         code = _code_source()
         assert "use_effect" in code, "PubSub 必须用 use_effect 订阅"
-        # cleanup 函数成对出现 (订阅/退订)
-        assert code.count("cleanup=") >= 2, "PubSub + FilePicker 至少两处 cleanup"
+        # cleanup 函数成对出现 (FilePicker + PubSub 各一处 cleanup)
+        assert code.count("cleanup=") >= 2, "FilePicker + PubSub 各需一处 cleanup"
 
-    def test_stream_ref_buffer_exists(self):
-        """DoD: LLM 流式 Markdown 卡片必须用 ref buffer + 节流 set_state。"""
+    def test_stream_cards_state_driven(self):
+        """DoD: 流式卡片必须从 state.stream_cards 渲染 (state-driven, 不用 ref buffer)。"""
         code = _code_source()
-        assert "_STREAM_THROTTLE" in code, "必须定义流式节流常量 _STREAM_THROTTLE"
-        assert "stream_buffers" in code, "必须用 stream_buffers ref 缓存流式 chunks"
-        assert "set_log_cards" in code, "必须用 set_log_cards 触发重渲染"
+        assert "state.stream_cards" in code, "必须从 state.stream_cards 渲染流式卡片"
+        assert "StreamCard" in code, "必须使用 StreamCard dataclass"
+
+    def test_no_callback_injection(self):
+        """DoD: 禁止回调注入模式 (on_log_stream_start / on_ai_card_start)。"""
+        code = _code_source()
+        assert "on_log_stream_start" not in code, "禁止 on_log_stream_start 回调注入"
+        assert "on_ai_card_start" not in code, "禁止 on_ai_card_start 回调注入"
+        assert "_setup_vm_callbacks" not in code, "禁止 _setup_vm_callbacks 回调绑定"
 
     def test_consumes_resizable_splitter(self):
         """DoD: 必须函数调用消费 ResizableSplitter (props 推送)。"""

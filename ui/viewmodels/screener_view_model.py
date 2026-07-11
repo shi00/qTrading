@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 # Must NOT be i18n'd — both sides use this as a programmatic identifier.
 TASK_NAME_PREFIX = "strategy_screening"
 
+# Stream card throttle and limit (moved from View, VM owns card lifecycle)
+_STREAM_THROTTLE = 0.05  # seconds
+_MAX_LOG_CARDS = 10
+
 
 @dataclass(frozen=True)
 class LogEntry:
@@ -32,6 +36,20 @@ class LogEntry:
     name: str
     score: float
     thinking: str
+
+
+@dataclass(frozen=True)
+class StreamCard:
+    """Single streaming/AI placeholder card (immutable, state-driven).
+
+    - is_analyzing=True: 占位卡 (并发非流式模式, ProgressRing + "分析中")
+    - is_analyzing=False: 流式卡 (reasoning + content Markdown)
+    """
+
+    name: str
+    reasoning: str = ""
+    content: str = ""
+    is_analyzing: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +75,8 @@ class ScreenerState:
     status_color: str = ""
     # AI streaming logs (append-only tuple)
     logs: tuple[LogEntry, ...] = ()
+    # AI streaming/placeholder cards (state-driven, §3.2 MVVM)
+    stream_cards: tuple[StreamCard, ...] = ()
     # Mode: "REALTIME" or "HISTORY"
     mode: str = "REALTIME"
     # Task unlock signal (View resets after consuming)
@@ -96,11 +116,8 @@ class ScreenerViewModel:
         # History mode snapshot (internal)
         self._realtime_snapshot: dict | None = None
 
-        # View-provided callbacks for strategy context (not VM→View notifications).
-        # These are callables the strategy invokes to signal UI element creation;
-        # they do not match the Phase 2 grep (on_update / on_log / on_status 回调注入).
-        self.on_log_stream_start: Callable[[str], Callable] | None = None
-        self.on_ai_card_start: Callable[[str], None] | None = None
+        # Stream card buffers (VM owns card lifecycle, §3.2 MVVM state-driven)
+        self._stream_buffers: dict[str, dict] = {}
 
         # Async infrastructure
         self._main_loop = None
@@ -168,8 +185,7 @@ class ScreenerViewModel:
         """Cleanup resources and ensure aggressive GC of large dataframes"""
         self.unsubscribe_task_manager()
         self._subscribers.clear()
-        self.on_log_stream_start = None
-        self.on_ai_card_start = None
+        self._stream_buffers.clear()
         self._main_loop = None
 
         for f in list(self._threadsafe_futures):
@@ -224,6 +240,7 @@ class ScreenerViewModel:
         from utils.correlation import ensure_correlation_id
 
         ensure_correlation_id()
+        self.clear_stream_cards()
 
         strategy = self.strategy_mgr.get_strategy(strategy_key)
         if not strategy:
@@ -293,10 +310,8 @@ class ScreenerViewModel:
 
                 context["on_progress"] = _combined_ai_progress
                 context["on_result"] = self._on_ai_result_stream
-                if self.on_log_stream_start:
-                    context["on_stream_start"] = self.on_log_stream_start
-                if self.on_ai_card_start:
-                    context["on_card_start"] = self.on_ai_card_start
+                context["on_stream_start"] = self._on_stream_start_adapter
+                context["on_card_start"] = self._on_card_start_adapter
 
                 # We inject the task_id into context so deep AI tasks can check cancellation
                 context["_task_id"] = task_id
@@ -507,6 +522,72 @@ class ScreenerViewModel:
         # Slicing is fast enough for main thread
         return self._full_results.iloc[start:end]
 
+    # --- Stream Card Management (state-driven, §3.2 MVVM) ---
+
+    def clear_stream_cards(self) -> None:
+        """Clear all stream cards and buffers (called on new run)."""
+        self._stream_buffers.clear()
+        self._set_state(stream_cards=())
+
+    def start_stream_card(self, name: str, is_analyzing: bool = False) -> None:
+        """Create a new stream/placeholder card."""
+        self._stream_buffers[name] = {"reasoning": "", "content": "", "last_flush": 0.0, "pending": False}
+        card = StreamCard(name=name, is_analyzing=is_analyzing)
+        new_cards = (self._state.stream_cards + (card,))[-_MAX_LOG_CARDS:]
+        self._set_state(stream_cards=new_cards)
+
+    def append_stream_chunk(self, name: str, chunk: str, is_reasoning: bool) -> None:
+        """Accumulate LLM chunk, throttle-flush to state."""
+        buf = self._stream_buffers.get(name)
+        if not buf:
+            return
+        if is_reasoning:
+            buf["reasoning"] += chunk
+        else:
+            buf["content"] += chunk
+        now = time.time()
+        if now - buf["last_flush"] >= _STREAM_THROTTLE:
+            self._flush_stream_card(name)
+        else:
+            buf["pending"] = True
+
+    def finalize_stream_card(self, name: str) -> None:
+        """Force flush pending buffer (called by strategy on completion)."""
+        buf = self._stream_buffers.get(name)
+        if buf and buf.get("pending"):
+            self._flush_stream_card(name)
+
+    def _flush_stream_card(self, name: str) -> None:
+        """Flush single card buffer to state."""
+        buf = self._stream_buffers.get(name)
+        if not buf:
+            return
+        # Guard: card may have been truncated by _MAX_LOG_CARDS; avoid orphan buffer + noop notify
+        if not any(c.name == name for c in self._state.stream_cards):
+            self._stream_buffers.pop(name, None)
+            return
+        new_cards = tuple(
+            replace(c, reasoning=buf["reasoning"], content=buf["content"], is_analyzing=False) if c.name == name else c
+            for c in self._state.stream_cards
+        )
+        self._set_state(stream_cards=new_cards)
+        buf["last_flush"] = time.time()
+        buf["pending"] = False
+
+    def _on_stream_start_adapter(self, name: str) -> Callable:
+        """Adapter for strategy's on_stream_start contract (returns on_chunk closure)."""
+        self.start_stream_card(name, is_analyzing=False)
+
+        def _on_chunk(chunk_text: str, is_reasoning: bool = False) -> None:
+            self.append_stream_chunk(name, chunk_text, is_reasoning)
+
+        _on_chunk.final_flush = lambda: self.finalize_stream_card(name)  # type: ignore[attr-defined]  # [reason: ai_mixin.py:576 用 hasattr 检查 final_flush]
+        return _on_chunk
+
+    def _on_card_start_adapter(self, name: str) -> None:
+        """Adapter for strategy's on_card_start contract."""
+        self.start_stream_card(name, is_analyzing=True)
+
     # --- AI Streaming Handlers ---
 
     def _on_ai_progress(self, current, total, msg):
@@ -652,10 +733,13 @@ class ScreenerViewModel:
             "sort_column": self._state.sort_column,
             "sort_ascending": self._state.sort_ascending,
             "ai_buffer": self._ai_buffer[:],
+            "stream_cards": self._state.stream_cards,
+            "stream_buffers": dict(self._stream_buffers),
         }
         # Clear for history data
         self._full_results = None
         self._ai_buffer = []
+        self._stream_buffers.clear()
         # _update_pagination only updates pagination fields; sort_* are set in _set_state below.
         self._update_pagination(page_no=1)
         self._set_state(
@@ -663,6 +747,7 @@ class ScreenerViewModel:
             page_no=1,
             sort_column=None,
             sort_ascending=True,
+            stream_cards=(),
             data_version=self._state.data_version + 1,
         )
         logger.info("[ScreenerVM] Switched to HISTORY mode")
@@ -678,6 +763,8 @@ class ScreenerViewModel:
             sc = self._realtime_snapshot["sort_column"]
             sa = self._realtime_snapshot["sort_ascending"]
             self._ai_buffer = self._realtime_snapshot["ai_buffer"]
+            stream_cards = self._realtime_snapshot.get("stream_cards", ())
+            self._stream_buffers = self._realtime_snapshot.get("stream_buffers", {})
             self._realtime_snapshot = None
             # U-3 fix: Merge discarded_buffer back to ai_buffer
             if self._discarded_buffer:
@@ -690,6 +777,7 @@ class ScreenerViewModel:
                 page_no=pn,
                 sort_column=sc,
                 sort_ascending=sa,
+                stream_cards=stream_cards,
                 data_version=self._state.data_version + 1,
             )
         else:

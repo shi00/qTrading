@@ -9,7 +9,7 @@
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
 - FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``, cleanup 时移除
 - PubSub (TaskManager) 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
-- LLM 流式 Markdown 卡片用 ref buffer + 节流 ``set_state`` (<50ms/帧)
+- LLM 流式 Markdown 卡片从 ``state.stream_cards`` 渲染 (VM 侧节流 flush, state-driven)
 - page 访问用 ``ft.context.page`` (try/except 守卫 RuntimeError)
 - 移除全部命令式生命周期/主题/locale/resize/page_ref/占位字典 API (改用 state 驱动)
 - 消费声明式 ResizableSplitter/PaginatedTable/StockDetailDialog (函数调用, props 推送)
@@ -19,8 +19,6 @@ import asyncio
 import datetime
 import logging
 import os
-import time
-from collections.abc import Callable
 from decimal import Decimal
 
 import flet as ft
@@ -34,7 +32,7 @@ from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, translate_strategy_name
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.screener_view_model import ScreenerViewModel
+from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -92,13 +90,6 @@ _COLUMN_WIDTHS = {
 _VOLUME_COLS = frozenset({"vol", "volume", "amount"})
 
 _DATE_COLS = frozenset({"list_date", "trade_date"})
-
-# 流式卡片节流间隔 (秒) — <50ms/帧性能要求
-# NOTE(lazy): 节流常量已实现 ref buffer + set_state 节流模式, 但无法在单元测试中验证实际帧率 <50ms/帧 (需 renderer + 真实流式输入). ceiling: LLM 单 chunk 渲染耗时未基准化. upgrade: 集成测试 (flet_test_page + 模拟流式输入) 落地后补充帧率基准.
-_STREAM_THROTTLE = 0.05
-
-# 流式卡片最大显示数 (防止内存爆炸)
-_MAX_LOG_CARDS = 10
 
 
 def _format_cell_value(col: str, val) -> str:
@@ -249,7 +240,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``
     - PubSub (TaskManager) 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
-    - LLM 流式 Markdown 卡片用 ref buffer + 节流 ``set_state`` (<50ms/帧)
+    - LLM 流式 Markdown 卡片从 ``state.stream_cards`` 渲染 (VM 侧节流 flush, state-driven)
     - page 访问用 ``ft.context.page`` (try/except 守卫)
 
     Args:
@@ -285,11 +276,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     params_ref = ft.use_ref(lambda: {})
     _params_version, bump_params = ft.use_state(0)
 
-    # --- 流式卡片 (ref buffer + state 驱动渲染) ---
-    stream_buffers = ft.use_ref(lambda: {})
-    log_cards, set_log_cards = ft.use_state(())
-    log_cards_ref = ft.use_ref(lambda: ())
-
     # --- FilePicker 生命周期 (use_ref 持有 + use_effect 注册/移除) ---
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
@@ -304,81 +290,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             page.services.remove(file_picker)
 
     ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
-
-    # --- VM 流式回调绑定 (on_log_stream_start / on_ai_card_start) ---
-
-    def _on_log_stream_start(name: str) -> Callable:
-        """创建流式 Markdown 卡片, 返回节流 ``_on_chunk`` 闭包。"""
-        stream_buffers.current[name] = {
-            "reasoning": "",
-            "content": "",
-            "last_flush": 0.0,
-            "pending": False,
-        }
-        # 添加卡片 (若不存在)
-        current = log_cards_ref.current or ()
-        if not any(c["name"] == name for c in current):
-            new_cards = current + ({"name": name, "reasoning": "", "content": "", "is_analyzing": False},)
-            if len(new_cards) > _MAX_LOG_CARDS:
-                new_cards = new_cards[-_MAX_LOG_CARDS:]
-            log_cards_ref.current = new_cards
-            set_log_cards(new_cards)
-
-        def _flush() -> None:
-            buf = stream_buffers.current.get(name)
-            if not buf:
-                return
-            snap_reas = buf["reasoning"]
-            snap_cont = buf["content"]
-            current_cards = log_cards_ref.current or ()
-            new_cards = tuple(
-                {**c, "reasoning": snap_reas, "content": snap_cont, "is_analyzing": False} if c["name"] == name else c
-                for c in current_cards
-            )
-            log_cards_ref.current = new_cards
-            set_log_cards(new_cards)
-            buf["last_flush"] = time.time()
-            buf["pending"] = False
-
-        def _on_chunk(chunk_text: str, is_reasoning: bool = False) -> None:
-            buf = stream_buffers.current.get(name)
-            if not buf:
-                return
-            if is_reasoning:
-                buf["reasoning"] += chunk_text
-            else:
-                buf["content"] += chunk_text
-            now = time.time()
-            if now - buf["last_flush"] >= _STREAM_THROTTLE:
-                _flush()
-            else:
-                buf["pending"] = True
-
-        _on_chunk.final_flush = lambda: (
-            _flush() if (stream_buffers.current or {}).get(name, {}).get("pending") else None
-        )  # type: ignore[attr-defined]  # [reason: 动态挂载 final_flush 属性供 VM 终结调用]
-        return _on_chunk
-
-    def _on_ai_card_start(name: str) -> None:
-        """并发模式: 插入'分析中'占位卡。"""
-        current = log_cards_ref.current or ()
-        if not any(c["name"] == name for c in current):
-            new_cards = current + ({"name": name, "reasoning": "", "content": "", "is_analyzing": True},)
-            if len(new_cards) > _MAX_LOG_CARDS:
-                new_cards = new_cards[-_MAX_LOG_CARDS:]
-            log_cards_ref.current = new_cards
-            set_log_cards(new_cards)
-        return None
-
-    def _setup_vm_callbacks() -> None:
-        vm.on_log_stream_start = _on_log_stream_start
-        vm.on_ai_card_start = _on_ai_card_start
-
-    def _cleanup_vm_callbacks() -> None:
-        vm.on_log_stream_start = None
-        vm.on_ai_card_start = None
-
-    ft.use_effect(_setup_vm_callbacks, dependencies=[], cleanup=_cleanup_vm_callbacks)
 
     # --- PubSub (TaskManager) 订阅/退订 ---
 
@@ -444,10 +355,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             else:
                 params_ref.current[p["name"]] = p.get("default")
         bump_params(_params_version + 1)
-        # 清空旧卡片
-        log_cards_ref.current = ()
-        set_log_cards(())
-        # 执行
+        # 执行 (VM 在 run_strategy 开始时自动清空 stream_cards)
         try:
             await vm.run_strategy(key, params=dict(params_ref.current or {}))
         except asyncio.CancelledError:
@@ -485,9 +393,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         if not selected_strategy:
             return
         set_run_disabled(True)
-        # 清空旧卡片
-        log_cards_ref.current = ()
-        set_log_cards(())
         try:
             await vm.run_strategy(selected_strategy, params=dict(params_ref.current or {}))
         except asyncio.CancelledError:
@@ -972,10 +877,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     # --- 构建流式卡片控件 ---
 
-    def _build_log_card(card: dict) -> ft.Container:
-        """构建单张流式/AI 占位卡。"""
-        name = card["name"]
-        if card.get("is_analyzing"):
+    def _build_log_card(card: StreamCard) -> ft.Container:
+        """构建单张流式/AI 占位卡 (state-driven, 从 vm.state.stream_cards 渲染)。"""
+        name = card.name
+        if card.is_analyzing:
             return ft.Container(
                 content=ft.Column(
                     [
@@ -1005,8 +910,8 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                 margin=ft.Margin.only(bottom=10),
             )
 
-        reasoning = card.get("reasoning", "")
-        content = card.get("content", "")
+        reasoning = card.reasoning
+        content = card.content
         reasoning_visible = bool(reasoning)
         return ft.Container(
             content=ft.Column(
@@ -1303,7 +1208,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                 ),
                 ft.Container(
                     content=ft.Column(
-                        [_build_log_card(c) for c in log_cards],
+                        [_build_log_card(c) for c in state.stream_cards],
                         expand=True,
                         spacing=4,
                         scroll=ft.ScrollMode.ALWAYS,

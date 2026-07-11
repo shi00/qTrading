@@ -164,6 +164,13 @@ class TestScreenerViewModelDispose:
         assert vm.state.mode == "REALTIME"
         assert vm.state.logs == ()
 
+    def test_dispose_clears_stream_buffers(self, vm):
+        """P1-3: dispose 必须清空 _stream_buffers 防止资源泄漏。"""
+        vm.start_stream_card("stock_1")
+        assert len(vm._stream_buffers) == 1
+        vm.dispose()
+        assert len(vm._stream_buffers) == 0
+
 
 class TestScreenerViewModelPagination:
     def test_pagination(self, vm):
@@ -713,6 +720,22 @@ class TestSwitchToHistory:
         assert vm._realtime_snapshot["sort_ascending"] is False
         assert vm._realtime_snapshot["ai_buffer"] == [{"x": 1}]
 
+    def test_snapshots_stream_cards_and_buffers(self, vm):
+        """P1-3: switch_to_history 必须快照 stream_cards 和 stream_buffers。"""
+        vm.start_stream_card("stock_1")
+        vm.switch_to_history()
+        assert vm._realtime_snapshot["stream_cards"] != ()
+        assert len(vm._realtime_snapshot["stream_cards"]) == 1
+        assert vm._realtime_snapshot["stream_cards"][0].name == "stock_1"
+        assert len(vm._realtime_snapshot["stream_buffers"]) == 1
+
+    def test_clears_stream_cards_and_buffers_on_switch(self, vm):
+        """P1-3: switch_to_history 后 state.stream_cards 和 _stream_buffers 必须清空。"""
+        vm.start_stream_card("stock_1")
+        vm.switch_to_history()
+        assert vm.state.stream_cards == ()
+        assert len(vm._stream_buffers) == 0
+
     def test_clears_results(self, vm):
         vm._full_results = pd.DataFrame({"A": [1]})
         vm.switch_to_history()
@@ -746,6 +769,15 @@ class TestSwitchToRealtime:
         assert vm.state.page_no == 3
         assert vm.state.sort_column == "A"
         assert vm.state.sort_ascending is False
+
+    def test_restores_stream_cards_and_buffers(self, vm):
+        """P1-3: switch_to_realtime 必须恢复 stream_cards 和 _stream_buffers。"""
+        vm.start_stream_card("stock_1")
+        vm.switch_to_history()
+        vm.switch_to_realtime()
+        assert len(vm.state.stream_cards) == 1
+        assert vm.state.stream_cards[0].name == "stock_1"
+        assert len(vm._stream_buffers) == 1
 
     def test_clears_snapshot(self, vm):
         vm._full_results = pd.DataFrame({"A": [1]})
