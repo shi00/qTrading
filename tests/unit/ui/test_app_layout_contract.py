@@ -140,8 +140,32 @@ class TestAppLayoutContract:
         assert "_view_cache" not in _code_source(), "不应使用 _view_cache (声明式直接函数调用)"
 
     def test_no_use_ref_cache(self):
-        """DoD: 禁止 use_ref cache 命令式实例。"""
-        assert "ft.use_ref" not in _code_source(), "不应直接使用 ft.use_ref"
+        """DoD: 禁止 use_ref cache 命令式控件实例（Future/非控件引用除外，R.1.3 例外）。
+
+        全量校验所有 ft.use_ref(...) 调用的参数必须为 None，避免"存在一个 use_ref(None)
+        即放行"的虚假保障（QA Critical + Skeptic M1）。
+        """
+        import re
+
+        source = _code_source()
+        use_ref_args = re.findall(r"ft\.use_ref\(([^)]*)\)", source)
+        for arg in use_ref_args:
+            assert arg.strip() == "None", f"use_ref 仅允许 None 初始值（非控件实例），实际: {arg}"
+
+    def test_app_layout_resize_cleanup_cancels_debounce(self):
+        """DoD: _cleanup_resize 必须取消 pending debounce_task 并置 None（R.1.3 防孤儿任务）。
+
+        本测试为源码契约守护（grep 式），行为覆盖由集成测试承担。
+        用 _code_source() 剥离 docstring 降低误判，500 字符窗口覆盖函数体。
+        """
+        source = _code_source()
+        # debounce_task 必须用 use_ref 持有（跨 re-render 持久 + cleanup 可访问）
+        assert "ft.use_ref" in source, "debounce_task 必须用 use_ref 持有"
+        # _cleanup_resize 必须包含 cancel 调用 + 置 None（防孤儿引用 + 可重入）
+        cleanup_idx = source.index("def _cleanup_resize")
+        cleanup_section = source[cleanup_idx : cleanup_idx + 500]
+        assert ".cancel()" in cleanup_section, "_cleanup_resize 必须取消 debounce_task"
+        assert "= None" in cleanup_section, "_cleanup_resize cancel 后必须置 None 防孤儿引用"
 
     def test_subscribes_i18n(self):
         """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""

@@ -18,7 +18,6 @@
 import asyncio
 import logging
 from enum import IntEnum
-from typing import Any
 
 import flet as ft
 
@@ -147,31 +146,28 @@ def AppLayout() -> ft.Container:
         set_nav_collapsed(not nav_collapsed)
 
     # --- Resize 处理 (use_effect + page.on_resize, 防抖 + state 更新) ---
+    # debounce_task 用 use_ref 持有（跨 re-render 持久 + cleanup 可访问，非命令式控件实例）
+    debounce_task_ref = ft.use_ref(None)
+
     def _setup_resize() -> None:
         page = _get_page()
         if page is None:
             return
 
-        # 防抖任务跟踪 (闭包变量, effect 只运行一次, 跨 resize 事件持久)
-        # page.run_task 返回 Future, 用 Any 注解避免 pyright 协变/逆变推断冲突
-        debounce_task: Any = None
-
         async def _do_resize(width: float, height: float) -> None:
-            nonlocal debounce_task
             try:
                 await asyncio.sleep(RESIZE_DEBOUNCE_MS / 1000)
             except asyncio.CancelledError:
                 raise  # R2: 必须传播
             set_window_size((width, height))
-            debounce_task = None
+            debounce_task_ref.current = None
 
         def _on_resize(e: ft.ControlEvent) -> None:
-            nonlocal debounce_task
-            if debounce_task is not None:
-                debounce_task.cancel()
+            if debounce_task_ref.current is not None:
+                debounce_task_ref.current.cancel()
             width = float(getattr(e, "width", 0) or 0)
             height = float(getattr(e, "height", 0) or 0)
-            debounce_task = page.run_task(_do_resize, width, height)
+            debounce_task_ref.current = page.run_task(_do_resize, width, height)
 
         page.on_resize = _on_resize
 
@@ -179,6 +175,9 @@ def AppLayout() -> ft.Container:
         page = _get_page()
         if page is not None:
             page.on_resize = None
+        if debounce_task_ref.current is not None:
+            debounce_task_ref.current.cancel()
+            debounce_task_ref.current = None
 
     ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
 
