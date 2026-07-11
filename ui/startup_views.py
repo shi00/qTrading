@@ -7,7 +7,7 @@
 - 旧命令式 ``class StartupViewRenderer`` → ``@ft.component def StartupView()``
 - controller 通过 _StartupBridge 桥接触发组件重渲染 (bridge.notify → set_state)
 - 状态驱动渲染: state/context 用 use_state, 根据 StartupState 条件渲染
-- dialog 管理: use_effect(dependencies=[state]) 响应 state 变化 show/hide dialog
+- dialog 管理: ``ft.use_dialog()`` 声明式挂载/卸载 (§10.1), dialog 由 state 驱动条件创建
 - i18n 通过 ft.use_state(I18n.get_observable_state) 自动重渲染
 - 移除 page.clean()/page.add()/page.update() 命令式调用
 - page 访问: 不持有 page 引用 (controller 回调通过 run_task_fn 注入)
@@ -53,7 +53,7 @@ class _StartupBridge:
     controller 的 on_state_change 调 bridge.notify 触发重渲染。
 
     时序安全: notify 在 dispatch 绑定前仅更新 state/context 快照,
-    首次渲染 use_state(bridge.state) 读取最新快照, 不丢失状态。
+    _setup_bridge 绑定 dispatch 后同步 bridge.state != state 的变更, 不丢失状态。
     """
 
     def __init__(self) -> None:
@@ -205,14 +205,12 @@ def _build_onboarding_view(on_complete: Callable[[], Any]) -> ft.Container:
 def StartupView(
     controller: StartupController,
     bridge: _StartupBridge,
-    show_dialog_fn: Callable[[ft.Control], None],
-    hide_dialog_fn: Callable[[ft.Control], None],
     run_task_fn: Callable[..., Any],
 ) -> ft.Control:
     """启动期声明式组件 (Phase G.1).
 
     根据 StartupState 条件渲染 loading/error/onboarding/main_app;
-    dialog 用 use_effect(dependencies=[state]) 响应 state 变化 show/hide;
+    dialog 用 ``ft.use_dialog()`` 声明式挂载/卸载 (§10.1), 由 state 驱动条件创建;
     controller 通过 _StartupBridge 桥接触发重渲染。
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
@@ -233,67 +231,52 @@ def StartupView(
             set_context(new_ctx)
 
         bridge.dispatch = _dispatch
+        # 同步 dispatch 绑定前可能已发生的状态变更:
+        # page.render() 调度 effects 但不同步执行, controller.start() (async)
+        # 可能在 dispatch 绑定前调 bridge.notify 导致状态丢失。
+        if bridge.state != state:
+            _dispatch(bridge.state, bridge.context)
 
     def _cleanup_bridge() -> None:
         bridge.dispatch = None
 
     ft.use_effect(_setup_bridge, dependencies=[], cleanup=_cleanup_bridge)
 
-    # --- dialog 管理 (响应 state 变化 show/hide) ---
-    # Any: use_ref 初始 None, current 运行时持有 ft.Control | None
-    current_dialog_ref: Any = ft.use_ref(lambda: None)
+    # --- dialog 管理 (ft.use_dialog 声明式, §10.1) ---
+    # dialog 由 state 驱动条件创建; state 变化时旧 dialog 自动卸载, 新 dialog 自动挂载
+    dialog: ft.AlertDialog | None = None
+    if state == StartupState.NEED_UPGRADE:
 
-    def _setup_dialog() -> None:
-        dialog: ft.Control | None = None
-        if state == StartupState.NEED_UPGRADE:
+        def _on_upgrade(e: ft.ControlEvent) -> None:
+            run_task_fn(controller.upgrade)
 
-            def _on_upgrade(e: ft.ControlEvent) -> None:
-                run_task_fn(controller.upgrade)
+        dialog = _build_upgrade_dialog(_on_upgrade)
+    elif state == StartupState.UPGRADE_IN_PROGRESS:
+        dialog = _build_upgrade_in_progress_dialog()
+    elif state == StartupState.UPGRADE_SUCCESS:
 
-            dialog = _build_upgrade_dialog(_on_upgrade)
-        elif state == StartupState.UPGRADE_IN_PROGRESS:
-            dialog = _build_upgrade_in_progress_dialog()
-        elif state == StartupState.UPGRADE_SUCCESS:
+        def _on_ok(e: ft.ControlEvent) -> None:
+            run_task_fn(controller.proceed_after_upgrade_success)
 
-            def _on_ok(e: ft.ControlEvent) -> None:
-                d = current_dialog_ref.current
-                if d is not None:
-                    hide_dialog_fn(d)
-                    current_dialog_ref.current = None
-                run_task_fn(controller.proceed_after_upgrade_success)
+        dialog = _build_upgrade_success_dialog(_on_ok)
+    elif state == StartupState.UPGRADE_FAILED:
 
-            dialog = _build_upgrade_success_dialog(_on_ok)
-        elif state == StartupState.UPGRADE_FAILED:
+        def _on_exit(e: ft.ControlEvent) -> None:
+            # NOTE(lazy): _on_exit 不触发 state 变化, dialog 在 exit cleanup (≤5s) 期间保持可见可交互.
+            #   ceiling: exit cleanup 5s 窗口内 Retry 可点击, 与 force_exit 竞态.
+            #   upgrade: 重写为 EXITING 状态时处理 (独立任务).
+            controller.upgrade_exit()
 
-            def _on_exit(e: ft.ControlEvent) -> None:
-                d = current_dialog_ref.current
-                if d is not None:
-                    hide_dialog_fn(d)
-                    current_dialog_ref.current = None
-                controller.upgrade_exit()
+        def _on_retry(e: ft.ControlEvent) -> None:
+            run_task_fn(controller.upgrade_retry)
 
-            def _on_retry(e: ft.ControlEvent) -> None:
-                d = current_dialog_ref.current
-                if d is not None:
-                    hide_dialog_fn(d)
-                    current_dialog_ref.current = None
-                run_task_fn(controller.upgrade_retry)
+        dialog = _build_upgrade_failed_dialog(_on_exit, _on_retry)
 
-            dialog = _build_upgrade_failed_dialog(_on_exit, _on_retry)
+    ft.use_dialog(dialog)
 
-        if dialog is not None:
-            show_dialog_fn(dialog)
-            current_dialog_ref.current = dialog
+    # --- news alert 监听 (仅 READY 时注册, cleanup 必须退订避免泄漏) ---
+    news_alert_cb_ref = ft.use_ref(lambda: None)
 
-    def _cleanup_dialog() -> None:
-        d = current_dialog_ref.current
-        if d is not None:
-            hide_dialog_fn(d)
-            current_dialog_ref.current = None
-
-    ft.use_effect(_setup_dialog, dependencies=[state], cleanup=_cleanup_dialog)
-
-    # --- news alert 监听 (仅 READY 时注册) ---
     def _setup_news_alert() -> None:
         if state != StartupState.READY:
             return
@@ -307,9 +290,19 @@ def StartupView(
             except RuntimeError:
                 pass
 
+        news_alert_cb_ref.current = on_news_alert
         NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
 
-    ft.use_effect(_setup_news_alert, dependencies=[state])
+    def _cleanup_news_alert() -> None:
+        cb = news_alert_cb_ref.current
+        if cb is None:
+            return
+        from services.news_subscription_service import NewsSubscriptionService
+
+        NewsSubscriptionService().remove_listener(cb, is_alert=True)
+        news_alert_cb_ref.current = None
+
+    ft.use_effect(_setup_news_alert, dependencies=[state], cleanup=_cleanup_news_alert)
 
     # --- 渲染 (state 驱动条件渲染) ---
     if state == StartupState.READY:
@@ -330,5 +323,5 @@ def StartupView(
             controller.skip()
 
         return _build_error_view(context, _on_retry, _on_reconfigure, _on_skip)
-    # LOADING / NEED_UPGRADE / UPGRADE_* → loading 背景 (dialog 由 use_effect 管理)
+    # LOADING / NEED_UPGRADE / UPGRADE_* → loading 背景 (dialog 由 ft.use_dialog 声明式管理)
     return _build_loading_view()

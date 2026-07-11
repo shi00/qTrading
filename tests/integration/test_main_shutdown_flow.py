@@ -56,6 +56,10 @@ class _DummyPage:
     def add(self, control):
         self.controls.append(control)
 
+    def render(self, component, /, *args, **kwargs):
+        """Mock page.render (V1 声明式 API) — 仅记录调用, 不实际渲染。"""
+        self.controls.append(component)
+
     def update(self):
         self.updated_count += 1
 

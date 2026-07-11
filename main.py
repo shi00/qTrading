@@ -277,14 +277,11 @@ async def main(page: ft.Page):
         on_exit=lambda: page.run_task(_perform_upgrade_exit),  # type: ignore[arg-type]  # [reason: page.run_task 返回 Task，on_exit 回调期望 None，返回值被忽略]
     )
 
-    page.add(
-        StartupView(
-            controller=controller,
-            bridge=bridge,
-            show_dialog_fn=_show_dialog,
-            hide_dialog_fn=_hide_dialog,
-            run_task_fn=page.run_task,
-        )
+    page.render(
+        StartupView,
+        controller=controller,
+        bridge=bridge,
+        run_task_fn=page.run_task,
     )
 
     db_url = ConfigHandler.get_db_url()

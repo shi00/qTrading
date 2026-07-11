@@ -244,3 +244,19 @@ def test_build_onboarding_view(mock_controller):
 def test_startup_view_is_ft_component():
     """StartupView 必须用 @ft.component 装饰 (声明式契约守护)."""
     assert hasattr(StartupView, "__wrapped__"), "StartupView 必须用 @ft.component 装饰"
+
+
+def test_startup_view_uses_use_dialog():
+    """DoD: dialog 必须通过 ft.use_dialog() 声明式管理 (§10.1), 禁止 show_dialog_fn/hide_dialog_fn 回归。"""
+    from pathlib import Path
+
+    import ui.startup_views as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    assert "ft.use_dialog(" in source, "必须使用 ft.use_dialog() 声明式管理 dialog"
+    assert "show_dialog_fn" not in source, "禁止 show_dialog_fn 命令式回调注入"
+    assert "hide_dialog_fn" not in source, "禁止 hide_dialog_fn 命令式回调注入"
+    assert "current_dialog_ref" not in source, "禁止 current_dialog_ref 命令式 ref 管理"
+    assert "_setup_dialog" not in source, "禁止 _setup_dialog 命令式 use_effect"
+    assert "page.show_dialog" not in source, "禁止 page.show_dialog 命令式 API"
+    assert "page.pop_dialog" not in source, "禁止 page.pop_dialog 命令式 API"
