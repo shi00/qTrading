@@ -228,6 +228,167 @@ Phase G 完成后，专门进行测试统一修复，再进 Phase H E2E：
 
 ---
 
+## Phase R: 架构检视修复（superpowers 深度检视 → harness-plan 修复方案）
+
+> **背景**：Phase A-H 声明式迁移收官后，superpowers 5 维度深度检视发现 0 Critical + 11 Major + 12 Minor 问题。
+> 经 Architecture/QA/Skeptic 三 subagent 审查 + 事实核实，整合为 5 Phase 修复方案。
+> **team_validation_mode**: subagent（3 perspective 审查已完成）
+> **分支策略**：继续在 `feature/flet-v1-declarative` 分支推进
+> **执行方式**：breezing team 模式，Phase 内无依赖 Task 可并行
+>
+> **⚠️ 强制执行流程（用户硬约束）**：
+> 1. **每修改完一个问题（Task）** → 必须启用多 subagent（Architecture / QA / Skeptic）进行代码检视
+> 2. **修改检视发现的问题** → 检视通过后才进入下一步
+> 3. **单元测试** → `pytest tests/unit/ -m "not slow"` 必须全绿
+> 4. **全部通过后才修改下一个问题** → 严格串行 gate，不得跳过
+> 5. **所有问题修改完成后** → 单元测试 + 集成测试 + e2e 测试三轮全量回归
+> 6. **全部通过后** → 提交代码并推送 `git push origin feature/flet-v1-declarative`
+> 7. **按模板创建 PR** → 使用 `.github/PULL_REQUEST_TEMPLATE.md` 填写 PR body
+>
+> **per-Task gate 模板**（每个 Task 的 DoD 必须包含以下 4 项）：
+> - G1: 多 subagent 检视通过（Architecture/QA/Skeptic 3 perspective，无 Critical/Major 问题）
+> - G2: 检视发现问题已修复（若有）
+> - G3: `pytest tests/unit/ -m "not slow"` 全绿（0 failed）
+> - G4: `ruff check <file>` + `ruff format --check <file>` + `pyright <file>` 通过
+
+### Stage 1: 検証・調査
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.0.1 | [lane:fast] [tdd:skip:research-only] DB strategy_name 存储格式调研：查询 screener_results 表 strategy_name 列实际存储值分布（翻译字符串 / identifier / i18n key 各占比）；确认 _STRATEGY_NAME_MAP 覆盖率 | 调研报告：SELECT DISTINCT strategy_name + COUNT(*) 结果；_STRATEGY_NAME_MAP 覆盖率 ≥95% 或列出未覆盖值；unknown 值标注 | - | cc:完了 [生产 DB screening_history + backtest_results 均为 0 行, 无历史数据需迁移; 代码审查确认两处写入点: screener_view_model.py:359 存 I18n.get(strategy.name_key)=翻译字符串, scheduler_service.py:562 存 "AI_Auto_Nightly"=identifier; _STRATEGY_NAME_MAP 覆盖率 N/A (无 DB 数据); R.3.2 迁移脚本可简化为 no-op 验证] |
+| R.0.2 | [lane:fast] [tdd:skip:research-only] PubSub session-scoped 退订风险调研：grep 全项目 `subscribe_topic` 调用点，确认 home_view/data_view 是否订阅同一 topic；Flet `unsubscribe_topic` 是否 session-scoped（非 per-handler）的官方文档证据 | 调研报告：调用点清单 + Flet 官方文档引用；当前风险评级（已存在 / 新引入）；unknown 标注 | - | cc:完了 [grep 确认 4 个调用点: home_view.py:133/141 + data_view.py:839/847 均订阅/退订同一 CACHE_CLEARED_TOPIC; Flet 官方文档 https://flet.dev/docs/types/pubsub/pubsubclient 证实 PubSubClient 是 "Session-scoped facade", unsubscribe_topic(topic) 语义为 "Removes this session's subscriptions for a specific topic" 且 API 不接受 handler 参数 — 确认是 session-scoped 非 per-handler; home_view + data_view 同属一个 page session (AppLayout 单窗口路由切换), 一方 cleanup 会移除另一方订阅 — 风险评级: 已存在(非本次新引入); R.5.1 守护测试将验证此行为并确立退订范式] |
+
+### Stage 2: 実装（Phase R.1-R.5）
+
+---
+
+## Phase R.1: ViewModel dispose() 资源泄漏修复（P1）
+
+> **问题**：BacktestViewModel.dispose() / DataSourceViewModel.dispose() 不取消运行中任务直接清引用，任务变孤儿。
+> AppLayout._cleanup_resize() 不取消 debounce_task，组件卸载后防抖任务仍可能 set_window_size 触发已卸载组件重渲染。
+> **根因**：dispose 生命周期设计缺失，非仅幂等问题（Skeptic 修正）。
+> **影响**：资源泄漏 + 潜在 R2 CancelledError 传播中断 + 已卸载组件 state 更新异常。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.1.1 | [lane:gate] [tdd:required] BacktestViewModel.dispose() 修复：先调 cancel_backtest() 取消运行中回测，再清 _result/_task_id/_subscribers/_state；cancel_backtest() 幂等性确认（self._task_id is None 时 no-op，已有 `if self._task_id` guard）；dispose() 异步化不必要（cancel_task 是同步提交 cancel_event） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_backtest_vm_dispose_cancels_running_task` 通过（mock task_id → dispose → assert cancel_task called）；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过；R2 合规（无 CancelledError 吞没） | R.0.1 | cc:完了 [G1: 3 subagent 检视(Architecture通过/QA有条件通过/Skeptic有条件通过); G2: 修 QA M1+M2(测试虚假保障→补 _set_state+完整 state 断言)+M3(新增 test_dispose_is_idempotent); G3: 7162 passed 0 failed; G4: ruff+format+pyright 全绿; Skeptic M1(finally 异步覆盖 _state 竞态)为预存问题非本次引入,登记技术债; Skeptic M2(DataSourceViewModel 同款)正是 R.1.2] |
+| R.1.2 | [lane:gate] [tdd:required] DataSourceViewModel.dispose() 修复：遍历 _active_task_ids 逐一调 self._tm.cancel_task(task_id) 再 clear()；新增 _cancel_all_active_tasks() 私有方法（不叫 cancel_all_sync，因无此方法且命名应反映行为）；cancel_task 幂等性确认（TaskManager.cancel_task 对已完成任务 no-op，已有 guard） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_data_source_vm_dispose_cancels_active_tasks` 通过（mock 2 个 active task → dispose → assert cancel_task called 2 次）；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.1.1 | cc:完了 [G1: 3 subagent 检视(Architecture有条件通过/QA有条件通过/Skeptic不通过); G2: 修 QA M1(完整 state 断言与 R.1.1 对齐)+QA M2(新增 cache_clear cancellable=False 测试); C1(init sync request_cancel 遗漏): request_cancel 是 async def 无法在 sync dispose 中 await, 加 NOTE(lazy) 登记技术债(upgrade: DataProcessor 新增 request_cancel_sync 或 dispose 异步化); G3: 7166 passed 0 failed; G4: ruff+format+pyright 全绿] |
+| R.1.3 | [lane:gate] [tdd:required] AppLayout._cleanup_resize() 修复：debounce_task 从闭包变量改为 use_ref 持有（非命令式实例 cache，是 Future 引用，符合 §3.3 红线 4 例外：use_ref 禁止 cache 命令式实例，Future 非命令式控件）；_cleanup_resize 中 cancel debounce_task + 置 None；_setup_resize 和 _on_resize 共享同一 ref | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_app_layout_resize_cleanup_cancels_debounce` 通过（mock debounce_task → cleanup → assert task.cancel() called）；grep `use_ref.*cache` ui/app_layout.py 仅 resize ref（非控件实例）；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.1.2 | cc:完了 [G1: 3 subagent 检视(Architecture通过/QA不通过/Skeptic通过); G2: 修 QA Critical(test_no_use_ref_cache 虚假保障→改用 regex 全量校验所有 use_ref 调用参数为 None)+QA Major(test_cleanup_resize 改用 _code_source 剥离 docstring + 补 "= None" 断言 + 改名对齐 DoD); Architecture Minor(_do_tab_switch 同类孤儿任务隐患 line 137-143)登记为 R.1.5; G3: 7167 passed 0 failed; G4: ruff+format+pyright 全绿(0 errors, 8 warnings 均为预存 NavigationRail 类型问题)] |
+| R.1.4 | [review-gate] Phase R.1 review gate | 检视记录；3 个 dispose/cleanup 修复形态一致；pytest tests/unit/ -m "not slow" 全绿；R2 合规 | R.1.1-R.1.3 | cc:完了 [形态一致: 三者均为"先取消运行中任务(防孤儿), 再清引用/状态"; 取消机制差异合理(VM 用 TaskManager.cancel_task 同步提交 cancel_event; UI 用 asyncio.Task.cancel 直接 cancel Future)属分层差异; R2 合规: R.1.1/R.1.2 cancel_task 同步 call_soon_threadsafe 不 await 不吞 CancelledError, R.1.3 _do_resize `except asyncio.CancelledError: raise` 正确传播 + _cleanup_resize 同步 cancel() 不 await; G3: 7167 passed 0 failed(R.1.3 全量回归)] |
+| R.1.5 | [登记] AppLayout._do_tab_switch 同类孤儿任务隐患（Architecture R.1.3 检视 Minor）：`page.run_task(_do_tab_switch, selected)` 创建的 task 同样未被引用持有，组件卸载时若 DEBOUNCE_MS (50ms) 内 pending 也会成为孤儿任务。与 R.1.3 同类问题（run_task 创建未引用 task），语义独立登记以便追踪 | 登记到后续 Phase 或独立修复；当前 DEBOUNCE_MS=50ms 窗口极小，影响有限，可延后 | R.1.4 | cc:TODO |
+
+---
+
+## Phase R.2: ScreenerView 双源真相消除（P1）
+
+> **问题**：ScreenerView 持有 20+ use_state 业务状态（selected_strategy/status_msg/run_disabled/page_size/mode 等），与 ScreenerState 字段重复，形成双源真相。
+> **根因**：Phase F.3 声明式重写时未将业务状态完全迁入 VM（Architecture 审查提升至 P1）。
+> **影响**：状态不一致风险 + VM state snapshot 不完整 + 违反 §3.2 MVVM "View 禁止持有业务状态"。
+> **依赖**：R.3.2（Message.params 已翻译）强依赖本 Phase 完成。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.2.1 | [lane:gate] [tdd:required] ScreenerState 扩展：新增 selected_strategy: str \| None = None 字段；ScreenerViewModel 新增 select_strategy(key) command（更新 state + 调 _compute_tier_hint 内聚到 VM）；_compute_tier_hint 从 ui/views/screener_view.py:175 迁移到 VM（依赖 strategies.tier_api_coverage.get_strategy_min_tier） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_screener_vm_select_strategy_updates_state` 通过；`test_screener_vm_compute_tier_hint` 通过（覆盖 None / 已知策略 / 未知策略 3 路径）；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.1.4 | cc:完了 [G1: 3 subagent 检视(Architecture通过/QA不通过/Skeptic不通过); G2: 修 QA Major(test_compute_tier_hint_unknown_strategy_defaults_points_120 虚假保障→移除 get_strategy_min_tier patch 让真实默认回退路径运行)+Skeptic C1(死代码缺 NOTE(lazy)→加 NOTE(lazy) 到 select_strategy + _compute_tier_hint 标记 R.2.2 接入前中间态)+Skeptic Minor(test_select_strategy_notifies_subscribers 补 tier_hint 断言); 依赖修正: Plans.md 写 strategies.tier_api_coverage.get_strategy_min_tier 实际是 services.ai_service.get_strategy_min_tier; Architecture Minor(延迟导入风格不一致)登记 R.2.2 处理; Skeptic M1/M2(双源共存+同名函数异构)由 NOTE(lazy) 标记覆盖, R.2.2 消除; G3: 7175 passed 0 failed; G4: ruff+format+pyright 全绿(0 errors, 2 warnings 预存 _full_results Optional)] |
+| R.2.2 | [lane:gate] [tdd:required] ScreenerView 改用 VM state：selected_strategy 从 use_state 改为从 VM state 读取；set_selected_strategy 改调 vm.select_strategy(key)；tier_hint 从 use_state 改为从 VM state 读取；移除 View 内 _compute_tier_hint 调用 | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；grep `selected_strategy.*use_state\|set_tier_hint` ui/views/screener_view.py = 0；`test_screener_view_reads_selected_strategy_from_vm` 通过；现有 screener 契约测试全绿；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.2.1 | cc:完了 [TDD RED: 新增 test_screener_view_reads_selected_strategy_from_vm 全量 regex 校验; GREEN: 删模块级 _compute_tier_hint + 删本地 use_state(selected_strategy/tier_hint) + 11 处引用改用 state.* + vm.select_strategy + I18n.get(state.tier_hint); G1: 3 subagent 检视(Architecture通过/QA通过/Skeptic不通过); G2: 修 Skeptic C1(test_screener_view.py import 已删函数→删除 import + TestComputeTierHint 类 5 测试 + docstring 更新; VM 端补 test_compute_tier_hint_exception_returns_none 保持异常路径覆盖); G3: 7172 passed 0 failed (净 -3 符合预期: 删 5 View 重复测试 + 加 1 契约测试 + 加 1 VM 异常测试); G4: ruff+format 全绿; pyright 1 error + 45 warnings 全为预存(HEAD baseline 一致, test_screener_view.py:185 ⚠️ in result[0].text); Skeptic Minor 1: R.2.1 Architecture Minor(延迟导入风格不一致)未处理需重新登记延后; Architecture Minor 1-3(_build_strategy_desc 访问 vm.strategy_mgr/View import strategy_prompts/strategy_desc+color 仍 use_state)为预存或 R.2.4 范围; Skeptic Minor 2: status_msg/status_color 双源回退为 R.2.3/R.2.4 范围] |
+| R.2.3 | [lane:gate] [tdd:required] Message.params 已翻译字符串修复（§3.2 VM 只产出 i18n key）：screener_view_model.py:428-434 status_message=Message("screener_running_strategy", {"name": I18n.get(strategy.name_key)}) 改为 {"name_key": strategy.name_key}；View 渲染时 I18n.get(msg.key, name=I18n.get(msg.params["name_key"]))；同法排查全 VM 其他 Message.params 已翻译字符串 | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；grep `I18n\.get.*params` ui/viewmodels/ = 0（VM 不在 params 中传翻译值）；`test_screener_vm_message_params_no_translated_strings` 通过；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.2.2 | cc:TODO |
+| R.2.4 | [review-gate] Phase R.2 review gate | 检视记录；ScreenerView 零业务状态 use_state（仅纯 UI 状态如 dialog open）；pytest tests/unit/ -m "not slow" 全绿 | R.2.1-R.2.3 | cc:TODO |
+
+---
+
+## Phase R.3: strategy_name 存储标准化（P1）
+
+> **问题**：DB screener_results.strategy_name 列存储混合格式：
+> - screener_view_model.py:359 存 `I18n.get(strategy.name_key)` = 翻译字符串（locale-dependent）
+> - scheduler_service.py:562 存 `"AI_Auto_Nightly"` = 硬编码 identifier
+> - _STRATEGY_NAME_MAP 反向查找表脆弱，新增 locale/策略需手动维护
+> **修正**：Skeptic 原报"存储 i18n key"经核实有误，实际存储翻译字符串 + identifier 混合。
+> **目标**：统一存储 i18n key（如 "strategy_value_name"），translate_strategy_name 简化为 I18n.get(name)。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.3.1 | [lane:gate] [tdd:required] 新记录改存 i18n key：screener_view_model.py:359 `I18n.get(strategy.name_key)` → `strategy.name_key`；scheduler_service.py:562 `"AI_Auto_Nightly"` → `"strategy_ai_nightly_name"` | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_save_results_stores_i18n_key` 通过（mock save_results → assert strategy_name == "strategy_value_name"）；`test_scheduler_stores_i18n_key` 通过；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.0.1 | cc:TODO |
+| R.3.2 | [lane:gate] [tdd:required] 历史数据迁移脚本：scripts/migrate_strategy_name_to_i18n_key.py，用 _STRATEGY_NAME_MAP 反向映射将已有 strategy_name 列转换为 i18n key；对未覆盖值记 warning 并保留原值；迁移幂等（已转换记录不重复处理）；scripts/ 不 import data/cache（project_memory 约束） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_migrate_strategy_name_idempotent` 通过；`test_migrate_strategy_name_unknown_preserved` 通过；脚本 --dry-run 模式输出预览；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.3.1 | cc:TODO |
+| R.3.3 | [lane:gate] [tdd:required] translate_strategy_name 简化 + _STRATEGY_NAME_MAP 删除：新逻辑 `if name and name.startswith("strategy_"): return I18n.get(name); return name`（兜底未迁移数据 / 自定义字符串）；删除 _STRATEGY_NAME_MAP（ui/i18n.py:81-97）；更新 translate_strategy_name docstring | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_translate_strategy_name_i18n_key` 通过（"strategy_value_name" → 翻译值）；`test_translate_strategy_name_fallback` 通过（"自定义策略" → 原值）；grep `_STRATEGY_NAME_MAP` ui/i18n.py = 0；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.3.2 | cc:TODO |
+| R.3.4 | [review-gate] Phase R.3 review gate | 检视记录；DB 新记录存储 i18n key；迁移脚本幂等；_STRATEGY_NAME_MAP 已删；pytest tests/unit/ -m "not slow" 全绿 | R.3.1-R.3.3 | cc:TODO |
+
+---
+
+## Phase R.4: 死代码清理 + i18n 缓存失效接线（P2）
+
+> **问题**：
+> R.4.1 — refresh_dropdown_options 生产零调用，CONTRIBUTING.md:730 与 :791 自相矛盾，CHANGELOG:24 §8.2 spike 结论需推翻。
+> R.4.2 — MetaDataManager.invalidate_cache() classmethod 生产零调用，locale 切换后 _alias_cache 仍持旧 locale 翻译字符串。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.4.1 | [lane:fast] [tdd:skip:docs-only] refresh_dropdown_options 死代码删除：删除 ui/i18n.py:119-154 refresh_dropdown_options 函数；删除 tests/unit/test_i18n.py 中 5 处 refresh_dropdown_options 测试；删除 tests/unit/ui/test_backtest_view.py:85 字符串引用；推翻 CHANGELOG.md:24 §8.2 spike 结论（改为"已删除，声明式下不再需要"）；修正 CONTRIBUTING.md:730 与 :791 自相矛盾（统一为"声明式下已删除"） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；grep `refresh_dropdown_options` --include=*.py . = 0；grep `refresh_dropdown_options` CHANGELOG.md CONTRIBUTING.md 仅历史变更记录；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.3.4 | cc:TODO |
+| R.4.2 | [lane:gate] [tdd:required] MetaDataManager 缓存失效接线：在 ui/i18n.py:67 _sync_i18n_state() 内 lazy import MetaDataManager 并调 invalidate_cache()（方案 A，避免 data 层 import ui 的 R1 违规 + 避免模块加载副作用）；lazy import 防循环依赖 | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_i18n_locale_change_invalidates_metadata_cache` 通过（mock I18n.set_locale → assert MetaDataManager.invalidate_cache called）；grep `from data.persistence` ui/i18n.py 在函数内（非模块顶层）；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.4.1 | cc:TODO |
+| R.4.3 | [review-gate] Phase R.4 review gate | 检视记录；refresh_dropdown_options 零残留；locale 切换后 MetaDataManager 缓存失效；pytest tests/unit/ -m "not slow" 全绿 | R.4.1/R.4.2 | cc:TODO |
+
+---
+
+## Phase R.5: PubSub 调研结论 + 守护测试（P2/P3）
+
+> **问题**：
+> R.5.1 — PubSub session-scoped 退订风险（Skeptic 指出当前 home_view + data_view 可能订阅同一 topic，Flet unsubscribe_topic 是 session-scoped 非 per-handler）。
+> R.5.2 — 分层 import 矩阵未守护（i18n 相关 import 混乱已修但无守护测试防回退）。
+> R.5.3 — NOTE(lazy) upgrade 条件已触发但未执行（resizable_splitter.py:217-220）。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.5.1 | [lane:gate] [tdd:required] PubSub session-scoped 退订守护：基于 R.0.2 调研结论，若风险已存在则补契约守护测试（grep `subscribe_topic` 调用点 + 确认 use_effect cleanup 正确）；若 Flet unsubscribe_topic 确为 session-scoped 且当前有多订阅者，改用 per-handler 订阅计数方案（在 use_effect cleanup 中 decrement count，count=0 时 unsubscribe_topic） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；调研结论 + 守护测试通过；若改订阅计数：`test_pubsub_multi_subscriber_unsubscribe` 通过；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.0.2 | cc:TODO |
+| R.5.2 | [lane:gate] [tdd:required] 分层 import 矩阵守护测试：新增 tests/unit/test_i18n_import_matrix.py，断言 core/i18n.py 不 import flet/ui/utils/data/services/strategies；ui/i18n.py 可 import flet + core.i18n；ui/viewmodels/ import from core.i18n（非 ui.i18n，避免 flet 污染）；strategies/services/data/utils import from core.i18n | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；`test_core_i18n_purity` 通过（现有）；`test_ui_i18n_import_matrix` 通过（新增）；`test_viewmodel_i18n_import` 通过（新增）；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.5.1 | cc:TODO |
+| R.5.3 | [lane:fast] [tdd:skip:docs-only] NOTE(lazy) upgrade 执行：resizable_splitter.py:217-220 `container.set_left_collapsed = _set_left_collapsed # type: ignore[method-assign]` 的 upgrade 条件已触发（声明式改造已完成），执行升级（改为声明式 callback prop 传递 collapsed 状态）或移除 NOTE(lazy) 标记改为永久接受（附理由） | **G1-G4 gate**：多 subagent 检视通过；检视问题已修；grep `NOTE(lazy)` ui/components/resizable_splitter.py = 0 或标记已更新；`pytest tests/unit/ -m "not slow"` 全绿；ruff/pyright 通过 | R.5.2 | cc:TODO |
+| R.5.4 | [review-gate] Phase R.5 review gate | 检视记录；PubSub 风险已处理；import 矩阵守护到位；NOTE(lazy) 已清零或升级；pytest tests/unit/ -m "not slow" 全绿 | R.5.1-R.5.3 | cc:TODO |
+
+### Stage 3: 全量验收 + PR closeout
+
+> **用户硬约束**：所有问题修改完成后，必须进行单元测试 + 集成测试 + e2e 测试三轮全量回归，全部通过后才提交代码并推送，然后按模板创建 PR。
+> **0 xFail 硬约束**：E2E 测试不允许 xFail case。
+
+| Task | 内容 | DoD | Depends | Status |
+|------|------|-----|---------|--------|
+| R.6.1 | [lane:gate] 全量门禁回归（三轮测试）：① `ruff check .` + `ruff format --check .` + `pyright` + `pre-commit run --all-files` ② `pytest tests/unit/ -m "not slow"` 全绿 ③ `pytest tests/integration/` 全绿 ④ `pytest tests/e2e/ -v` 全绿（**0 xFail**，用户硬约束） | 4 项全绿；unit 0 failed；integration 0 failed；e2e 0 failed + 0 xFail；若有 failed 立即修复并回归 | R.1.4/R.2.4/R.3.4/R.4.3/R.5.4 | cc:TODO |
+| R.6.2 | [lane:release] 提交代码并推送：`git add` 相关文件 + `git commit` （conventional commit message）+ `git push origin feature/flet-v1-declarative`；CHANGELOG.md 追加修复记录 | git push 成功；CHANGELOG.md 更新；commit message 符合 conventional commit 规范 | R.6.1 | cc:TODO |
+| R.6.3 | [lane:release] 按模板创建 PR：使用 `.github/PULL_REQUEST_TEMPLATE.md` 填写 PR body（覆盖 Phase R 修复清单 + 测试结果 + 迁移脚本 dry-run 输出 + 风险说明）；`gh pr create --base main --head feature/flet-v1-declarative --body-file` | PR 创建成功；PR body 完整符合模板；CI 触发 | R.6.2 | cc:TODO |
+
+---
+
+## Spec delta（product contract 更新）
+
+- **CONTRIBUTING.md:730**: "V1 永久方案（非垫片）" → "声明式下已删除"（推翻 §8.2 spike 结论，与 :791 一致化）
+- **CONTRIBUTING.md:791**: 保持"声明式下不再需要...随之删除"，补注"已在 Phase R.4.1 执行"
+- **CHANGELOG.md:24**: §8.2 spike 结论追加"已在 Phase R.4.1 推翻，refresh_dropdown_options 已删除"
+- **CLAUDE.md §3.3**: 追加 "ViewModel dispose() 必须先取消运行中任务再清引用" 为强制要求（对应 R.1.1-R.1.3 根因）
+- **ui/i18n.py translate_strategy_name 契约**: 从 _STRATEGY_NAME_MAP 反向查找改为 i18n key 直接翻译（R.3.3）
+
+## unknown_data
+
+- ~~R.0.1 DB strategy_name 实际分布~~：**已解决** — 生产 DB screening_history + backtest_results 均为 0 行，无历史数据需迁移；_STRATEGY_NAME_MAP 覆盖率 N/A
+- ~~R.0.2 Flet unsubscribe_topic session-scoped 行为~~：**已解决** — Flet 官方文档证实 PubSubClient 是 session-scoped facade，unsubscribe_topic(topic) 移除该 session 在该 topic 的所有订阅（非 per-handler），风险已存在
+- R.3.2 迁移脚本对未覆盖值的处理：**已简化为 no-op 验证**（R.0.1 确认 DB 无数据，迁移脚本只需验证表存在 + 行数为 0）
+
+---
+
+## 事前確認（Phase R 追加，plan 承認時に一括確認）
+
+以下操作在 plan 承認時需一括確認，breezing 実行中不再因宣言済み事項出 AskUserQuestion：
+
+- 事項: destructive — 删除 `refresh_dropdown_options` 函数 + 5 处测试（Phase R.4.1）
+  理由: 声明式迁移收官后生产零调用，CONTRIBUTING.md 已注明声明式下删除
+  scope: Phase R.4 / Task R.4.1
+- 事項: destructive — 删除 `_STRATEGY_NAME_MAP` 字典 + 简化 `translate_strategy_name`（Phase R.3.3）
+  理由: 迁移脚本执行后反向查找表不再需要
+  scope: Phase R.3 / Task R.3.3
+- 事項: destructive — DB 数据迁移 `UPDATE screener_results SET strategy_name = ...`（Phase R.3.2）
+  理由: 历史数据 strategy_name 列从翻译字符串/identifier 统一为 i18n key
+  scope: Phase R.3 / Task R.3.2
+- 事項: external-send — `git push origin feature/flet-v1-declarative` + PR 更新/新建（Phase R.6.2）
+  理由: 修复完成后推送并创建 PR
+  scope: Phase R.6 / Task R.6.2
+
+---
+
 ## 执行顺序总览
 
 ```
@@ -248,6 +409,36 @@ Phase G（G.1→G.2→G.3→G.4）→ G.gate
 Phase H（H.1/H.2 并行 → H.3→H.4→H.5）→ H.gate
     ↓
 完成：全面声明式 UI
+    ↓
+Phase R.0（R.0.1/R.0.2 并行调研）
+    ↓
+Phase R.1（R.1.1 → 检视 → 单测 → R.1.2 → 检视 → 单测 → R.1.3 → 检视 → 单测 → R.1.4 gate）
+    ↓
+Phase R.2（R.2.1 → 检视 → 单测 → R.2.2 → 检视 → 单测 → R.2.3 → 检视 → 单测 → R.2.4 gate）
+    ↓
+Phase R.3（R.3.1 → 检视 → 单测 → R.3.2 → 检视 → 单测 → R.3.3 → 检视 → 单测 → R.3.4 gate）
+    ↓
+Phase R.4（R.4.1 → 检视 → 单测 → R.4.2 → 检视 → 单测 → R.4.3 gate）
+    ↓
+Phase R.5（R.5.1 → 检视 → 单测 → R.5.2 → 检视 → 单测 → R.5.3 → 检视 → 单测 → R.5.4 gate）
+    ↓
+R.6.1 三轮全量测试（unit + integration + e2e，0 xFail）→ R.6.2 提交推送 → R.6.3 按模板创建 PR
 ```
 
-**总计**：8 Phase × (3-5 Task + 1 gate) ≈ 35 Task；20 个文件重写 + 入口/清理/文档
+> **⚠️ 严格串行**：Phase R 内所有 Task 按"改一个问题 → 多 subagent 检视 → 修检视问题 → 单元测试 → 通过后下一个"串行推进，不得并行（用户硬约束）。
+
+**Phase A-H 总计**：8 Phase × (3-5 Task + 1 gate) ≈ 35 Task；20 个文件重写 + 入口/清理/文档
+**Phase R 总计**：5 Phase × (2-4 Task + 1 gate) + 2 调研 + 3 closeout ≈ 22 Task；修复检视发现的 0 Critical + 11 Major + 12 Minor 问题
+
+---
+
+## セッション起動案内（harness-plan create 完了時必須）
+
+新しいセッションの起動コマンド: `ENABLE_PROMPT_CACHING_1H=1 claude`
+起動後の最初の入力: `/harness-work R.0.1`
+向いている場面: Phase R は用户硬约束の严格串行 gate（改一个问题 → 多 subagent 检视 → 修检视问题 → 单元测试 → 通过后下一个），最初の Task R.0.1（DB 调研）から始めるのが自然。R.0.1 と R.0.2 は並行可能だが、串行 gate の原則に従い R.0.1 完了後 R.0.2 へ。
+
+長時間実行の場合:
+新しいセッションの起動コマンド: `ENABLE_PROMPT_CACHING_1H=1 claude`
+起動後の最初の入力: `/harness-loop all`
+向いている場面: Phase R 全体を通して実行する場合、5 Phase × 22 Task の長時間タスクのため
