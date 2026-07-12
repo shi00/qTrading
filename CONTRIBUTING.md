@@ -729,7 +729,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 V0→V1 兼容垫片（PageRefMixin / 旧 mock 全局桩）已全部删除。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。
 
-> **`refresh_dropdown_options()` 状态**：本函数是 V1 渲染管线针对命令式 `page.update()` 批量更新的临时方案。**声明式下不再需要**（options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化）。所有命令式控件已重写为声明式，该函数生产零调用，待 Phase R.4.1 删除（见 [Plans.md](./Plans.md) Phase R.4.1）。
+> **`refresh_dropdown_options()` 状态**：已在 Phase R.4.1 删除。声明式 UI 下 options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化，该函数不再需要。
 
 ### V1 声明式 UI 开发规范
 
@@ -746,7 +746,7 @@ V0→V1 兼容垫片（PageRefMixin / 旧 mock 全局桩）已全部删除。测
 | 状态 | 实例属性 + 手动 `self.update()` | `use_state` 状态变更自动重渲染 |
 | 生命周期/副作用 | `did_mount`/`will_unmount` | `use_effect(setup, dependencies, cleanup)` |
 | i18n 热切换 | `I18n.subscribe`/`unsubscribe` + `refresh_locale` + 手动刷新 | locale 作为声明式状态源，切换自动重渲染（不再手动订阅/刷新） |
-| 下拉刷新 | `refresh_dropdown_options` 两步 update 绕过 | 状态驱动重建 options，绕过随之删除 |
+| 下拉刷新 | ~~`refresh_dropdown_options` 两步 update 绕过~~（已删除） | 状态驱动重建 options，自动绕过 |
 | 响应式 | `handle_resize` 鸭子分发 + 断点手算 | 窗口尺寸作为 state/observable + `ResponsiveRow`，状态驱动布局 |
 | page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片已删除 |
 | ViewModel 消费 | `on_update`/`on_log` 回调注入 + View 持有 VM | `use_viewmodel(factory) -> (state, commands)`，View 只读 state + 调 commands（见 [MVVM 表现层](#mvvm-表现层)） |
@@ -790,7 +790,7 @@ def MetricCard(label_key: str):
 
 - **i18n**：locale 作为声明式状态源。组件通过 `use_state` 订阅 `I18n` 的 locale 变化（或在父组件统一管理 locale state，子组件经 props 接收），切换时自动重渲染。**不再**手动 `subscribe`/`refresh_locale`。**ViewModel state 不含 locale**——VM 只产出 i18n key（如 `"screener.run"`），View 渲染时按当前 locale 解析；locale 切换由 View 层独立状态源驱动重渲染，不需要 VM 参与或通知。
 - **响应式**：窗口尺寸作为 `use_state`（由根组件订阅 `page.on_resize` 更新），通过 props 下发；视图内用 `ResponsiveRow` + `col` 配置，状态驱动布局。**不再**实现 `handle_resize` 鸭子分发。
-- **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数在声明式下不再需要，存量命令式控件改造后随之删除。
+- **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数已在 Phase R.4.1 删除（声明式下不再需要）。
 
 #### 5. ViewModel 消费（MVVM 桥接）
 
@@ -1180,7 +1180,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 |------|---------|---------------|--------------|
 | **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
-| ~~P3~~ | ~~**命令式 UI 存量需整改为声明式**~~ **[已收官]** | 原 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型。 | Phase A-H 声明式迁移已收官（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：所有 View/Tab/Component 已重写为 `@ft.component` + `use_viewmodel` 范式；`PageRefMixin`/`v1_compat.py` 兼容垫片已删除；`refresh_dropdown_options` 待 Phase R.4.1 删除（生产零调用）。 |
+| ~~P3~~ | ~~**命令式 UI 存量需整改为声明式**~~ **[已收官]** | 原 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型。 | Phase A-H 声明式迁移已收官（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：所有 View/Tab/Component 已重写为 `@ft.component` + `use_viewmodel` 范式；`PageRefMixin`/`v1_compat.py` 兼容垫片已删除；`refresh_dropdown_options` 已在 Phase R.4.1 删除（生产零调用）。 |
 | **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R17 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
 
 ---

@@ -82,7 +82,6 @@ class TestBacktestViewDeclarativeContract:
             "_page_ref",
             "PageRefMixin",
             "self.update()",
-            "refresh_dropdown_options",
         ],
     )
     def test_no_imperative_api_in_source(self, forbidden: str):
