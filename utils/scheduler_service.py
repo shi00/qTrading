@@ -558,8 +558,16 @@ class SchedulerService:
                 import uuid as _uuid
 
                 run_id = _uuid.uuid4().hex[:16]
+                # R.3.1: 存储 i18n key (非 identifier)。
+                # 这里有意使用 "strategy_ai_nightly_name" 而非 AISelectionStrategy.name_key
+                # (= "strategy_ai_active_name")：夜间定时预测与用户交互式 AI 选股是两个
+                # 语义场景，UI 上需区分显示（"夜间 AI 预测" vs "AI 主动选股"），非 DRY 违反。
                 await rm.save_results(
-                    "AI_Auto_Nightly", result_df, trade_date=analysis_trade_date, run_id=run_id, params_snapshot={}
+                    "strategy_ai_nightly_name",
+                    result_df,
+                    trade_date=analysis_trade_date,
+                    run_id=run_id,
+                    params_snapshot={},
                 )
                 await self._mark_nightly_prediction_done_db(today_str)
                 return I18n.get("sched_pred_done_found", count=len(result_df))

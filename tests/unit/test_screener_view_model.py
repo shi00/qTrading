@@ -369,6 +369,67 @@ class TestScreenerViewModelRunStrategy:
         assert passed_params == test_params
 
     @pytest.mark.asyncio
+    async def test_save_results_stores_i18n_key(self, vm):
+        """R.3.1: save_results 应存储 strategy.name_key (i18n key) 而非 I18n.get(name_key) 翻译字符串。
+
+        验证 strategy_name 参数为 i18n key (如 "strategy_value_name")，
+        非 locale-dependent 翻译值 (如 "价值投资")。
+        """
+        analysis_date = datetime.date(2024, 12, 27)
+        result_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "name": ["平安银行"],
+                "close": [10.5],
+                "pct_chg": [2.5],
+                "ai_score": [85],
+                "ai_reason": ["test"],
+                "thinking": ["test"],
+            }
+        )
+
+        mock_strategy = MagicMock()
+        mock_strategy.name_key = "strategy_value_name"  # i18n key, 非翻译字符串
+        mock_strategy.filter = AsyncMock(return_value=result_df)
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": analysis_date,
+            }
+        )
+
+        submitted_coro = []
+
+        def mock_submit_task(
+            name,
+            task_type,
+            coroutine_factory,
+            cancellable=False,
+            unique_key=None,
+            **kwargs,
+        ):
+            submitted_coro.append(coroutine_factory(task_id="test_task_id"))
+            return "test_task_id"
+
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = mock_submit_task
+            await vm.run_strategy("test_strategy", save_results=True)
+
+        for coro in submitted_coro:
+            await coro
+
+        vm.review_mgr.save_results.assert_called_once()
+        call_args = vm.review_mgr.save_results.call_args
+        # 第一个位置参数应为 i18n key (strategy.name_key), 非翻译字符串
+        stored_strategy_name = call_args.args[0]
+        assert stored_strategy_name == "strategy_value_name"
+        # 不应等于翻译值 (防御性断言)
+        assert stored_strategy_name != "价值投资"
+
+    @pytest.mark.asyncio
     async def test_run_strategy_raises_when_trade_date_missing_before_save(self, vm):
         result_df = pd.DataFrame(
             {

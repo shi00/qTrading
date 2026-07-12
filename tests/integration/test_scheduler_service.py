@@ -235,7 +235,7 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
     msg = await holder["factory"]("task-id")
     assert msg == "sched_pred_done_found:1"
     assert holder["saved"] is not None
-    assert holder["saved"][0] == "AI_Auto_Nightly"
+    assert holder["saved"][0] == "strategy_ai_nightly_name"
     assert holder["saved"][1] == "20260423"
     assert holder["saved"][2] is not None, "save_results should receive a non-None run_id"
     assert len(holder["saved"][2]) == 16, f"run_id should be 16 chars, got {len(holder['saved'][2])}"

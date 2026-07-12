@@ -485,7 +485,7 @@ class ScreenerViewModel:
 
                         run_id = _uuid.uuid4().hex[:16]
                         await self.review_mgr.save_results(
-                            I18n.get(strategy.name_key),
+                            strategy.name_key,
                             result_df,
                             trade_date=analysis_trade_date,
                             run_id=run_id,
