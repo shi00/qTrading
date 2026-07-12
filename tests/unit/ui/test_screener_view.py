@@ -24,6 +24,7 @@ from ui.views.screener_view import (
     _format_cell_value,
     _format_history_date,
     _parse_num,
+    _render_status_message,
     _resolve_group_title,
 )
 
@@ -247,3 +248,132 @@ class TestFormatHistoryDate:
         display, key = _format_history_date("notadate")
         assert display == "notadate"
         assert key == "notadate"
+
+
+# ============================================================================
+# R.2.3: _render_status_message helper 单元测试
+# 验证 VM 传 i18n key (如 name_key), View 渲染时翻译为当前 locale
+# ============================================================================
+
+
+class TestRenderStatusMessage:
+    """R.2.3: _render_status_message 翻译 ``*_key`` 后缀 params 为当前 locale.
+
+    覆盖 None 边界 / 单 *_key 翻译 / 多 *_key / 非 str 跳过 / 非 *_key 保留 / 空 params.
+    """
+
+    def test_none_returns_empty(self):
+        """msg=None 时返回空字符串."""
+        assert _render_status_message(None) == ""
+
+    @patch("ui.views.screener_view.I18n")
+    def test_single_key_param_translated(self, mock_i18n):
+        """单个 *_key 后缀 param 翻译并替换字段名 (name_key → name)."""
+        from ui.viewmodels import Message
+
+        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}" if not kw else f"[T]{key}/{kw}"
+        msg = Message("screener_running_strategy", {"name_key": "strategy_value_name"})
+
+        _render_status_message(msg)
+
+        # name_key 被翻译为 [T]strategy_value_name, 字段名替换为 name
+        mock_i18n.get.assert_any_call("strategy_value_name")
+        # 最终 I18n.get 调用应传 name=翻译值 (非 name_key=raw key)
+        final_call = mock_i18n.get.call_args_list[-1]
+        assert final_call.args == ("screener_running_strategy",)
+        assert final_call.kwargs == {"name": "[T]strategy_value_name"}
+
+    @patch("ui.views.screener_view.I18n")
+    def test_non_key_params_preserved(self, mock_i18n):
+        """非 *_key 后缀 params 保留原样, 不翻译."""
+        from ui.viewmodels import Message
+
+        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}" if not kw else f"[T]{key}/{kw}"
+        msg = Message("screener_done_saved", {"count": 42, "tables": "northbound_data"})
+
+        _render_status_message(msg)
+
+        # 最终调用应保留 count + tables 原值
+        final_call = mock_i18n.get.call_args_list[-1]
+        assert final_call.args == ("screener_done_saved",)
+        assert final_call.kwargs == {"count": 42, "tables": "northbound_data"}
+
+    @patch("ui.views.screener_view.I18n")
+    def test_multiple_key_params_translated(self, mock_i18n):
+        """多个 *_key 后缀 params 同时翻译 (name_key + provider_key)."""
+        from ui.viewmodels import Message
+
+        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}" if not kw else f"[T]{key}/{kw}"
+        msg = Message(
+            "test_multi_key",
+            {"name_key": "strategy_value_name", "provider_key": "provider_qwen", "count": 5},
+        )
+
+        _render_status_message(msg)
+
+        # 应分别翻译 name_key 和 provider_key, 保留 count
+        mock_i18n.get.assert_any_call("strategy_value_name")
+        mock_i18n.get.assert_any_call("provider_qwen")
+        final_call = mock_i18n.get.call_args_list[-1]
+        assert final_call.args == ("test_multi_key",)
+        assert final_call.kwargs == {
+            "name": "[T]strategy_value_name",
+            "provider": "[T]provider_qwen",
+            "count": 5,
+        }
+
+    @patch("ui.views.screener_view.I18n")
+    def test_non_str_key_param_skipped(self, mock_i18n):
+        """*_key 后缀但值非 str 时跳过翻译 (isinstance 守卫)."""
+        from ui.viewmodels import Message
+
+        mock_i18n.get.side_effect = lambda key, **kw: f"[T]{key}" if not kw else f"[T]{key}/{kw}"
+        # name_key 是 int (异常场景), 不应被翻译
+        msg = Message("test_key", {"name_key": 123, "count": 5})
+
+        _render_status_message(msg)
+
+        # name_key 应保留原字段名和值 (因非 str)
+        final_call = mock_i18n.get.call_args_list[-1]
+        assert final_call.args == ("test_key",)
+        assert final_call.kwargs == {"name_key": 123, "count": 5}
+
+    @patch("ui.views.screener_view.I18n")
+    def test_empty_params(self, mock_i18n):
+        """空 params 的 Message 正常处理."""
+        from ui.viewmodels import Message
+
+        mock_i18n.get.return_value = "[T]empty"
+        msg = Message("test_empty", {})
+
+        result = _render_status_message(msg)
+
+        assert result == "[T]empty"
+        mock_i18n.get.assert_called_once_with("test_empty")
+
+    @patch("ui.views.screener_view.I18n")
+    def test_locale_switch_retranslates(self, mock_i18n):
+        """R.2.3 核心目标: locale 切换后, 同一 Message 重渲染时用新 locale 翻译 name_key.
+
+        验证: helper 每次调用都重新调 I18n.get(name_key), 不缓存翻译结果.
+        """
+        from ui.viewmodels import Message
+
+        # 模拟 locale 切换: 第一次 I18n.get(name_key) 返回中文, 第二次返回英文
+        translations = iter(["价值策略", "Value Strategy"])
+        mock_i18n.get.side_effect = lambda key, **kw: (
+            next(translations) if not kw and key == "strategy_value_name" else f"[T]{key}/{kw}"
+        )
+        msg = Message("screener_running_strategy", {"name_key": "strategy_value_name"})
+
+        # 第一次渲染 (zh_CN locale)
+        _render_status_message(msg)
+        first_call = mock_i18n.get.call_args_list[-1]
+        assert first_call.kwargs == {"name": "价值策略"}
+
+        # 第二次渲染 (en_US locale, 同一 msg)
+        _render_status_message(msg)
+        second_call = mock_i18n.get.call_args_list[-1]
+        assert second_call.kwargs == {"name": "Value Strategy"}, (
+            "locale 切换后 helper 必须用新 locale 重新翻译 name_key (R.2.3 核心目标)"
+        )

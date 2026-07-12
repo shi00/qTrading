@@ -3,7 +3,7 @@ import inspect
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -87,6 +87,12 @@ class ScreenerState:
     task_unlocked: bool = False
     # Data version (incremented on _full_results change)
     data_version: int = 0
+    # Strategy loading (R.2.6.1: 业务状态迁入 VM, View 构建 Flet Options 时翻译)
+    strategies_loaded: bool = False
+    strategies_with_dep: dict[str, dict] = field(default_factory=dict)
+    # Strategy description (R.2.6.2: 业务状态迁入 VM, View 映射 color 标识符到 AppColors)
+    strategy_desc: str = ""
+    strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
 
 
 class ScreenerViewModel:
@@ -242,6 +248,94 @@ class ScreenerViewModel:
         """
         tier_hint = self._compute_tier_hint(key)
         self._set_state(selected_strategy=key, tier_hint=tier_hint)
+
+    def load_strategies(self) -> None:
+        """加载策略列表到 state (R.2.6.1: 业务状态迁入 VM).
+
+        从 strategy_mgr 获取策略+依赖信息, 存入 state.strategies_with_dep.
+        View 渲染时调 _build_strategy_options(state.strategies_with_dep, ...) 构建 Flet Options,
+        确保 locale 切换后 Options 自动重新翻译 (避免 use_state 缓存旧 locale 翻译).
+        """
+        try:
+            strategies_with_dep = self.strategy_mgr.get_all_with_dependencies()
+            self._set_state(
+                strategies_with_dep=strategies_with_dep,
+                strategies_loaded=True,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("[ScreenerVM] Failed to load strategies: %s", e, exc_info=True)
+            self._set_state(
+                status_message=Message("screener_load_failed", {}),
+                status_color="red",
+            )
+
+    def update_strategy_desc(self, selected_strategy: str | None, params: dict | None = None) -> None:
+        """更新策略描述和颜色到 state (R.2.6.2: 业务状态迁入 VM).
+
+        计算策略描述文本和颜色语义标识符, 存入 state.strategy_desc/strategy_desc_color.
+        View 渲染时映射 color 标识符到 AppColors (避免 VM 感知 UI 颜色, §3.2).
+
+        Args:
+            selected_strategy: 策略 key, None 表示清空
+            params: 动态参数 (可选, 用于 get_dynamic_description; None 时用策略默认参数)
+        """
+        if not selected_strategy:
+            self._set_state(strategy_desc="", strategy_desc_color="default")
+            return
+
+        try:
+            strategy_obj = self.strategy_mgr.get_strategy(selected_strategy)
+            strategies_with_dep = self.strategy_mgr.get_all_with_dependencies()
+            dep_info = strategies_with_dep.get(selected_strategy, {})
+
+            if strategy_obj:
+                if params is None:
+                    params = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
+                desc = strategy_obj.get_dynamic_description(params)
+            else:
+                desc = self.get_strategy_desc(selected_strategy)
+
+            # NOTE(lazy): I18n.get(strategy_missing_apis) 及 get_strategy_desc 回退路径的翻译值拼入 desc 字符串,
+            # locale 切换后不自动刷新. ceiling: VM state 非 Message, 无 *_key params 翻译机制.
+            # upgrade: desc 改为 Message 结构或引入 desc_key+params 时统一修复 (与 R.2.5 同类, R.3 一并处理).
+            if dep_info.get("missing_apis"):
+                warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
+                desc = f"{desc}{warning_suffix}"
+                color = "warning"
+            else:
+                color = "default"
+
+            self._set_state(strategy_desc=desc, strategy_desc_color=color)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("[ScreenerVM] update_strategy_desc failed: %s", e, exc_info=True)
+            self._set_state(strategy_desc="", strategy_desc_color="default")
+
+    def set_history_viewing_status(self, date_str: str, label: str) -> None:
+        """设置历史查看状态到 state (R.2.6.3: 业务状态迁入 VM).
+
+        将历史查看状态包装为 Message + params, 存入 state.status_message/status_color.
+        View 传入已格式化的 date_str 和已翻译的 label (因 translate_strategy_name 是 View 层 i18n 函数),
+        VM 只存 key + params 不调 I18n.get (§3.2 VM 不感知 locale).
+
+        Args:
+            date_str: 已格式化的日期字符串 (如 "2024-12-27")
+            label: 已翻译的标签字符串 (如 "#abc12345" 或 "价值策略" 或 "全部策略")
+        """
+        # NOTE(lazy): label 为 View 层已翻译字符串 (translate_strategy_name 是 View 层函数),
+        # locale 切换后 state.status_message.params["label"] 残留旧 locale 翻译.
+        # ceiling: translate_strategy_name 未迁入 VM 或未引入 strategy_name_key 机制.
+        # upgrade: R.3 strategy_name 标准化后, label 改为传 raw strategy_name + View 渲染时翻译.
+        self._set_state(
+            status_message=Message(
+                "screener_history_viewing",
+                {"date": date_str, "label": label},
+            ),
+            status_color="blue",
+        )
 
     @staticmethod
     def _compute_tier_hint(selected_strategy: str | None) -> str | None:
@@ -460,12 +554,11 @@ class ScreenerViewModel:
         self._set_state(
             page_no=1,
             loading=True,
-            # NOTE(lazy): params.name 存放已翻译策略名,语言切换时需 View 重新翻译.
-            #   ceiling: Phase 3-4 View 声明式重写时改为嵌套 Message 或策略名 i18n key 直传.
-            #   upgrade: Phase 3-4 ScreenerView 声明式重写.
+            # §3.2: VM 只产出 i18n key (name_key), View 渲染时翻译为当前 locale 策略名.
+            # 避免 VM 持有翻译字符串导致 locale 切换后 state 残留旧 locale 翻译.
             status_message=Message(
                 "screener_running_strategy",
-                {"name": I18n.get(strategy.name_key)},
+                {"name_key": strategy.name_key},
             ),
             status_color="blue",
         )

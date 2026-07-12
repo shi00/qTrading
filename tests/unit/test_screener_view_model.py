@@ -163,6 +163,10 @@ class TestScreenerViewModelDispose:
         assert vm.state.page_no == 1
         assert vm.state.mode == "REALTIME"
         assert vm.state.logs == ()
+        # R.2.6.2/R.2.6.3: 新增字段也需重置到默认值
+        assert vm.state.strategy_desc == ""
+        assert vm.state.strategy_desc_color == "default"
+        assert vm.state.status_message is None
 
     def test_dispose_clears_stream_buffers(self, vm):
         """P1-3: dispose 必须清空 _stream_buffers 防止资源泄漏。"""
@@ -985,6 +989,211 @@ class TestScreenerViewModelSelectStrategy:
         assert snapshots[0].tier_hint is None
 
 
+class TestScreenerViewModelLoadStrategies:
+    """R.2.6.1: load_strategies command — 加载策略列表到 state (业务状态迁入 VM)."""
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_load_strategies_updates_state(self, mock_dp, mock_sm, mock_rm):
+        """load_strategies() 成功时更新 state.strategies_with_dep + state.strategies_loaded=True."""
+        vm = ScreenerViewModel()
+        mock_strategies = {"value": {"name": "价值策略", "missing_apis": []}}
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value=mock_strategies)
+
+        vm.load_strategies()
+
+        assert vm.state.strategies_loaded is True
+        assert vm.state.strategies_with_dep == mock_strategies
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_load_strategies_notifies_subscribers(self, mock_dp, mock_sm, mock_rm):
+        """load_strategies() 必须通知订阅者 (state 变化传播)."""
+        vm = ScreenerViewModel()
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+
+        vm.load_strategies()
+
+        assert len(snapshots) == 1
+        assert snapshots[0].strategies_loaded is True
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_load_strategies_failure_sets_error_status(self, mock_dp, mock_sm, mock_rm):
+        """load_strategies() 失败时设置 status_message=Message('screener_load_failed') + status_color='red'."""
+        vm = ScreenerViewModel()
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(side_effect=RuntimeError("DB error"))
+
+        vm.load_strategies()
+
+        assert vm.state.strategies_loaded is False
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "screener_load_failed"
+        assert vm.state.status_color == "red"
+
+
+class TestScreenerViewModelUpdateStrategyDesc:
+    """R.2.6.2: update_strategy_desc command — 更新策略描述+颜色到 state (业务状态迁入 VM).
+
+    VM 不感知 AppColors (§3.2), state.strategy_desc_color 产出语义标识符
+    ("default"/"warning"), View 渲染时映射到 AppColors.
+    """
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_none_clears_state(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc(None) 清空 desc + color=default."""
+        vm = ScreenerViewModel()
+        vm.update_strategy_desc(None)
+        assert vm.state.strategy_desc == ""
+        assert vm.state.strategy_desc_color == "default"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_with_strategy_obj_uses_dynamic_description(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc(key) 当 strategy_obj 存在时调 get_dynamic_description(defaults)."""
+        vm = ScreenerViewModel()
+        mock_strategy = MagicMock()
+        mock_strategy.get_parameters.return_value = [{"name": "rsi", "default": 30}]
+        mock_strategy.get_dynamic_description.return_value = "RSI<30 选股"
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
+
+        vm.update_strategy_desc("rsi_strategy")
+
+        mock_strategy.get_dynamic_description.assert_called_once_with({"rsi": 30})
+        assert vm.state.strategy_desc == "RSI<30 选股"
+        assert vm.state.strategy_desc_color == "default"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_with_missing_apis_sets_warning_color(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc(key) 当 dep_info.missing_apis 非空时 color='warning' + desc 追加警告."""
+        vm = ScreenerViewModel()
+        mock_strategy = MagicMock()
+        mock_strategy.get_parameters.return_value = []
+        mock_strategy.get_dynamic_description.return_value = "策略描述"
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={"value": {"missing_apis": ["daily_basic"]}})
+
+        vm.update_strategy_desc("value")
+
+        assert "⚠️" in vm.state.strategy_desc
+        assert vm.state.strategy_desc_color == "warning"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_with_params_uses_provided_params(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc(key, params=...) 用提供的 params 而非默认参数调 get_dynamic_description."""
+        vm = ScreenerViewModel()
+        mock_strategy = MagicMock()
+        mock_strategy.get_parameters.return_value = [{"name": "rsi", "default": 30}]
+        mock_strategy.get_dynamic_description.return_value = "RSI<15 选股"
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
+
+        vm.update_strategy_desc("rsi_strategy", params={"rsi": 15})
+
+        mock_strategy.get_dynamic_description.assert_called_once_with({"rsi": 15})
+        assert vm.state.strategy_desc == "RSI<15 选股"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_fallback_to_get_strategy_desc_when_no_obj(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc(key) 当 strategy_obj 不存在时回退到 vm.get_strategy_desc(key)."""
+        vm = ScreenerViewModel()
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=None)
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
+        vm.get_strategy_desc = MagicMock(return_value="回退描述")
+
+        vm.update_strategy_desc("unknown")
+
+        vm.get_strategy_desc.assert_called_once_with("unknown")
+        assert vm.state.strategy_desc == "回退描述"
+        assert vm.state.strategy_desc_color == "default"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_notifies_subscribers(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc() 必须通知订阅者 (state 变化传播)."""
+        vm = ScreenerViewModel()
+        vm.strategy_mgr.get_all_with_dependencies = MagicMock(return_value={})
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+
+        vm.update_strategy_desc(None)
+
+        assert len(snapshots) == 1
+        assert snapshots[0].strategy_desc == ""
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_update_strategy_desc_exception_resets_to_default(self, mock_dp, mock_sm, mock_rm):
+        """update_strategy_desc() 异常时降级为空 desc + default color (G2 M2: 防护 slider 高频场景)."""
+        vm = ScreenerViewModel()
+        vm.strategy_mgr.get_strategy = MagicMock(side_effect=RuntimeError("DB error"))
+
+        vm.update_strategy_desc("broken_strategy")
+
+        assert vm.state.strategy_desc == ""
+        assert vm.state.strategy_desc_color == "default"
+
+
+class TestScreenerViewModelSetHistoryViewingStatus:
+    """R.2.6.3: set_history_viewing_status command — 历史查看状态迁入 VM state.
+
+    VM 接收 View 传入的已格式化 date_str + 已翻译 label, 包装为 Message + params,
+    存入 state.status_message/status_color (§3.2 VM 不调 I18n.get).
+    """
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_history_viewing_status_updates_state(self, mock_dp, mock_sm, mock_rm):
+        """set_history_viewing_status() 设置 status_message=Message('screener_history_viewing') + color='blue'."""
+        vm = ScreenerViewModel()
+        vm.set_history_viewing_status("2024-12-27", "#abc12345")
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.key == "screener_history_viewing"
+        assert vm.state.status_message.params == {"date": "2024-12-27", "label": "#abc12345"}
+        assert vm.state.status_color == "blue"
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_history_viewing_status_with_strategy_label(self, mock_dp, mock_sm, mock_rm):
+        """set_history_viewing_status() 接受翻译后的策略名作为 label."""
+        vm = ScreenerViewModel()
+        vm.set_history_viewing_status("2024-12-27", "价值策略")
+        assert vm.state.status_message is not None
+        assert vm.state.status_message.params == {"date": "2024-12-27", "label": "价值策略"}
+
+    @patch("ui.viewmodels.screener_view_model.ReviewManager")
+    @patch("ui.viewmodels.screener_view_model.StrategyManager")
+    @patch("ui.viewmodels.screener_view_model.DataProcessor")
+    def test_set_history_viewing_status_notifies_subscribers(self, mock_dp, mock_sm, mock_rm):
+        """set_history_viewing_status() 必须通知订阅者 (state 变化传播)."""
+        vm = ScreenerViewModel()
+        snapshots: list = []
+        vm.subscribe(lambda s: snapshots.append(s))
+        vm.set_history_viewing_status("2024-12-27", "价值策略")
+        assert len(snapshots) == 1
+        assert snapshots[0].status_message is not None
+        assert snapshots[0].status_message.key == "screener_history_viewing"
+
+
 class TestScreenerViewModelComputeTierHint:
     """R.2.1: _compute_tier_hint 覆盖 None / 已知策略 / 未知策略 3 路径。
 
@@ -1065,3 +1274,73 @@ class TestScreenerViewModelComputeTierHint:
         ):
             result = vm._compute_tier_hint("value")
         assert result is None
+
+
+# ============================================================================
+# R.2.3: Message.params 不含翻译字符串 (§3.2 VM 只产出 i18n key)
+# ============================================================================
+
+
+class TestScreenerViewModelMessageParamsPurity:
+    """R.2.3: Message.params 不含翻译字符串 (§3.2 VM 只产出 i18n key).
+
+    VM 不应在 Message.params 中调用 I18n.get 产生翻译字符串;
+    应传递 i18n key (如 name_key), 由 View 渲染时翻译为当前 locale.
+    避免 VM 持有翻译字符串导致 locale 切换后 state 残留旧 locale 翻译.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_strategy_status_message_uses_name_key(self, vm):
+        """R.2.3: run_strategy 启动时 status_message.params 应含 name_key (i18n key),
+        不含 name (翻译字符串).
+
+        触发 run_strategy 后立即检查 state.status_message:
+        - params["name_key"] == strategy.name_key (raw i18n key)
+        - "name" not in params (无翻译字符串)
+
+        注意: submit_task 被 mock 故意不执行 coroutine, 仅验证 submit_task 前同步设置的
+        status_message (line 460-471), 不进入 _execute_screening 实际执行路径.
+        """
+        mock_strategy = MagicMock()
+        mock_strategy.name = "test_strategy"
+        mock_strategy.name_key = "test_strategy_name_key"
+        vm.strategy_mgr.get_strategy = MagicMock(return_value=mock_strategy)
+        vm.data_processor.get_strategy_data = AsyncMock(
+            return_value={
+                "screening_data": pd.DataFrame({"ts_code": ["000001.SZ"]}),
+                "trade_date": datetime.date(2024, 12, 31),
+            }
+        )
+
+        with patch("ui.viewmodels.screener_view_model.TaskManager") as mock_tm:
+            mock_tm.return_value.update_progress = MagicMock()
+            mock_tm.return_value.submit_task = MagicMock(return_value="test_task_id")
+            await vm.run_strategy("test_strategy", save_results=False)
+
+        msg = vm.state.status_message
+        assert msg is not None
+        assert msg.key == "screener_running_strategy"
+        assert "name_key" in msg.params, "params 必须含 name_key (i18n key, R.2.3)"
+        assert msg.params["name_key"] == "test_strategy_name_key"
+        assert "name" not in msg.params, "params 不应含 name (翻译字符串, §3.2)"
+
+    def test_no_i18n_get_in_message_params(self):
+        """R.2.3 契约守护: VM 源码中 Message(...) 调用不应在 params 中包含 I18n.get(...) 调用.
+
+        Regex 扫描源码确认 §3.2 契约: VM 只产出 (key, params),
+        params 中不应有 I18n.get(...) 翻译调用.
+
+        局限性说明: 本 regex 仅检测 ``Message(... I18n.get(...) ...)`` 字面量内联调用模式,
+        无法检测变量赋值后传入场景 (如 ``name = I18n.get("x"); Message("k", {"name": name})``).
+        完整守护依赖代码评审; 本测试作为快速回归门禁, 覆盖当前 VM 中所有 11 处 Message 调用模式.
+        """
+        import re
+        from pathlib import Path
+
+        from ui.viewmodels import screener_view_model as mod
+
+        src = Path(mod.__file__).read_text(encoding="utf-8")
+        # 多行匹配 Message(... I18n.get(...) ...) 字面量内联调用模式
+        pattern = r"Message\([^)]*I18n\.get\([^)]*\)[^)]*\)"
+        matches = re.findall(pattern, src, re.DOTALL)
+        assert not matches, f"VM 在 Message.params 中调用了 I18n.get (违反 §3.2 VM 只产出 i18n key): {matches}"
