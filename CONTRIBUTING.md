@@ -3,6 +3,8 @@
 感谢你考虑为 AStockScreener 做贡献！本文档分为三部分：人类贡献者指南、开发环境与命令参考、实现规范手册。
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
+>
+> **对应版本**：0.9.0，最后校对：2026-07-12（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
 
 ## 目录
 
@@ -727,7 +729,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 V0→V1 兼容垫片（PageRefMixin / 旧 mock 全局桩）已全部删除。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。
 
-> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py) 不是兼容垫片，而是 V1 渲染管线针对命令式 `page.update()` 批量更新的永久解决方案。**声明式下不再需要**（options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化）。所有命令式控件重写为声明式后，该函数随之删除。
+> **`refresh_dropdown_options()` 状态**：本函数是 V1 渲染管线针对命令式 `page.update()` 批量更新的临时方案。**声明式下不再需要**（options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化）。所有命令式控件已重写为声明式，该函数生产零调用，待 Phase R.4.1 删除（见 [Plans.md](./Plans.md) Phase R.4.1）。
 
 ### V1 声明式 UI 开发规范
 
@@ -818,7 +820,7 @@ def ScreenerView():
 
 - View 只做两件事：读 `state` 渲染控件树、事件调 `vm.command()`
 - VM 不得出现在 View 的 `use_state`/`use_effect` 之外的任何地方；不持有 VM 引用做副作用
-- `use_viewmodel` hook 已实现（见 CLAUDE.md §3.3 已知技术债），新 UI 必须通过本 hook 消费 ViewModel
+- `use_viewmodel` hook 已实现（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)），新 UI 必须通过本 hook 消费 ViewModel
 - 7 个 ViewModel 已全部迁移为 `use_viewmodel` 范式，新代码必须沿用
 
 #### 6. 迁移约束
@@ -826,7 +828,7 @@ def ScreenerView():
 - **所有命令式 UI 代码已全面重写为声明式**（CLAUDE.md §1.4 UI 迁移例外）：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已全部重写为 `@ft.component` + `use_viewmodel` 声明式范式。
 - `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
 - async 窗口/控件方法必须 `await`。
-- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法属存量技术债，全面重写后删除。
+- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法已全面重写完成，命令式控件已删除（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）。
 
 ### 依赖管理
 
@@ -1178,7 +1180,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 |------|---------|---------------|--------------|
 | **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
-| **P3** | **命令式 UI 存量需整改为声明式** | 现有 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型，命令式视为技术债。 | 独立重构主线：按视图切分逐个改造为 `@ft.component` + `use_state`/`use_effect`；i18n 九规范、响应式九规范、`PageRefMixin`、`refresh_dropdown_options` 等命令式绕过随改造删除。整改工作量大，作为独立任务排期。当前状态：独立重构任务。 |
+| ~~P3~~ | ~~**命令式 UI 存量需整改为声明式**~~ **[已收官]** | 原 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型。 | Phase A-H 声明式迁移已收官（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：所有 View/Tab/Component 已重写为 `@ft.component` + `use_viewmodel` 范式；`PageRefMixin`/`v1_compat.py` 兼容垫片已删除；`refresh_dropdown_options` 待 Phase R.4.1 删除（生产零调用）。 |
 | **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R17 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
 
 ---

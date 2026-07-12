@@ -194,11 +194,9 @@ class BacktestViewModel:
                     if not self.state.is_running:
                         return
                     # NOTE(lazy): message 是 service/engine 层硬编码英文字符串(非 i18n key),
-                    #   暂以原字符串作为 Message.key 直接透传。当前 BacktestView 未消费此字段
-                    #   (legacy 命令式 _on_vm_progress 走 str 回调,与 state 解耦),无渲染影响。
-                    #   ceiling: Phase 3-4 BacktestView 声明式重写时改为 service 传 i18n key +
-                    #   params 或新增 backtest_progress 通用 key。
-                    #   upgrade: Phase 3-4 BacktestView 声明式重写.
+                    #   暂以原字符串作为 Message.key 直接透传。
+                    #   ceiling: service 传 i18n key + params 或新增 backtest_progress 通用 key。
+                    #   upgrade: BacktestView 声明式重写已完成(Phase C.2), i18n 改造待 Phase R.2.3 执行.
                     self._set_state(
                         progress=progress,
                         progress_message=Message(message, {}),

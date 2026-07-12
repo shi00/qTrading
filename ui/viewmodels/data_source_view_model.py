@@ -120,7 +120,7 @@ class DataSourceViewModel:
 
         NOTE(lazy): 返回 get_error_message() 已翻译字符串,VM 间接感知 locale.
         ceiling: dual-track 大体积数据非 state 字段,Phase 2 locale 修复仅覆盖 state 字段.
-        upgrade: Phase 3-4 View 声明式重写时, _last_health_error 改为 Message 或 i18n key + format_args 透传.
+        upgrade: View 声明式重写已完成(Phase E.2), _last_health_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
         """
         return self._last_health_error
 

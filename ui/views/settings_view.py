@@ -53,13 +53,7 @@ def _get_tab_button_style(is_selected: bool) -> ft.ButtonStyle:
 
 
 def _build_tabs(show_snack: Callable) -> list[ft.Control]:
-    """Instantiate all 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab).
-
-    NOTE(lazy): 3 tabs (DataSource/AIBrain/System) 仍命令式, Phase E 待重写。
-    每次重渲染会重新实例化, 命令式 tab 内部状态会丢失, 但 SettingsView 本身不持有
-    这些状态, 影响限于 tab 内部交互态。
-    ceiling: Phase E tabs 声明式化完成. upgrade: 3 个命令式 tabs 全部重写为 @ft.component.
-    """
+    """Instantiate all 6 tabs (DataSourceTab/DatabaseTab/AIBrainTab/AutomationTab/NotificationsTab/SystemTab)."""
     return [
         DataSourceTab(show_snack),
         DatabaseTab(show_snack),

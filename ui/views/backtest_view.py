@@ -131,7 +131,7 @@ def BacktestView() -> ft.Container:
 
     # NOTE(lazy): chart_min_height 固定为 None（移除窗口尺寸命令式回调）。
     # 图表容器 expand=True 自动填充，丢失紧凑模式(240)/标准模式(360)的高度切换。
-    # ceiling: 窗口尺寸响应式重设计. upgrade: Phase F.4 app_layout 声明式重写时引入 page 尺寸响应式 state.
+    # ceiling: 窗口尺寸响应式重设计. upgrade: app_layout 声明式重写已完成(Phase G.1), page 尺寸响应式 state 待独立任务实现.
     return ft.Container(
         content=ft.Column(
             [
