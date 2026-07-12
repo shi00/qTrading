@@ -51,6 +51,20 @@ def _v1_page_compat(monkeypatch):
     monkeypatch.setattr(ft.Control, "update", update)
 
 
+@pytest.fixture(autouse=True)
+def _reset_context_page():
+    """每个测试后清理 _context_page ContextVar，防止 FakePage 跨测试泄漏。
+
+    ``attach_fake_page``（见 ``tests/unit/ui/component_renderer.py``）调用
+    ``_context_page.set(FakePage)`` 修改 ContextVar，若不清理会跨测试泄漏，
+    导致后续 UI 测试因 page 类型不匹配而失败。
+    """
+    yield
+    from flet.controls.context import _context_page
+
+    _context_page.set(None)
+
+
 @pytest.fixture
 def mock_page():
     return MockFletPage()
