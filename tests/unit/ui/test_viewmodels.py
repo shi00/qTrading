@@ -1079,3 +1079,108 @@ class TestScreenerViewModelOnAiResultStreamFlush:
         mock_get_loop.assert_not_called()
         assert len(screener_vm._ai_buffer) == 1
         assert len(screener_vm.state.logs) == 1
+
+
+# ============================================================================
+# Message dataclass 测试 — VM state 中的 i18n 消息字段契约
+# ============================================================================
+
+
+from ui.viewmodels import Message  # noqa: E402
+
+
+class TestMessageDataclass:
+    """Message dataclass 契约测试：验证 i18n 消息字段的不变式。
+
+    Message 是 VM state 中的 i18n 消息载体（方案 §3.1）：
+    - VM 只产出 (key, params)，不感知 locale
+    - View 渲染时调 I18n.get(msg.key, **msg.params)
+    """
+
+    def test_key_only_uses_default_empty_params(self) -> None:
+        """仅 key：params 默认为空 dict（非 None）。"""
+        msg = Message(key="screener_load_failed")
+
+        assert msg.key == "screener_load_failed"
+        assert msg.params == {}
+        assert isinstance(msg.params, dict)
+
+    def test_key_with_params(self) -> None:
+        """key + params：完整字段。"""
+        msg = Message(key="strategy_missing_apis", params={"api": "daily"})
+
+        assert msg.key == "strategy_missing_apis"
+        assert msg.params == {"api": "daily"}
+
+    def test_default_params_not_shared_across_instances(self) -> None:
+        """default_factory 保证每个 Message 的 params 是独立 dict。"""
+        msg1 = Message(key="a")
+        msg2 = Message(key="b")
+
+        msg1.params["x"] = 1
+
+        assert msg2.params == {}  # msg2.params 不受 msg1 修改影响
+
+    def test_frozen_raises_on_attribute_assignment(self) -> None:
+        """frozen=True：直接赋值抛 FrozenInstanceError。"""
+        from dataclasses import FrozenInstanceError
+
+        msg = Message(key="x")
+
+        with pytest.raises(FrozenInstanceError):
+            msg.key = "y"  # type: ignore[misc]
+
+    def test_frozen_raises_on_params_reassignment(self) -> None:
+        """frozen=True：params 字段不可重新赋值。"""
+        from dataclasses import FrozenInstanceError
+
+        msg = Message(key="x")
+
+        with pytest.raises(FrozenInstanceError):
+            msg.params = {"new": 1}  # type: ignore[misc]
+
+    def test_equality_same_key_and_params(self) -> None:
+        """相同 key + params 的两个 Message 相等。"""
+        msg1 = Message(key="x", params={"a": 1})
+        msg2 = Message(key="x", params={"a": 1})
+
+        assert msg1 == msg2
+
+    def test_inequality_different_key(self) -> None:
+        """不同 key 的 Message 不等。"""
+        msg1 = Message(key="x")
+        msg2 = Message(key="y")
+
+        assert msg1 != msg2
+
+    def test_inequality_different_params(self) -> None:
+        """相同 key 但不同 params 的 Message 不等。"""
+        msg1 = Message(key="x", params={"a": 1})
+        msg2 = Message(key="x", params={"a": 2})
+
+        assert msg1 != msg2
+
+    def test_params_accepts_arbitrary_value_types(self) -> None:
+        """params 值可为任意类型（str/int/list/dict）。"""
+        msg = Message(
+            key="x",
+            params={"name": "策略A", "count": 10, "tags": ["a", "b"], "meta": {"k": "v"}},
+        )
+
+        assert msg.params["name"] == "策略A"
+        assert msg.params["count"] == 10
+        assert msg.params["tags"] == ["a", "b"]
+        assert msg.params["meta"] == {"k": "v"}
+
+    def test_i18n_get_unpacks_params(self) -> None:
+        """View 消费：I18n.get(msg.key, **msg.params) 解包 params。
+
+        验证 Message 契约与 I18n.get(key, **params) 调用模式兼容。
+        """
+        from core.i18n import I18n
+
+        msg = Message(key="home_northbound")
+        # I18n.get(msg.key, **msg.params) 应不抛异常
+        result = I18n.get(msg.key, **msg.params)
+        assert isinstance(result, str)
+        assert len(result) > 0
