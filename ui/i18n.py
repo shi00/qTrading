@@ -78,55 +78,22 @@ def _sync_i18n_state() -> None:
 I18n.subscribe(_sync_i18n_state)
 
 
-_STRATEGY_NAME_MAP = {
-    "AI_Auto_Nightly": "strategy_ai_nightly_name",
-    "AI 自动夜间选股": "strategy_ai_nightly_name",
-    "AI Auto Nightly Screening": "strategy_ai_nightly_name",
-    "AI 深度精选 (Beta)": "strategy_ai_active_name",
-    "AI Deep Dive (Beta)": "strategy_ai_active_name",
-    "价值投资": "strategy_value_name",
-    "Value Investing": "strategy_value_name",
-    "高成长策略": "strategy_growth_name",
-    "High Growth": "strategy_growth_name",
-    "高股息策略": "strategy_dividend_name",
-    "High Dividend": "strategy_dividend_name",
-    "放量突破": "strategy_volume_breakout_name",
-    "Volume Breakout": "strategy_volume_breakout_name",
-    "北向持股": "strategy_northbound_holding_name",
-    "Northbound Holdings": "strategy_northbound_holding_name",
-    "北向净流入": "strategy_northbound_flow_name",
-    "Northbound Net Inflow": "strategy_northbound_flow_name",
-    "超跌反弹": "strategy_oversold_name",
-    "Oversold Rebound": "strategy_oversold_name",
-    "龙虎榜机构": "strategy_institutional_name",
-    "Institutional Hits": "strategy_institutional_name",
-    "筹码集中 (暂不可用)": "strategy_chips_name",
-    "Chip Concentration (N/A)": "strategy_chips_name",
-    "大宗交易": "strategy_block_trade_name",
-    "Block Trades": "strategy_block_trade_name",
-    "现金流优质": "strategy_cashflow_name",
-    "Quality Cashflow": "strategy_cashflow_name",
-    "大盘低估": "strategy_large_pe_name",
-    "Large Cap Low PE": "strategy_large_pe_name",
-}
-
-
 def translate_strategy_name(name: str | None) -> str | None:
     """
     Translate strategy name to localized version.
 
+    R.3.3: 简化为 i18n key 直接翻译 + 非 i18n key 兜底原样返回。
+    历史数据 (identifier/zh/en 翻译字符串) 已由 scripts/migrate_strategy_name_to_i18n_key.py
+    迁移为 i18n key, 未迁移值原样返回 (兜底兼容)。
+
     Args:
-        name: Strategy name (either an identifier like 'AI_Auto_Nightly' or already localized)
+        name: i18n key (如 "strategy_value_name") 或非 i18n key 字符串 (兜底原样返回)
 
     Returns:
-        Localized strategy name
+        本地化策略名; 非 i18n key 原样返回
     """
-    if not name:
-        return name
-
-    if name in _STRATEGY_NAME_MAP:
-        return I18n.get(_STRATEGY_NAME_MAP[name])
-
+    if name and name.startswith("strategy_"):
+        return I18n.get(name)
     return name
 
 

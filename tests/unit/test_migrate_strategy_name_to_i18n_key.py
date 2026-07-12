@@ -56,5 +56,39 @@ class TestMigrateStrategyName:
         assert migrate_strategy_name("") == ""
 
 
+class TestStrategyNameMapSync:
+    """R.3.3 scripts/ 副本完整性守护.
+
+    R.3.3 删除 ui/i18n.py:_STRATEGY_NAME_MAP 后, scripts/ 副本成为唯一来源。
+    本测试类断言 scripts/ 副本覆盖所有 strategy_*_name i18n key 的反向映射,
+    防止新增 strategy 时遗漏迁移脚本的反向映射条目。
+    """
+
+    def test_scripts_map_covers_all_strategy_keys(self):
+        """scripts/ 副本应覆盖所有 strategy_*_name i18n key 的反向映射.
+
+        遍历 locales/zh_CN/strings.json 中所有 strategy_*_name key,
+        断言每个 key 在 scripts._STRATEGY_NAME_MAP.values() 中至少出现一次。
+        """
+        import json
+        from pathlib import Path
+
+        locales_dir = Path(__file__).resolve().parent.parent.parent / "locales"
+        with open(locales_dir / "zh_CN" / "strings.json", encoding="utf-8") as f:
+            zh_strings = json.load(f)
+
+        strategy_keys = {k for k in zh_strings if k.startswith("strategy_") and k.endswith("_name")}
+        assert strategy_keys, "locales/zh_CN/strings.json 应至少有一个 strategy_*_name key"
+
+        from migrate_strategy_name_to_i18n_key import _STRATEGY_NAME_MAP as scripts_map  # type: ignore[reportMissingImports]
+
+        mapped_values = set(scripts_map.values())
+        missing = strategy_keys - mapped_values
+        assert not missing, (
+            f"scripts/_STRATEGY_NAME_MAP 缺少以下 strategy_*_name key 的反向映射: {missing}. "
+            "新增策略时必须在 scripts/migrate_strategy_name_to_i18n_key.py:_STRATEGY_NAME_MAP 中添加对应的 zh/en 反向映射。"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

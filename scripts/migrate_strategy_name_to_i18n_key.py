@@ -33,7 +33,7 @@ import sys
 
 import asyncpg
 
-# Synced copy from ui/i18n.py:_STRATEGY_NAME_MAP (29 entries: 1 identifier + 13 zh + 15 en).
+# Synced copy from ui/i18n.py:_STRATEGY_NAME_MAP (29 entries: 1 identifier + 14 zh + 14 en).
 # Do NOT import from ui/i18n.py — scripts/ must not pull in flet runtime side effects.
 _STRATEGY_NAME_MAP: dict[str, str] = {
     "AI_Auto_Nightly": "strategy_ai_nightly_name",

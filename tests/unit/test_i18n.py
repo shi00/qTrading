@@ -533,35 +533,40 @@ class TestI18nBackwardCompatibility:
 
 
 class TestTranslateStrategyName:
-    """Test translate_strategy_name function."""
+    """Test translate_strategy_name function (R.3.3 简化后)."""
 
-    def test_translate_ai_auto_nightly(self):
-        """Test translating AI_Auto_Nightly identifier."""
+    def test_translate_strategy_i18n_key_zh(self):
+        """R.3.3: i18n key 应翻译为 zh_CN 本地化字符串."""
         from ui.i18n import translate_strategy_name
 
         I18n.set_locale("zh_CN")
-        result = translate_strategy_name("AI_Auto_Nightly")
-        assert result == "AI 自动夜间选股"
+        assert translate_strategy_name("strategy_ai_nightly_name") == "AI 自动夜间选股"
+        assert translate_strategy_name("strategy_value_name") == "价值投资"
+        assert translate_strategy_name("strategy_growth_name") == "高成长策略"
 
-        I18n.set_locale("en_US")
-        result = translate_strategy_name("AI_Auto_Nightly")
-        assert result == "AI Auto Nightly Screening"
-
-        I18n.set_locale("zh_CN")
-
-    def test_translate_already_localized_name(self):
-        """Test translating already localized names."""
+    def test_translate_strategy_i18n_key_en(self):
+        """R.3.3: i18n key 应翻译为 en_US 本地化字符串."""
         from ui.i18n import translate_strategy_name
 
-        I18n.set_locale("zh_CN")
-        result = translate_strategy_name("价值投资")
-        assert result == "价值投资"
-
         I18n.set_locale("en_US")
-        result = translate_strategy_name("Value Investing")
-        assert result == "Value Investing"
+        assert translate_strategy_name("strategy_ai_nightly_name") == "AI Auto Nightly Screening"
+        assert translate_strategy_name("strategy_value_name") == "Value Investing"
+        assert translate_strategy_name("strategy_growth_name") == "High Growth"
 
         I18n.set_locale("zh_CN")
+
+    def test_translate_non_i18n_key_returns_original(self):
+        """R.3.3: 非 i18n key 字符串应原样返回 (兜底兼容未迁移数据)."""
+        from ui.i18n import translate_strategy_name
+
+        # 未迁移的翻译字符串 (兜底原样返回)
+        assert translate_strategy_name("价值投资") == "价值投资"
+        assert translate_strategy_name("Value Investing") == "Value Investing"
+        # 未迁移的 identifier
+        assert translate_strategy_name("AI_Auto_Nightly") == "AI_Auto_Nightly"
+        # 自定义策略名
+        assert translate_strategy_name("自定义策略") == "自定义策略"
+        assert translate_strategy_name("Custom Strategy") == "Custom Strategy"
 
     def test_translate_unknown_name_returns_original(self):
         """Test that unknown names are returned as-is."""

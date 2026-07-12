@@ -37,9 +37,9 @@ def reset_i18n():
 
 
 class TestTranslateStrategyName:
-    """Tests for translate_strategy_name function.
+    """Tests for translate_strategy_name function (R.3.3 简化后).
 
-    旧接口兼容性测试（阶段 4 删除时同步移除）。
+    R.3.3: 仅识别 startswith("strategy_") 的 i18n key, 非 i18n key 原样返回。
     """
 
     def test_translate_none_returns_none(self):
@@ -52,59 +52,57 @@ class TestTranslateStrategyName:
         result = translate_strategy_name("")
         assert result == ""
 
-    def test_translate_known_strategy_id(self):
-        """Test translating a known strategy ID."""
+    def test_translate_strategy_i18n_key(self):
+        """R.3.3: i18n key (startswith strategy_) 应通过 I18n.get 翻译."""
         with patch("ui.i18n.I18n.get") as mock_get:
-            mock_get.return_value = "AI Nightly Strategy"
-            result = translate_strategy_name("AI_Auto_Nightly")
-        assert result == "AI Nightly Strategy"
+            mock_get.return_value = "Translated Strategy"
+            result = translate_strategy_name("strategy_ai_nightly_name")
+        assert result == "Translated Strategy"
+        mock_get.assert_called_once_with("strategy_ai_nightly_name")
 
-    def test_translate_known_strategy_name_chinese(self):
-        """Test translating a known Chinese strategy name."""
+    def test_translate_non_i18n_key_returns_original(self):
+        """R.3.3: 非 i18n key (identifier/zh/en 翻译字符串/自定义) 原样返回."""
         with patch("ui.i18n.I18n.get") as mock_get:
-            mock_get.return_value = "Value Investing"
-            result = translate_strategy_name("价值投资")
-        assert result == "Value Investing"
-
-    def test_translate_known_strategy_name_english(self):
-        """Test translating a known English strategy name."""
-        with patch("ui.i18n.I18n.get") as mock_get:
-            mock_get.return_value = "Value Investing"
-            result = translate_strategy_name("Value Investing")
-        assert result == "Value Investing"
+            mock_get.return_value = "Should Not Be Called"
+            # 旧 identifier (未迁移)
+            assert translate_strategy_name("AI_Auto_Nightly") == "AI_Auto_Nightly"
+            # 旧 zh 翻译字符串 (未迁移)
+            assert translate_strategy_name("价值投资") == "价值投资"
+            # 旧 en 翻译字符串 (未迁移)
+            assert translate_strategy_name("Value Investing") == "Value Investing"
+            # 自定义策略名
+            assert translate_strategy_name("自定义策略") == "自定义策略"
+        mock_get.assert_not_called()
 
     def test_translate_unknown_strategy_returns_original(self):
         """Test translating unknown strategy returns original."""
-        with patch("ui.i18n.I18n.get") as mock_get:
-            mock_get.side_effect = lambda x: x  # Return key as-is
-            result = translate_strategy_name("Unknown Strategy")
+        result = translate_strategy_name("Unknown Strategy")
         assert result == "Unknown Strategy"
 
-    def test_translate_all_known_strategy_ids(self):
-        """Test translating all known strategy IDs in the map."""
-        test_cases = [
-            ("AI_Auto_Nightly", "strategy_ai_nightly_name"),
-            ("AI 深度精选 (Beta)", "strategy_ai_active_name"),
-            ("AI Deep Dive (Beta)", "strategy_ai_active_name"),
-            ("价值投资", "strategy_value_name"),
-            ("Value Investing", "strategy_value_name"),
-            ("高成长策略", "strategy_growth_name"),
-            ("高股息策略", "strategy_dividend_name"),
-            ("北向持股", "strategy_northbound_holding_name"),
-            ("北向净流入", "strategy_northbound_flow_name"),
-            ("超跌反弹", "strategy_oversold_name"),
-            ("龙虎榜机构", "strategy_institutional_name"),
-            ("筹码集中 (暂不可用)", "strategy_chips_name"),
-            ("大宗交易", "strategy_block_trade_name"),
-            ("现金流优质", "strategy_cashflow_name"),
-            ("大盘低估", "strategy_large_pe_name"),
+    def test_translate_all_strategy_i18n_keys(self):
+        """R.3.3: 所有 strategy_*_name i18n key 都应通过 I18n.get 翻译."""
+        strategy_keys = [
+            "strategy_ai_nightly_name",
+            "strategy_ai_active_name",
+            "strategy_value_name",
+            "strategy_growth_name",
+            "strategy_dividend_name",
+            "strategy_volume_breakout_name",
+            "strategy_northbound_holding_name",
+            "strategy_northbound_flow_name",
+            "strategy_oversold_name",
+            "strategy_institutional_name",
+            "strategy_chips_name",
+            "strategy_block_trade_name",
+            "strategy_cashflow_name",
+            "strategy_large_pe_name",
         ]
 
         with patch("ui.i18n.I18n.get") as mock_get:
             mock_get.return_value = "Translated"
-            for strategy_name, _ in test_cases:
-                result = translate_strategy_name(strategy_name)
-                assert result == "Translated"
+            for key in strategy_keys:
+                result = translate_strategy_name(key)
+                assert result == "Translated", f"Key {key} should be translated"
 
     def test_translate_returns_original_when_i18n_fails(self):
         """Test that original name is returned if I18n lookup fails."""
