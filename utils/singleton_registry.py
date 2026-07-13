@@ -50,7 +50,16 @@ atexit.register(_atexit_cleanup_all)
 
 
 def register_singleton[TClass: type](cls: TClass) -> TClass:
-    """Class decorator that registers a singleton for unified reset."""
+    """Class decorator that registers a singleton for unified reset.
+
+    R15/L2: All production singletons must implement _reset_singleton for test isolation.
+    Test classes (under tests.) are exempted for fallback-path testing.
+    """
+    if not hasattr(cls, "_reset_singleton") and not cls.__module__.startswith("tests."):
+        raise TypeError(
+            f"Singleton {cls.__name__} must implement _reset_singleton for test isolation (R15/L2). "
+            "See CLAUDE.md §4.3 and CONTRIBUTING.md「单例模式实现模板」."
+        )
     with _lock:
         if cls not in _registry:
             _registry.append(cls)
