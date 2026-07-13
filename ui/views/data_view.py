@@ -28,7 +28,7 @@ import pandas as pd
 from data.persistence.metadata_manager import MetaDataManager
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
@@ -154,7 +154,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
     state, _ = use_viewmodel(vm=vm)
 
     # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- 本地 UI 状态 (输入框值, 用户覆盖) ---
@@ -619,7 +619,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     state, _ = use_viewmodel(vm=vm)
 
     # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- 本地 UI 状态 ---
@@ -820,7 +820,7 @@ def DataExplorerView() -> ft.Container:
     _state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
 
     # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Tab 选中状态 ---

@@ -149,8 +149,8 @@ class TestHealthScanDialogContract:
         assert "ft.use_dialog(" in _raw_source(), "必须使用 ft.use_dialog"
 
     def test_uses_i18n_observable_state(self):
-        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
-        assert "ft.use_state(I18n.get_observable_state)" in _raw_source(), "必须订阅 I18n.get_observable_state"
+        """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""
+        assert "ft.use_state(get_observable_state)" in _raw_source(), "必须订阅 get_observable_state"
 
     def test_uses_use_effect_for_scan(self):
         """DoD: 扫描任务必须通过 use_effect 启动 (R2 CancelledError 传播)。"""
@@ -177,8 +177,8 @@ class TestHealthScanDialogContract:
         assert "use_ref(lambda: ft." not in code, "use_ref 不应缓存 ft 控件实例"
 
     def test_subscribes_i18n(self):
-        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
-        assert "I18n.get_observable_state" in _raw_source(), "必须订阅 I18n.get_observable_state"
+        """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""
+        assert "get_observable_state" in _raw_source(), "必须订阅 get_observable_state"
 
     def test_pure_functions_preserved(self):
         """DoD: 模块级纯函数保留导出 (由旧 class 转换)。"""
@@ -233,8 +233,8 @@ class TestHealthReportDialogContractPreserved:
         assert "ft.use_dialog(" in _raw_source()
 
     def test_uses_i18n_observable_state(self):
-        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
-        assert "ft.use_state(I18n.get_observable_state)" in _raw_source()
+        """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""
+        assert "ft.use_state(get_observable_state)" in _raw_source()
 
     def test_pure_functions_preserved(self):
         """DoD: 模块级纯函数保留导出。"""

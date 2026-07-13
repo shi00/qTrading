@@ -10,6 +10,7 @@ from collections import OrderedDict
 
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.sanitizers import DataSanitizer
@@ -288,6 +289,14 @@ class NewsSubscriptionService:
             logger.warning("[NewsService] Engine disposed during fetch, stopping.")
             self._running = False
         except Exception as e:
+            severity = classify_severity(e)
+            if severity == "system":
+                logger.error(
+                    "[NewsService] System-level error in background fetch task: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+                raise
             logger.error(
                 "[NewsService] Error in background fetch task: %s",
                 DataSanitizer.sanitize_error(e),
@@ -312,6 +321,14 @@ class NewsSubscriptionService:
                 tag = I18n.get("news_tag_format", emoji=emoji, category=category)
                 return tag
         except Exception as e:
+            severity = classify_severity(e)
+            if severity == "system":
+                logger.error(
+                    "[NewsService] System-level error in AI Tagging: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+                raise
             logger.warning("[NewsService] AI Tagging failed: %s", DataSanitizer.sanitize_error(e))
 
         if any(k in clean_content for k in ["央行", "证监会", "国务院", "财政部", "政策", "立案", "违规"]):
@@ -377,6 +394,14 @@ class NewsSubscriptionService:
                 logger.warning("[NewsService] Engine disposed during processing, stopping loop.")
                 break
             except Exception as e:
+                severity = classify_severity(e)
+                if severity == "system":
+                    logger.error(
+                        "[NewsService] System-level error in processing loop: %s",
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
+                    raise
                 logger.error(
                     "[NewsService] Error in processing loop: %s",
                     DataSanitizer.sanitize_error(e),
@@ -433,6 +458,15 @@ class NewsSubscriptionService:
             except TimeoutError:
                 logger.warning("[NewsService] Listener %s timed out (5s)", listener)
             except Exception as e:
+                severity = classify_severity(e)
+                if severity == "system":
+                    logger.error(
+                        "[NewsService] System-level error in listener %s: %s",
+                        listener,
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
+                    raise
                 count = self._listener_errors.get(listener, 0) + 1
                 self._listener_errors[listener] = count
 
@@ -567,6 +601,14 @@ class NewsSubscriptionService:
                                 except TimeoutError:
                                     logger.warning("[NewsService] Alert listener %s timed out (3s)", listener)
                                 except Exception as e:
+                                    severity = classify_severity(e)
+                                    if severity == "system":
+                                        logger.error(
+                                            "[NewsService] System-level error in alert listener: %s",
+                                            DataSanitizer.sanitize_error(e),
+                                            exc_info=True,
+                                        )
+                                        raise
                                     logger.error(
                                         "[NewsService] Alert listener error: %s", DataSanitizer.sanitize_error(e)
                                     )
@@ -586,5 +628,13 @@ class NewsSubscriptionService:
             logger.warning("[NewsService] Engine disposed during poll, stopping.")
             self._running = False
         except Exception as e:
+            severity = classify_severity(e)
+            if severity == "system":
+                logger.error(
+                    "[NewsService] System-level error in poll: %s",
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
+                raise
             logger.warning("[NewsService] Poll failed: %s", DataSanitizer.sanitize_error(e))
             logger.debug("[NewsService] Poll failed traceback:", exc_info=True)

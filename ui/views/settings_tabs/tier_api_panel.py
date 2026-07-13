@@ -7,7 +7,7 @@
 - 旧命令式 class → ``@ft.component def TierApiPanel(system_vm)``
 - VM 由消费方实例化（system_tab 创建 SystemViewModel 并注入）
 - View 通过 ``use_viewmodel(vm=system_vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
 - probe 三态（idle/running/result）由 VM state + last_probe_result 驱动渲染
 - 响应式断点用 ``use_state`` + ``page.on_resize``（use_effect 挂载，链式保留 prev）
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
@@ -19,8 +19,8 @@ from datetime import datetime
 
 import flet as ft
 
-from core.i18n import I18n
 from ui.hooks import use_viewmodel
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.system_viewmodel import SystemViewModel
 
@@ -229,7 +229,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
     - VM 由消费方实例化（system_tab 创建 SystemViewModel 并注入）
     - View 通过 ``use_viewmodel(vm=system_vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - probe 三态（idle/running/result）由 VM state + last_probe_result 驱动渲染
     - 响应式断点用 ``use_state`` + ``page.on_resize``（use_effect 挂载，链式保留 prev）
     - 无 page ref / 生命周期回调 / 手动刷新
@@ -241,7 +241,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     state, vm = use_viewmodel(vm=system_vm)
 
     # --- 订阅 i18n 变更（自动重渲染）---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- 局部状态 ---
     current_tier = vm.get_current_tier()

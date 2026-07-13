@@ -136,6 +136,23 @@ class TushareClient:
         "cn_gdp": {"quarter": "period"},
         # Phase 3D：share_float API 返回 float_type，重命名为 share_type（与 ORM 列名对齐）
         "share_float": {"float_type": "share_type"},
+        # R17（迁移 0015）：shibor API 返回 date/on/1w-1y（SQL 保留字/数字开头），
+        # 重命名为 record_date/on_rate/week_1-week_2/month_1-month_3-month_6-month_9/year_1
+        "shibor": {
+            "date": "record_date",
+            "on": "on_rate",
+            "1w": "week_1",
+            "2w": "week_2",
+            "1m": "month_1",
+            "3m": "month_3",
+            "6m": "month_6",
+            "9m": "month_9",
+            "1y": "year_1",
+        },
+        # R17（迁移 0015）：shibor_lpr API 返回 date 列，重命名为 record_date（与 shibor 同表合并）
+        "shibor_lpr": {"date": "record_date"},
+        # R17（迁移 0015）：index_classify API 返回 level（SQL 保留字），重命名为 sw_level（与 ORM 列名对齐）
+        "index_classify": {"level": "sw_level"},
     }
 
     _SLOW_API_OVERRIDES: typing.ClassVar[dict[str, float]] = {
@@ -1889,7 +1906,8 @@ class TushareClient:
             src: 来源（SW2021 表示 2021 版申万行业分类）。
 
         Returns:
-            DataFrame，包含 index_code/index_name/level/industry_code/industry_name/parent_code/is_sw。
+            DataFrame，包含 index_code/index_name/sw_level/industry_code/industry_name/parent_code/is_sw。
+            （level 经 _COLUMN_RENAMES 重命名为 sw_level，R17 迁移 0015）
         """
         return await self._handle_api_call(
             self.pro.index_classify,

@@ -604,3 +604,140 @@ class TestNumericDetection:
         ]
         result = vm._detect_numeric_cols(schema)
         assert result == {"c1", "c2", "c3"}
+
+
+class TestUnsubscribeEdgeCase:
+    def test_unsubscribe_when_already_removed_is_noop(self, vm):
+        """对已移除的回调再次调用 unsubscribe 应安全无操作(分支 114->exit)。"""
+
+        def cb(_s):
+            pass
+
+        unsubscribe = vm.subscribe(cb)
+        unsubscribe()
+        unsubscribe()  # 第二次调用,callback 已不在列表,不应抛异常
+
+
+class TestDisposeEdgeCase:
+    def test_dispose_when_db_already_none(self, vm):
+        """dispose 时 _db 为 None 应安全跳过 close(分支 144->147)。"""
+        vm._db = None
+        vm.dispose()
+        assert vm._disposed is True
+
+
+class TestInitTablesSeverity:
+    async def test_operational_error_sets_error_message(self, vm, mock_db):
+        """operational 严重度异常(未知错误)设置 error_message,返回空列表。"""
+        mock_db.get_all_tables.side_effect = RuntimeError("unknown boom")
+        result = await vm.init_tables()
+        assert result == []
+        assert vm.state.error_message is not None
+
+    async def test_system_error_propagates(self, vm, mock_db):
+        """system 严重度异常(PermissionError)必须抛出,不被吞没。"""
+        mock_db.get_all_tables.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await vm.init_tables()
+
+
+class TestLoadSchemaSeverity:
+    async def test_recoverable_error_sets_error_message(self, vm, mock_db):
+        """recoverable 严重度异常(timeout)设置 error_message,返回空列表。"""
+        mock_db.get_table_schema.side_effect = RuntimeError("query timeout")
+        result = await vm.load_table_schema("stock_basic")
+        assert result == []
+        assert vm.state.error_message is not None
+
+    async def test_system_error_propagates(self, vm, mock_db):
+        """system 严重度异常(PermissionError)必须抛出。"""
+        mock_db.get_table_schema.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await vm.load_table_schema("stock_basic")
+
+
+class TestQueryDataSeverity:
+    async def test_operational_error_sets_error_message(self, vm, mock_db):
+        """operational 严重度异常设置 error_message,返回当前数据,finally 重置 is_loading。"""
+        mock_db.get_table_count.side_effect = RuntimeError("unknown boom")
+        result = await vm.query_data()
+        assert result.empty
+        assert vm.state.error_message is not None
+        assert vm.state.is_loading is False
+
+    async def test_recoverable_error_sets_error_message(self, vm, mock_db):
+        """recoverable 严重度异常(timeout)设置 error_message,返回当前数据。"""
+        mock_db.get_table_count.side_effect = RuntimeError("query timeout")
+        result = await vm.query_data()
+        assert result.empty
+        assert vm.state.error_message is not None
+        assert vm.state.is_loading is False
+
+    async def test_system_error_propagates(self, vm, mock_db):
+        """system 严重度异常(PermissionError)必须抛出,finally 仍重置 is_loading。"""
+        mock_db.get_table_count.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await vm.query_data()
+        assert vm.state.is_loading is False
+
+
+class TestQueryCountSeverity:
+    async def test_operational_error_returns_zero(self, vm, mock_db):
+        """operational 严重度异常返回 0 并设置 error_message。"""
+        mock_db.get_table_count.side_effect = RuntimeError("unknown boom")
+        result = await vm.query_count()
+        assert result == 0
+        assert vm.state.error_message is not None
+
+    async def test_recoverable_error_returns_zero(self, vm, mock_db):
+        """recoverable 严重度异常(timeout)返回 0 并设置 error_message。"""
+        mock_db.get_table_count.side_effect = RuntimeError("query timeout")
+        result = await vm.query_count()
+        assert result == 0
+        assert vm.state.error_message is not None
+
+    async def test_system_error_propagates(self, vm, mock_db):
+        """system 严重度异常(PermissionError)必须抛出。"""
+        mock_db.get_table_count.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await vm.query_count()
+
+
+class TestExportDataSeverity:
+    async def test_operational_error_returns_empty_df(self, vm, mock_db):
+        """operational 严重度异常返回空 DataFrame 并设置 error_message。"""
+        mock_db.query_table.side_effect = RuntimeError("unknown boom")
+        result = await vm.export_data()
+        assert result.empty
+        assert vm.state.error_message is not None
+
+    async def test_recoverable_error_returns_empty_df(self, vm, mock_db):
+        """recoverable 严重度异常(timeout)返回空 DataFrame 并设置 error_message。"""
+        mock_db.query_table.side_effect = RuntimeError("query timeout")
+        result = await vm.export_data()
+        assert result.empty
+        assert vm.state.error_message is not None
+
+    async def test_system_error_propagates(self, vm, mock_db):
+        """system 严重度异常(PermissionError)必须抛出。"""
+        mock_db.query_table.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await vm.export_data()
+
+
+class TestExecuteSQLSeverity:
+    async def test_operational_error_returns_error_dict(self, vm, mock_db):
+        """operational 严重度异常返回 error dict,递增 sql_result_version,finally 重置 sql_is_executing。"""
+        mock_db.execute_sql.side_effect = RuntimeError("unknown boom")
+        result = await vm.execute_sql("SELECT 1")
+        assert result["success"] is False
+        assert result["error"] is not None
+        assert vm.state.sql_is_executing is False
+        assert vm.state.sql_result_version == 1
+
+    async def test_system_error_propagates(self, vm, mock_db):
+        """system 严重度异常(PermissionError)必须抛出,finally 仍重置 sql_is_executing。"""
+        mock_db.execute_sql.side_effect = PermissionError("denied")
+        with pytest.raises(PermissionError):
+            await vm.execute_sql("SELECT 1")
+        assert vm.state.sql_is_executing is False

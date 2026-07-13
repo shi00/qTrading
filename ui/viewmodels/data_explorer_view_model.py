@@ -430,7 +430,7 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in execute_sql: %s", e, exc_info=True)
-            # NOTE(lazy): _sql_result.error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: Phase 3-4 View 声明式重写时, _sql_result.error 改为 Message 或 i18n key + format_args 透传.
+            # NOTE(lazy): _sql_result.error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: View 声明式重写已完成(Phase F.2), _sql_result.error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
             self._sql_result = {"success": False, "data": None, "error": get_error_message(error_info)}
             self._set_state(sql_result_version=self._state.sql_result_version + 1)
             return self._sql_result

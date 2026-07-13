@@ -168,7 +168,6 @@ class FletPage:
                 # 通过 selection 替换机制正确更新 TextEditingController。
                 await self.page.keyboard.press("Control+A")
                 await self.page.keyboard.type(value, delay=30)
-                await self.page.wait_for_timeout(50)
             except Exception as exc:  # noqa: BLE001
                 logger.debug(
                     "fill_textbox: keyboard.type failed for '%s', falling back to fill(): %s",
@@ -418,18 +417,20 @@ class FletPage:
             # V1 M3: Dropdown 触发器在未获得焦点时文本为空，文本匹配可能失败。
             # 进入暴力搜索模式：依次点击每个 aria-expanded 触发器，检查弹出的选项是否匹配。
             # 这避免了依赖触发器文本定位 Dropdown，适配 V1 M3 的渲染特性。
+            # NOTE(lazy): 暴力搜索上限 8 个触发器，每触发器等待 1s. ceiling: 页面上同时超过 8 个 Dropdown. upgrade: 改进触发器定位策略避免暴力搜索.
             all_triggers = self.page.locator('flt-semantics[role="button"][aria-expanded]')
             trigger_count = await all_triggers.count()
-            logger.debug("select_dropdown: 暴力搜索模式，共 %d 个触发器", trigger_count)
-            for idx in range(trigger_count):
+            max_triggers = min(trigger_count, 8)
+            logger.debug("select_dropdown: 暴力搜索模式，共 %d 个触发器，扫描前 %d 个", trigger_count, max_triggers)
+            for idx in range(max_triggers):
                 try:
                     trigger = all_triggers.nth(idx)
                     if await trigger.count() == 0:
                         continue
                     await trigger.click(timeout=self._tm(3000), force=True)
                     logger.debug("暴力搜索: 点击触发器[%d]", idx)
-                    for _ in range(10):
-                        await self.page.wait_for_timeout(300)
+                    for _ in range(5):
+                        await self.page.wait_for_timeout(200)
                         if await check_option_visible():
                             option_ready = True
                             break
@@ -437,12 +438,12 @@ class FletPage:
                         break
                     # 选项不匹配，关闭菜单（按 Escape）后尝试下一个触发器
                     await self.page.keyboard.press("Escape")
-                    await self.page.wait_for_timeout(300)
+                    await self.page.wait_for_timeout(200)
                 except Exception as ex:  # noqa: BLE001
                     logger.debug("暴力搜索: 触发器[%d] 失败: %s", idx, ex)
                     try:
                         await self.page.keyboard.press("Escape")
-                        await self.page.wait_for_timeout(300)
+                        await self.page.wait_for_timeout(200)
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -452,7 +453,8 @@ class FletPage:
             raise RuntimeError(f"Timeout waiting for option '{option_text}' (key: '{opt_match_key}') to appear")
 
         # 等待选项渲染稳定（CanvasKit 动画收尾），防止点击被动画吞噬
-        await self.page.wait_for_timeout(350)
+        # 200ms 取 CanvasKit 动画上限（通常 100-200ms），CI 高负载时更安全
+        await self.page.wait_for_timeout(200)
         clicked = await click_option()
         if not clicked:
             raise RuntimeError(f"Failed to click option '{option_text}' (key: '{opt_match_key}')")

@@ -6,7 +6,7 @@
 变更要点:
 - 6 个命令式 class (ft.Container/ft.Row/ft.ResponsiveRow) → ``@ft.component`` 函数组件
 - 移除所有命令式 API: set_value/set_label/update_theme/set_loading/set_text/update_locale/.update()
-- i18n 自动重渲染: SectionHeader/SettingRow 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅
+- i18n 自动重渲染: SectionHeader/SettingRow 通过 ``ft.use_state(get_observable_state)`` 订阅
 - theme 自动重渲染: MetricCard 通过 ``ft.use_state(AppColors.get_observable_state)`` 订阅
   (trend 用的 UP/DOWN 为 Layer 2 自定义色，需随主题刷新)
 - 状态驱动渲染: MetricCard 的 value/icon/status_color、ActionChip 的 is_loading/title/subtitle
@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -221,9 +221,9 @@ def SectionHeader(
 
     When ``title_key`` is set, the title is re-resolved via ``I18n.get(title_key)``
     on each render; locale changes auto-trigger rerender via
-    ``ft.use_state(I18n.get_observable_state)``.
+    ``ft.use_state(get_observable_state)``.
     """
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     display_title = I18n.get(title_key) if title_key else title
     controls: list[ft.Control] = [
@@ -271,9 +271,9 @@ def SettingRow(
     Responsive layout: aligns strictly on desktop via grids, wraps on mobile.
     When ``title_key``/``subtitle_key`` are set, text is re-resolved via
     ``I18n.get``; locale changes auto-trigger rerender via
-    ``ft.use_state(I18n.get_observable_state)``.
+    ``ft.use_state(get_observable_state)``.
     """
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     display_title = I18n.get(title_key) if title_key else title
     display_subtitle = I18n.get(subtitle_key) if subtitle_key else subtitle

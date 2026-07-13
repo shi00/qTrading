@@ -3,7 +3,8 @@
 声明式重写后 View 层测试聚焦:
 1. 契约守护 (grep 检查禁止的命令式模式: class 继承/did_mount/.update()/weakref page_ref/
    _view_cache/PageRefMixin/schedule_resize/_handle_resize/_on_locale_change/refresh_locale)
-2. 模块级纯函数测试 (_build_view/_build_nav_destinations/_get_page)
+2. 模块级纯函数测试 (_build_nav_destinations/_get_page) +
+   _build_pages_stack 源码契约守护 (ft.Stack + visible prop, 项目内存硬约束 #34)
 
 业务逻辑覆盖 (tab 切换 + resize 防抖 + 子视图消费) 由集成测试
 (flet_test_page fixture) 承担, 声明式组件含 use_state 在无 renderer 下抛 RuntimeError。
@@ -140,12 +141,36 @@ class TestAppLayoutContract:
         assert "_view_cache" not in _code_source(), "不应使用 _view_cache (声明式直接函数调用)"
 
     def test_no_use_ref_cache(self):
-        """DoD: 禁止 use_ref cache 命令式实例。"""
-        assert "ft.use_ref" not in _code_source(), "不应直接使用 ft.use_ref"
+        """DoD: 禁止 use_ref cache 命令式控件实例（Future/非控件引用除外，R.1.3 例外）。
+
+        全量校验所有 ft.use_ref(...) 调用的参数必须为 None，避免"存在一个 use_ref(None)
+        即放行"的虚假保障（QA Critical + Skeptic M1）。
+        """
+        import re
+
+        source = _code_source()
+        use_ref_args = re.findall(r"ft\.use_ref\(([^)]*)\)", source)
+        for arg in use_ref_args:
+            assert arg.strip() == "None", f"use_ref 仅允许 None 初始值（非控件实例），实际: {arg}"
+
+    def test_app_layout_resize_cleanup_cancels_debounce(self):
+        """DoD: _cleanup_resize 必须取消 pending debounce_task 并置 None（R.1.3 防孤儿任务）。
+
+        本测试为源码契约守护（grep 式），行为覆盖由集成测试承担。
+        用 _code_source() 剥离 docstring 降低误判，500 字符窗口覆盖函数体。
+        """
+        source = _code_source()
+        # debounce_task 必须用 use_ref 持有（跨 re-render 持久 + cleanup 可访问）
+        assert "ft.use_ref" in source, "debounce_task 必须用 use_ref 持有"
+        # _cleanup_resize 必须包含 cancel 调用 + 置 None（防孤儿引用 + 可重入）
+        cleanup_idx = source.index("def _cleanup_resize")
+        cleanup_section = source[cleanup_idx : cleanup_idx + 500]
+        assert ".cancel()" in cleanup_section, "_cleanup_resize 必须取消 debounce_task"
+        assert "= None" in cleanup_section, "_cleanup_resize cancel 后必须置 None 防孤儿引用"
 
     def test_subscribes_i18n(self):
-        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
-        assert "I18n.get_observable_state" in _raw_source(), "必须订阅 I18n.get_observable_state"
+        """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""
+        assert "get_observable_state" in _raw_source(), "必须订阅 get_observable_state"
 
     def test_subscribes_theme(self):
         """DoD: 必须订阅 AppColors.get_observable_state (theme 自动重渲染)。"""
@@ -207,56 +232,53 @@ class TestAppLayoutContract:
 # ============================================================================
 
 
-class TestBuildView:
-    """_build_view 模块级纯函数测试。"""
+class TestBuildPagesStack:
+    """``_build_pages_stack`` 源码契约守护测试 (项目内存硬约束 #34)。
 
-    patches: list
+    ``_build_pages_stack`` 是 ``@ft.component``, 在无 renderer 上下文下直接调用会抛
+    ``RuntimeError`` (与 AppLayout 同), 故改为源码契约守护 (grep 式) 验证其符合
+    ft.Stack + visible prop 范式。行为覆盖由集成测试 (flet_test_page fixture) 承担。
+    """
 
-    @pytest.fixture(autouse=True)
-    def _setup(self, mock_i18n):
-        self.mock_i18n = mock_i18n
-        self.patches = [
-            patch("ui.app_layout.I18n", self.mock_i18n),
-            patch("ui.app_layout.HomeView", MagicMock()),
-            patch("ui.app_layout.ScreenerView", MagicMock()),
-            patch("ui.app_layout.BacktestView", MagicMock()),
-            patch("ui.app_layout.DataExplorerView", MagicMock()),
-            patch("ui.app_layout.TaskCenterView", MagicMock()),
-            patch("ui.app_layout.SettingsView", MagicMock()),
-        ]
-        with contextlib.ExitStack() as stack:
-            for p in self.patches:
-                stack.enter_context(p)
-            yield
+    def test_build_pages_stack_is_ft_component(self):
+        """DoD: ``_build_pages_stack`` 必须被 ``@ft.component`` 装饰 (硬约束 #31)。"""
+        from ui.app_layout import _build_pages_stack
 
-    def test_market_tab_returns_home_view(self):
-        """NavTabs.MARKET 索引返回 HomeView() 实例。"""
-        from ui.app_layout import NavTabs, _build_view
+        assert hasattr(_build_pages_stack, "__wrapped__"), "_build_pages_stack 必须用 @ft.component 装饰"
 
-        view = _build_view(NavTabs.MARKET)
-        assert view is not None
+    def test_build_pages_stack_signature_returns_stack(self):
+        """DoD: 函数签名必须为 ``def _build_pages_stack(...) -> ft.Stack``。"""
+        source = _code_source()
+        assert "def _build_pages_stack(" in source, "必须是函数定义"
+        assert "-> ft.Stack" in source, "返回类型必须为 ft.Stack"
 
-    def test_screener_tab_returns_screener_view(self):
-        """NavTabs.SCREENER 索引返回 ScreenerView() 实例。"""
-        from ui.app_layout import NavTabs, _build_view
+    def test_build_pages_stack_uses_ft_stack(self):
+        """DoD: 必须使用 ``ft.Stack`` 容器 (硬约束 #34: state-driven rendering)。"""
+        source = _code_source()
+        assert "ft.Stack(" in source, "必须使用 ft.Stack 替代条件渲染"
 
-        view = _build_view(NavTabs.SCREENER)
-        assert view is not None
+    def test_build_pages_stack_uses_visible_prop(self):
+        """DoD: 页面切换必须用 ``visible`` prop 而非 if/else 创建不同控件 (硬约束 #34)。"""
+        source = _code_source()
+        assert "visible=current_tab" in source, "页面切换必须用 visible prop 控制"
 
-    def test_all_tabs_return_non_none(self):
-        """所有 NavTabs 索引返回非 None 对象。"""
-        from ui.app_layout import NavTabs, _build_view
+    def test_no_conditional_view_rendering(self):
+        """DoD: 不应保留 ``_build_view`` 条件渲染旧函数 (已迁移至 ft.Stack + visible prop)。"""
+        source = _code_source()
+        assert "def _build_view(" not in source, "不应再有 _build_view 条件渲染函数"
 
-        for tab in NavTabs:
-            view = _build_view(int(tab))
-            assert view is not None, f"tab {tab.name} 应返回非 None 视图"
-
-    def test_unknown_index_returns_text(self):
-        """未知索引返回 ft.Text 兜底。"""
-        from ui.app_layout import _build_view
-
-        view = _build_view(99)
-        assert isinstance(view, ft.Text)
+    def test_consumes_all_six_subviews_in_stack(self):
+        """DoD: ``_build_pages_stack`` 必须预先创建所有 6 个子视图放入 Stack。"""
+        source = _code_source()
+        for view_name in [
+            "HomeView()",
+            "ScreenerView()",
+            "BacktestView()",
+            "DataExplorerView()",
+            "TaskCenterView()",
+            "SettingsView()",
+        ]:
+            assert view_name in source, f"_build_pages_stack 必须预创建 {view_name}"
 
 
 class TestBuildNavDestinations:

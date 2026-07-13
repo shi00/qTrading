@@ -7,8 +7,7 @@
 - 历史 page 引用基类与显式 update 调用全部移除, 状态变更由 ``use_state`` 驱动自动重渲染
 - 拖拽即时宽度用 ``use_ref`` 缓存 (性能优化, 非 cache 命令式实例), 节流后 ``set_state`` 提交
 - ConfigHandler 宽度持久化用 ``use_effect`` 初始加载 + 拖拽结束写入
-- 折叠状态用 ``use_state`` 管理; 临时保留 ``set_left_collapsed`` 方法供命令式消费方
-  (screener_view) 过渡使用, Phase F.3 后删除
+- 折叠状态用 ``use_state`` 管理
 """
 
 import logging
@@ -88,7 +87,7 @@ def ResizableSplitter(
         min_width: 左侧最小宽度
         max_width: 左侧最大宽度
         on_resize: 宽度变化回调 (可选, 用于触发子控件刷新, 签名 () -> None)
-        drag_interval: 拖拽事件节流毫秒数, 默认 16ms (~60fps)
+        drag_interval: 拖拽事件节流毫秒数, 默认 16ms (~60fps). NOTE(lazy): 匹配显示器刷新率. ceiling: 低性能设备 60fps reconcile 可能掉帧. upgrade: 设备性能检测或用户反馈掉帧时改 33ms.
         collapsible: 是否允许折叠左侧栏
         collapsed: 初始是否折叠左侧栏
     """
@@ -167,14 +166,6 @@ def ResizableSplitter(
         """鼠标离开分隔条: 恢复透明。"""
         set_hovered(False)
 
-    def _set_left_collapsed(collapsed_val: bool) -> None:
-        """折叠/恢复左栏 (临时兼容层, 供命令式消费方过渡使用)。"""
-        if not collapsible:
-            return
-        set_is_collapsed(collapsed_val)
-        if on_resize:
-            on_resize()
-
     # --- Render ---
     hover_color = ft.Colors.with_opacity(0.6, AppColors.PRIMARY) if hovered else ft.Colors.TRANSPARENT
 
@@ -214,8 +205,4 @@ def ResizableSplitter(
         ),
         expand=True,
     )
-    # NOTE(lazy): 临时兼容层, 给命令式消费方 (screener_view) 提供 set_left_collapsed 方法.
-    # ceiling: screener_view 在 Phase F.3 声明式重写完成.
-    # upgrade: Phase F.3 screener_view 声明式重写完成后删除此赋值.
-    container.set_left_collapsed = _set_left_collapsed  # type: ignore[method-assign]  # [reason: 声明式组件无方法定义, 动态挂兼容方法供命令式消费方过渡]
     return container

@@ -36,11 +36,11 @@ class TestMacroDaoIntegrity:
         assert df is not None
         assert not df.empty
         # Level 2: 验证字段存在和具体值
-        # 注意：返回列名是数据库列名（on/1w/2w/1m/3m/6m/9m/1y），非 Python 属性名（见约束 6）
-        assert "on" in df.columns
-        assert "1y" in df.columns
-        assert df["on"].iloc[0] == Decimal("1.85")
-        assert df["1y"].iloc[0] == Decimal("2.50")
+        # R17（迁移 0015）：列名 on_rate/year_1 等非保留字，属性名与列名一致
+        assert "on_rate" in df.columns
+        assert "year_1" in df.columns
+        assert df["on_rate"].iloc[0] == Decimal("1.85")
+        assert df["year_1"].iloc[0] == Decimal("2.50")
         # Phase 3G §4.3.3：LPR 扩列字段验证
         assert "lpr_1y" in df.columns, "lpr_1y 字段未在查询结果中"
         assert "lpr_5y" in df.columns, "lpr_5y 字段未在查询结果中"
@@ -171,15 +171,15 @@ class TestShiborDataQuality:
         """
         mock_df = pd.DataFrame(
             {
-                "date": ["20240101"],
-                "on": [2.0],
-                "1w": [2.5],
-                "2w": [2.8],
-                "1m": [3.0],
-                "3m": [3.5],
-                "6m": [4.0],
-                "9m": [4.2],
-                "1y": [4.5],
+                "record_date": ["20240101"],
+                "on_rate": [2.0],
+                "week_1": [2.5],
+                "week_2": [2.8],
+                "month_1": [3.0],
+                "month_3": [3.5],
+                "month_6": [4.0],
+                "month_9": [4.2],
+                "year_1": [4.5],
             }
         )
 
@@ -191,9 +191,9 @@ class TestShiborDataQuality:
         ):
             df = await macro_dao.get_shibor_latest()
 
-            assert "on" in df.columns
-            assert "1w" in df.columns
-            assert "3m" in df.columns
+            assert "on_rate" in df.columns
+            assert "week_1" in df.columns
+            assert "month_3" in df.columns
 
     @pytest.mark.asyncio
     async def test_shibor_rate_range(self, macro_dao):
@@ -202,10 +202,10 @@ class TestShiborDataQuality:
         """
         mock_df = pd.DataFrame(
             {
-                "date": ["20240101"],
-                "on": [2.0],
-                "1w": [2.5],
-                "3m": [3.5],
+                "record_date": ["20240101"],
+                "on_rate": [2.0],
+                "week_1": [2.5],
+                "month_3": [3.5],
             }
         )
 
@@ -217,7 +217,7 @@ class TestShiborDataQuality:
         ):
             df = await macro_dao.get_shibor_latest()
 
-            on_rate = df["on"].iloc[0]
+            on_rate = df["on_rate"].iloc[0]
             assert 0 < on_rate < 20
 
 

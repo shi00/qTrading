@@ -87,11 +87,11 @@ class TestDatabaseConfigPanelContract:
         assert "@ft.component" in source, "DatabaseConfigPanel 必须用 @ft.component 装饰"
 
     def test_database_config_panel_uses_i18n_observable_state(self):
-        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        """DoD: 必须通过 ft.use_state(get_observable_state) 订阅 i18n 变化。"""
         import ui.components.config_panels.database_config_panel as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "I18n.get_observable_state" in source, "DatabaseConfigPanel 必须订阅 I18n.get_observable_state"
+        assert "get_observable_state" in source, "DatabaseConfigPanel 必须订阅 get_observable_state"
 
     def test_database_config_panel_no_class_container(self):
         """DoD: 禁止命令式 class 继承 ft.Container。"""
@@ -171,11 +171,11 @@ class TestTushareConfigPanelContract:
         assert "@ft.component" in source, "TushareConfigPanel 必须用 @ft.component 装饰"
 
     def test_tushare_config_panel_uses_i18n_observable_state(self):
-        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        """DoD: 必须通过 ft.use_state(get_observable_state) 订阅 i18n 变化。"""
         import ui.components.config_panels.tushare_config_panel as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "I18n.get_observable_state" in source, "TushareConfigPanel 必须订阅 I18n.get_observable_state"
+        assert "get_observable_state" in source, "TushareConfigPanel 必须订阅 get_observable_state"
 
     def test_tushare_config_panel_no_class_container(self):
         """DoD: 禁止命令式 class 继承 ft.Container。"""
@@ -255,11 +255,11 @@ class TestLLMConfigPanelContract:
         assert "@ft.component" in source, "LLMConfigPanel 必须用 @ft.component 装饰"
 
     def test_llm_config_panel_uses_i18n_observable_state(self):
-        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        """DoD: 必须通过 ft.use_state(get_observable_state) 订阅 i18n 变化。"""
         import ui.components.config_panels.llm_config_panel as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "I18n.get_observable_state" in source, "LLMConfigPanel 必须订阅 I18n.get_observable_state"
+        assert "get_observable_state" in source, "LLMConfigPanel 必须订阅 get_observable_state"
 
     def test_llm_config_panel_no_class_container(self):
         """DoD: 禁止命令式 class 继承 ft.Container。"""
@@ -339,11 +339,11 @@ class TestLocalModelConfigPanelContract:
         assert "@ft.component" in source, "LocalModelConfigPanel 必须用 @ft.component 装饰"
 
     def test_local_model_config_panel_uses_i18n_observable_state(self):
-        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        """DoD: 必须通过 ft.use_state(get_observable_state) 订阅 i18n 变化。"""
         import ui.components.config_panels.local_model_config_panel as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "I18n.get_observable_state" in source, "LocalModelConfigPanel 必须订阅 I18n.get_observable_state"
+        assert "get_observable_state" in source, "LocalModelConfigPanel 必须订阅 get_observable_state"
 
     def test_local_model_config_panel_no_class_container(self):
         """DoD: 禁止命令式 class 继承 ft.Container。"""

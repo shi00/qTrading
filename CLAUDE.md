@@ -3,7 +3,7 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.9.0，最后校对：2026-06-29
+> **对应版本**：0.9.0，最后校对：2026-07-13
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
 
 ---
@@ -104,6 +104,7 @@
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/` |
 | 性能阈值调整 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
+| Git 操作 / 分支 / worktree | §3 R18、CONTRIBUTING.md「Git 工作流与分支策略」；与 superpowers `using-git-worktrees` / `finishing-a-development-branch` skill 联动 |
 
 ### 1.9 关键验证命令
 
@@ -117,7 +118,7 @@
 
 - **禁止臆造 API**：使用任何库 API 前，若不确定其存在/签名/语义，必须先读源码或官方文档验证，禁止凭记忆编造（Flet/Polars/SQLAlchemy 等版本演进快，尤须核实）。
 - **禁止臆断行号/符号**：引用代码位置时以符号名（函数/类/常量）为准；不得声称"第 N 行是 X"而未实际读取该行。
-- **禁止臆造红线编号**：引用 R1~R17 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
+- **禁止臆造红线编号**：引用 R1~R18 前确认其存在与含义；红线编号 append-only，不复用废弃编号。
 - **不确定即验证**：判断"某 API 在当前版本是否可用/是否已删除"时，必须以 `pyproject.toml` 锁定版本对应的实际行为为准。
 
 ---
@@ -153,8 +154,9 @@
 | R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | 可自动化待实现 |
 | R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | 可自动化待实现（AST 检查） |
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
+| R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 
-> **红线自动化方向**：R1 分层依赖可引入 [`import-linter`](https://import-linter.readthedocs.io/) 在 CI 声明禁止方向；R16 UI 阻塞可用自定义 AST/正则 pre-commit 钩子扫描 `ui/` 中 Flet 事件处理器内的同步阻塞调用。二者登记为后续独立自动化任务。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。
+> **红线自动化方向**：R1 分层依赖可引入 [`import-linter`](https://import-linter.readthedocs.io/) 在 CI 声明禁止方向；R16 UI 阻塞可用自定义 AST/正则 pre-commit 钩子扫描 `ui/` 中 Flet 事件处理器内的同步阻塞调用。二者登记为后续独立自动化任务。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测可与 superpowers `using-git-worktrees` skill 联动，AI 助手在开始特性/重构任务前应主动声明并触发该 skill。
 
 ### 3.2 ✅ 强制要求
 
@@ -221,6 +223,7 @@ app → 编排所有层，仅被 main.py 调用
 | 策略模式 / Polars 向量化基类 / AI 策略混入 / DAO 模式 / 数据同步 / TaskManager | 对应小节 |
 | MVVM 表现层 (View / ViewModel / Component) / 配置管理 / 质量门控 / 性能监控 / 单例模式实现模板 | 对应小节 |
 | 测试规范 / CI/CD 流水线与门禁 | 对应小节 |
+| Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | 「Git 工作流与分支策略」 |
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 / Flet 0.85.3 (V1) API 约束 / 升级协同机制 | 对应小节 |

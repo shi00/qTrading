@@ -68,7 +68,7 @@ class AppTask:
     # Internal fields for execution
     _coroutine_gen: Callable = None  # Function that returns a coroutine  # type: ignore[assignment]
     _asyncio_task: asyncio.Task | None = None
-    _cancel_event: asyncio.Event | None = None
+    _cancel_event: threading.Event | None = None
     unique_key: str | None = None  # For deduplication
     correlation_id: str | None = None  # Inherited from caller context for full-chain tracing
 
@@ -294,8 +294,9 @@ class TaskManager:
                     self._active_keys.discard(task.unique_key)
             return
 
-        # Note: _cancel_event will be created lazily in _task_runner
-        # to ensure it's bound to the correct event loop
+        # Note: _cancel_event will be created lazily in _task_runner.
+        # Using threading.Event (not asyncio.Event) per project memory hard
+        # constraint to avoid loop binding issues (R11).
         self._persist_task(task)
         self._notify_subscribers()
         logger.info("[TaskManager] Queued task: [%s] %s", task.id, task.name)
@@ -339,10 +340,11 @@ class TaskManager:
         task = self._tasks.get(task_id)
         return task is not None and task.status == TaskStatus.CANCELLED
 
-    def get_cancel_event(self, task_id: str) -> asyncio.Event | None:
-        """返回任务的取消信号 asyncio.Event，task 不存在或未启动时返回 None。
+    def get_cancel_event(self, task_id: str) -> threading.Event | None:
+        """返回任务的取消信号 threading.Event，task 不存在或未启动时返回 None。
 
-        Event 在 _task_runner 中懒初始化以绑定正确的事件循环（R11）。
+        使用 threading.Event 而非 asyncio.Event 以避免跨循环绑定问题（R11，
+        项目内存硬约束）。Event 在 _task_runner 中懒初始化。
         调用方应优先使用此访问器，而非穿透 task._cancel_event 私有字段。
         """
         task = self._tasks.get(task_id)
@@ -506,9 +508,9 @@ class TaskManager:
         cid = task.correlation_id or task.id[:8]
         set_correlation_id(cid)
 
-        # Ensure event exists on this loop
+        # Ensure cancel event exists (threading.Event avoids loop binding, R11)
         if task._cancel_event is None:
-            task._cancel_event = asyncio.Event()
+            task._cancel_event = threading.Event()
 
         task.status = TaskStatus.RUNNING
         task.started_at = get_now()

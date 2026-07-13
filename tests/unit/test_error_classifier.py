@@ -1,5 +1,5 @@
-import asyncio
 import json
+import threading
 
 import pytest
 
@@ -402,7 +402,7 @@ class TestClassifySeverityIntegration:
         )
         task.status = TaskStatus.RUNNING
         task.started_at = get_now()
-        task._cancel_event = asyncio.Event()
+        task._cancel_event = threading.Event()
         task._coroutine_gen = lambda: self._raise_system()
 
         tm._tasks[task.id] = task
@@ -433,7 +433,7 @@ class TestClassifySeverityIntegration:
         )
         task.status = TaskStatus.RUNNING
         task.started_at = get_now()
-        task._cancel_event = asyncio.Event()
+        task._cancel_event = threading.Event()
         task._coroutine_gen = lambda: self._raise_operational()
 
         tm._tasks[task.id] = task
@@ -463,7 +463,7 @@ class TestClassifySeverityIntegration:
         )
         task.status = TaskStatus.RUNNING
         task.started_at = get_now()
-        task._cancel_event = asyncio.Event()
+        task._cancel_event = threading.Event()
 
         async def dummy_coro():
             return "ok"

@@ -54,14 +54,13 @@ async def test_system_tab_tier_api_panel_rendered(e2e_page):
 
     # 滚动到 system tab 底部，使 TierApiPanel 进入视口
     await e2e_page.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-    await e2e_page.page.wait_for_timeout(1500)  # 等待 CanvasKit 重新渲染
 
     # TierApiPanel 标题（容错检测：has_text 不阻塞，验证已渲染即可）
     panel_title = I18n.get("sys_tier_panel_title")
     tier_label = I18n.get("sys_label_point_tier")
     probe_button = I18n.get("sys_tier_probe_button")
 
-    # 轮询检测 TierApiPanel 关键文本，最多 15s
+    # 轮询检测 TierApiPanel 关键文本，最多 15s（滚动后 CanvasKit 异步渲染）
     found_keys: list[str] = []
     for _ in range(30):
         if await e2e_page.has_text(panel_title):

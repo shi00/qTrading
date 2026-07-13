@@ -8,7 +8,7 @@
 - controller 通过 _StartupBridge 桥接触发组件重渲染 (bridge.notify → set_state)
 - 状态驱动渲染: state/context 用 use_state, 根据 StartupState 条件渲染
 - dialog 管理: ``ft.use_dialog()`` 声明式挂载/卸载 (§10.1), dialog 由 state 驱动条件创建
-- i18n 通过 ft.use_state(I18n.get_observable_state) 自动重渲染
+- i18n 通过 ft.use_state(get_observable_state) 自动重渲染
 - 移除 page.clean()/page.add()/page.update() 命令式调用
 - page 访问: 不持有 page 引用 (controller 回调通过 run_task_fn 注入)
 """
@@ -25,7 +25,7 @@ import flet as ft
 # 的延伸 (main.py 装配 StartupView), 不是 ui 层的正常业务导入。
 # 已在 tests/unit/test_architecture_boundaries.py 的 KNOWN_EXCEPTIONS 中记录。
 from app.startup_controller import StartupContext, StartupController, StartupState
-from core.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 
 logger = logging.getLogger(__name__)
 
@@ -214,12 +214,12 @@ def StartupView(
     controller 通过 _StartupBridge 桥接触发重渲染。
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
-    - i18n 通过 ft.use_state(I18n.get_observable_state) 自动重渲染
+    - i18n 通过 ft.use_state(get_observable_state) 自动重渲染
     - 状态驱动: state/context 用 use_state
     - 不持有 page 引用 (controller 回调通过 run_task_fn 注入)
     - 异步任务: run_task_fn 调度; R2 CancelledError 由 controller 内部处理
     """
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     state, set_state = ft.use_state(bridge.state)
     context, set_context = ft.use_state(bridge.context)

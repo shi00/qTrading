@@ -4,127 +4,25 @@
 - 创建符合 VM 契约的 FakeViewModel（state 属性、subscribe/callback、dispose）
 - 用 Flet 组件渲染辅助驱动 @ft.component 组件生命周期
 - 验证 hook 在 mount/render/unmount 各阶段的行为
-
-渲染辅助参考 scripts/spike_ui_debt/_spike_helpers.py（批次 0 spike 验证用），
-批次 2.5 将新增正式的 tests/unit/ui/render_helper.py，届时迁移。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from dataclasses import dataclass, replace
+from typing import Any
 
 import flet as ft
 import pytest
-from flet.components.component import Component, Renderer
 
+from tests.unit.ui.component_renderer import (
+    make_component,
+    run_mount_effects,
+    run_render_effects,
+    run_unmount_effects,
+)
 from ui.hooks import use_viewmodel
 
 pytestmark = pytest.mark.unit
-
-
-@pytest.fixture(autouse=True)
-def _reset_context_page():
-    """每个测试后清理 _context_page，防止 FakePage 泄漏到其他测试。
-
-    attach_fake_page 调用 _context_page.set(FakePage) 修改 ContextVar，
-    若不清理会跨测试泄漏，导致后续 UI 测试因 page 类型不匹配而失败。
-    """
-    yield
-    from flet.controls.context import _context_page
-
-    _context_page.set(None)
-
-
-# ============================================================================
-# 最小组件渲染辅助（参考 spike helpers，批次 2.5 迁移到 render_helper.py）
-# ============================================================================
-
-
-@dataclass
-class FakeSession:
-    """伪造的 page.session，捕获 schedule_update / schedule_effect 调用。
-
-    与 spike helpers 的 FakeSession 不同，本测试需要 effect 实际执行（验证
-    subscribe/dispose 调用），因此 ``schedule_effect`` 同步执行 hook.setup()
-    或 hook.cleanup()。spike helpers 仅验证调度行为，此处需验证执行行为。
-    """
-
-    scheduled_updates: list[Component] = field(default_factory=list)
-    scheduled_effects: list[tuple[Any, bool]] = field(default_factory=list)
-
-    def schedule_update(self, component: Component) -> None:
-        self.scheduled_updates.append(component)
-
-    def schedule_effect(self, hook: Any, is_cleanup: bool) -> None:
-        self.scheduled_effects.append((hook, is_cleanup))
-        # 同步执行 effect（测试需验证 setup/cleanup 实际执行，而非仅调度）
-        if is_cleanup:
-            if hook.cleanup is not None:
-                hook.cleanup()
-        else:
-            hook.setup()
-
-    def patch_control(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
-        pass
-
-
-@dataclass
-class FakePage:
-    """伪造的 page 对象，仅暴露 session 与 enable_components_mode 所需接口。"""
-
-    session: FakeSession = field(default_factory=FakeSession)
-
-
-def make_component(fn: Any, *args: Any, **kwargs: Any) -> Component:
-    """创建 @ft.component 装饰函数对应的 Component 实例。"""
-    c = Component(fn=fn, args=args, kwargs=kwargs)
-    c._state.mounted = True
-    return c
-
-
-def render_once(component: Component) -> Any:
-    """在 Renderer 上下文中驱动一次组件函数执行，返回 fn 返回值。"""
-    component._state.hook_cursor = 0
-    component._detach_observable_subscriptions()
-    component._subscribe_observable_args(component.args, component.kwargs)
-    renderer = Renderer(component)
-    fn = getattr(component.fn, "__component_impl__", component.fn)
-    with renderer.with_context(), renderer._Frame(renderer, component):
-        return fn(*component.args, **component.kwargs)
-
-
-def attach_fake_page(component: Component, page: FakePage | None = None) -> FakePage:
-    """为组件绑定伪造 page，使 effect 调度路径可走通。"""
-    if page is None:
-        page = FakePage()
-    from flet.controls.context import _context_page
-
-    # _context_page 期望 Page | None，测试注入 FakePage 驱动 effect 调度路径
-    _context_page.set(cast(Any, page))
-    return page
-
-
-def run_mount_effects(component: Component, page: FakePage | None = None) -> FakePage:
-    """模拟组件 mount：驱动首次渲染 + 触发 mount effects。"""
-    page = attach_fake_page(component, page)
-    render_once(component)
-    component._state.mounted = True
-    component._run_mount_effects()
-    return page
-
-
-def run_render_effects(component: Component) -> None:
-    """模拟组件 re-render 后的 effect 调度（deps 变化检测）。"""
-    render_once(component)
-    component._run_render_effects()
-
-
-def run_unmount_effects(component: Component) -> None:
-    """模拟组件 unmount：触发 cleanup effects。"""
-    component._state.mounted = False
-    component._detach_observable_subscriptions()
-    component._run_unmount_effects()
 
 
 # ============================================================================

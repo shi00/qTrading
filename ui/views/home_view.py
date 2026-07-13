@@ -27,7 +27,7 @@ from services.news_subscription_service import NewsUpdateType
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors
 from ui.viewmodels.home_view_model import HomeViewModel
@@ -59,7 +59,7 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
     state, vm = use_viewmodel(HomeViewModel)
 
     # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- 大体积数据快照 (dual-track: VM 持有源数据, View 用 use_state 快照驱动渲染) ---

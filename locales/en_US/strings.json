@@ -185,6 +185,7 @@
     "screener_data_loaded": "Data Loaded",
     "screener_load_failed": "Load Failed",
     "screener_please_select": "Please select a strategy first!",
+    "screener_history_viewing": "Viewing History: {date} / {label}",
     "unit_year": "Year",
     "unit_years": "Years",
     "screener_strategy_not_found": "Strategy not found",

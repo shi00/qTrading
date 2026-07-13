@@ -22,7 +22,7 @@ import flet as ft
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
 from utils.log_decorators import UILogger
@@ -43,7 +43,7 @@ def BacktestView() -> ft.Container:
     """
     state, vm = use_viewmodel(BacktestViewModel)
     # 订阅 i18n + theme 变化（locale/theme 切换时自动重渲染）
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- UI local state ---
@@ -131,7 +131,7 @@ def BacktestView() -> ft.Container:
 
     # NOTE(lazy): chart_min_height 固定为 None（移除窗口尺寸命令式回调）。
     # 图表容器 expand=True 自动填充，丢失紧凑模式(240)/标准模式(360)的高度切换。
-    # ceiling: 窗口尺寸响应式重设计. upgrade: Phase F.4 app_layout 声明式重写时引入 page 尺寸响应式 state.
+    # ceiling: 窗口尺寸响应式重设计. upgrade: app_layout 声明式重写已完成(Phase G.1), page 尺寸响应式 state 待独立任务实现.
     return ft.Container(
         content=ft.Column(
             [

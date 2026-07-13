@@ -190,6 +190,79 @@ class TestDataSourceViewModelSubscribe:
         assert len(snapshots) == prev_count
 
 
+class TestDataSourceViewModelDisposeCancelsTasks:
+    """R.1.2: dispose() 必须先取消所有活跃任务再清引用，防止孤儿任务。"""
+
+    def test_dispose_cancels_all_active_tasks(self, vm, mock_task_manager):
+        """dispose() 遍历 _active_task_ids 逐一调 cancel_task（R.1.2）。"""
+        vm._active_task_ids = {
+            "daily_sync": "task_001",
+            "ai_concept_sync": "task_002",
+        }
+        vm._set_state(
+            is_syncing=True,
+            active_key="daily_sync",
+            health_checking=True,
+            init_sync_running=True,
+            progress=0.5,
+            progress_message=Message("msg"),
+        )
+        vm._emit_snack(Message("snack"), "success")
+        vm._emit_health_result({"status": "green"})
+        vm._emit_health_error("err")
+
+        vm.dispose()
+
+        assert mock_task_manager.cancel_task.call_count == 2
+        mock_task_manager.cancel_task.assert_any_call("task_001")
+        mock_task_manager.cancel_task.assert_any_call("task_002")
+        assert vm._active_task_ids == {}
+        assert vm._subscribers == []
+        # 完整 state 重置断言（与 R.1.1 对齐）
+        assert vm.state.is_syncing is False
+        assert vm.state.active_key is None
+        assert vm.state.health_checking is False
+        assert vm.state.init_sync_running is False
+        assert vm.state.init_sync_cancellable is False
+        assert vm.state.init_sync_final_status is None
+        assert vm.state.progress == 0.0
+        assert vm.state.progress_message is None
+        assert vm.state.health_result_version == 0
+        assert vm.state.snack_version == 0
+        assert vm.state.cache_cleared_version == 0
+        assert vm.state.health_error_version == 0
+        # dual-track 属性
+        assert vm.last_snack is None
+        assert vm.last_health_result is None
+        assert vm.last_health_error is None
+
+    def test_dispose_cancels_non_cancellable_task(self, vm, mock_task_manager):
+        """dispose() 对 cancellable=False 任务仍调 cancel_task（TaskManager 内部 no-op，R.1.2）。"""
+        vm._active_task_ids = {"cache_clear": "task_003"}
+
+        vm.dispose()
+
+        mock_task_manager.cancel_task.assert_called_once_with("task_003")
+        assert vm._active_task_ids == {}
+
+    def test_dispose_no_active_tasks_is_noop(self, vm, mock_task_manager):
+        """dispose() 在无活跃任务时不应调用 cancel_task（幂等性，R.1.2）。"""
+        vm.dispose()
+
+        mock_task_manager.cancel_task.assert_not_called()
+        assert vm._active_task_ids == {}
+
+    def test_dispose_is_idempotent(self, vm, mock_task_manager):
+        """dispose() 连续调用两次：第二次不应重复调 cancel_task（R.1.2 幂等性）。"""
+        vm._active_task_ids = {"daily_sync": "task_001"}
+
+        vm.dispose()
+        vm.dispose()
+
+        mock_task_manager.cancel_task.assert_called_once_with("task_001")
+        assert vm._active_task_ids == {}
+
+
 class TestDataSourceViewModelCheckHealth:
     async def test_check_health_success(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         await bound_vm.check_health()
@@ -663,3 +736,146 @@ class TestDataSourceViewModelGetHealthReport:
         result = await bound_vm.get_health_report()
         mock_processor.check_data_health.assert_awaited_once()
         assert result == mock_processor.check_data_health.return_value
+
+
+class TestDataSourceViewModelCoverageFill:
+    """补充覆盖:unsubscribe 幂等性、私有 helper 早退、command 异常路径与边界分支。
+
+    覆盖原 0% → 94% 报告中剩余的 missing 行:
+    - 131->exit: unsubscribe 在 callback 已移除时的 no-op 分支
+    - 202: _reset_init_sync 在 is_syncing=False 时早退
+    - 218: _recover_after_task_terminated 在 is_syncing=False 时早退
+    - 238: check_health 第二次 update_progress(0.9) 返回 False 时早退
+    - 278->exit / 429->exit: progress 回调 t=0 时不抛 ZeroDivisionError
+    - 348-354: ai_concept_rebuild Exception 分支
+    - 485: cancel_init_sync 在无 system_init_sync 任务时跳过 cancel_task
+    - 535->533 / 544->exit: recover_stale_state 保留 RUNNING 任务
+    """
+
+    def test_unsubscribe_twice_is_noop(self, vm):
+        """重复 unsubscribe 已被移除的 callback 不抛异常（幂等性，131->exit）。"""
+        cb = MagicMock()
+        unsub = vm.subscribe(cb)
+        unsub()
+        # 第二次调用: callback 已不在 _subscribers, if 分支为 False, no-op
+        unsub()
+        assert cb not in vm._subscribers
+
+    def test_reset_init_sync_noop_when_not_syncing(self, vm, snapshots):
+        """is_syncing=False 时 _reset_init_sync 早退,不触发 _set_state（202）。"""
+        assert vm.state.is_syncing is False
+        prev_count = len(snapshots)
+        vm._reset_init_sync(TaskStatus.COMPLETED)
+        assert len(snapshots) == prev_count
+        assert vm.state.init_sync_final_status is None
+
+    def test_recover_after_task_terminated_noop_when_not_syncing(self, vm, snapshots):
+        """is_syncing=False 时 _recover_after_task_terminated 早退,不触发 _set_state（218）。"""
+        assert vm.state.is_syncing is False
+        prev_count = len(snapshots)
+        vm._recover_after_task_terminated("daily_sync", TaskStatus.COMPLETED)
+        assert len(snapshots) == prev_count
+
+    async def test_check_health_second_update_progress_false_raises_cancelled(
+        self, bound_vm, snapshots, mock_processor, mock_task_manager
+    ):
+        """check_health 第二次 update_progress(0.9) 返回 False 时抛 CancelledError 早退（238）。
+
+        场景: 第一次 update_progress(0.2) 返回 True 通过, check_data_health 执行成功,
+        但第二次 update_progress(0.9) 返回 False（任务被取消/不再 RUNNING）, 立即早退。
+        """
+        # 第一次(0.2) True, 第二次(0.9) False
+        mock_task_manager.update_progress = MagicMock(side_effect=[True, False])
+        await bound_vm.check_health()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(asyncio.CancelledError):
+            await factory(task_id="task_123")
+        # 第二次早退, _emit_health_result 未调用
+        assert bound_vm.last_health_result is None
+        assert not any(s.health_result_version > 0 for s in snapshots)
+
+    async def test_ai_concept_rebuild_error_emits_snack(self, bound_vm, mock_processor, mock_task_manager):
+        """AI concept rebuild 抛 Exception 时 emit error snack 并 re-raise（348-354）。"""
+        mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=RuntimeError("LLM down"))
+        bound_vm.execute_ai_concept_rebuild()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        with pytest.raises(RuntimeError, match="LLM down"):
+            await factory(task_id="task_123")
+        # error snack emitted
+        assert bound_vm.last_snack == (Message("common_op_fail"), "error")
+        # finally 重置 sync busy
+        assert bound_vm.state.is_syncing is False
+        assert bound_vm.state.active_key is None
+
+    async def test_cancel_init_sync_no_active_task(self, bound_vm, mock_processor, mock_task_manager):
+        """cancel_init_sync 在 _active_task_ids 无 system_init_sync 时仅 await request_cancel（485）。"""
+        assert "system_init_sync" not in bound_vm._active_task_ids
+        await bound_vm.cancel_init_sync()
+        mock_processor.request_cancel.assert_awaited_once()
+        # 无 task_id, 跳过 cancel_task 调用
+        mock_task_manager.cancel_task.assert_not_called()
+
+    def test_recover_stale_state_keeps_running_task(self, bound_vm, mock_task_manager):
+        """recover_stale_state 保留 RUNNING 状态的活跃任务,仅清理终态任务（535->533, 544->exit）。"""
+        bound_vm._set_state(is_syncing=True, active_key="daily_sync")
+        bound_vm._active_task_ids = {
+            "daily_sync": "task_running",  # 仍 RUNNING, 保留
+            "ai_concept_sync": "task_done",  # COMPLETED, 清理
+        }
+        running_task = MagicMock()
+        running_task.status = TaskStatus.RUNNING
+        done_task = MagicMock()
+        done_task.status = TaskStatus.COMPLETED
+        mock_task_manager.get_task.side_effect = [running_task, done_task]
+
+        bound_vm.recover_stale_state()
+
+        assert "daily_sync" in bound_vm._active_task_ids
+        assert "ai_concept_sync" not in bound_vm._active_task_ids
+        # 仍有活跃任务, is_syncing 保持 True, 不调 _set_sync_busy(False)
+        assert bound_vm.state.is_syncing is True
+
+    async def test_daily_sync_progress_with_zero_total(self, bound_vm, mock_processor, mock_task_manager):
+        """_daily_logic._progress 回调在 t=0 时使用 0 进度,不抛 ZeroDivisionError（278->exit）。"""
+
+        async def _call_progress(*args, progress_callback=None, **kwargs):
+            assert progress_callback is not None
+            # t=0 触发 `c / t if t else 0` False 分支, 应返回 0 而非抛异常
+            progress_callback(1, 0, "zero-total-step")
+
+        mock_processor.run_daily_update = AsyncMock(side_effect=_call_progress)
+        # update_progress 返回 True, 不触发 CancelledError 早退
+        mock_task_manager.update_progress = MagicMock(return_value=True)
+
+        bound_vm.execute_full_daily_sync()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        # update_progress 被以 progress=0 调用, 未抛 ZeroDivisionError
+        mock_task_manager.update_progress.assert_called_once()
+        progress_arg = mock_task_manager.update_progress.call_args.args[1]
+        assert progress_arg == 0
+
+    async def test_init_sync_progress_with_zero_total(self, bound_vm, mock_processor, mock_task_manager):
+        """_combined_progress 在 t=0 时使用 0 进度,不抛 ZeroDivisionError（429->exit）。"""
+        # update_progress 返回 True, 不触发 CancelledError 早退
+        mock_task_manager.update_progress = MagicMock(return_value=True)
+
+        async def _fake_initialize(*args, **kwargs):
+            cb = kwargs.get("progress_callback")
+            if cb:
+                # t=0 触发 `c / t if t > 0 else 0` False 分支
+                cb(1, 0, "zero-total-step")
+            return {"success": True}
+
+        mock_processor.initialize_system = AsyncMock(side_effect=_fake_initialize)
+
+        bound_vm.execute_init_historical_data()
+        factory = _capture_coroutine_factory(mock_task_manager.submit_task)
+        await factory(task_id="task_123")
+
+        # 验证 _combined_progress 用 progress=0 调用 update_progress
+        first_call_args = mock_task_manager.update_progress.call_args_list[0].args
+        assert first_call_args[1] == 0
+        # 正常完成, init_sync_final_status=COMPLETED
+        assert bound_vm.state.init_sync_final_status == TaskStatus.COMPLETED

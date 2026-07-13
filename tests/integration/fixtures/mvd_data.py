@@ -9,8 +9,8 @@
 
 设计原则：
 1. 所有金额/比率字段使用 Decimal，与 ORM Numeric 类型一致
-2. ShiborDaily 的 Python 属性名（w1/w2/m1/m3/m6/m9/y1）与数据库列名（1w/2w/1m/3m/6m/9m/1y）不同，
-   insert().values(dict) 按 column key（属性名）匹配，必须使用属性名
+2. R17（迁移 0015）：ShiborDaily 属性名与列名一致（record_date/on_rate/week_1/...），
+   insert().values(dict) 按 column key 匹配
 3. financial_reports 设计为 8 期 ROE 递增（12.5→16.0），支持趋势验证
 4. top10_holders 设计为 3 条，支持持股比例合计验证
 5. stk_holdernumber 设计为 2 期，支持股东人数变化趋势验证
@@ -608,18 +608,17 @@ MVD_MACRO_ECONOMY = {
     "ti_yoy": Decimal("5.8"),
 }
 
-# 注意：ORM 中 Python 属性名与数据库列名不同（通过 name= 映射）。
-# insert().values(dict) 按 column key（即 Python 属性名）匹配，必须使用属性名。
+# R17（迁移 0015）：属性名与列名一致（record_date/on_rate/week_1/...）
 MVD_SHIBOR_DAILY = {
-    "date": datetime.date(2026, 6, 24),
-    "on": Decimal("1.85"),
-    "w1": Decimal("1.95"),  # name="1w"
-    "w2": Decimal("2.10"),  # name="2w"
-    "m1": Decimal("2.25"),  # name="1m"
-    "m3": Decimal("2.35"),  # name="3m"
-    "m6": Decimal("2.40"),  # name="6m"
-    "m9": Decimal("2.45"),  # name="9m"
-    "y1": Decimal("2.50"),  # name="1y"
+    "record_date": datetime.date(2026, 6, 24),
+    "on_rate": Decimal("1.85"),
+    "week_1": Decimal("1.95"),
+    "week_2": Decimal("2.10"),
+    "month_1": Decimal("2.25"),
+    "month_3": Decimal("2.35"),
+    "month_6": Decimal("2.40"),
+    "month_9": Decimal("2.45"),
+    "year_1": Decimal("2.50"),
     # Phase 3G §4.3.3：LPR 利率（shibor_daily 扩列）
     "lpr_1y": Decimal("3.10"),
     "lpr_5y": Decimal("3.60"),

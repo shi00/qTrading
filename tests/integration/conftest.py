@@ -465,11 +465,15 @@ async def mvd_data(test_engine):
             # --- Teardown: 显式定向删除数据并 commit ---
             try:
                 await _cleanup_mvd_data(test_engine)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning("[mvd_data] teardown data deletion failed: %s", e)
             # --- Teardown: 关闭 CacheManager 引擎并重置单例 ---
             try:
                 await cache.close()
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning("[mvd_data] CacheManager close failed during teardown: %s", e)
             CacheManager._reset_singleton()
@@ -587,6 +591,8 @@ async def cleanup_singletons_session():
                 if hasattr(inst, "close") and inspect.iscoroutinefunction(inst.close):
                     try:
                         await inst.close()
+                    except asyncio.CancelledError:
+                        raise
                     except Exception as e:
                         logger.warning(
                             "Failed to async close singleton %s during session teardown: %s", cls.__name__, e

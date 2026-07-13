@@ -38,7 +38,7 @@ def _make_classify_df(n_levels: int = 3, codes_per_level: int = 1) -> pd.DataFra
                 {
                     "index_code": f"8010{i:03d}.SI",
                     "index_name": f"行业_{level}_{i}",
-                    "level": level,
+                    "sw_level": level,
                     "industry_code": f"{i:06d}",
                     "industry_name": f"行业_{i}",
                     "parent_code": "",
@@ -152,7 +152,7 @@ class TestSyncMembersCancellation:
         classify_df = pd.DataFrame(
             {
                 "index_code": [f"8010{i:04d}.SI" for i in range(201)],
-                "level": ["L1"] * 201,
+                "sw_level": ["L1"] * 201,
             }
         )
 
@@ -195,7 +195,7 @@ class TestSyncMembersCancellation:
         classify_df = pd.DataFrame(
             {
                 "index_code": ["801010.SI", "801020.SI"],
-                "level": ["L1", "L1"],
+                "sw_level": ["L1", "L1"],
             }
         )
 
@@ -242,7 +242,7 @@ class TestSyncMembersCancellation:
         strategy.member_dao = MagicMock()
         strategy.member_dao.save_sw_industry_member = AsyncMock(return_value=1)
 
-        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "level": ["L1", "L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L1", "L1"]})
 
         # 两次调用都返回相同 ts_code+index_code，应去重为 1 行
         ctx.api.get_index_member_all = AsyncMock(

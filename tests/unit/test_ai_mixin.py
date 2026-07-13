@@ -1853,9 +1853,9 @@ class TestBuildMacroContext:
         cache.get_shibor_latest = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "on": [1.5],
-                    "1w": [1.8],
-                    "3m": [2.1],
+                    "on_rate": [1.5],
+                    "week_1": [1.8],
+                    "month_3": [2.1],
                 }
             )
         )
@@ -1884,7 +1884,9 @@ class TestBuildMacroContext:
         s = ConcreteStrategy()
         cache = MagicMock()
         cache.get_macro_economy = AsyncMock(return_value=pd.DataFrame({"m2_yoy": [8.5], "cpi": [0.2], "ppi": [-2.5]}))
-        cache.get_shibor_latest = AsyncMock(return_value=pd.DataFrame({"on": [2.0], "1w": [2.5], "3m": [3.0]}))
+        cache.get_shibor_latest = AsyncMock(
+            return_value=pd.DataFrame({"on_rate": [2.0], "week_1": [2.5], "month_3": [3.0]})
+        )
         result = await s._build_macro_context(cache)
         assert result is not None
         assert "宏观经济环境" in result
@@ -2006,10 +2008,10 @@ class TestBuildMacroContext:
         cache.get_shibor_latest = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "date": [datetime.date(2024, 6, 14)],
-                    "on": [1.8],
-                    "1w": [1.9],
-                    "3m": [2.0],
+                    "record_date": [datetime.date(2024, 6, 14)],
+                    "on_rate": [1.8],
+                    "week_1": [1.9],
+                    "month_3": [2.0],
                     "lpr_1y": [3.45],
                     "lpr_5y": [3.95],
                 }
@@ -2928,10 +2930,10 @@ class TestBuildStaleSection:
         # shibor 数据
         shibor_df = pd.DataFrame(
             {
-                "date": ["2024-01-15"],
-                "on": [1.85],
-                "1w": [1.95],
-                "3m": [2.10],
+                "record_date": ["2024-01-15"],
+                "on_rate": [1.85],
+                "week_1": [1.95],
+                "month_3": [2.10],
             }
         )
         cache.get_shibor_latest = AsyncMock(return_value=shibor_df)

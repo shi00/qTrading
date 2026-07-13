@@ -20,6 +20,14 @@ class Message:
     符合 CONTRIBUTING.md「MVVM 表现层」契约:
     - VM 不感知 locale,只产出 key + params
     - View 渲染时调 I18n.get(msg.key, **msg.params)
+
+    ``*_key`` 后缀 params 约定 (R.2.3):
+    - VM 通过 ``{"<name>_key": <i18n_key>}`` 传递需翻译的 i18n key (如
+      ``{"name_key": strategy.name_key}``), 避免在 VM 中调 ``I18n.get`` 产生
+      locale-dependent 字符串污染 state.
+    - View 渲染时识别 ``*_key`` 后缀字段, 调 ``I18n.get`` 翻译为当前 locale 字符串,
+      并替换字段名 (如 ``name_key`` → ``name``), 对齐 i18n 模板占位符.
+    - 当前实现: ``ui.views.screener_view._render_status_message`` helper.
     """
 
     key: str

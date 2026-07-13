@@ -232,27 +232,12 @@ class TestOrmDaoAlignment:
         assert not missing, f"save_trade_cal missing: {missing}"
 
     def test_shibor_daily_alignment(self):
+        # R17（迁移 0015）：属性名与列名一致，无需 orm_to_db_mapping
         model_cols = get_model_columns(ShiborDaily)
         dao_cols = extract_cols_from_method(MacroDao.save_shibor_daily)
         assert dao_cols is not None
         expected = model_cols - {"updated_at", "created_at"}
-        orm_to_db_mapping = {
-            "w1": "1w",
-            "w2": "2w",
-            "m1": "1m",
-            "m3": "3m",
-            "m6": "6m",
-            "m9": "9m",
-            "y1": "1y",
-        }
-        for orm_col, db_col in orm_to_db_mapping.items():
-            if orm_col in expected:
-                expected.discard(orm_col)
-                if db_col in dao_cols:
-                    expected.add(orm_col)
         missing = expected - dao_cols
-        if missing and missing <= set(orm_to_db_mapping.keys()):
-            missing = set()
         assert not missing, f"save_shibor_daily missing: {missing}"
 
     def test_stock_concepts_alignment(self):

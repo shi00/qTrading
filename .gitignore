@@ -58,10 +58,14 @@ nosetests.xml
 coverage.xml
 coverage.json
 *.cover
+.coveragerc.tmp
 .hypothesis/
 .pytest_cache/
 .ruff_cache/
 junit-*.xml
+
+# Test runtime helpers (auto-generated, not source code)
+sitecustomize.py
 
 # Gemini / Local AI Assistant
 .gemini/
@@ -104,3 +108,7 @@ e2e-artifacts/
 # 6. docs
 docs/
 .worktrees/
+
+# 7. AI assistant working state (harness-plan / harness-review products)
+Plans.md
+.claude/

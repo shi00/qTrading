@@ -55,7 +55,7 @@ class TestBacktestViewDeclarativeContract:
     def test_subscribes_i18n_and_theme_observable_state(self):
         """必须订阅 i18n + theme observable state 以自动重渲染。"""
         src = _source_text()
-        assert "ft.use_state(I18n.get_observable_state)" in src
+        assert "ft.use_state(get_observable_state)" in src
         assert "ft.use_state(AppColors.get_observable_state)" in src
 
     def test_uses_ft_context_page(self):
@@ -82,7 +82,6 @@ class TestBacktestViewDeclarativeContract:
             "_page_ref",
             "PageRefMixin",
             "self.update()",
-            "refresh_dropdown_options",
         ],
     )
     def test_no_imperative_api_in_source(self, forbidden: str):

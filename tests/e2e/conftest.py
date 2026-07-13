@@ -369,6 +369,8 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
         except RuntimeError:
             await context.close()
             raise
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.debug("[E2E] DB error UI check failed (non-fatal): %s", exc, exc_info=True)
 
@@ -376,15 +378,12 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     return fp
 
 
-async def _teardown_page(fp: FletPage) -> None:
+async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None:
+    """Function 级 teardown：失败时保存 trace + screenshot，关闭 context。"""
     pw_context = fp.get_context()
     if not pw_context:
         return
-    _, _, context, page, request = pw_context
-    failed = any(
-        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
-        for when in ("setup", "call")
-    )
+    _, _, context, page, _request = pw_context
     try:
         if failed:
             ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
@@ -393,8 +392,56 @@ async def _teardown_page(fp: FletPage) -> None:
             await context.tracing.stop(path=str(ARTIFACT_DIR / f"{name}-trace.zip"))
         else:
             await context.tracing.stop()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[e2e_teardown] tracing stop failed: %s", e)
     finally:
         await context.close()
+
+
+async def _ensure_locale_zh(fp: FletPage) -> None:
+    """语言状态污染安全网：确保 flet_app 内存中的 I18n locale 为 zh_CN。
+
+    test_settings_language_switch 切换语言后，其 finally 块可能因 CanvasKit
+    渲染延迟/snackbar 干扰而恢复失败，导致 flet_app 内存 locale 仍是 en_US。
+    pristine_config fixture 只还原磁盘配置和测试进程 I18n，不还原 app 内存 locale。
+    本函数作为最后防线，在 e2e_page teardown 时检查并恢复中文，避免污染后续测试。
+
+    设计要点：
+    - 快速检查 has_text(nav_settings_zh)：正常测试几乎无开销（中文存在则 early return）
+    - 恢复失败只 warning 不抛出：避免掩盖原始测试失败
+    - R2: asyncio.CancelledError 必须 raise
+    """
+    nav_settings_zh = I18n.get("nav_settings", locale="zh_CN")
+    try:
+        if await fp.has_text(nav_settings_zh):
+            return
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[e2e_page] locale 安全网 has_text 检查失败: %s", e, exc_info=True)
+        return
+
+    logger.warning("[e2e_page] 检测到语言污染（找不到中文导航文本），尝试通过 UI 恢复 zh_CN")
+    try:
+        nav_settings_en = I18n.get("nav_settings", locale="en_US")
+        await fp.click_text(nav_settings_en, timeout_ms=8000)
+        tab_system_en = I18n.get("settings_tab_system", locale="en_US")
+        await fp.click_text(tab_system_en, timeout_ms=8000)
+        lang_label_en = I18n.get("settings_language", locale="en_US")
+        lang_zh = I18n.get("settings_lang_zh")
+        await fp.select_dropdown(lang_label_en, lang_zh, timeout_ms=10000)
+        for _ in range(25):
+            if await fp.has_text(nav_settings_zh):
+                logger.info("[e2e_page] locale 安全网成功恢复 zh_CN")
+                return
+            await fp.page.wait_for_timeout(200)
+        logger.warning("[e2e_page] locale 安全网未能确认中文恢复")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[e2e_page] locale 安全网恢复失败: %s", e, exc_info=True)
 
 
 def _parse_asyncpg_dsn(sqlalchemy_url: str) -> str:
@@ -744,16 +791,35 @@ def wizard_app(tmp_path_factory):
 
 @pytest.fixture
 async def e2e_page(e2e_browser, flet_app: AppServer, request):
+    """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
+
+    性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。
+    CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
+    """
     fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
+    if request.node.get_closest_marker("slow"):
+        fp._timeout_multiplier = max(TIMEOUT_MULTIPLIER, 2.5)  # noqa: SLF001
     yield fp
-    await _teardown_page(fp)
+    # 语言安全网：mutates_config 用例可能污染 flet_app 内存 locale
+    if request.node.get_closest_marker("mutates_config"):
+        await _ensure_locale_zh(fp)
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
 
 
 @pytest.fixture
 async def wizard_page(e2e_browser, wizard_app: AppServer, request):
+    """Function 级 Page（向导测试）：每用例独立 context，无状态污染。"""
     fp = await _make_page(e2e_browser, wizard_app, request)
     yield fp
-    await _teardown_page(fp)
+    failed = any(
+        getattr(request.node, f"rep_{when}", None) and getattr(request.node, f"rep_{when}").failed
+        for when in ("setup", "call")
+    )
+    await _teardown_page(fp, request, failed=failed)
 
 
 @pytest.fixture(autouse=True)
@@ -802,5 +868,7 @@ def pristine_config(request):
     if I18n.current_locale() != locale_snapshot:
         try:
             I18n.set_locale(locale_snapshot)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning("[pristine_config] 还原 I18n locale 到 %s 失败: %s", locale_snapshot, e)

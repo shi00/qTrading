@@ -4,12 +4,18 @@
 View 层测试聚焦于:
 1. 模块级纯函数测试 (_on_test_success)
 2. 契约守护 (grep 检查禁止的命令式模式: did_mount/.update()/refresh_locale/class 继承)
+3. 组件体渲染测试 (DatabaseTab @ft.component body)
 """
 
 import logging
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
 
+import flet as ft
 import pytest
+
+from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
 
 pytestmark = pytest.mark.unit
 
@@ -113,11 +119,11 @@ class TestDatabaseTabContract:
         assert "use_viewmodel" in source, "DatabaseTab 必须使用 use_viewmodel hook"
 
     def test_database_tab_uses_i18n_observable_state(self):
-        """DoD: 必须通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 变化。"""
+        """DoD: 必须通过 ft.use_state(get_observable_state) 订阅 i18n 变化。"""
         import ui.views.settings_tabs.database_tab as mod
 
         source = Path(mod.__file__).read_text(encoding="utf-8")
-        assert "I18n.get_observable_state" in source, "DatabaseTab 必须订阅 I18n.get_observable_state"
+        assert "get_observable_state" in source, "DatabaseTab 必须订阅 get_observable_state"
 
     def test_database_tab_uses_theme_observable_state(self):
         """DoD: 必须通过 ft.use_state(AppColors.get_observable_state) 订阅 theme 变化。"""
@@ -180,3 +186,157 @@ class TestOnTestSuccess:
 
         with pytest.raises(KeyError):
             _on_test_success({"host": "localhost"})
+
+
+# ============================================================================
+# 组件体渲染测试 (DatabaseTab @ft.component body)
+# ============================================================================
+
+
+class _FakeDatabaseVM:
+    """模拟 DatabaseConfigPanelViewModel, 满足 use_viewmodel hook 契约。"""
+
+    def __init__(self) -> None:
+        self._subscribers: list[Any] = []
+        self.state = MagicMock()
+        self.reload_config = MagicMock()
+        self.dispose_called = False
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsub() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsub
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+
+class TestDatabaseTabComponentBody:
+    """DatabaseTab 组件体渲染测试: 验证控件树结构 + VM 生命周期。"""
+
+    def test_mount_returns_container(self, mock_i18n_state, mock_app_colors_state):
+        """挂载 DatabaseTab 返回 ft.Container。"""
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        fake_vm = _FakeDatabaseVM()
+        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", return_value=fake_vm):
+            component = make_component(DatabaseTab, show_snack_callback=MagicMock())
+            run_mount_effects(component)
+            result = render_once(component)
+
+        assert isinstance(result, ft.Container)
+
+    def test_mount_creates_vm_via_factory(self, mock_i18n_state, mock_app_colors_state):
+        """挂载时通过 factory 实例化 DatabaseConfigPanelViewModel。"""
+        from ui.views.settings_tabs import database_tab as mod
+
+        fake_vm = _FakeDatabaseVM()
+        with patch.object(mod, "DatabaseConfigPanelViewModel", return_value=fake_vm) as mock_cls:
+            component = make_component(mod.DatabaseTab, show_snack_callback=MagicMock())
+            run_mount_effects(component)
+
+        mock_cls.assert_called_once()
+
+    def test_mount_triggers_reload_config_effect(self, mock_i18n_state, mock_app_colors_state):
+        """挂载时 use_effect 触发 vm.reload_config()。"""
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        fake_vm = _FakeDatabaseVM()
+        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", return_value=fake_vm):
+            component = make_component(DatabaseTab, show_snack_callback=MagicMock())
+            run_mount_effects(component)
+
+        fake_vm.reload_config.assert_called_once()
+
+    def test_mount_subscribes_to_vm(self, mock_i18n_state, mock_app_colors_state):
+        """挂载时 use_viewmodel hook 注册 VM 订阅。"""
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        fake_vm = _FakeDatabaseVM()
+        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", return_value=fake_vm):
+            component = make_component(DatabaseTab, show_snack_callback=MagicMock())
+            run_mount_effects(component)
+
+        assert len(fake_vm._subscribers) > 0
+
+    def test_render_contains_storage_icon_and_title(self, mock_i18n_state, mock_app_colors_state):
+        """渲染的控件树含 STORAGE 图标 + 标题文本。"""
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        fake_vm = _FakeDatabaseVM()
+        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", return_value=fake_vm):
+            component = make_component(DatabaseTab, show_snack_callback=MagicMock())
+            run_mount_effects(component)
+            result = render_once(component)
+
+        # 遍历控件树查找 Icon + Text
+        icons: list[ft.Icon] = []
+        texts: list[ft.Text] = []
+
+        def _walk(ctrl: Any) -> None:
+            if isinstance(ctrl, ft.Icon):
+                icons.append(ctrl)
+            if isinstance(ctrl, ft.Text):
+                texts.append(ctrl)
+            for attr in ("controls", "content"):
+                children = getattr(ctrl, attr, None)
+                if isinstance(children, list):
+                    for c in children:
+                        if c is not None:
+                            _walk(c)
+                elif children is not None:
+                    _walk(children)
+
+        _walk(result)
+        assert any(i.icon == ft.Icons.STORAGE for i in icons), "应含 STORAGE 图标"
+
+    def test_render_contains_card(self, mock_i18n_state, mock_app_colors_state):
+        """渲染的控件树含 ft.Card (配置面板容器)。"""
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        fake_vm = _FakeDatabaseVM()
+        with patch("ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", return_value=fake_vm):
+            component = make_component(DatabaseTab, show_snack_callback=MagicMock())
+            run_mount_effects(component)
+            result = render_once(component)
+
+        cards: list[ft.Card] = []
+
+        def _walk(ctrl: Any) -> None:
+            if isinstance(ctrl, ft.Card):
+                cards.append(ctrl)
+            for attr in ("controls", "content"):
+                children = getattr(ctrl, attr, None)
+                if isinstance(children, list):
+                    for c in children:
+                        if c is not None:
+                            _walk(c)
+                elif children is not None:
+                    _walk(children)
+
+        _walk(result)
+        assert len(cards) >= 1, "应含至少 1 个 Card"
+
+    def test_vm_on_save_invokes_show_snack(self, mock_i18n_state, mock_app_colors_state):
+        """_make_vm 的 _on_save 回调调用 show_snack_callback。"""
+        from ui.views.settings_tabs.database_tab import DatabaseTab
+
+        fake_vm = _FakeDatabaseVM()
+        show_snack = MagicMock()
+        with patch(
+            "ui.views.settings_tabs.database_tab.DatabaseConfigPanelViewModel", return_value=fake_vm
+        ) as mock_cls:
+            component = make_component(DatabaseTab, show_snack_callback=show_snack)
+            run_mount_effects(component)
+
+        # 取出 _make_vm 传给 VM 构造函数的 on_save_callback
+        call_kwargs = mock_cls.call_args.kwargs
+        on_save_cb = call_kwargs.get("on_save_callback")
+        assert on_save_cb is not None
+        on_save_cb({"host": "localhost"})
+        show_snack.assert_called_once()

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import ui.i18n as ui_i18n
 from ui.i18n import DEFAULT_LOCALE, LOCALE_MAP, SUPPORTED_LOCALES, I18n
 
 pytestmark = pytest.mark.unit
@@ -11,19 +12,27 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def reset_i18n():
+    """每个测试前后重置 I18n 全局状态.
+
+    A2-fix3: 不清空 _listeners (保留 ui/i18n.py _sync_i18n_state 全局订阅),
+    仅重置 core 层 locale 状态和 ui 层 _i18n_state 单例.
+    core 层已无 _state (方案 A 下沉到 ui 层).
+    Regression fix: 保存/恢复 _listeners 快照, 清理测试中 subscribe 的泄漏回调,
+    同时保留 _sync_i18n_state 全局订阅.
+    """
+    saved_listeners = list(I18n._listeners) if I18n._listeners else None
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
     I18n._missing_keys = set()
-    I18n._listeners = None
-    I18n._state = None
+    ui_i18n._i18n_state = None
     yield
+    I18n._listeners = saved_listeners
     I18n._initialized = False
     I18n._locale = DEFAULT_LOCALE
     I18n._strings_cache = {}
     I18n._missing_keys = set()
-    I18n._listeners = None
-    I18n._state = None
+    ui_i18n._i18n_state = None
 
 
 class TestLocaleResourceIntegrity:
@@ -524,35 +533,40 @@ class TestI18nBackwardCompatibility:
 
 
 class TestTranslateStrategyName:
-    """Test translate_strategy_name function."""
+    """Test translate_strategy_name function (R.3.3 简化后)."""
 
-    def test_translate_ai_auto_nightly(self):
-        """Test translating AI_Auto_Nightly identifier."""
+    def test_translate_strategy_i18n_key_zh(self):
+        """R.3.3: i18n key 应翻译为 zh_CN 本地化字符串."""
         from ui.i18n import translate_strategy_name
 
         I18n.set_locale("zh_CN")
-        result = translate_strategy_name("AI_Auto_Nightly")
-        assert result == "AI 自动夜间选股"
+        assert translate_strategy_name("strategy_ai_nightly_name") == "AI 自动夜间选股"
+        assert translate_strategy_name("strategy_value_name") == "价值投资"
+        assert translate_strategy_name("strategy_growth_name") == "高成长策略"
 
-        I18n.set_locale("en_US")
-        result = translate_strategy_name("AI_Auto_Nightly")
-        assert result == "AI Auto Nightly Screening"
-
-        I18n.set_locale("zh_CN")
-
-    def test_translate_already_localized_name(self):
-        """Test translating already localized names."""
+    def test_translate_strategy_i18n_key_en(self):
+        """R.3.3: i18n key 应翻译为 en_US 本地化字符串."""
         from ui.i18n import translate_strategy_name
 
-        I18n.set_locale("zh_CN")
-        result = translate_strategy_name("价值投资")
-        assert result == "价值投资"
-
         I18n.set_locale("en_US")
-        result = translate_strategy_name("Value Investing")
-        assert result == "Value Investing"
+        assert translate_strategy_name("strategy_ai_nightly_name") == "AI Auto Nightly Screening"
+        assert translate_strategy_name("strategy_value_name") == "Value Investing"
+        assert translate_strategy_name("strategy_growth_name") == "High Growth"
 
         I18n.set_locale("zh_CN")
+
+    def test_translate_non_i18n_key_returns_original(self):
+        """R.3.3: 非 i18n key 字符串应原样返回 (兜底兼容未迁移数据)."""
+        from ui.i18n import translate_strategy_name
+
+        # 未迁移的翻译字符串 (兜底原样返回)
+        assert translate_strategy_name("价值投资") == "价值投资"
+        assert translate_strategy_name("Value Investing") == "Value Investing"
+        # 未迁移的 identifier
+        assert translate_strategy_name("AI_Auto_Nightly") == "AI_Auto_Nightly"
+        # 自定义策略名
+        assert translate_strategy_name("自定义策略") == "自定义策略"
+        assert translate_strategy_name("Custom Strategy") == "Custom Strategy"
 
     def test_translate_unknown_name_returns_original(self):
         """Test that unknown names are returned as-is."""
@@ -661,107 +675,3 @@ class TestI18nDebugModeStrictInit:
         result = I18n.get("app_title")
 
         assert result == "A股智能选股助手"
-
-
-class TestRefreshDropdownOptions:
-    """refresh_dropdown_options 工具函数测试"""
-
-    def test_updates_options_and_preserves_value(self):
-        """正常场景：更新 options 并保留 value，调用两次 control.update()"""
-        from unittest.mock import patch
-
-        import flet as ft
-
-        from ui.i18n import refresh_dropdown_options
-
-        dropdown = ft.Dropdown(value="dark")
-        with patch.object(dropdown, "update") as mock_update:
-            refresh_dropdown_options(
-                dropdown,
-                [
-                    ft.dropdown.Option("dark", "Dark"),
-                    ft.dropdown.Option("light", "Light"),
-                ],
-            )
-
-        assert dropdown.value == "dark"
-        assert len(dropdown.options) == 2
-        assert dropdown.options[0].key == "dark"
-        assert dropdown.options[0].text == "Dark"
-        assert mock_update.call_count == 2
-
-    def test_value_none_preserved(self):
-        """saved_value 为 None 时正常处理"""
-        from unittest.mock import patch
-
-        import flet as ft
-
-        from ui.i18n import refresh_dropdown_options
-
-        dropdown = ft.Dropdown(value=None)
-        with patch.object(dropdown, "update"):
-            refresh_dropdown_options(
-                dropdown,
-                [ft.dropdown.Option("a", "Option A")],
-            )
-
-        assert dropdown.value is None
-        assert len(dropdown.options) == 1
-
-    def test_update_raises_unexpected_exception_propagates(self):
-        """control.update() 抛非预期异常（如 AssertionError）时必须传播，不得吞没
-
-        实现仅吞 RuntimeError（V1 未挂载）/ AttributeError（V0 兼容），
-        其他异常（编程错误）必须传播以暴露 bug，符合 CLAUDE.md §1.3 合理异常处理。
-        """
-        from unittest.mock import patch
-
-        import flet as ft
-
-        from ui.i18n import refresh_dropdown_options
-
-        dropdown = ft.Dropdown(value="dark")
-        with patch.object(dropdown, "update", side_effect=AssertionError("bug")):
-            with pytest.raises(AssertionError, match="bug"):
-                refresh_dropdown_options(
-                    dropdown,
-                    [ft.dropdown.Option("dark", "Dark")],
-                )
-
-    def test_update_raises_generic_exception_swallows_error(self):
-        """control.update() 抛其他异常时静默处理"""
-        from unittest.mock import patch
-
-        import flet as ft
-
-        from ui.i18n import refresh_dropdown_options
-
-        dropdown = ft.Dropdown(value="info")
-        with patch.object(dropdown, "update", side_effect=RuntimeError("connection lost")):
-            refresh_dropdown_options(
-                dropdown,
-                [ft.dropdown.Option("info", "Info")],
-            )
-
-        assert dropdown.value == "info"
-
-    def test_options_replaced_not_appended(self):
-        """options 被替换而非追加"""
-        from unittest.mock import patch
-
-        import flet as ft
-
-        from ui.i18n import refresh_dropdown_options
-
-        dropdown = ft.Dropdown(
-            value="a",
-            options=[ft.dropdown.Option("a", "Old A"), ft.dropdown.Option("b", "Old B")],
-        )
-        with patch.object(dropdown, "update"):
-            refresh_dropdown_options(
-                dropdown,
-                [ft.dropdown.Option("c", "New C")],
-            )
-
-        assert len(dropdown.options) == 1
-        assert dropdown.options[0].key == "c"

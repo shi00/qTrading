@@ -15,7 +15,7 @@ async def get_app_state(engine, key: str) -> str | None:
         return None
     try:
         async with engine.connect() as conn:
-            result = await conn.execute(sa.select(AppState.value).where(AppState.key == key))
+            result = await conn.execute(sa.select(AppState.config_value).where(AppState.config_key == key))
             row = result.fetchone()
             return row[0] if row else None
     except Exception as e:
@@ -29,10 +29,10 @@ async def set_app_state(engine, key: str, value: str) -> None:
         return
     try:
         async with engine.begin() as conn:
-            stmt = pg_insert(AppState).values(key=key, value=value)
+            stmt = pg_insert(AppState).values(config_key=key, config_value=value)
             stmt = stmt.on_conflict_do_update(
-                index_elements=["key"],
-                set_={"value": value, "updated_at": sa.func.now()},
+                index_elements=["config_key"],
+                set_={"config_value": value, "updated_at": sa.func.now()},
             )
             await conn.execute(stmt)
     except Exception as e:

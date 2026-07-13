@@ -120,7 +120,7 @@ class DataSourceViewModel:
 
         NOTE(lazy): 返回 get_error_message() 已翻译字符串,VM 间接感知 locale.
         ceiling: dual-track 大体积数据非 state 字段,Phase 2 locale 修复仅覆盖 state 字段.
-        upgrade: Phase 3-4 View 声明式重写时, _last_health_error 改为 Message 或 i18n key + format_args 透传.
+        upgrade: View 声明式重写已完成(Phase E.2), _last_health_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
         """
         return self._last_health_error
 
@@ -142,9 +142,27 @@ class DataSourceViewModel:
         self._state = replace(self._state, **changes)
         self._notify()
 
-    def dispose(self):
-        """Clear all subscribers and reset state."""
+    def _cancel_all_active_tasks(self):
+        """取消所有活跃任务（防孤儿），再清 _active_task_ids。
+
+        cancel_task 对已终态任务 no-op（TaskManager._cancel_task_impl 有 status guard）。
+        NOTE(lazy): init sync 任务仅走 asyncio cancel（cancel_task），不调 processor.request_cancel()
+        的协作式取消信号。dispose 是同步方法无法 await request_cancel（async def）。
+        ceiling: dispose 改为 async 或 DataProcessor 新增 sync request_cancel。init sync 仍会被
+        asyncio cancel 终止，仅非"优雅退出"——对 VM 销毁场景可接受。
+        upgrade: DataProcessor 新增 request_cancel_sync() 或 dispose 异步化时.
+        """
+        for task_id in self._active_task_ids.values():
+            self._tm.cancel_task(task_id)
         self._active_task_ids.clear()
+
+    def dispose(self):
+        """清理资源：先取消所有活跃任务（防孤儿），再清引用与状态。
+
+        cancellable=False 任务（如 cache_clear）的 cancel_task 是 no-op（TaskManager 记 warning），
+        任务将继续运行至完成——属设计意图（不可取消任务应原子完成）。
+        """
+        self._cancel_all_active_tasks()
         self._last_health_result = None
         self._last_snack = None
         self._last_health_error = None

@@ -128,8 +128,8 @@ class TestScreenerViewContract:
         assert "_ai_cards" not in _code_source(), "不应使用 _ai_cards (命令式占位字典)"
 
     def test_subscribes_i18n(self):
-        """DoD: 必须订阅 I18n.get_observable_state (i18n 自动重渲染)。"""
-        assert "I18n.get_observable_state" in _raw_source(), "必须订阅 I18n.get_observable_state"
+        """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""
+        assert "get_observable_state" in _raw_source(), "必须订阅 get_observable_state"
 
     def test_subscribes_theme(self):
         """DoD: 必须订阅 AppColors.get_observable_state (theme 自动重渲染)。"""
@@ -200,3 +200,280 @@ class TestScreenerViewContract:
         params = list(sig.parameters.keys())
         assert "page" not in params, "ScreenerView 不应接收 page 参数"
         assert "initial_strategy" in params, "ScreenerView 必须接收 initial_strategy 参数"
+
+    # ========================================================================
+    # R.2.2: ScreenerView 改用 VM state (selected_strategy/tier_hint)
+    # 消除双源真相: View 禁止 use_state 持有业务状态, 改从 state.* 读取
+    # ========================================================================
+
+    def test_screener_view_reads_selected_strategy_from_vm(self):
+        """R.2.2: View 从 VM state 读取 selected_strategy/tier_hint, 禁止本地 use_state 双源真相。
+
+        DoD: grep `selected_strategy.*use_state\\|set_tier_hint` ui/views/screener_view.py = 0。
+        全量 regex 校验所有 use_state 解构 + set_tier_hint 调用为 0,
+        避免"存在一处合规即放行"的虚假保障 (R.2.1 QA Critical 教训)。
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: selected_strategy 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(r"selected_strategy[^\n]*use_state", code)
+        assert use_state_matches == [], f"selected_strategy 不应使用 use_state (双源真相, R.2.2): {use_state_matches}"
+
+        # 禁止: tier_hint 通过 use_state 解构持有 (双源真相)
+        tier_hint_use_state = re.findall(r"tier_hint[^\n]*use_state", code)
+        assert tier_hint_use_state == [], f"tier_hint 不应使用 use_state (双源真相, R.2.2): {tier_hint_use_state}"
+
+        # 禁止: set_tier_hint 任何调用/解构 (VM select_strategy 内聚)
+        set_tier_hint_matches = re.findall(r"\bset_tier_hint\b", code)
+        assert set_tier_hint_matches == [], (
+            f"禁止 set_tier_hint 调用 (VM select_strategy 内聚, R.2.2): {set_tier_hint_matches}"
+        )
+
+        # 禁止: set_selected_strategy 任何调用/解构 (VM select_strategy 内聚)
+        set_selected_matches = re.findall(r"\bset_selected_strategy\b", code)
+        assert set_selected_matches == [], (
+            f"禁止 set_selected_strategy 调用 (VM select_strategy 内聚, R.2.2): {set_selected_matches}"
+        )
+
+        # 禁止: 模块级 _compute_tier_hint 函数定义 (已迁入 VM 为静态方法)
+        def_matches = re.findall(r"def _compute_tier_hint", code)
+        assert def_matches == [], f"禁止模块级 _compute_tier_hint 定义 (已迁入 VM, R.2.2): {def_matches}"
+
+        # 必须: 调用 vm.select_strategy (新 API, 替代 set_selected_strategy + set_tier_hint)
+        assert "vm.select_strategy" in code, "必须调用 vm.select_strategy (R.2.2 新 API)"
+
+        # 必须: 从 state.selected_strategy 读取 (VM state 单源真相)
+        assert "state.selected_strategy" in code, "必须从 state.selected_strategy 读取 (R.2.2)"
+
+        # 必须: 从 state.tier_hint 读取 (VM state 单源真相)
+        assert "state.tier_hint" in code, "必须从 state.tier_hint 读取 (R.2.2)"
+
+    # ========================================================================
+    # R.2.4: ScreenerView mode/page_size 双源移除 (VM state 单源真相)
+    # ========================================================================
+
+    def test_screener_view_reads_mode_from_vm(self):
+        """R.2.4: View 从 VM state 读取 mode, 禁止本地 use_state 双源真相.
+
+        DoD: grep `mode.*use_state\\|set_mode` ui/views/screener_view.py = 0.
+        VM 已有 switch_to_history()/switch_to_realtime() commands + state.mode.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: mode 通过 use_state 解构持有 (双源真相)
+        mode_use_state = re.findall(r"^\s*mode\s*,\s*set_mode\s*=\s*ft\.use_state", code, re.MULTILINE)
+        assert mode_use_state == [], f"mode 不应使用 use_state (双源真相, R.2.4): {mode_use_state}"
+
+        # 禁止: set_mode 任何调用/解构 (VM switch_to_history/switch_to_realtime 内聚)
+        set_mode_matches = re.findall(r"\bset_mode\b", code)
+        assert set_mode_matches == [], (
+            f"禁止 set_mode 调用 (VM switch_to_history/switch_to_realtime 内聚, R.2.4): {set_mode_matches}"
+        )
+
+        # 必须: 从 state.mode 读取 (VM state 单源真相)
+        assert "state.mode" in code, "必须从 state.mode 读取 (R.2.4)"
+
+    def test_screener_view_reads_page_size_from_vm(self):
+        """R.2.4: View 从 VM state 读取 page_size, 禁止本地 use_state 双源真相.
+
+        DoD: grep `page_size.*use_state\\|set_page_size` ui/views/screener_view.py = 0.
+        VM 已有 change_page_size() command + state.page_size.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: page_size 通过 use_state 解构持有 (双源真相)
+        page_size_use_state = re.findall(r"^\s*page_size\s*,\s*set_page_size\s*=\s*ft\.use_state", code, re.MULTILINE)
+        assert page_size_use_state == [], f"page_size 不应使用 use_state (双源真相, R.2.4): {page_size_use_state}"
+
+        # 禁止: set_page_size 任何调用/解构 (VM change_page_size 内聚)
+        set_page_size_matches = re.findall(r"\bset_page_size\b", code)
+        assert set_page_size_matches == [], (
+            f"禁止 set_page_size 调用 (VM change_page_size 内聚, R.2.4): {set_page_size_matches}"
+        )
+
+        # 必须: 从 state.page_size 读取 (VM state 单源真相)
+        assert "state.page_size" in code, "必须从 state.page_size 读取 (R.2.4)"
+
+    # ========================================================================
+    # R.2.6.1: strategies_loaded/strategy_options 双源移除 (VM state 单源真相)
+    # ========================================================================
+
+    def test_screener_view_reads_strategies_loaded_from_vm(self):
+        """R.2.6.1: View 从 VM state 读取 strategies_loaded, 禁止本地 use_state 双源真相.
+
+        DoD: grep `strategies_loaded.*use_state\\|set_strategies_loaded` ui/views/screener_view.py = 0.
+        VM 已有 load_strategies() command + state.strategies_loaded.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: strategies_loaded 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(
+            r"^\s*strategies_loaded\s*,\s*set_strategies_loaded\s*=\s*ft\.use_state", code, re.MULTILINE
+        )
+        assert use_state_matches == [], f"strategies_loaded 不应使用 use_state (双源真相, R.2.6.1): {use_state_matches}"
+
+        # 禁止: set_strategies_loaded 任何调用/解构 (VM load_strategies 内聚)
+        set_matches = re.findall(r"\bset_strategies_loaded\b", code)
+        assert set_matches == [], f"禁止 set_strategies_loaded 调用 (VM load_strategies 内聚, R.2.6.1): {set_matches}"
+
+        # 必须: 从 state.strategies_loaded 读取 (VM state 单源真相)
+        assert "state.strategies_loaded" in code, "必须从 state.strategies_loaded 读取 (R.2.6.1)"
+
+    def test_screener_view_reads_strategy_options_from_vm(self):
+        """R.2.6.1: View 从 VM state.strategies_with_dep 构建 Flet Options, 禁止本地 use_state 缓存.
+
+        DoD: grep `strategy_options.*use_state\\|set_strategy_options` ui/views/screener_view.py = 0.
+        VM state.strategies_with_dep 持有原始策略数据, View 每次渲染调 _build_strategy_options 构建,
+        确保 locale 切换后 Options 自动重新翻译 (避免 use_state 缓存旧 locale 翻译).
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: strategy_options 通过 use_state 解构持有 (双源真相 + locale 缓存问题)
+        use_state_matches = re.findall(
+            r"^\s*strategy_options\s*,\s*set_strategy_options\s*=\s*ft\.use_state", code, re.MULTILINE
+        )
+        assert use_state_matches == [], (
+            f"strategy_options 不应使用 use_state (双源真相+locale缓存, R.2.6.1): {use_state_matches}"
+        )
+
+        # 禁止: set_strategy_options 任何调用/解构 (VM load_strategies 内聚)
+        set_matches = re.findall(r"\bset_strategy_options\b", code)
+        assert set_matches == [], f"禁止 set_strategy_options 调用 (VM load_strategies 内聚, R.2.6.1): {set_matches}"
+
+        # 必须: 从 state.strategies_with_dep 构建 Options (VM state 单源真相)
+        assert "state.strategies_with_dep" in code, "必须从 state.strategies_with_dep 构建 Options (R.2.6.1)"
+
+    # ========================================================================
+    # R.2.6.2: strategy_desc/strategy_desc_color 双源移除 (VM state 单源真相)
+    # ========================================================================
+
+    def test_screener_view_reads_strategy_desc_from_vm(self):
+        """R.2.6.2: View 从 VM state 读取 strategy_desc, 禁止本地 use_state 双源真相.
+
+        DoD: grep `strategy_desc.*use_state\\|set_strategy_desc` ui/views/screener_view.py = 0.
+        VM 已有 update_strategy_desc() command + state.strategy_desc.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: strategy_desc 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(
+            r"^\s*strategy_desc\s*,\s*set_strategy_desc\s*=\s*ft\.use_state", code, re.MULTILINE
+        )
+        assert use_state_matches == [], f"strategy_desc 不应使用 use_state (双源真相, R.2.6.2): {use_state_matches}"
+
+        # 禁止: set_strategy_desc 任何调用/解构 (VM update_strategy_desc 内聚)
+        set_matches = re.findall(r"\bset_strategy_desc\b", code)
+        assert set_matches == [], f"禁止 set_strategy_desc 调用 (VM update_strategy_desc 内聚, R.2.6.2): {set_matches}"
+
+        # 必须: 从 state.strategy_desc 读取 (VM state 单源真相)
+        assert "state.strategy_desc" in code, "必须从 state.strategy_desc 读取 (R.2.6.2)"
+
+    def test_screener_view_reads_strategy_desc_color_from_vm(self):
+        """R.2.6.2: View 从 VM state 读取 strategy_desc_color, 禁止本地 use_state 双源真相.
+
+        DoD: grep `strategy_desc_color.*use_state\\|set_strategy_desc_color` ui/views/screener_view.py = 0.
+        VM state.strategy_desc_color 产出语义标识符 ("default"/"warning"), View 映射到 AppColors.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: strategy_desc_color 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(
+            r"^\s*strategy_desc_color\s*,\s*set_strategy_desc_color\s*=\s*ft\.use_state",
+            code,
+            re.MULTILINE,
+        )
+        assert use_state_matches == [], (
+            f"strategy_desc_color 不应使用 use_state (双源真相, R.2.6.2): {use_state_matches}"
+        )
+
+        # 禁止: set_strategy_desc_color 任何调用/解构 (VM update_strategy_desc 内聚)
+        set_matches = re.findall(r"\bset_strategy_desc_color\b", code)
+        assert set_matches == [], (
+            f"禁止 set_strategy_desc_color 调用 (VM update_strategy_desc 内聚, R.2.6.2): {set_matches}"
+        )
+
+        # 必须: 从 state.strategy_desc_color 读取 (VM state 单源真相)
+        assert "state.strategy_desc_color" in code, "必须从 state.strategy_desc_color 读取 (R.2.6.2)"
+
+        # 必须: 调用 vm.update_strategy_desc (新 API, 替代 set_strategy_desc + set_strategy_desc_color)
+        assert "vm.update_strategy_desc" in code, "必须调用 vm.update_strategy_desc (R.2.6.2 新 API)"
+
+        # 必须: 存在 _resolve_strategy_desc_color 映射函数 (VM 不感知 AppColors, §3.2)
+        assert "_resolve_strategy_desc_color" in code, (
+            "必须有 _resolve_strategy_desc_color 映射函数 (VM 不感知 AppColors, R.2.6.2)"
+        )
+
+    # ========================================================================
+    # R.2.6.3: status_msg/status_color 双源移除 (VM state 单源真相)
+    # ========================================================================
+
+    def test_screener_view_no_status_msg_use_state(self):
+        """R.2.6.3: View 禁止 use_state 持有 status_msg, 改从 VM state.status_message 读取.
+
+        DoD: grep `status_msg.*use_state\\|set_status_msg` ui/views/screener_view.py = 0.
+        VM 已有 set_history_viewing_status() command + state.status_message.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: status_msg 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(r"^\s*status_msg\s*,\s*set_status_msg\s*=\s*ft\.use_state", code, re.MULTILINE)
+        assert use_state_matches == [], f"status_msg 不应使用 use_state (双源真相, R.2.6.3): {use_state_matches}"
+
+        # 禁止: status_message 全称通过 use_state 解构持有 (QA m-4: 防止用全称创建新双源)
+        use_state_full_matches = re.findall(
+            r"^\s*status_message\s*,\s*set_status_message\s*=\s*ft\.use_state", code, re.MULTILINE
+        )
+        assert use_state_full_matches == [], (
+            f"status_message 不应使用 use_state (双源真相, R.2.6.3): {use_state_full_matches}"
+        )
+
+        # 禁止: set_status_msg 任何调用/解构 (VM set_history_viewing_status 内聚)
+        set_matches = re.findall(r"\bset_status_msg\b", code)
+        assert set_matches == [], (
+            f"禁止 set_status_msg 调用 (VM set_history_viewing_status 内聚, R.2.6.3): {set_matches}"
+        )
+
+    def test_screener_view_no_status_color_use_state(self):
+        """R.2.6.3: View 禁止 use_state 持有 status_color, 改从 VM state.status_color 读取.
+
+        DoD: grep `status_color.*use_state\\|set_status_color` ui/views/screener_view.py = 0.
+        VM state.status_color 已承载所有状态颜色 (run/history/error/success).
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: status_color 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(
+            r"^\s*status_color\s*,\s*set_status_color\s*=\s*ft\.use_state", code, re.MULTILINE
+        )
+        assert use_state_matches == [], f"status_color 不应使用 use_state (双源真相, R.2.6.3): {use_state_matches}"
+
+        # 禁止: set_status_color 任何调用/解构 (VM 内聚)
+        set_matches = re.findall(r"\bset_status_color\b", code)
+        assert set_matches == [], f"禁止 set_status_color 调用 (VM 内聚, R.2.6.3): {set_matches}"
+
+        # 必须: 调用 vm.set_history_viewing_status (新 API, 替代 set_status_msg + set_status_color)
+        assert "vm.set_history_viewing_status" in code, "必须调用 vm.set_history_viewing_status (R.2.6.3 新 API)"
+
+        # 必须: 从 state.status_message 渲染 (VM state 单源真相, 无 else 回退)
+        assert "state.status_message" in code, "必须从 state.status_message 读取 (R.2.6.3)"
+
+        # 必须: 从 state.status_color 读取 (VM state 单源真相, 与 state.status_message 对称)
+        assert "state.status_color" in code, "必须从 state.status_color 读取 (R.2.6.3)"

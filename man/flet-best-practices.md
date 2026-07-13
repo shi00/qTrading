@@ -8,7 +8,7 @@
 >
 > 本手册是 **通用 Flet v1 开发参考**，覆盖 Web/移动/桌面全平台。在 AStockScreener 项目中使用时，必须遵守以下**优先级**（后者被前者覆盖）：
 >
-> 1. **[CLAUDE.md](../CLAUDE.md)** — 项目宪法（红线 R1~R17、架构边界、交互准则）
+> 1. **[CLAUDE.md](../CLAUDE.md)** — 项目宪法（红线 R1~R18、架构边界、交互准则）
 > 2. **[CONTRIBUTING.md](../CONTRIBUTING.md)** — 项目实现规范（含「Flet 0.85.3 (V1) API 关键约束」21 行 breaking changes 表、「V1 声明式 UI 开发规范」）
 > 3. **本手册** — 通用 Flet v1 知识补充（路由、Services、存储、构建打包等项目规范未展开的主题）
 >

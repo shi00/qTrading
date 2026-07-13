@@ -233,18 +233,19 @@ class TestMacroContextInjection:
             new_callable=AsyncMock,
             return_value=pd.DataFrame(
                 {
-                    "date": ["20240101"],
-                    "on": [2.0],
-                    "1w": [2.5],
-                    "3m": [3.5],
+                    "record_date": ["20240101"],
+                    "on_rate": [2.0],
+                    "week_1": [2.5],
+                    "month_3": [3.5],
                 }
             ),
         ):
             df = await macro_dao.get_shibor_latest()
 
-            assert "on" in df.columns
-            assert "1w" in df.columns
-            assert "3m" in df.columns
+            # R17（迁移 0015）：列名 on_rate/week_1/month_3 等非保留字
+            assert "on_rate" in df.columns
+            assert "week_1" in df.columns
+            assert "month_3" in df.columns
 
 
 class TestFinancialDataQuality:

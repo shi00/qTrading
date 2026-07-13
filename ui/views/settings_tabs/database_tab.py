@@ -18,7 +18,7 @@ import flet as ft
 
 from ui.components.config_panels import DatabaseConfigPanel
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 
@@ -63,7 +63,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
     _, vm = use_viewmodel(_make_vm)
 
     # --- Subscribe to i18n + theme changes (auto-rerender on locale/theme switch) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Mount-time reload (替代命令式挂载回调的 reload_config) ---

@@ -12,7 +12,7 @@
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 
@@ -147,7 +147,7 @@ def MarketDashboard(data: dict | None = None) -> ft.Column:
     ``ft.use_state`` subscription.
     """
     # Subscribe to i18n + theme changes (auto-rerender on locale/theme switch)
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     if data is None:

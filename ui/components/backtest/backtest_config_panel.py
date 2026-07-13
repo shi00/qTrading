@@ -10,7 +10,7 @@
 - 旧命令式 Container 子类 → ``@ft.component def BacktestConfigPanel(on_run_backtest)``
 - 纯 UI 状态组件（收集用户输入的回测参数，无业务逻辑/IO/验证/保存），按 project_memory
   责任分层原则用 ``use_state`` 管理，不建 VM（YAGNI）
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
 - DatePicker 通过 ``ft.use_dialog()`` 声明式管理（DialogControl 子类，§10.1）
 - 删除死代码 ``_strategy_key``/``set_strategy_key``（BacktestView 用自身 _selected_strategy，
@@ -26,7 +26,7 @@ from datetime import date, timedelta
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
@@ -116,14 +116,14 @@ def BacktestConfigPanel(
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式：
     - 纯 UI 状态组件（收集回测参数），用 ``use_state`` 管理，不建 VM（YAGNI）
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 无 page ref / 生命周期回调 / 手动刷新
 
     Args:
         on_run_backtest: 运行回测回调，接收 config dict
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- UI state (pure UI state, no VM) ---
     today = date.today()

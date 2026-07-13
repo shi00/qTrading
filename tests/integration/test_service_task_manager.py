@@ -6,6 +6,7 @@ Tests for TaskManager service.
 
 import asyncio
 import datetime
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -238,7 +239,7 @@ class TestTaskManagerCancel:
             status=TaskStatus.RUNNING,
             cancellable=True,
         )
-        task._cancel_event = asyncio.Event()
+        task._cancel_event = threading.Event()
         manager._tasks = {"task1": task}
         manager._cancel_task_impl("task1")
         assert task.status == TaskStatus.CANCELLED

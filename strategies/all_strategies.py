@@ -67,6 +67,11 @@ class StrategyManager:
             cls._instance = None
             cls._initialized = False
 
+    @classmethod
+    def _atexit_cleanup(cls):
+        """No-op: strategies are stateless instances, no persistent resources to clean."""
+        pass
+
     def __init__(self):
         if self._initialized:
             return

@@ -458,14 +458,15 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         ctx.cache.engine = MagicMock()
         ctx.cache.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
-        # shibor 返回 on/1w/3m 列
+        # R17（迁移 0015）：TushareClient._COLUMN_RENAMES 将 date/on/1w/3m 重命名为 record_date/on_rate/week_1/month_3
+        # mock 直接返回重命名后的 DataFrame（模拟 _handle_api_call 自动重命名后的结果）
         ctx.api.get_shibor = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "date": ["20240614"],
-                    "on": [1.8],
-                    "1w": [1.9],
-                    "3m": [2.0],
+                    "record_date": ["20240614"],
+                    "on_rate": [1.8],
+                    "week_1": [1.9],
+                    "month_3": [2.0],
                 }
             )
         )
@@ -473,7 +474,7 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         ctx.api.get_shibor_lpr = AsyncMock(
             return_value=pd.DataFrame(
                 {
-                    "date": ["20240614"],
+                    "record_date": ["20240614"],
                     "lpr_1y": [3.45],
                     "lpr_5y": [3.95],
                 }
@@ -498,7 +499,7 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         assert "lpr_1y" in saved_df.columns
         assert "lpr_5y" in saved_df.columns
         # 验证 merge 后 LPR 值正确
-        row = saved_df[saved_df["date"] == "20240614"].iloc[0]
+        row = saved_df[saved_df["record_date"] == "20240614"].iloc[0]
         assert row["lpr_1y"] == 3.45
         assert row["lpr_5y"] == 3.95
 
@@ -510,7 +511,7 @@ class TestMacroSyncSyncShiborDailyWithLpr:
         ctx.cache.engine = MagicMock()
         ctx.cache.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
-        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [1.8]}))
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [1.8]}))
         ctx.api.get_shibor_lpr = AsyncMock(side_effect=TushareAPIPermissionError("shibor_lpr", "denied"))
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
@@ -845,7 +846,7 @@ class TestMacroSyncStrategySyncShibor:
         today = datetime.date(2024, 6, 15)
         strategy._get_effective_trade_date = AsyncMock(return_value=today)
         ctx.api = MagicMock()
-        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240615"], "on": [2.0]}))
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240615"], "on_rate": [2.0]}))
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 1)])
         result = SyncResult()
@@ -1088,7 +1089,7 @@ class TestMacroSyncShiborDateParsing:
         ctx.cache.engine = MagicMock()
         ctx.cache.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
-        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [2.0]}))
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [2.0]}))
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
         strategy.dao.get_shibor_latest_date = AsyncMock(return_value="invalid-date-format")
@@ -1372,7 +1373,7 @@ class TestMacroSyncPartialFailure:
         ctx.cache.update_sync_status = AsyncMock()
         ctx.api = MagicMock()
         ctx.api.get_macro_data = AsyncMock(side_effect=RuntimeError("Macro API error"))
-        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"date": ["20240614"], "on": [2.0]}))
+        ctx.api.get_shibor = AsyncMock(return_value=pd.DataFrame({"record_date": ["20240614"], "on_rate": [2.0]}))
         strategy = MacroSyncStrategy(ctx)
         strategy.dao = MagicMock()
         strategy.dao.get_macro_latest_date = AsyncMock(return_value=None)

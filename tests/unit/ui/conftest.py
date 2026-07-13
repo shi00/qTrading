@@ -4,8 +4,9 @@ from unittest.mock import MagicMock, create_autospec
 import flet as ft
 import pytest
 
-from core.i18n import DEFAULT_LOCALE, I18n, I18nState
+from core.i18n import DEFAULT_LOCALE
 from tests.unit.ui.mock_flet import MockFletPage
+from ui.i18n import I18nState
 from ui.theme import AppColors, AppColorsState, AppStyles, ThemeName
 from utils.config_handler import ConfigHandler
 
@@ -50,6 +51,20 @@ def _v1_page_compat(monkeypatch):
     monkeypatch.setattr(ft.Control, "update", update)
 
 
+@pytest.fixture(autouse=True)
+def _reset_context_page():
+    """每个测试后清理 _context_page ContextVar，防止 FakePage 跨测试泄漏。
+
+    ``attach_fake_page``（见 ``tests/unit/ui/component_renderer.py``）调用
+    ``_context_page.set(FakePage)`` 修改 ContextVar，若不清理会跨测试泄漏，
+    导致后续 UI 测试因 page 类型不匹配而失败。
+    """
+    yield
+    from flet.controls.context import _context_page
+
+    _context_page.set(None)
+
+
 @pytest.fixture
 def mock_page():
     return MockFletPage()
@@ -70,15 +85,15 @@ def mock_i18n():
 def mock_i18n_state(monkeypatch):
     """MockI18nState 注入 fixture：可控 locale 的 I18nState 实例（方案 §3.3.1）。
 
-    声明式组件通过 ``ft.use_state(I18n.get_observable_state)`` 订阅，
-    本 fixture 用 monkeypatch 注入 ``I18n._state``，让 ``get_observable_state()``
+    声明式组件通过 ``ft.use_state(get_observable_state)`` 订阅，
+    本 fixture 用 monkeypatch 注入 ``ui.i18n._i18n_state``，让 ``get_observable_state()``
     返回此 mock 实例。替代旧 ``I18n.subscribe`` mock（命令式 View 用，阶段 4 删除）。
 
     单测中 ``render_component`` 绕过 Renderer，``use_state`` 不会真正订阅，
-    但 ``I18n.get_observable_state()`` 仍被调用以读取初始 locale。
+    但 ``get_observable_state()`` 仍被调用以读取初始 locale。
     """
     state = I18nState(locale=DEFAULT_LOCALE)
-    monkeypatch.setattr(I18n, "_state", state)
+    monkeypatch.setattr("ui.i18n._i18n_state", state)
     return state
 
 

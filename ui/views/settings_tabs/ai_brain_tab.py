@@ -27,7 +27,7 @@ from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.failover_config_panel_view_model import FailoverConfigPanelViewModel
 from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
@@ -150,7 +150,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- 3 子 VM (内部模式: hook 实例化 + dispose on unmount) ---

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import ui.i18n as ui_i18n
 from ui.i18n import I18n
 
 pytestmark = pytest.mark.unit
@@ -20,19 +21,23 @@ LOCALES_DIR = Path(__file__).parent.parent.parent / "locales"
 
 @pytest.fixture(autouse=True)
 def reset_i18n():
+    """A2-fix3: 不清空 _listeners (保留 ui/i18n.py _sync_i18n_state 全局订阅).
+
+    Regression fix: 保存/恢复 _listeners 快照, 清理测试中 subscribe 的泄漏回调.
+    """
+    saved_listeners = list(I18n._listeners) if I18n._listeners else None
     I18n._initialized = False
     I18n._locale = "zh_CN"
     I18n._strings_cache = {}
     I18n._missing_keys = set()
-    I18n._listeners = None
-    I18n._state = None
+    ui_i18n._i18n_state = None
     yield
+    I18n._listeners = saved_listeners
     I18n._initialized = False
     I18n._locale = "zh_CN"
     I18n._strings_cache = {}
     I18n._missing_keys = set()
-    I18n._listeners = None
-    I18n._state = None
+    ui_i18n._i18n_state = None
 
 
 class TestNoErrorPlaceholdersInJSON:

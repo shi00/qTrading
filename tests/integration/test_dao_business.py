@@ -963,7 +963,7 @@ class TestHolderDao:
         result = await holder_dao.get_stk_holdernumber("000001.SZ")
         assert len(result) == 3
 
-        result = result.sort_values("end_date")
+        result = result.sort_values("end_date", ascending=True)
 
         assert result["holder_num_change"].iloc[0] is None or pd.isna(result["holder_num_change"].iloc[0])
         assert result["holder_num_change"].iloc[1] == -5000
@@ -1008,12 +1008,12 @@ class TestHolderDao:
         assert saved == 4
 
         result_1 = await holder_dao.get_stk_holdernumber("000001.SZ")
-        result_1 = result_1.sort_values("end_date")
+        result_1 = result_1.sort_values("end_date", ascending=True)
         assert result_1["holder_num_change"].iloc[1] == -10000
         assert abs(float(result_1["holder_num_ratio"].iloc[1]) - (-10.0)) < 0.01
 
         result_2 = await holder_dao.get_stk_holdernumber("000002.SZ")
-        result_2 = result_2.sort_values("end_date")
+        result_2 = result_2.sort_values("end_date", ascending=True)
         assert result_2["holder_num_change"].iloc[1] == 10000
         assert abs(float(result_2["holder_num_ratio"].iloc[1]) - 20.0) < 0.01
 
@@ -1049,7 +1049,7 @@ class TestHolderDao:
         await holder_dao.save_holder_number(df2)
 
         result = await holder_dao.get_stk_holdernumber("000001.SZ")
-        result = result.sort_values("end_date")
+        result = result.sort_values("end_date", ascending=True)
         assert len(result) == 2
         assert pd.isna(result["holder_num_change"].iloc[0])
         assert result["holder_num_change"].iloc[1] == -10000
@@ -1086,18 +1086,19 @@ class TestMacroDao:
 
     async def test_save_shibor_daily(self, macro_dao, clean_db):
         """保存 Shibor 利率"""
+        # R17（迁移 0015）：列名 record_date/on_rate/week_1/... 均非保留字，属性名与列名一致
         df = pd.DataFrame(
             [
                 {
-                    "date": _RECENT_DATE,
-                    "on": 1.5,
-                    "1w": 1.8,
-                    "2w": 2.0,
-                    "1m": 2.2,
-                    "3m": 2.5,
-                    "6m": 2.7,
-                    "9m": 2.8,
-                    "1y": 2.9,
+                    "record_date": _RECENT_DATE,
+                    "on_rate": 1.5,
+                    "week_1": 1.8,
+                    "week_2": 2.0,
+                    "month_1": 2.2,
+                    "month_3": 2.5,
+                    "month_6": 2.7,
+                    "month_9": 2.8,
+                    "year_1": 2.9,
                 }
             ]
         )

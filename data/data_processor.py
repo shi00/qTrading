@@ -341,7 +341,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def run_ai_concept_tagging(
         self,
         task_id: str | None = None,
-        cancel_event: asyncio.Event | None = None,
+        cancel_event: threading.Event | None = None,
         *,
         manual_trigger: bool = False,
         **kwargs,
@@ -355,7 +355,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         Args:
             task_id: Optional task identifier for logging.
-            cancel_event: Optional asyncio.Event for cancellation signaling.
+            cancel_event: Optional threading.Event for cancellation signaling.
             manual_trigger: If True, execute LLM-based concept tagging.
             **kwargs: Additional arguments. Supports `ai_service` for LLM injection
                 (R1: data/ must not import services/; AIService is passed via kwargs

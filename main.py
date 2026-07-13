@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from core.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from utils.config_handler import ConfigHandler
 from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
 from utils.log_decorators import UILogger
@@ -28,10 +28,10 @@ def CloseConfirmDialog(
 ) -> ft.AlertDialog:
     """窗口关闭确认对话框 (声明式, i18n state 驱动自动重渲染).
 
-    CLAUDE.md §3.2 MVVM: i18n 通过 ``ft.use_state(I18n.get_observable_state)``
+    CLAUDE.md §3.2 MVVM: i18n 通过 ``ft.use_state(get_observable_state)``
     订阅, locale 切换时自动重渲染, 无需手动刷新控件。
     """
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     return ft.AlertDialog(
         modal=True,
         title=ft.Text(I18n.get("exit_confirm_title")),

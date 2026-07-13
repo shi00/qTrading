@@ -15,7 +15,7 @@ from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
 )
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 
 if TYPE_CHECKING:
@@ -508,7 +508,7 @@ def HealthReportDialog(
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
     - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 深度扫描通过 ``on_deep_scan`` 回调通知消费方（HealthScanDialog 声明式，Task E.3 重写）
     - 无命令式生命周期回调/手动刷新/``show_dialog``/``pop_dialog``
 
@@ -519,7 +519,7 @@ def HealthReportDialog(
         on_close: 关闭回调（消费方用于清理引用）
         on_deep_scan: 深度扫描回调（消费方打开 HealthScanDialog）
     """
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     open_, set_open = ft.use_state(open_state)
 
     width, height = _health_dialog_size(page)
@@ -775,7 +775,7 @@ def HealthScanDialog(
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
     - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 扫描状态/进度/状态文本/结果均由 ``use_state`` 驱动渲染
     - 扫描任务通过 ``use_effect(setup, [open_], cleanup=cleanup)`` 启动，
       ``open_=True`` 时自动触发（替代旧消费方 ``page.run_task(scan_dlg.start_scan)``）
@@ -792,7 +792,7 @@ def HealthScanDialog(
         on_close: 关闭回调（消费方用于清理引用）
     """
     # --- i18n 订阅（locale 切换自动重渲染）---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- dialog 显隐 state（从 prop 初始化）---
     open_, set_open = ft.use_state(open_state)

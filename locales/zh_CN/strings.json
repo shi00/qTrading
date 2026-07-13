@@ -123,6 +123,7 @@
     "screener_data_loaded": "数据加载完成",
     "screener_load_failed": "加载失败",
     "screener_please_select": "请先选择策略！",
+    "screener_history_viewing": "查看历史: {date} / {label}",
     "unit_year": "年",
     "unit_years": "年",
     "screener_strategy_not_found": "未找到该策略",

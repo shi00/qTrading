@@ -591,7 +591,7 @@ class TestTushareClientApiMethods:
             {
                 "index_code": ["801010.SI"],
                 "index_name": ["农林牧渔"],
-                "level": ["L1"],
+                "sw_level": ["L1"],
                 "industry_code": ["110000"],
                 "industry_name": ["农林牧渔"],
                 "parent_code": [""],

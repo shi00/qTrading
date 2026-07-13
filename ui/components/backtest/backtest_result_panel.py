@@ -11,7 +11,7 @@
 - 旧命令式 Container 子类 → ``@ft.component def BacktestResultPanel(result, chart_min_height)``
 - 纯展示组件（接收 result/chart_min_height props），按 project_memory 责任分层原则
   用 ``use_state`` 管理 trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
-- i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 订阅自动重渲染
+- i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新、set_result/set_chart_min_height 方法
 - 消费方 BacktestView 通过重新实例化推送 props（过渡期，Task 3.6.3 BacktestView 声明式
   重写后改为父组件 state 驱动）
@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 import flet as ft
 import flet_charts as fch
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
 if TYPE_CHECKING:
@@ -483,7 +483,7 @@ def BacktestResultPanel(
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式：
     - 纯展示组件（接收 result/chart_min_height props），用 ``use_state`` 管理
       trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
-    - i18n 通过 ``ft.use_state(I18n.get_observable_state)`` 自动重渲染
+    - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
     - 无 page ref / 生命周期回调 / 手动刷新 / set_result / set_chart_min_height
 
     Args:
@@ -491,7 +491,7 @@ def BacktestResultPanel(
         chart_min_height: 图表区最小高度（None 时不设置）
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
 
     # --- UI local state (trades pagination + selected tab) ---
     trades_page, set_trades_page = ft.use_state(0)

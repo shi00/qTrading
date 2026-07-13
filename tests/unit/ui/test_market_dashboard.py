@@ -2,11 +2,16 @@
 
 业务逻辑由消费方 ViewModel 单元测试覆盖。View 层测试聚焦于契约守护
 （grep 检查禁止的命令式模式），参照 test_settings_widgets.py 模式。
+
+Phase 1.2 扩展：追加纯函数测试 + 组件体测试，覆盖 _resolve_color /
+_build_index_card / _build_hsgt_card / _build_concept_card 分支逻辑
+及 MarketDashboard 组件体渲染。
 """
 
 import ast
 from pathlib import Path
 
+import flet as ft
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -104,9 +109,343 @@ class TestMarketDashboardContract:
         assert "_page_ref" not in _code_source()
 
     def test_subscribes_i18n(self):
-        """DoD: 必须订阅 I18n.get_observable_state（i18n 自动重渲染）。"""
-        assert "I18n.get_observable_state" in _raw_source()
+        """DoD: 必须订阅 get_observable_state（i18n 自动重渲染）。"""
+        assert "get_observable_state" in _raw_source()
 
     def test_subscribes_app_colors(self):
         """DoD: 必须订阅 AppColors.get_observable_state（theme 自动重渲染）。"""
         assert "AppColors.get_observable_state" in _raw_source()
+
+
+# ============================================================================
+# 纯函数测试 — _resolve_color / _build_index_card / _build_hsgt_card / _build_concept_card
+# ============================================================================
+
+
+class TestResolveColor:
+    """_resolve_color 纯函数测试：验证 RED/GREEN/其他 颜色映射。"""
+
+    def test_red_maps_to_up(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """'RED' → AppColors.UP（A股红涨）。"""
+        from ui.components.market_dashboard import _resolve_color
+        from ui.theme import AppColors
+
+        assert _resolve_color("RED") == AppColors.UP
+
+    def test_green_maps_to_down(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """'GREEN' → AppColors.DOWN（A股绿跌）。"""
+        from ui.components.market_dashboard import _resolve_color
+        from ui.theme import AppColors
+
+        assert _resolve_color("GREEN") == AppColors.DOWN
+
+    def test_none_returns_text_secondary(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """None → AppColors.TEXT_SECONDARY（中性灰）。"""
+        from ui.components.market_dashboard import _resolve_color
+        from ui.theme import AppColors
+
+        assert _resolve_color(None) == AppColors.TEXT_SECONDARY
+
+    def test_empty_string_returns_text_secondary(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """'' → AppColors.TEXT_SECONDARY。"""
+        from ui.components.market_dashboard import _resolve_color
+        from ui.theme import AppColors
+
+        assert _resolve_color("") == AppColors.TEXT_SECONDARY
+
+    def test_other_color_returns_text_secondary(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """未识别的颜色名 → AppColors.TEXT_SECONDARY。"""
+        from ui.components.market_dashboard import _resolve_color
+        from ui.theme import AppColors
+
+        assert _resolve_color("BLUE") == AppColors.TEXT_SECONDARY
+
+    def test_case_insensitive(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """大小写不敏感：'red' 与 'RED' 等价。"""
+        from ui.components.market_dashboard import _resolve_color
+        from ui.theme import AppColors
+
+        assert _resolve_color("red") == AppColors.UP
+        assert _resolve_color("green") == AppColors.DOWN
+
+
+class TestBuildIndexCard:
+    """_build_index_card 纯函数测试：验证指数卡片渲染。"""
+
+    def test_full_info_renders_value_and_change(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """完整 info：value/change 显示，color 解析为 AppColors token。"""
+        from ui.components.market_dashboard import _build_index_card
+        from ui.i18n import I18n
+        from ui.theme import AppColors
+
+        info = {"value": "3000.50", "change": "+1.2%", "color": "RED"}
+        card = _build_index_card("home_index_sh", info)
+
+        assert isinstance(card, ft.Container)
+        col = card.content
+        # 第 1 项：title = I18n.get(title_key)（不依赖具体翻译值）
+        assert col.controls[0].value == I18n.get("home_index_sh")
+        # 第 2 项：value
+        assert col.controls[1].value == "3000.50"
+        # 第 3 项：change
+        assert col.controls[2].value == "+1.2%"
+        # color 解析为 UP
+        assert col.controls[2].color == AppColors.UP
+
+    def test_empty_info_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """空 info：value/change 显示 '--'。"""
+        from ui.components.market_dashboard import _build_index_card
+
+        card = _build_index_card("home_index_sh", {})
+
+        col = card.content
+        assert col.controls[1].value == "--"
+        assert col.controls[2].value == "--"
+
+    def test_missing_color_uses_text_secondary(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """info 无 color 字段 → _resolve_color(None) = TEXT_SECONDARY。"""
+        from ui.components.market_dashboard import _build_index_card
+        from ui.theme import AppColors
+
+        card = _build_index_card("home_index_sh", {"value": "1", "change": "0%"})
+
+        col = card.content
+        assert col.controls[2].color == AppColors.TEXT_SECONDARY
+
+    def test_col_config_is_4_per_row(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """卡片 col 配置：xs/sm=6, md/lg=3（4 列布局）。"""
+        from ui.components.market_dashboard import _build_index_card
+
+        card = _build_index_card("home_index_sh", {})
+
+        assert card.col == {"xs": 6, "sm": 6, "md": 3, "lg": 3}
+
+
+class TestBuildHsgtCard:
+    """_build_hsgt_card 纯函数测试：验证北向资金卡片渲染。"""
+
+    def test_full_info_renders_value_and_sub(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """完整 info：value/sub 显示，color 解析。"""
+        from ui.components.market_dashboard import _build_hsgt_card
+        from ui.i18n import I18n
+        from ui.theme import AppColors
+
+        info = {"value": "100亿", "sub": "净流入", "color": "RED"}
+        card = _build_hsgt_card(info)
+
+        assert isinstance(card, ft.Container)
+        col = card.content
+        # 第 1 项：title = I18n.get("home_northbound")
+        assert col.controls[0].value == I18n.get("home_northbound")
+        # 第 2 项：value
+        assert col.controls[1].value == "100亿"
+        # 第 3 项：sub
+        assert col.controls[2].value == "净流入"
+        # value 的 color 解析为 UP
+        assert col.controls[1].color == AppColors.UP
+
+    def test_empty_info_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """空 info：value/sub 显示 '--'。"""
+        from ui.components.market_dashboard import _build_hsgt_card
+
+        card = _build_hsgt_card({})
+
+        col = card.content
+        assert col.controls[1].value == "--"
+        assert col.controls[2].value == "--"
+
+
+class TestBuildConceptCard:
+    """_build_concept_card 纯函数测试：验证热门概念卡片渲染。"""
+
+    def test_red_color_uses_up_and_trending_up_icon(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """color 含 'red' → is_up=True, color=UP, icon=TRENDING_UP。"""
+        from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
+
+        item = {"name": "AI", "change": "+3.5%", "color": "red"}
+        card = _build_concept_card(item)
+
+        assert isinstance(card, ft.Container)
+        col = card.content
+        # 第 1 项：name
+        assert col.controls[0].value == "AI"
+        # 第 2 项：Row(Icon, Text)
+        row = col.controls[1]
+        icon = row.controls[0]
+        text = row.controls[1]
+        assert icon.icon == ft.Icons.TRENDING_UP
+        assert icon.color == AppColors.UP
+        assert text.value == "+3.5%"
+        assert text.color == AppColors.UP
+
+    def test_non_red_color_uses_down_and_trending_down_icon(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """color 不含 'red' → is_up=False, color=DOWN, icon=TRENDING_DOWN。"""
+        from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
+
+        item = {"name": "新能源", "change": "-2.1%", "color": "green"}
+        card = _build_concept_card(item)
+
+        col = card.content
+        row = col.controls[1]
+        icon = row.controls[0]
+        assert icon.icon == ft.Icons.TRENDING_DOWN
+        assert icon.color == AppColors.DOWN
+
+    def test_missing_color_defaults_to_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """item 无 color → color_str='' → is_up=False → DOWN。"""
+        from ui.components.market_dashboard import _build_concept_card
+        from ui.theme import AppColors
+
+        item = {"name": "x", "change": "0%"}
+        card = _build_concept_card(item)
+
+        col = card.content
+        row = col.controls[1]
+        assert row.controls[0].color == AppColors.DOWN
+
+    def test_missing_name_falls_back_to_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """item 无 name → 显示 '--'。"""
+        from ui.components.market_dashboard import _build_concept_card
+
+        card = _build_concept_card({"change": "0%"})
+
+        col = card.content
+        assert col.controls[0].value == "--"
+
+    def test_missing_change_falls_back_to_default(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """item 无 change → 显示 '0.00%'。"""
+        from ui.components.market_dashboard import _build_concept_card
+
+        card = _build_concept_card({"name": "x"})
+
+        col = card.content
+        row = col.controls[1]
+        assert row.controls[1].value == "0.00%"
+
+    def test_col_config_is_6_per_row_on_mobile(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """卡片 col 配置：xs=6, sm=4, md=3, lg=2。"""
+        from ui.components.market_dashboard import _build_concept_card
+
+        card = _build_concept_card({"name": "x"})
+
+        assert card.col == {"xs": 6, "sm": 4, "md": 3, "lg": 2}
+
+
+# ============================================================================
+# 组件体测试 — 用 attach_fake_page 驱动 MarketDashboard 渲染
+# ============================================================================
+
+
+from tests.unit.ui.component_renderer import (  # noqa: E402
+    make_component,
+    render_once,
+    run_mount_effects,
+)
+
+
+class TestMarketDashboardBody:
+    """MarketDashboard 组件体测试：验证 data 解析与布局。"""
+
+    def test_none_data_renders_empty_state(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """data=None → 空 dict，indices/hsgt 为空，hot_concepts 显示 empty 提示。"""
+        from ui.components.market_dashboard import MarketDashboard
+
+        component = make_component(MarketDashboard, data=None)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        assert isinstance(result, ft.Column)
+        # 第 1 项：indices_row（4 张空卡片）
+        indices_row = result.controls[0]
+        assert isinstance(indices_row, ft.ResponsiveRow)
+        assert len(indices_row.controls) == 4
+        # 第 3 项：concepts_section（含 empty 提示）
+        concepts_section = result.controls[2]
+        concepts_row = concepts_section.controls[1]
+        assert len(concepts_row.controls) == 1  # empty 提示
+
+    def test_full_data_renders_indices_and_concepts(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """完整 data：3 indices + hsgt + 多个 hot_concepts。"""
+        from ui.components.market_dashboard import MarketDashboard
+
+        data = {
+            "indices": [
+                {"value": "3000", "change": "+1%", "color": "RED"},
+                {"value": "10000", "change": "-0.5%", "color": "GREEN"},
+                {"value": "2000", "change": "+0.3%", "color": "RED"},
+            ],
+            "hsgt": {"value": "50亿", "sub": "净流入", "color": "RED"},
+            "hot_concepts": [
+                {"name": "AI", "change": "+3%", "color": "red"},
+                {"name": "新能源", "change": "-1%", "color": "green"},
+            ],
+        }
+        component = make_component(MarketDashboard, data=data)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        assert len(indices_row.controls) == 4  # 3 indices + 1 hsgt
+        concepts_section = result.controls[2]
+        concepts_row = concepts_section.controls[1]
+        assert len(concepts_row.controls) == 2  # 2 concept cards
+
+    def test_empty_hot_concepts_shows_empty_hint(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """hot_concepts=[] → 显示 empty 提示卡片。"""
+        from ui.components.market_dashboard import MarketDashboard
+        from ui.i18n import I18n
+
+        data = {"hot_concepts": []}
+        component = make_component(MarketDashboard, data=data)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        concepts_section = result.controls[2]
+        concepts_row = concepts_section.controls[1]
+        assert len(concepts_row.controls) == 1
+        # empty 提示的 Text = I18n.get("home_hot_concepts_empty")
+        empty_card = concepts_row.controls[0]
+        empty_text = empty_card.content
+        assert empty_text.value == I18n.get("home_hot_concepts_empty")
+
+    def test_partial_indices_fills_empty_cards(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """indices 不足 3 个：缺失部分用空 dict 填充（仍渲染 4 张卡片）。"""
+        from ui.components.market_dashboard import MarketDashboard
+
+        data = {"indices": [{"value": "3000", "change": "+1%", "color": "RED"}]}
+        component = make_component(MarketDashboard, data=data)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        assert len(indices_row.controls) == 4
+
+    def test_non_dict_hsgt_treated_as_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """hsgt 非 dict（如 list）→ 当作空 dict 处理，不抛异常。"""
+        from ui.components.market_dashboard import MarketDashboard
+
+        data = {"hsgt": ["invalid"]}
+        component = make_component(MarketDashboard, data=data)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        # hsgt 卡片仍渲染（值为 '--'）
+        hsgt_card = indices_row.controls[3]
+        col = hsgt_card.content
+        assert col.controls[1].value == "--"
+
+    def test_non_dict_index_item_treated_as_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """indices[i] 非 dict（如 str）→ 当作空 dict 处理。"""
+        from ui.components.market_dashboard import MarketDashboard
+
+        data = {"indices": ["invalid", {"value": "1"}, "valid"]}
+        component = make_component(MarketDashboard, data=data)
+        run_mount_effects(component)
+        result = render_once(component)
+
+        indices_row = result.controls[0]
+        # 3 张 index 卡片仍渲染
+        assert len(indices_row.controls) == 4

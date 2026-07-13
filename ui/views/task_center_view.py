@@ -18,7 +18,7 @@ import flet as ft
 
 from services.task_manager import TaskStatus
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.task_center_view_model import (
     PAGE_SIZE,
@@ -262,7 +262,7 @@ def TaskCenterView() -> ft.Container:
     """
     state, vm = use_viewmodel(TaskCenterViewModel)
     # Subscribe to i18n + theme changes (triggers auto-rerender on locale/theme switch)
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Handlers ---

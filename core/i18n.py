@@ -1,10 +1,7 @@
 import json
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
-
-import flet as ft
 
 logger = logging.getLogger(__name__)
 
@@ -30,24 +27,6 @@ LOCALE_NAMES: dict[str, str] = {
 }
 
 
-@ft.observable
-@dataclass
-class I18nState(ft.Observable):
-    """i18n Observable 状态源。
-
-    声明式组件通过 ``ft.use_state(I18n.get_observable_state)`` 订阅，
-    locale 变更时 ``I18n.set_locale`` 更新 ``state.locale`` 触发 Observable 通知，
-    框架自动重渲染订阅该 state 的组件。
-
-    显式继承 ``ft.Observable`` 使 pyright 能识别 ``subscribe`` 等方法；
-    ``@ft.observable`` 装饰器检测到 ``Observable in __mro__`` 后直接返回原类（no-op）。
-
-    旧接口 ``I18n.subscribe``/``_listeners`` 保留供命令式 View 使用（阶段 4 删除）。
-    """
-
-    locale: str = DEFAULT_LOCALE
-
-
 class I18n:
     """
     Internationalization support.
@@ -65,18 +44,6 @@ class I18n:
     _strings_cache: dict = {}
     _missing_keys: set = set()
     _locales_dir: Path | None = None
-    _state: I18nState | None = None
-
-    @classmethod
-    def get_observable_state(cls) -> I18nState:
-        """获取 i18n Observable 状态源单例。
-
-        声明式组件通过 ``ft.use_state(I18n.get_observable_state)`` 订阅，
-        locale 变更时自动触发重渲染。
-        """
-        if cls._state is None:
-            cls._state = I18nState()
-        return cls._state
 
     @classmethod
     def _get_locales_dir(cls) -> Path:
@@ -125,10 +92,15 @@ class I18n:
             cls._locale = DEFAULT_LOCALE
 
         cls._initialized = True
-        # 同步 Observable state（声明式组件自动重渲染）。
-        # 若 _state 尚未被组件订阅，get_observable_state 会 lazy 创建实例，
-        # 后续 use_state(I18n.get_observable_state) 复用同一实例拿到正确 locale。
-        cls.get_observable_state().locale = cls._locale
+        # 触发 _listeners (ui/i18n.py _sync_i18n_state 同步 Observable state).
+        # initialize 与 set_locale 行为对齐: 首次初始化也需通知订阅方,
+        # 否则 ui 层 I18nState.locale 会 stale (仍为 DEFAULT_LOCALE).
+        if cls._listeners:
+            for listener in cls._listeners:
+                try:
+                    listener()
+                except Exception as e:
+                    logger.error("[I18n] Listener error during initialize: %s", e)
         logger.info("[I18n] Initialized with locale: %s", cls._locale)
 
     @classmethod
@@ -195,20 +167,17 @@ class I18n:
     def set_locale(cls, locale: str):
         """Change locale and notify listeners.
 
-        同步更新 Observable state（声明式组件自动重渲染）；
-        旧接口 ``_listeners`` 回调保留供命令式 View 使用（阶段 4 删除）。
+        通过 ``_listeners`` 通知订阅方 (ui/i18n.py ``_sync_i18n_state`` 订阅后
+        同步 Observable state, 触发声明式组件自动重渲染).
         """
         normalized_locale = LOCALE_MAP.get(locale, locale)
 
         if normalized_locale in SUPPORTED_LOCALES:
             cls._locale = normalized_locale
             cls._initialized = True
-            # 同步 Observable state：state.locale 赋值触发 __setattr__ → _notify
-            # → 订阅该 state 的声明式组件自动重渲染。
-            cls.get_observable_state().locale = cls._locale
             logger.info("[I18n] Locale changed to: %s", cls._locale)
 
-            # 旧接口：命令式 View 通过 subscribe 注册的回调（阶段 4 删除）
+            # 通知订阅方 (ui/i18n.py _sync_i18n_state 同步 Observable state)
             if cls._listeners:
                 for listener in cls._listeners:
                     try:
@@ -221,6 +190,9 @@ class I18n:
     @classmethod
     def subscribe(cls, callback, *, sync_immediately: bool = True):
         """Subscribe to locale changes.
+
+        Locale 变更通知抽象: ui/i18n.py 通过本接口订阅 ``_sync_i18n_state``,
+        在 locale 变更时同步 ui 层 Observable state (触发声明式组件重渲染).
 
         Args:
             callback: Zero-arg callable (bound method or closure) invoked on

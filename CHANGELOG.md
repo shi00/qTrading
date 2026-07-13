@@ -21,7 +21,7 @@
   * R15: Image src_base64 → src（直接支持 base64）
   * window_icon → window.icon
   * 删除 _schedule_async/_scheduled_tasks/_run_task 兼容垫片
-  * §8.2 spike 结论：V1 Prop.__set__ 值相等短路仍存在，refresh_dropdown_options() 保留修订（docstring + CONTRIBUTING.md §5.8 规范 4 已更新）
+  * §8.2 spike 结论：V1 Prop.__set__ 值相等短路仍存在，但声明式 UI 改造后 refresh_dropdown_options() 生产零调用，已在 Phase R.4.1 删除（声明式下 options 由 state 派生，use_state 触发重建自动绕过值相等优化）
 
 ## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.10...v0.7.0) (2026-06-15)
 

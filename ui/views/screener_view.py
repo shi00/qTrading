@@ -30,8 +30,9 @@ from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
-from ui.i18n import I18n, translate_strategy_name
+from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.theme import AppColors, AppStyles
+from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -90,6 +91,23 @@ _COLUMN_WIDTHS = {
 _VOLUME_COLS = frozenset({"vol", "volume", "amount"})
 
 _DATE_COLS = frozenset({"list_date", "trade_date"})
+
+
+def _render_status_message(msg: Message | None) -> str:
+    """渲染状态消息, 翻译 ``*_key`` 后缀 params 为当前 locale (§3.2 VM 不感知 locale).
+
+    VM 通过 params 传递 i18n key (如 ``name_key=strategy.name_key``),
+    View 渲染时翻译为当前 locale 字符串并替换原 ``*_key`` 字段,
+    避免 VM 持有翻译字符串导致 locale 切换后 state 残留旧 locale 翻译.
+    """
+    if msg is None:
+        return ""
+    params = dict(msg.params)
+    for k in list(params):
+        if k.endswith("_key") and isinstance(params[k], str):
+            params[k[:-4]] = I18n.get(params[k])
+            del params[k]
+    return I18n.get(msg.key, **params)
 
 
 def _format_cell_value(col: str, val) -> str:
@@ -172,51 +190,15 @@ def _resolve_group_title(group_name: str, label_key: str | None = None) -> str:
     return group_name
 
 
-def _compute_tier_hint(selected_strategy: str | None) -> str | None:
-    """检查策略档位是否足够，不足时返回提示文案 key，否则 None。"""
-    if not selected_strategy:
-        return None
-    try:
-        from data.external.tushare_client import TushareClient
-        from services.ai_service import get_strategy_min_tier
-        from utils.config_handler import ConfigHandler
+def _resolve_strategy_desc_color(color_key: str) -> str:
+    """映射策略描述颜色语义标识符到 AppColors (R.2.6.2: VM 不感知 UI 颜色, §3.2).
 
-        current_tier = ConfigHandler.get_tushare_point_tier()
-        min_tier = get_strategy_min_tier(selected_strategy)
-        client = TushareClient()
-        if client.get_tier_order(current_tier) < client.get_tier_order(min_tier):
-            return I18n.get("sys_strategy_tier_hint")
-    except Exception as e:
-        logger.debug("[ScreenerView] tier hint check skipped: %s", e, exc_info=True)
-    return None
-
-
-def _build_strategy_desc(
-    selected_strategy: str | None,
-    vm: ScreenerViewModel,
-) -> tuple[str, str]:
-    """构建策略描述文本和颜色 (desc, color)。"""
-    if not selected_strategy:
-        return "", AppColors.TEXT_PRIMARY
-
-    strategy_obj = vm.strategy_mgr.get_strategy(selected_strategy)
-    strategies_with_dep = vm.strategy_mgr.get_all_with_dependencies()
-    dep_info = strategies_with_dep.get(selected_strategy, {})
-
-    if strategy_obj:
-        defaults = {p["name"]: p.get("default") for p in strategy_obj.get_parameters()}
-        desc = strategy_obj.get_dynamic_description(defaults)
-    else:
-        desc = vm.get_strategy_desc(selected_strategy)
-
-    if dep_info.get("missing_apis"):
-        warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
-        desc = f"{desc}{warning_suffix}"
-        color = AppColors.WARNING
-    else:
-        color = AppColors.TEXT_PRIMARY
-
-    return desc, color
+    VM 通过 state.strategy_desc_color 产出语义标识符 ("default"/"warning"),
+    View 渲染时映射为 AppColors 实际颜色值.
+    """
+    if color_key == "warning":
+        return AppColors.WARNING
+    return AppColors.TEXT_PRIMARY
 
 
 def _format_history_date(date_str) -> tuple[str, str]:
@@ -250,23 +232,17 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
 
     # --- i18n / theme 订阅 (自动重渲染) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
-    # --- 本地 UI 状态 ---
-    selected_strategy, set_selected_strategy = ft.use_state(None)
-    strategy_desc, set_strategy_desc = ft.use_state("")
-    strategy_desc_color, set_strategy_desc_color = ft.use_state(AppColors.TEXT_PRIMARY)
-    tier_hint, set_tier_hint = ft.use_state(None)
-    status_msg, set_status_msg = ft.use_state("")
-    status_color, set_status_color = ft.use_state(AppColors.TEXT_SECONDARY)
+    # --- 本地 UI 状态 (R.2.2: selected_strategy/tier_hint 已迁入 VM state;
+    #                     R.2.4: mode/page_size 已迁入 VM state;
+    #                     R.2.6.1: strategies_loaded/strategy_options 已迁入 VM state;
+    #                     R.2.6.2: strategy_desc/strategy_desc_color 已迁入 VM state;
+    #                     R.2.6.3: status_msg/status_color 已迁入 VM state) ---
     progress_visible, set_progress_visible = ft.use_state(False)
     run_disabled, set_run_disabled = ft.use_state(True)
     export_disabled, set_export_disabled = ft.use_state(True)
-    mode, set_mode = ft.use_state("REALTIME")
-    strategies_loaded, set_strategies_loaded = ft.use_state(False)
-    strategy_options, set_strategy_options = ft.use_state(())
-    page_size, set_page_size = ft.use_state(50)
     history_tree_offset, set_history_tree_offset = ft.use_state(0)
     history_tree_items, set_history_tree_items = ft.use_state(())
     history_load_more_visible, set_history_load_more_visible = ft.use_state(False)
@@ -301,20 +277,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     ft.use_effect(_setup_task_manager, dependencies=[], cleanup=_cleanup_task_manager)
 
-    # --- 策略加载 (mount 时执行一次) ---
+    # --- 策略加载 (mount 时执行一次, R.2.6.1: VM.load_strategies 内聚) ---
 
     async def _load_strategies_async() -> None:
-        try:
-            strategies_with_dep = vm.strategy_mgr.get_all_with_dependencies()
-            options = _build_strategy_options(strategies_with_dep, vm.strategy_mgr)
-            set_strategy_options(tuple(options))
-            set_strategies_loaded(True)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error("[ScreenerView] Failed to load strategies: %s", e, exc_info=True)
-            set_status_msg(I18n.get("screener_load_failed"))
-            set_status_color(AppColors.ERROR)
+        vm.load_strategies()
 
     ft.use_effect(_load_strategies_async, dependencies=[])
 
@@ -330,20 +296,18 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     # --- 深度链接 (策略加载后执行 pending_strategy) ---
 
     async def _execute_pending_strategy() -> None:
-        if not strategies_loaded or not pending_strategy:
+        if not state.strategies_loaded or not pending_strategy:
             return
         key = pending_strategy
         set_pending_strategy(None)
-        # 验证策略存在
-        if not any(opt.key == key for opt in strategy_options):
+        # 验证策略存在 (R.2.6.1: 从 state.strategies_with_dep 检查)
+        if key not in state.strategies_with_dep:
             logger.warning("[ScreenerView] Pending strategy %s not found.", key)
             return
-        # 选中策略
-        set_selected_strategy(key)
-        desc, color = _build_strategy_desc(key, vm)
-        set_strategy_desc(desc)
-        set_strategy_desc_color(color)
-        set_tier_hint(_compute_tier_hint(key))
+        # 选中策略 (R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state)
+        vm.select_strategy(key)
+        # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
+        vm.update_strategy_desc(key)
         set_run_disabled(False)
         # 默认参数
         params_def = vm.get_strategy_params(key)
@@ -363,19 +327,18 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         except Exception as e:
             logger.error("[ScreenerView] Pending strategy execution failed: %s", e, exc_info=True)
 
-    ft.use_effect(_execute_pending_strategy, dependencies=[strategies_loaded, pending_strategy])
+    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy])
 
     # --- 事件 handler ---
 
     def _on_strategy_change(e: ft.ControlEvent) -> None:
         new_val = e.control.value if e and e.control else None
         UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
-        set_selected_strategy(new_val)
+        # R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state
+        vm.select_strategy(new_val)
         set_run_disabled(not new_val)
-        desc, color = _build_strategy_desc(new_val, vm)
-        set_strategy_desc(desc)
-        set_strategy_desc_color(color)
-        set_tier_hint(_compute_tier_hint(new_val))
+        # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
+        vm.update_strategy_desc(new_val)
         # 初始化参数默认值
         if new_val:
             params_def = vm.get_strategy_params(new_val)
@@ -389,12 +352,12 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             bump_params(_params_version + 1)
 
     async def _on_run_click(e: ft.ControlEvent) -> None:
-        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={selected_strategy}")
-        if not selected_strategy:
+        UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={state.selected_strategy}")
+        if not state.selected_strategy:
             return
         set_run_disabled(True)
         try:
-            await vm.run_strategy(selected_strategy, params=dict(params_ref.current or {}))
+            await vm.run_strategy(state.selected_strategy, params=dict(params_ref.current or {}))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -462,7 +425,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         try:
             new_size = int(e.control.value if e and e.control else 50)
             vm.change_page_size(new_size)
-            set_page_size(new_size)
         except (ValueError, TypeError):
             pass
 
@@ -478,9 +440,8 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             return
         new_mode = list(selected)[0]
         UILogger.log_action("ScreenerView", "Toggle", f"mode={new_mode}")
-        if new_mode == mode:
+        if new_mode == state.mode:
             return
-        set_mode(new_mode)
         if new_mode == "HISTORY":
             vm.switch_to_history()
             # 清空表格
@@ -542,10 +503,13 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             display = f"{ts[:4]}-{ts[4:6]}-{ts[6:]}" if len(ts) == 8 and ts.isdigit() else ts
         if run_id:
             label = f"#{run_id[:8]}"
+        elif strategy_name:
+            # translate_strategy_name 可能返回 None, 回退到原始 strategy_name (R.2.6.3: 保证 label 为 str)
+            label = translate_strategy_name(strategy_name) or strategy_name
         else:
-            label = translate_strategy_name(strategy_name) if strategy_name else I18n.get("screener_all_strategies")
-        set_status_msg(f"{display} / {label}")
-        set_status_color("blue")
+            label = I18n.get("screener_all_strategies")
+        # R.2.6.3: vm.set_history_viewing_status 内聚 status_message/color 到 VM state
+        vm.set_history_viewing_status(display, label)
         try:
             await vm.load_history_data(trade_date, strategy_name, run_id)
         except asyncio.CancelledError:
@@ -576,11 +540,9 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     def _on_slider_change(name: str, e: ft.ControlEvent) -> None:
         val = e.control.value if e and e.control else 0
         _update_param(name, val)
-        # 动态更新策略描述
-        if selected_strategy:
-            strategy_obj = vm.strategy_mgr.get_strategy(selected_strategy)
-            if strategy_obj and hasattr(strategy_obj, "get_dynamic_description"):
-                set_strategy_desc(strategy_obj.get_dynamic_description(dict(params_ref.current or {})))
+        # R.2.6.2: 动态更新策略描述 (vm.update_strategy_desc 用当前 params 重算 desc+color)
+        if state.selected_strategy:
+            vm.update_strategy_desc(state.selected_strategy, params=dict(params_ref.current or {}))
 
     async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
         try:
@@ -641,13 +603,9 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     # --- 派生渲染数据 ---
 
-    # 状态栏: 从 VM state.status_message 渲染
-    if state.status_message:
-        status_text_value = I18n.get(state.status_message.key, **state.status_message.params)
-        status_text_color = state.status_color or AppColors.TEXT_SECONDARY
-    else:
-        status_text_value = status_msg
-        status_text_color = status_color
+    # 状态栏: 从 VM state.status_message 渲染 (R.2.6.3: 单源真相, §3.2 VM 只产出 i18n key + params)
+    status_text_value = _render_status_message(state.status_message)
+    status_text_color = state.status_color or AppColors.TEXT_SECONDARY
 
     # 表格数据: 从 VM 读取当前页
     df = vm.get_current_page_data()
@@ -733,11 +691,11 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             )
 
         if p_type == "textarea":
-            if p_name == "ai_system_prompt" and selected_strategy:
+            if p_name == "ai_system_prompt" and state.selected_strategy:
                 from strategies.strategy_prompts import get_base_prompt
 
                 current_val = (
-                    params_ref.current.get(p_name) or get_base_prompt(selected_strategy) or p.get("default", "")
+                    params_ref.current.get(p_name) or get_base_prompt(state.selected_strategy) or p.get("default", "")
                 )
             else:
                 current_val = params_ref.current.get(p_name, p.get("default", ""))
@@ -767,14 +725,14 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                                         icon=ft.Icons.SAVE,
                                         style=ft.ButtonStyle(color=AppColors.PRIMARY),
                                         height=30,
-                                        on_click=lambda e, s=selected_strategy: _on_save_prompt(s),
+                                        on_click=lambda e, s=state.selected_strategy: _on_save_prompt(s),
                                     ),
                                     ft.TextButton(
                                         content=I18n.get("ai_reset_default"),
                                         icon=ft.Icons.RESTORE,
                                         style=ft.ButtonStyle(color=AppColors.TEXT_SECONDARY),
                                         height=30,
-                                        on_click=lambda e, s=selected_strategy: _on_restore_prompt(s),
+                                        on_click=lambda e, s=state.selected_strategy: _on_restore_prompt(s),
                                     ),
                                 ],
                             ),
@@ -792,10 +750,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         """构建策略参数面板。"""
         from ui.theme import PARAM_GROUP_ORDER
 
-        if not selected_strategy:
+        if not state.selected_strategy:
             return []
 
-        params_def = vm.get_strategy_params(selected_strategy)
+        params_def = vm.get_strategy_params(state.selected_strategy)
         if not params_def:
             return []
 
@@ -1041,7 +999,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     # --- 构建 UI ---
 
-    is_realtime = mode == "REALTIME"
+    is_realtime = state.mode == "REALTIME"
 
     # 1. 顶部控制区
     title_row = ft.Row(
@@ -1062,7 +1020,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                         icon=ft.Icon(ft.Icons.HISTORY),
                     ),
                 ],
-                selected=[mode],
+                selected=[state.mode],
                 on_change=_on_mode_change,
             ),
         ],
@@ -1070,10 +1028,11 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         spacing=10,
     )
 
+    # R.2.6.1: 从 state.strategies_with_dep 构建 Flet Options (每次渲染重新翻译, locale 切换自动刷新)
     strategy_dropdown = ft.Dropdown(
         label=I18n.get("select_strategy"),
-        options=list(strategy_options),
-        value=selected_strategy,
+        options=_build_strategy_options(state.strategies_with_dep, vm.strategy_mgr),
+        value=state.selected_strategy,
         on_select=_on_strategy_change,
         width=AppStyles.CONTROL_WIDTH_MD,
         text_size=14,
@@ -1087,12 +1046,18 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         [
             ft.Row([strategy_dropdown], spacing=10),
             ft.Text(
-                strategy_desc or I18n.get("screener_no_strategy_hint"),
+                state.strategy_desc or I18n.get("screener_no_strategy_hint"),
                 size=13,
-                color=strategy_desc_color,
+                color=_resolve_strategy_desc_color(state.strategy_desc_color),
                 no_wrap=False,
             ),
-            ft.Text(tier_hint or "", size=12, color=AppColors.WARNING, visible=tier_hint is not None, no_wrap=False),
+            ft.Text(
+                I18n.get(state.tier_hint) if state.tier_hint else "",
+                size=12,
+                color=AppColors.WARNING,
+                visible=state.tier_hint is not None,
+                no_wrap=False,
+            ),
             *_build_params_panel(),
         ],
         spacing=10,
@@ -1165,7 +1130,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             ft.Dropdown(
                 label=I18n.get("screener_page_size"),
                 options=_build_page_size_options(),
-                value=str(page_size),
+                value=str(state.page_size),
                 width=120,
                 dense=True,
                 text_size=13,

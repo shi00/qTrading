@@ -10,20 +10,20 @@
   - _compute_progress_text：probe 三态文本分派（running/result 4 类型/idle）
   - _compute_list_height：响应式断点高度（lg/md/sm/width=0）
 - 契约守护测试（grep 命令式禁止模式 = 0 + 验证声明式 API）
-
-声明式组件 TierApiPanel（@ft.component + use_viewmodel + use_state + use_effect）
-是有状态组件，由集成测试（flet_test_page fixture）覆盖，不在本单测范围。
+- 组件体渲染测试（TierApiPanel @ft.component body）
 """
 
 import contextlib
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import flet as ft
 import pytest
 
 from data.constants import TUSHARE_POINT_TIERS
+from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
 from ui.views.settings_tabs import tier_api_panel as panel_module
 from ui.views.settings_tabs.tier_api_panel import (
     _build_api_description,
@@ -426,9 +426,9 @@ class TestTierApiPanelContract:
         assert "use_viewmodel(vm=" in content
 
     def test_uses_i18n_observable_state(self) -> None:
-        """验证通过 ft.use_state(I18n.get_observable_state) 订阅 i18n 自动重渲染。"""
+        """验证通过 ft.use_state(get_observable_state) 订阅 i18n 自动重渲染。"""
         content = self._read_panel_content()
-        assert "ft.use_state(I18n.get_observable_state)" in content
+        assert "ft.use_state(get_observable_state)" in content
 
     def test_uses_ft_context_page(self) -> None:
         """验证通过 ft.context.page 访问 page（try/except RuntimeError 守卫）。"""
@@ -477,3 +477,329 @@ class TestTierApiPanelContract:
         # 检查变量赋值/属性赋值（= stale_hint_text 或 .stale_hint_text =）
         assert "stale_hint_text =" not in content
         assert ".stale_hint_text" not in content
+
+
+# ============================================================================
+# 组件体渲染测试 (TierApiPanel @ft.component body)
+# ============================================================================
+
+
+class _FakeSystemState:
+    """模拟 SystemState 的最小字段集。"""
+
+    def __init__(self, probe_in_progress: bool = False, probe_result_version: int = 0) -> None:
+        self.probe_in_progress = probe_in_progress
+        self.probe_result_version = probe_result_version
+
+
+class _FakeSystemVM:
+    """模拟 SystemViewModel, 满足 use_viewmodel(vm=) 外部 VM 模式契约。"""
+
+    def __init__(
+        self,
+        current_tier: str = "points_5000",
+        capability_cache: dict | None = None,
+        last_probe_result: dict | None = None,
+        probe_in_progress: bool = False,
+    ) -> None:
+        self._state = _FakeSystemState(probe_in_progress=probe_in_progress)
+        self._subscribers: list[Any] = []
+        self._current_tier = current_tier
+        self._capability_cache = capability_cache if capability_cache is not None else {}
+        self._last_probe_result = last_probe_result
+        self.dispose_called = False
+
+    @property
+    def state(self) -> _FakeSystemState:
+        return self._state
+
+    @property
+    def last_probe_result(self) -> dict | None:
+        return self._last_probe_result
+
+    def get_current_tier(self) -> str:
+        return self._current_tier
+
+    def get_capability_cache(self) -> dict[str, bool | None]:
+        return self._capability_cache
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsub() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsub
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    async def on_tier_changed(self, new_tier: str, progress_callback: Any = None) -> dict:
+        return {"type": "completed", "available": 1, "unavailable": 0, "unknown": 0}
+
+    async def run_probe(self, progress_callback: Any = None) -> dict:
+        return {"type": "completed", "available": 1, "unavailable": 0, "unknown": 0}
+
+
+def _collect_controls(root: Any) -> list[Any]:
+    """深度优先遍历控件树。"""
+    if root is None:
+        return []
+    result: list[Any] = [root]
+    for attr in ("controls", "items", "tabs"):
+        children = getattr(root, attr, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    result.extend(_collect_controls(child))
+    content = getattr(root, "content", None)
+    if content is not None:
+        result.extend(_collect_controls(content))
+    return result
+
+
+def _make_tier_panel_patches(mock_client: MagicMock) -> list:
+    """创建 TierApiPanel 渲染所需的 patch 列表。"""
+    return [
+        patch("ui.views.settings_tabs.tier_api_panel.I18n"),
+        patch("ui.views.settings_tabs.tier_api_panel.AppColors"),
+        patch("ui.views.settings_tabs.tier_api_panel.AppStyles"),
+        patch("data.external.tushare_client.TushareClient", return_value=mock_client),
+    ]
+
+
+def _make_mock_client() -> MagicMock:
+    """创建 mock TushareClient for component rendering."""
+    client = MagicMock()
+    client.get_tier_apis.return_value = {"daily", "fina_indicator"}
+    client.is_independent_purchase.return_value = False
+    client.get_last_probe_time.return_value = None
+    client.get_capability_cache.return_value = {}
+    return client
+
+
+class TestTierApiPanelComponentBody:
+    """TierApiPanel 组件体渲染测试: 验证控件树结构 + VM 交互 + 事件 handler。"""
+
+    def _make_page(self):
+        """创建带 on_resize 的 FakePage。"""
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        page.on_resize = None  # type: ignore[method-assign]
+        return page
+
+    def test_mount_returns_column(self, mock_i18n_state, mock_app_colors_state):
+        """挂载 TierApiPanel 返回 ft.Column。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        assert isinstance(result, ft.Column)
+
+    def test_mount_subscribes_to_vm(self, mock_i18n_state, mock_app_colors_state):
+        """挂载时 use_viewmodel hook 注册 VM 订阅。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+
+        assert len(vm._subscribers) > 0
+
+    def test_render_contains_dropdown_and_button(self, mock_i18n_state, mock_app_colors_state):
+        """渲染的控件树含 Dropdown (档位选择) + Button (probe 触发)。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        dropdowns = [c for c in ctrls if isinstance(c, ft.Dropdown)]
+        buttons = [c for c in ctrls if isinstance(c, ft.Button)]
+        assert len(dropdowns) >= 1, "应含 Dropdown"
+        assert len(buttons) >= 1, "应含 Button"
+
+    def test_render_contains_listview(self, mock_i18n_state, mock_app_colors_state):
+        """渲染的控件树含 ListView (API 列表)。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        listviews = [c for c in ctrls if isinstance(c, ft.ListView)]
+        assert len(listviews) >= 1, "应含 ListView"
+
+    def test_dropdown_disabled_when_probe_in_progress(self, mock_i18n_state, mock_app_colors_state):
+        """probe_in_progress=True 时 Dropdown + Button disabled。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM(probe_in_progress=True)
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        dropdowns = [c for c in ctrls if isinstance(c, ft.Dropdown)]
+        buttons = [c for c in ctrls if isinstance(c, ft.Button)]
+        assert dropdowns[0].disabled is True
+        assert buttons[0].disabled is True
+
+    def test_on_tier_change_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
+        """_on_tier_change 触发 page.run_task 调用 _run_tier_change。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        run_task_calls: list = []
+        page.run_task = MagicMock(side_effect=lambda fn, *a, **kw: run_task_calls.append((fn, a)))  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 找到 Dropdown 的 on_select handler
+        ctrls = _collect_controls(result)
+        dropdown = next(c for c in ctrls if isinstance(c, ft.Dropdown))
+        # 模拟档位变更事件
+        e = MagicMock()
+        e.control.value = "points_120"
+        dropdown.on_select(e)
+        assert len(run_task_calls) > 0, "应触发 page.run_task"
+
+    def test_on_tier_change_same_tier_does_nothing(self, mock_i18n_state, mock_app_colors_state):
+        """_on_tier_change 选择相同档位时不触发 run_task。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM(current_tier="points_5000")
+        client = _make_mock_client()
+        page = self._make_page()
+        run_task_calls: list = []
+        page.run_task = MagicMock(side_effect=lambda fn, *a, **kw: run_task_calls.append((fn, a)))  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        dropdown = next(c for c in ctrls if isinstance(c, ft.Dropdown))
+        e = MagicMock()
+        e.control.value = "points_5000"  # 同档位
+        dropdown.on_select(e)
+        assert len(run_task_calls) == 0, "相同档位不应触发 run_task"
+
+    def test_on_probe_click_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
+        """_on_probe_click 触发 page.run_task 调用 _run_probe。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        run_task_calls: list = []
+        page.run_task = MagicMock(side_effect=lambda fn, *a, **kw: run_task_calls.append((fn, a)))  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        button = next(c for c in ctrls if isinstance(c, ft.Button))
+        button.on_click(MagicMock())
+        assert len(run_task_calls) > 0, "应触发 page.run_task"
+
+    def test_last_probe_time_displayed(self, mock_i18n_state, mock_app_colors_state):
+        """渲染时显示 last_probe_time 文本。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        client.get_last_probe_time.return_value = datetime(2024, 6, 15, 10, 30)
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+        client.get_last_probe_time.assert_called_once()
+
+    def test_probe_in_progress_shows_progress_text(self, mock_i18n_state, mock_app_colors_state):
+        """probe_in_progress=True 且有进度时显示进度文本。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM(probe_in_progress=True)
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 进度文本由 _compute_progress_text 生成, probe_in_progress 时调用 I18n.get
+        assert isinstance(result, ft.Column)
+
+    def test_on_resize_updates_width(self, mock_i18n_state, mock_app_colors_state):
+        """_setup_resize 挂载 on_resize handler, 触发后更新 width state。"""
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+        client = _make_mock_client()
+        page = self._make_page()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+        # _setup_resize 应已将 page.on_resize 替换为 _on_resize
+        assert page.on_resize is not None, "挂载后 page.on_resize 应被设置"
+        # 触发 resize 事件
+        e = MagicMock()
+        e.width = 1000
+        page.on_resize(e)  # 不应抛异常

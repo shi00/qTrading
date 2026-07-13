@@ -3,6 +3,8 @@
 感谢你考虑为 AStockScreener 做贡献！本文档分为三部分：人类贡献者指南、开发环境与命令参考、实现规范手册。
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
+>
+> **对应版本**：0.9.0，最后校对：2026-07-13（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
 
 ## 目录
 
@@ -11,6 +13,7 @@
   - [如何贡献](#如何贡献)
   - [Pull Request 流程](#pull-request-流程)
   - [代码审查与合并](#代码审查与合并)
+  - [Git 工作流与分支策略](#git-工作流与分支策略)
 - [第二部分：开发环境与命令参考](#第二部分开发环境与命令参考)
   - [前置要求](#前置要求)
   - [安装步骤](#安装步骤)
@@ -113,12 +116,139 @@
 
 ### 合并策略
 
-我们使用 **Merge Queue** 确保合并安全：
+我们使用 **Merge Queue** 确保合并安全（合并方式为 **Squash Merge**，保持 main 历史干净，详见下节「Git 工作流与分支策略」）：
 
 1. PR 获得批准后，点击 "Ready for review" → "Merge when ready"
 2. 系统会自动将 PR 加入合并队列
 3. 在队列中会与 main 最新代码组合后重新运行 CI
 4. 通过后自动合并
+
+## Git 工作流与分支策略
+
+> 对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)。本节承接宪法中关于 git 隔离开发的强制要求，提供分支模型、命名规范、worktree 标准流程。与 superpowers `using-git-worktrees` / `finishing-a-development-branch` skill 联动。
+
+### 分支模型：GitHub Flow
+
+项目采用 **GitHub Flow**：单一长期分支 `main` + 短命 feature 分支。不引入 Git Flow 的 `develop`/`release`/`hotfix` 多长期分支（违反 YAGNI）。
+
+```text
+main (受保护，禁止直接 push)
+  ├── feature/strategy-macd   ── PR ── Squash Merge ──┐
+  ├── fix/dao-memory-leak     ── PR ── Squash Merge ──┤
+  └── refactor/cache-layer    ── PR ── Squash Merge ──┘
+                                                       ↓
+                                                    main 推进
+```
+
+例外：发布冻结期可临时使用 `release/<version>` 分支，发布后立即删除，不长期保留。
+
+### 分支命名规范
+
+格式：`<type>/<scope>-<short-desc>`，`type` 复用「提交信息规范」类型，保持一致：
+
+| 类型 | 用途 | 示例 |
+|------|------|------|
+| `feature/` | 新功能 | `feature/strategy-macd` |
+| `fix/` | Bug 修复 | `fix/dao-memory-leak` |
+| `refactor/` | 重构（不改行为） | `refactor/cache-layer` |
+| `docs/` | 文档更新（多文件） | `docs/api-reference` |
+| `test/` | 测试补强 | `test/dao-coverage` |
+| `chore/` | 构建/工具/依赖 | `chore/upgrade-flet` |
+| `perf/` | 性能优化 | `perf/data-loader-batch` |
+| `ci/` | CI 配置 | `ci/add-coverage-check` |
+
+约束：
+- 全小写，单词用 `-` 分隔，禁用下划线/中文
+- 长度 ≤ 50 字符
+- 语义清晰可检索
+
+### Worktree 强制使用
+
+**强制场景**（违反即 R18）：
+- 新特性开发（涉及新增文件或多文件改动）
+- 重构任务（跨文件结构调整）
+- 实验性探索（不确定是否合并的工作）
+- AI 助手驱动的多步骤实现任务（配合 superpowers `using-git-worktrees` skill 自动触发）
+
+**豁免场景**：
+- 单文件文档纯改（如仅改 README.md 一处）
+- 单行修复（typo、配置值修正）
+- bug 复现脚本（临时一次性代码）
+- 已在 `.worktrees/<branch>/` 内的开发（已满足隔离）
+
+### 标准工作流
+
+完整生命周期（与 superpowers skill 对齐）：
+
+```bash
+# 1. 创建 worktree（默认 .worktrees/<branch-name>/，已在 .gitignore）
+git worktree add .worktrees/feature-strategy-macd -b feature/strategy-macd
+cd .worktrees/feature-strategy-macd
+
+# 2. 项目 setup（Python 项目）
+uv sync                                    # 或 pip install -e .
+pre-commit install                         # 安装 git hooks
+
+# 3. 基线测试验证（确保起点干净）
+ruff check . && ruff format --check . && pyright
+python -m pytest tests/unit/ -v -m "not slow"
+
+# 4. 开发（遵循 TDD：先写测试，再写实现，每步 commit）
+#    提交遵循「提交信息规范」+ 原子提交原则（见下节）
+
+# 5. 完成后跑完整门禁
+pre-commit run --all-files
+python -m pytest tests/unit/ -v -m "not slow"
+
+# 6. 推送并创建 PR
+git push -u origin feature/strategy-macd
+gh pr create --title "feat(strategy): add MACD crossover" --body "..."
+
+# 7. PR 通过 Merge Queue 合并后，清理 worktree（回主工作区执行）
+cd ../..  # 回主仓库根
+git worktree remove .worktrees/feature-strategy-macd
+git worktree prune
+git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
+```
+
+> 详细决策流程（merge/PR/keep/discard 四选项）由 superpowers `finishing-a-development-branch` skill 提供，AI 助手在任务完成时自动触发。
+
+### 原子提交
+
+每次提交应满足：
+- **可独立构建**：任意 commit checkout 后都能通过 `ruff check` + `pyright`
+- **单一职责**：一次提交只做一件事（新功能 / 修复 / 重构二选一，不混合）
+- **测试先行**：实现代码与对应测试同一 commit 提交（TDD RED→GREEN 中的 GREEN 步）
+- **可回滚**：单个 commit 可通过 `git revert` 安全回滚，不影响其他功能
+
+反例（禁止）：
+```bash
+# ❌ 混合多事
+git commit -m "feat: add MACD + fix login bug + rename utils"
+# ❌ 实现与测试分离
+git commit -m "feat: add MACD"          # 只有实现
+git commit -m "test: add MACD tests"    # 测试滞后
+# ❌ 编译失败的中间态
+git commit -m "wip: refactor in progress"
+```
+
+### 长期分支禁令（软规范）
+
+Feature 分支存活建议 ≤ 7 天。超期需评估：
+- 拆分为更小的 PR 分批合并
+- 或显式标注为长任务，在 PR 描述中说明原因
+
+避免长期分支与 main 漂移过大导致合并冲突爆炸。
+
+### 与现有流程的关系
+
+| 流程 | 文档位置 | 与本节关系 |
+|------|---------|-----------|
+| Conventional Commits | 「提交信息规范」 | 分支 type 与 commit type 对齐 |
+| PR 流程 | 「Pull Request 流程」 | worktree 完成后进入 PR 阶段 |
+| Merge Queue + Squash | 「合并策略」 | 本节规定的合并方式 |
+| CODEOWNERS | 「代码审查与合并」 | 关键路径强制审查 |
+| pre-commit | 「代码风格基础」 | 提交前质量门禁 |
 
 ---
 
@@ -727,7 +857,7 @@ V1 引入的 breaking changes 已通过 `pyright` 与运行期 TypeError/Attribu
 
 V0→V1 兼容垫片（PageRefMixin / 旧 mock 全局桩）已全部删除。测试侧改用 `conftest._v1_page_compat` fixture 兼容未挂载控件的 `update()`/`page` 访问。
 
-> **V1 永久方案（非垫片）**：[`refresh_dropdown_options()`](./ui/i18n.py) 不是兼容垫片，而是 V1 渲染管线针对命令式 `page.update()` 批量更新的永久解决方案。**声明式下不再需要**（options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化）。所有命令式控件重写为声明式后，该函数随之删除。
+> **`refresh_dropdown_options()` 状态**：已在 Phase R.4.1 删除。声明式 UI 下 options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化，该函数不再需要。
 
 ### V1 声明式 UI 开发规范
 
@@ -744,7 +874,7 @@ V0→V1 兼容垫片（PageRefMixin / 旧 mock 全局桩）已全部删除。测
 | 状态 | 实例属性 + 手动 `self.update()` | `use_state` 状态变更自动重渲染 |
 | 生命周期/副作用 | `did_mount`/`will_unmount` | `use_effect(setup, dependencies, cleanup)` |
 | i18n 热切换 | `I18n.subscribe`/`unsubscribe` + `refresh_locale` + 手动刷新 | locale 作为声明式状态源，切换自动重渲染（不再手动订阅/刷新） |
-| 下拉刷新 | `refresh_dropdown_options` 两步 update 绕过 | 状态驱动重建 options，绕过随之删除 |
+| 下拉刷新 | ~~`refresh_dropdown_options` 两步 update 绕过~~（已删除） | 状态驱动重建 options，自动绕过 |
 | 响应式 | `handle_resize` 鸭子分发 + 断点手算 | 窗口尺寸作为 state/observable + `ResponsiveRow`，状态驱动布局 |
 | page 引用 | `PageRefMixin` 覆写只读 `control.page` | 组件内经官方上下文机制或事件 `e.page` 获取，垫片已删除 |
 | ViewModel 消费 | `on_update`/`on_log` 回调注入 + View 持有 VM | `use_viewmodel(factory) -> (state, commands)`，View 只读 state + 调 commands（见 [MVVM 表现层](#mvvm-表现层)） |
@@ -788,7 +918,7 @@ def MetricCard(label_key: str):
 
 - **i18n**：locale 作为声明式状态源。组件通过 `use_state` 订阅 `I18n` 的 locale 变化（或在父组件统一管理 locale state，子组件经 props 接收），切换时自动重渲染。**不再**手动 `subscribe`/`refresh_locale`。**ViewModel state 不含 locale**——VM 只产出 i18n key（如 `"screener.run"`），View 渲染时按当前 locale 解析；locale 切换由 View 层独立状态源驱动重渲染，不需要 VM 参与或通知。
 - **响应式**：窗口尺寸作为 `use_state`（由根组件订阅 `page.on_resize` 更新），通过 props 下发；视图内用 `ResponsiveRow` + `col` 配置，状态驱动布局。**不再**实现 `handle_resize` 鸭子分发。
-- **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数在声明式下不再需要，存量命令式控件改造后随之删除。
+- **下拉刷新**：options 由 state 派生，`use_state` 触发重建即自动绕过 V1 `Prop.__set__` 值相等优化。`refresh_dropdown_options()` 工具函数已在 Phase R.4.1 删除（声明式下不再需要）。
 
 #### 5. ViewModel 消费（MVVM 桥接）
 
@@ -818,7 +948,7 @@ def ScreenerView():
 
 - View 只做两件事：读 `state` 渲染控件树、事件调 `vm.command()`
 - VM 不得出现在 View 的 `use_state`/`use_effect` 之外的任何地方；不持有 VM 引用做副作用
-- `use_viewmodel` hook 已实现（见 CLAUDE.md §3.3 已知技术债），新 UI 必须通过本 hook 消费 ViewModel
+- `use_viewmodel` hook 已实现（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)），新 UI 必须通过本 hook 消费 ViewModel
 - 7 个 ViewModel 已全部迁移为 `use_viewmodel` 范式，新代码必须沿用
 
 #### 6. 迁移约束
@@ -826,7 +956,7 @@ def ScreenerView():
 - **所有命令式 UI 代码已全面重写为声明式**（CLAUDE.md §1.4 UI 迁移例外）：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已全部重写为 `@ft.component` + `use_viewmodel` 声明式范式。
 - `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
 - async 窗口/控件方法必须 `await`。
-- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法属存量技术债，全面重写后删除。
+- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法已全面重写完成，命令式控件已删除（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）。
 
 ### 依赖管理
 
@@ -862,7 +992,7 @@ def ScreenerView():
 
 **优先级（冲突时前者覆盖后者）**：
 
-1. [CLAUDE.md](./CLAUDE.md)（红线 R1~R17、架构边界、交互准则）
+1. [CLAUDE.md](./CLAUDE.md)（红线 R1~R18、架构边界、交互准则）
 2. 本文件（CONTRIBUTING.md，项目实现规范）
 3. [`man/flet-best-practices.md`](./man/flet-best-practices.md)（通用 Flet v1 参考）
 
@@ -1178,8 +1308,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 |------|---------|---------------|--------------|
 | **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
-| **P3** | **命令式 UI 存量需整改为声明式** | 现有 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型，命令式视为技术债。 | 独立重构主线：按视图切分逐个改造为 `@ft.component` + `use_state`/`use_effect`；i18n 九规范、响应式九规范、`PageRefMixin`、`refresh_dropdown_options` 等命令式绕过随改造删除。整改工作量大，作为独立任务排期。当前状态：独立重构任务。 |
-| **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R17 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
+| ~~P3~~ | ~~**命令式 UI 存量需整改为声明式**~~ **[已收官]** | 原 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型。 | Phase A-H 声明式迁移已收官（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：所有 View/Tab/Component 已重写为 `@ft.component` + `use_viewmodel` 范式；`PageRefMixin`/`v1_compat.py` 兼容垫片已删除；`refresh_dropdown_options` 已在 Phase R.4.1 删除（生产零调用）。 |
+| **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R18 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
 
 ---
 

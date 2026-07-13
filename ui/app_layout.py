@@ -18,11 +18,10 @@
 import asyncio
 import logging
 from enum import IntEnum
-from typing import Any
 
 import flet as ft
 
-from ui.i18n import I18n
+from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
@@ -57,25 +56,50 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _build_view(tab_index: int) -> ft.Control:
-    """根据 tab 索引构造子视图 (直接函数调用, 不缓存实例)。
+@ft.component
+def _build_pages_stack(current_tab: int) -> ft.Stack:
+    """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
-    声明式范式: 每次重渲染重新构造子视图, 由 Flet diff 算法决定实际 DOM 更新。
+    项目内存硬约束 #34: state-driven rendering (ft.Stack + visible prop)
+    替代条件渲染 (if/else 创建不同控件)。所有页面控件预先创建并放入 Stack,
+    通过 ``visible`` prop 切换显示, 不再动态创建/销毁控件。
+
+    声明式范式: 每次重渲染重新构造控件树, 由 Flet diff 算法决定实际 DOM 更新。
     子视图内部用 ``use_state``/``use_viewmodel`` 持久化自身状态, 重建不丢失。
     """
-    if tab_index == NavTabs.MARKET:
-        return HomeView()
-    if tab_index == NavTabs.SCREENER:
-        return ScreenerView()
-    if tab_index == NavTabs.BACKTEST:
-        return BacktestView()
-    if tab_index == NavTabs.DATA:
-        return DataExplorerView()
-    if tab_index == NavTabs.TASKS:
-        return TaskCenterView()
-    if tab_index == NavTabs.SETTINGS:
-        return SettingsView()
-    return ft.Text(I18n.get("view_unknown"))
+    pages = [
+        ft.Container(
+            content=HomeView(),
+            expand=True,
+            visible=current_tab == NavTabs.MARKET,
+        ),
+        ft.Container(
+            content=ScreenerView(),
+            expand=True,
+            visible=current_tab == NavTabs.SCREENER,
+        ),
+        ft.Container(
+            content=BacktestView(),
+            expand=True,
+            visible=current_tab == NavTabs.BACKTEST,
+        ),
+        ft.Container(
+            content=DataExplorerView(),
+            expand=True,
+            visible=current_tab == NavTabs.DATA,
+        ),
+        ft.Container(
+            content=TaskCenterView(),
+            expand=True,
+            visible=current_tab == NavTabs.TASKS,
+        ),
+        ft.Container(
+            content=SettingsView(),
+            expand=True,
+            visible=current_tab == NavTabs.SETTINGS,
+        ),
+    ]
+    return ft.Stack(pages, expand=True)
 
 
 def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
@@ -115,7 +139,7 @@ def AppLayout() -> ft.Container:
     - 异步任务: ``page.run_task`` 调度; R2 CancelledError 必须 raise
     """
     # --- Subscribe to i18n + theme changes (auto-rerender) ---
-    ft.use_state(I18n.get_observable_state)
+    ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
     # --- Pure UI state ---
@@ -147,31 +171,28 @@ def AppLayout() -> ft.Container:
         set_nav_collapsed(not nav_collapsed)
 
     # --- Resize 处理 (use_effect + page.on_resize, 防抖 + state 更新) ---
+    # debounce_task 用 use_ref 持有（跨 re-render 持久 + cleanup 可访问，非命令式控件实例）
+    debounce_task_ref = ft.use_ref(None)
+
     def _setup_resize() -> None:
         page = _get_page()
         if page is None:
             return
 
-        # 防抖任务跟踪 (闭包变量, effect 只运行一次, 跨 resize 事件持久)
-        # page.run_task 返回 Future, 用 Any 注解避免 pyright 协变/逆变推断冲突
-        debounce_task: Any = None
-
         async def _do_resize(width: float, height: float) -> None:
-            nonlocal debounce_task
             try:
                 await asyncio.sleep(RESIZE_DEBOUNCE_MS / 1000)
             except asyncio.CancelledError:
                 raise  # R2: 必须传播
             set_window_size((width, height))
-            debounce_task = None
+            debounce_task_ref.current = None
 
         def _on_resize(e: ft.ControlEvent) -> None:
-            nonlocal debounce_task
-            if debounce_task is not None:
-                debounce_task.cancel()
+            if debounce_task_ref.current is not None:
+                debounce_task_ref.current.cancel()
             width = float(getattr(e, "width", 0) or 0)
             height = float(getattr(e, "height", 0) or 0)
-            debounce_task = page.run_task(_do_resize, width, height)
+            debounce_task_ref.current = page.run_task(_do_resize, width, height)
 
         page.on_resize = _on_resize
 
@@ -179,6 +200,9 @@ def AppLayout() -> ft.Container:
         page = _get_page()
         if page is not None:
             page.on_resize = None
+        if debounce_task_ref.current is not None:
+            debounce_task_ref.current.cancel()
+            debounce_task_ref.current = None
 
     ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
 
@@ -231,7 +255,7 @@ def AppLayout() -> ft.Container:
     )
 
     body = ft.Container(
-        content=_build_view(int(current_tab)),
+        content=_build_pages_stack(int(current_tab)),
         expand=True,
         padding=20,
         bgcolor=AppColors.BACKGROUND,

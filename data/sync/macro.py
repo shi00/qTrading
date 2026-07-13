@@ -477,9 +477,10 @@ class MacroSyncStrategy(ISyncStrategy):
                     # 已知限制：LPR 发布日若为非工作日（周末），因 shibor 主表无该日行，该 LPR 数据会丢失；
                     # 下次同步时 LPR API 仍返回该日数据，但 shibor 主表仍无该日行，数据持续丢失。
                     # ceiling: 月频 LPR 单次丢失最多 1 条/月. upgrade: 改用独立 upsert 按 date 主键写入.
-                    common_dates = set(df["date"]).intersection(set(lpr_df["date"]))
+                    # R17（迁移 0015）：shibor/shibor_lpr API 返回经 _COLUMN_RENAMES 重命名后，date → record_date
+                    common_dates = set(df["record_date"]).intersection(set(lpr_df["record_date"]))
                     if common_dates:
-                        df = df.merge(lpr_df, on="date", how="left")
+                        df = df.merge(lpr_df, on="record_date", how="left")
                     else:
                         logger.debug("[MacroSync] Shibor | LPR dates do not intersect shibor dates, skipping LPR merge")
                 count = await self.dao.save_shibor_daily(df)
