@@ -18,7 +18,7 @@ repos:
       - id: type-ignore-reason
         name: Check type:ignore has reason
         entry: >-
-          python -c "import sys,re;[sys.exit(1) for f in sys.argv[1:] for line in open(f,encoding='utf-8').readlines() if re.search(r'# type: ignore$', line.rstrip())]"
+          python -c "import sys,re;[sys.exit(1) for f in sys.argv[1:] for line in open(f,encoding='utf-8').readlines() if re.search(r'# type: ?ignore(\s+#|$)', line.rstrip())]"
         language: system
         types_or: [ python, pyi ]
 

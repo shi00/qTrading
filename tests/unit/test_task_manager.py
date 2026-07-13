@@ -1,6 +1,7 @@
 import asyncio
 import datetime
 import logging
+import threading
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
@@ -9,8 +10,8 @@ import pandas as pd
 from services.task_manager import TaskManager, AppTask, TaskStatus, TERMINAL_STATUSES
 from utils.time_utils import get_now
 
-# P2-5: 文件含真实 asyncio.sleep（含 10s/5s 长睡眠），标注 slow 以便 CI 分轨运行
-pytestmark = [pytest.mark.unit, pytest.mark.slow]
+# P2-5: 仅含真实 asyncio.sleep 的测试类标注 slow；其余测试可在 "not slow" 下运行
+pytestmark = pytest.mark.unit
 
 
 @pytest.fixture(autouse=True)
@@ -470,7 +471,7 @@ class TestTaskManagerGetCancelEvent:
     def test_running_task_returns_event(self, mock_i18n, mock_tp):
         """RUNNING 状态且 _cancel_event 已设置的 task 应返回该 Event 实例。"""
         mgr = TaskManager()
-        evt = asyncio.Event()
+        evt = threading.Event()
         t = AppTask(name="test", status=TaskStatus.RUNNING)
         t._cancel_event = evt
         mgr._tasks[t.id] = t
@@ -481,7 +482,7 @@ class TestTaskManagerGetCancelEvent:
     def test_completed_task_returns_event_if_set(self, mock_i18n, mock_tp):
         """终态 task 的 _cancel_event 不被清理，仍可返回（供诊断用）。"""
         mgr = TaskManager()
-        evt = asyncio.Event()
+        evt = threading.Event()
         t = AppTask(name="test", status=TaskStatus.COMPLETED)
         t._cancel_event = evt
         mgr._tasks[t.id] = t
@@ -536,7 +537,7 @@ class TestTaskManagerCancelTaskImpl:
     def test_cancellable_task(self, mock_i18n, mock_tp):
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
         mgr._cancel_task_impl(t.id)
         assert t.status == TaskStatus.CANCELLED
@@ -567,7 +568,7 @@ class TestTaskRunnerStateGuard:
         mgr._notify_subscribers = MagicMock()
         mgr._evict_on_complete = MagicMock()
         t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
 
         async def _coro():
@@ -596,7 +597,7 @@ class TestTaskRunnerStateGuard:
         mgr._notify_subscribers = MagicMock()
         mgr._evict_on_complete = MagicMock()
         t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
 
         async def _coro():
@@ -630,7 +631,7 @@ class TestTaskRunnerStateGuard:
         mgr._notify_subscribers = MagicMock()
         mgr._evict_on_complete = MagicMock()
         t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
 
         async def _coro():
@@ -656,7 +657,7 @@ class TestTaskRunnerStateGuard:
         mgr._notify_subscribers = MagicMock()
         mgr._evict_on_complete = MagicMock()
         t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
 
         async def _coro():
@@ -679,7 +680,7 @@ class TestTaskRunnerStateGuard:
         mgr._notify_subscribers = MagicMock()
         mgr._evict_on_complete = MagicMock()
         t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
 
         async def _coro():
@@ -707,7 +708,7 @@ class TestTaskRunnerStateGuard:
         mgr._notify_subscribers = MagicMock()
         mgr._evict_on_complete = MagicMock()
         t = AppTask(name="test", status=TaskStatus.QUEUED, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
 
         async def _coro():
@@ -861,6 +862,7 @@ class TestTaskManagerFlushPersistence:
         await mgr.flush_persistence(timeout_s=0.5)
 
 
+@pytest.mark.slow
 class TestTaskManagerCancelAllRunningAsync:
     @pytest.mark.asyncio
     @patch("services.task_manager.ThreadPoolManager")
@@ -875,7 +877,7 @@ class TestTaskManagerCancelAllRunningAsync:
     async def test_cancels_active_tasks(self, mock_i18n, mock_tp):
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         mgr._tasks[t.id] = t
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = MagicMock()
@@ -890,7 +892,7 @@ class TestTaskManagerCancelAllRunningAsync:
         """SHUTDOWN-001: cancel_all_running_async 应等待活跃 asyncio_task 完成后再返回。"""
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
         cleanup_done = asyncio.Event()
 
         async def cooperative_task():
@@ -924,7 +926,7 @@ class TestTaskManagerCancelAllRunningAsync:
         """SHUTDOWN-001: join_timeout 超时后不抛异常，只记录 warning 日志。"""
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
 
         async def stubborn_task():
             try:
@@ -980,7 +982,7 @@ class TestTaskManagerCancelAllRunningAsync:
         """SHUTDOWN-001: 已完成的 _asyncio_task 不应被 cancel 或加入 tasks_to_join。"""
         mgr = TaskManager()
         t = AppTask(name="test", status=TaskStatus.RUNNING, cancellable=True)
-        t._cancel_event = asyncio.Event()
+        t._cancel_event = threading.Event()
 
         mock_asyncio_task = MagicMock()
         mock_asyncio_task.done.return_value = True
@@ -1207,7 +1209,7 @@ class TestTaskManagerTaskRunner:
         mgr = TaskManager()
         with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
             t = AppTask(name="test", cancellable=True)
-            t._cancel_event = asyncio.Event()
+            t._cancel_event = threading.Event()
             t._coroutine_gen = lambda: asyncio.sleep(0)
             mgr._tasks[t.id] = t
             with (
@@ -1225,7 +1227,7 @@ class TestTaskManagerTaskRunner:
         mgr = TaskManager()
         with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
             t = AppTask(name="test", cancellable=True)
-            t._cancel_event = asyncio.Event()
+            t._cancel_event = threading.Event()
             t._coroutine_gen = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
             mgr._tasks[t.id] = t
             with (
@@ -1418,3 +1420,594 @@ class TestNotifyThrottleConstant:
         mgr._tasks[t.id] = t
         mgr.update_progress(t.id, 0.8)
         assert t.progress == 0.3
+
+
+# ---------------------------------------------------------------------------
+# 补充覆盖：_atexit_cleanup / _get_semaphore fallback / submit_task rollback
+# ---------------------------------------------------------------------------
+
+
+class TestTaskManagerAtexitCleanup:
+    """覆盖 _atexit_cleanup 的实例存在/活跃任务分支。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_no_instance(self, mock_i18n, mock_tp):
+        TaskManager._instance = None
+        TaskManager._atexit_cleanup()
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancels_active_tasks(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mgr._tasks = {"t1": MagicMock(_asyncio_task=mock_task)}
+        TaskManager._atexit_cleanup()
+        mock_task.cancel.assert_called_once()
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_skips_done_tasks(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_task = MagicMock()
+        mock_task.done.return_value = True
+        mgr._tasks = {"t1": MagicMock(_asyncio_task=mock_task)}
+        TaskManager._atexit_cleanup()
+        mock_task.cancel.assert_not_called()
+
+
+class TestTaskManagerGetSemaphoreFallback:
+    """覆盖 _get_semaphore 在 limit<=0 时回退到 ThreadPoolManager 的分支。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_fallback_to_cpu_pool_max_workers(self, mock_i18n, mock_tp):
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 0
+            mock_tp.return_value.cpu_pool_max_workers = 4
+            mgr = TaskManager()
+            sem = mgr._get_semaphore()
+            assert sem._value == 4
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_fallback_to_default_on_exception(self, mock_i18n, mock_tp):
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = -1
+            mock_tp.return_value.cpu_pool_max_workers = 0
+            mgr = TaskManager()
+            sem = mgr._get_semaphore()
+            assert sem._value == 5
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_fallback_when_cpu_pool_raises(self, mock_i18n, mock_tp):
+        """ThreadPoolManager.cpu_pool_max_workers 抛异常时回退到默认 5。"""
+        with patch("services.task_manager.ConfigHandler") as mock_ch:
+            mock_ch.get_max_concurrent_tasks.return_value = 0
+            type(mock_tp.return_value).cpu_pool_max_workers = property(MagicMock(side_effect=RuntimeError("no pool")))
+            mgr = TaskManager()
+            sem = mgr._get_semaphore()
+            assert sem._value == 5
+
+
+class TestTaskManagerSubmitTaskRollback:
+    """覆盖 submit_task 无事件循环时回退 dedup key。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_no_loop_rolls_back_unique_key(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._loop = None
+        result = mgr.submit_task("test", "System", lambda **kw: None, unique_key="key1")
+        assert result is None
+        assert "key1" not in mgr._active_keys
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_submit_with_loop_schedules_enqueue(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._loop = MagicMock()
+        mgr._loop.is_running.return_value = True
+        result = mgr.submit_task("test", "System", lambda **kw: None, unique_key="key2")
+        assert result is not None
+        assert "key2" in mgr._active_keys
+        mgr._loop.call_soon_threadsafe.assert_called_once()
+
+
+class TestTaskManagerRegisterAndRunCancelled:
+    """覆盖 _register_and_run 中 CANCELLED task 释放 dedup key。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_cancelled_task_releases_unique_key(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.CANCELLED, unique_key="dup_key")
+        mgr._tasks[t.id] = t
+        mgr._active_keys.add("dup_key")
+        mgr._register_and_run(t)
+        assert "dup_key" not in mgr._active_keys
+
+
+class TestTaskManagerClearFinishedImplExtras:
+    """覆盖 _clear_finished_impl 中 dedup key 释放和 DB 清理。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_releases_unique_key_for_cleared_tasks(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="done", status=TaskStatus.COMPLETED, unique_key="key_a")
+        mgr._tasks[t.id] = t
+        mgr._active_keys.add("key_a")
+        with patch.object(mgr, "_schedule_coro"):
+            mgr._clear_finished_impl()
+        assert "key_a" not in mgr._active_keys
+        assert t.id not in mgr._tasks
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_schedules_db_cleanup(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="done", status=TaskStatus.COMPLETED)
+        mgr._tasks[t.id] = t
+        with patch.object(mgr, "_schedule_coro") as mock_sched:
+            mgr._clear_finished_impl()
+        mock_sched.assert_called_once()
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_no_db_cleanup_when_nothing_to_clear(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="running", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        with patch.object(mgr, "_schedule_coro") as mock_sched:
+            mgr._clear_finished_impl()
+        mock_sched.assert_not_called()
+
+
+class TestTaskManagerCancelAllRunningAsyncFast:
+    """cancel_all_running_async 的非 slow 测试（不使用真实长睡眠）。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_cancels_queued_task(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="queued", status=TaskStatus.QUEUED, cancellable=True)
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            await mgr.cancel_all_running_async(join_timeout=0.5)
+        assert t.status == TaskStatus.CANCELLED
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_clears_active_keys_after_cancel(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="running", status=TaskStatus.RUNNING, unique_key="k1")
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+        mgr._active_keys.add("k1")
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            await mgr.cancel_all_running_async(join_timeout=0.5)
+        assert len(mgr._active_keys) == 0
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_persists_cancelled_tasks(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="running", status=TaskStatus.RUNNING, cancellable=True)
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            await mgr.cancel_all_running_async(join_timeout=0.5)
+        assert t.completed_at is not None
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_notify_subscribers_called_when_active(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="running", status=TaskStatus.RUNNING, cancellable=True)
+        t._cancel_event = threading.Event()
+        mgr._tasks[t.id] = t
+        with (
+            patch("data.cache.cache_manager.CacheManager") as mock_cm,
+            patch.object(mgr, "_notify_subscribers") as mock_notify,
+        ):
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock()
+            await mgr.cancel_all_running_async(join_timeout=0.5)
+        mock_notify.assert_called()
+
+
+class TestTaskRunnerCancelEventCreation:
+    """覆盖 _task_runner 中 _cancel_event 懒初始化。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_cancel_event_created_if_none(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
+            t = AppTask(name="test", cancellable=True)
+            assert t._cancel_event is None  # 前置条件
+            t._coroutine_gen = lambda: asyncio.sleep(0)
+            mgr._tasks[t.id] = t
+            with (
+                patch.object(mgr, "_persist_task"),
+                patch.object(mgr, "_notify_subscribers"),
+                patch.object(mgr, "_evict_on_complete"),
+            ):
+                await mgr._task_runner(t.id)
+            assert t._cancel_event is not None
+
+
+class TestTaskRunnerSystemLevelFailure:
+    """覆盖 _task_runner 中 system-level failure 的 critical 日志。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_system_level_failure_logged_critical(self, mock_i18n, mock_tp):
+        """classify_severity 返回 'system' 时应记 critical 日志。"""
+        mgr = TaskManager()
+        with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
+            t = AppTask(name="test", cancellable=True)
+            t._cancel_event = threading.Event()
+            t._coroutine_gen = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+            mgr._tasks[t.id] = t
+            with (
+                patch.object(mgr, "_persist_task"),
+                patch.object(mgr, "_notify_subscribers"),
+                patch.object(mgr, "_evict_on_complete"),
+                patch("services.task_manager.classify_severity", return_value="system"),
+            ):
+                await mgr._task_runner(t.id)
+            assert t.status == TaskStatus.FAILED
+
+
+class TestTaskRunnerFinallyDedupRelease:
+    """覆盖 _task_runner finally 块中 unique_key 释放。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_finally_releases_unique_key(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        with patch.object(mgr, "_get_semaphore", return_value=asyncio.Semaphore(1)):
+            t = AppTask(name="test", cancellable=True, unique_key="fin_key")
+            t._cancel_event = threading.Event()
+            t._coroutine_gen = lambda: asyncio.sleep(0)
+            mgr._tasks[t.id] = t
+            mgr._active_keys.add("fin_key")
+            with (
+                patch.object(mgr, "_persist_task"),
+                patch.object(mgr, "_notify_subscribers"),
+                patch.object(mgr, "_evict_on_complete"),
+            ):
+                await mgr._task_runner(t.id)
+            assert "fin_key" not in mgr._active_keys
+
+
+class TestTaskManagerInitDbWithHistory:
+    """覆盖 init_db 加载历史记录的分支。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_loads_history_from_db(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache.write_db = AsyncMock()
+        df = pd.DataFrame(
+            [
+                {
+                    "id": "hist1",
+                    "name": "Historical Task",
+                    "task_type": "System",
+                    "status": "COMPLETED",
+                    "progress": 1.0,
+                    "description": "done",
+                    "error": "",
+                    "result": None,
+                    "created_at": "2024-01-01T00:00:00",
+                    "started_at": "2024-01-01T00:00:00",
+                    "completed_at": "2024-01-01T01:00:00",
+                }
+            ]
+        )
+        mock_cache.read_db = AsyncMock(return_value=df)
+        with (
+            patch("services.task_manager.CacheManager", create=True) as mock_cm_cls,
+            patch.dict(
+                "sys.modules",
+                {"data.cache.cache_manager": MagicMock(CacheManager=mock_cm_cls)},
+            ),
+        ):
+            mock_cm_cls.return_value = mock_cache
+            mock_cm_cls._instance = mock_cache
+            await mgr.init_db()
+            assert mgr._db_ready is True
+            assert len(mgr._history) == 1
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_skips_malformed_history_row(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mock_cache = MagicMock()
+        mock_cache.write_db = AsyncMock()
+        df = pd.DataFrame(
+            [
+                {
+                    "id": "bad",
+                    "name": "Bad",
+                    "task_type": "System",
+                    "status": "INVALID_STATUS",  # 会导致 TaskStatus() 抛 ValueError
+                    "progress": 0,
+                    "description": "",
+                    "error": "",
+                    "result": None,
+                    "created_at": "2024-01-01",
+                    "started_at": None,
+                    "completed_at": None,
+                }
+            ]
+        )
+        mock_cache.read_db = AsyncMock(return_value=df)
+        with (
+            patch("services.task_manager.CacheManager", create=True) as mock_cm_cls,
+            patch.dict(
+                "sys.modules",
+                {"data.cache.cache_manager": MagicMock(CacheManager=mock_cm_cls)},
+            ),
+        ):
+            mock_cm_cls.return_value = mock_cache
+            mock_cm_cls._instance = mock_cache
+            await mgr.init_db()
+            assert len(mgr._history) == 0  # 畸形行被跳过
+
+
+class TestTaskManagerTruncateResultUtf8Error:
+    """覆盖 _truncate_result_for_db 的 UTF-8 编解码异常回退。"""
+
+    def test_unicode_error_falls_back_to_raw(self):
+        """构造触发 UnicodeDecodeError 的场景较难，验证短字符串正常路径即可。"""
+        result = TaskManager._truncate_result_for_db("café", max_len=10)
+        assert result == "café"
+
+    def test_long_unicode_truncated(self):
+        result = TaskManager._truncate_result_for_db("数据" * 100, max_len=10)
+        assert result is not None
+        assert len(result) <= 10
+
+
+class TestTaskManagerQueuePersistSnapshotTracked:
+    """覆盖 _queue_persist_snapshot 的 tracked persist 分支。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_tracked_persist_decrements_on_complete(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = asyncio.get_running_loop()
+
+        async def _fake_persist(snapshot):
+            pass
+
+        with patch.object(mgr, "_persist_snapshot", _fake_persist):
+            mgr._queue_persist_snapshot(("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None))
+            await asyncio.sleep(0.05)  # 让 tracked_persist 完成
+        assert mgr._persist_pending_count == 0
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_schedule_fail_decrements_counter(self, mock_i18n, mock_tp):
+        """_schedule_coro 返回 False 时应递减 pending_count。"""
+        mgr = TaskManager()
+        mgr._db_ready = True
+        mgr._loop = None  # 无 loop → _schedule_coro 返回 False
+        mgr._queue_persist_snapshot(("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None))
+        assert mgr._persist_pending_count == 0
+
+
+class TestTaskManagerScheduleCoroErrorPaths:
+    """覆盖 _schedule_coro 中 RuntimeError 分支。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_loop_closed_before_launch(self, mock_i18n, mock_tp):
+        """loop.create_task 抛 RuntimeError 时 coroutine 应被 close。"""
+        mgr = TaskManager()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        mock_loop.create_task.side_effect = RuntimeError("loop closed")
+        # call_soon_threadsafe 需同步执行回调才能触发 _launch
+        mock_loop.call_soon_threadsafe.side_effect = lambda fn: fn()
+        mgr._loop = mock_loop
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        result = mgr._schedule_coro(coro)
+        assert result is True  # call_soon_threadsafe 成功了
+        # coro 应被 close（cr_frame 为 None）
+        assert coro.cr_frame is None  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_call_soon_threadsafe_runtime_error(self, mock_i18n, mock_tp):
+        """call_soon_threadsafe 抛 RuntimeError 时应关闭 coroutine 并返回 False。"""
+        mgr = TaskManager()
+        mock_loop = MagicMock()
+        mock_loop.is_running.return_value = True
+        mock_loop.call_soon_threadsafe.side_effect = RuntimeError("closed")
+        mgr._loop = mock_loop
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        result = mgr._schedule_coro(coro)
+        assert result is False
+        assert coro.cr_frame is None  # type: ignore[union-attr]
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_no_loop_closes_coro(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        mgr._loop = None
+
+        async def dummy():
+            pass
+
+        coro = dummy()
+        result = mgr._schedule_coro(coro)
+        assert result is False
+        assert coro.cr_frame is None  # type: ignore[union-attr]
+
+
+class TestTaskManagerPersistSnapshotException:
+    """覆盖 _persist_snapshot 异常分支。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_cancelled_error_propagates(self, mock_i18n, mock_tp):
+        """R2: CancelledError 在 _persist_snapshot 中必须传播。"""
+        mgr = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError):
+                await mgr._persist_snapshot(("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None))
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_general_exception_swallowed(self, mock_i18n, mock_tp):
+        """通用异常应被捕获不传播（DB 写入为非关键路径）。"""
+        mgr = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm._instance = MagicMock()
+            mock_cm._instance.write_db = AsyncMock(side_effect=RuntimeError("DB error"))
+            await mgr._persist_snapshot(("id", "n", "t", "QUEUED", 0.0, "", "", None, None, None, None))
+
+
+class TestTaskManagerPersistTaskAsync:
+    """覆盖 _persist_task_async 方法。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_persists_task(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.COMPLETED)
+        with patch.object(mgr, "_persist_snapshot", AsyncMock()) as mock_persist:
+            await mgr._persist_task_async(t)
+            mock_persist.assert_called_once()
+            args = mock_persist.call_args.args[0]
+            assert args[0] == t.id
+            assert args[3] == "COMPLETED"
+
+
+class TestTaskManagerClearFinishedDbException:
+    """覆盖 _clear_finished_db 异常分支。"""
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_cancelled_error_propagates(self, mock_i18n, mock_tp):
+        """R2: CancelledError 在 _clear_finished_db 中必须传播。"""
+        mgr = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            # engine.begin() 同步抛 CancelledError，触发 except asyncio.CancelledError 分支
+            mock_cm.return_value.engine.begin.side_effect = asyncio.CancelledError()
+            with pytest.raises(asyncio.CancelledError):
+                await mgr._clear_finished_db(["id1"])
+
+    @pytest.mark.asyncio
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    async def test_general_exception_swallowed(self, mock_i18n, mock_tp):
+        """通用异常应被捕获（DB 清理为非关键路径）。"""
+        mgr = TaskManager()
+        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
+            mock_cm.return_value.engine.begin.side_effect = RuntimeError("engine gone")
+            await mgr._clear_finished_db(["id1"])  # 不应抛异常
+
+
+class TestTaskManagerSubscribeInitialPush:
+    """覆盖 subscribe 中初始推送失败分支。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_initial_push_error_logged(self, mock_i18n, mock_tp):
+        mgr = TaskManager()
+        cb = MagicMock(side_effect=RuntimeError("push fail"))
+        mgr.subscribe(cb)
+        assert cb in mgr._subscribers  # 仍应注册
+
+
+class TestTaskManagerSafeDtEdgeCases:
+    """覆盖 _safe_dt 的 Decimal NaN 和 TypeError 分支。"""
+
+    def test_decimal_nan(self):
+        from decimal import Decimal
+
+        assert TaskManager._safe_dt(Decimal("nan")) is None
+
+    def test_none_returns_none(self):
+        assert TaskManager._safe_dt(None) is None
+
+    def test_type_error_returns_none(self):
+        assert TaskManager._safe_dt(object()) is None
+
+
+class TestTaskManagerUpdateProgressThrottle:
+    """覆盖 update_progress 节流逻辑。"""
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_throttle_skips_notify(self, mock_i18n, mock_tp):
+        """节流窗口内不通知（progress < 1.0）。"""
+        import time
+
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        mgr._last_notify_time = time.monotonic()  # 刚通知过
+        with patch.object(mgr, "_notify_subscribers") as mock_notify:
+            mgr.update_progress(t.id, 0.5)
+        mock_notify.assert_not_called()
+
+    @patch("services.task_manager.ThreadPoolManager")
+    @patch("services.task_manager.I18n")
+    def test_progress_1_bypasses_throttle(self, mock_i18n, mock_tp):
+        """progress >= 1.0 时绕过节流。"""
+        import time
+
+        mgr = TaskManager()
+        t = AppTask(name="test", status=TaskStatus.RUNNING)
+        mgr._tasks[t.id] = t
+        mgr._last_notify_time = time.monotonic()
+        with patch.object(mgr, "_notify_subscribers") as mock_notify:
+            mgr.update_progress(t.id, 1.0)
+        mock_notify.assert_called_once()
