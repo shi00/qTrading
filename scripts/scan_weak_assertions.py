@@ -124,6 +124,8 @@ def main():
         print(f"  {rel_path}:")
         for line_no, issue_type, detail in issues:
             print(f"    L{line_no} [{issue_type}] {detail}")
+            if not args.strict:
+                print(f"::warning file={rel_path},line={line_no}::{issue_type}: {detail}")
         print()
 
     if args.strict:

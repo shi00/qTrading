@@ -2,7 +2,7 @@
 
 Checks:
 1. installer.iss fallback version matches pyproject.toml version
-2. package.json pyright version matches CI pinned pyright version
+2. pyright version consistency across pyproject.toml / requirements-dev.txt / ci_cd.yml / package.json
 3. .release-please-manifest.json version matches pyproject.toml version
 4. Repo URL consistency (no stale louis2sin/AStockScreener in docs)
 5. SECURITY.md supported version matches pyproject.toml major.minor
@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 PYPROJECT_PATH = ROOT / "pyproject.toml"
+REQUIREMENTS_DEV_PATH = ROOT / "requirements-dev.txt"
 INSTALLER_PATH = ROOT / "installer.iss"
 PACKAGE_JSON_PATH = ROOT / "package.json"
 RELEASE_MANIFEST_PATH = ROOT / ".release-please-manifest.json"
@@ -60,6 +61,26 @@ def get_ci_pyright_version() -> str:
     if not m:
         raise ValueError(f"Could not find pyright version in {CI_WORKFLOW_PATH}")
     return m.group(1)
+
+
+def get_pyproject_pyright_version() -> str:
+    with open(PYPROJECT_PATH, "rb") as f:
+        cfg = tomllib.load(f)
+    dev_deps = cfg["project"]["optional-dependencies"]["dev"]
+    for entry in dev_deps:
+        if entry.startswith("pyright"):
+            m = re.search(r"pyright(?:==|>=)(\S+)", entry)
+            if m:
+                return m.group(1)
+    raise ValueError(f"Could not find pyright constraint in {PYPROJECT_PATH} [project.optional-dependencies.dev]")
+
+
+def get_requirements_dev_pyright_version() -> str:
+    content = REQUIREMENTS_DEV_PATH.read_text(encoding="utf-8")
+    for line in content.splitlines():
+        if line.startswith("pyright=="):
+            return line.split("==", 1)[1].strip()
+    raise ValueError(f"Could not find pyright==X.Y.Z line in {REQUIREMENTS_DEV_PATH}")
 
 
 def get_release_manifest_version() -> str:
@@ -181,9 +202,19 @@ def main() -> None:
                 f"installer.iss fallback version '{installer_ver}' != pyproject.toml version '{pyproject_ver}'"
             )
 
-    # Check 2: package.json pyright version vs CI pyright version
-    if pkg_pyright_ver != ci_pyright_ver:
-        errors.append(f"package.json pyright version '{pkg_pyright_ver}' != CI pyright version '{ci_pyright_ver}'")
+    # Check 2b: pyright version consistency across pyproject.toml / requirements-dev.txt / ci_cd.yml / package.json
+    pyproject_pyright_ver = get_pyproject_pyright_version()
+    requirements_dev_pyright_ver = get_requirements_dev_pyright_version()
+    pyright_versions = {
+        "pyproject.toml": pyproject_pyright_ver,
+        "requirements-dev.txt": requirements_dev_pyright_ver,
+        "ci_cd.yml": ci_pyright_ver,
+        "package.json": pkg_pyright_ver,
+    }
+    unique_pyright_versions = set(pyright_versions.values())
+    if len(unique_pyright_versions) > 1:
+        details = ", ".join(f"{src}={ver}" for src, ver in pyright_versions.items())
+        errors.append(f"pyright version mismatch: {details}")
 
     # Check 3: release-please-manifest.json version
     if manifest_ver != pyproject_ver:
@@ -226,7 +257,9 @@ def main() -> None:
         print(f"  pyproject.toml: {pyproject_ver}")
         print(f"  installer.iss:  {get_installer_fallback_version()}")
         print(
-            f"  pyright:        {get_package_json_pyright_version()} (package.json) = {get_ci_pyright_version()} (CI)"
+            f"  pyright:        {pyproject_pyright_ver} (pyproject.toml) = "
+            f"{requirements_dev_pyright_ver} (requirements-dev.txt) = "
+            f"{ci_pyright_ver} (CI) = {pkg_pyright_ver} (package.json)"
         )
         print(f"  release-please: {get_release_manifest_version()}")
 
