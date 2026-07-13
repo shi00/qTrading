@@ -678,40 +678,47 @@ class TestBaseDaoWriteDbExtended:
 
 
 class TestShiborDailyReservedWordMapping:
-    """DB-P1-9: Verify ShiborDaily model correctly maps reserved SQL words
-    'date' and 'on' with explicit name parameters."""
+    """DB-P1-9 / R17: Verify ShiborDaily model no longer uses SQL reserved words
+    or digit-leading column names (migration 0015 renamed them).
 
-    def test_date_column_maps_to_db_date(self):
+    Pre-0015: date/on/key/value/level + 1w/2w/1m/3m/6m/9m/1y
+    Post-0015: record_date/on_rate/week_1/week_2/month_1/month_3/month_6/month_9/year_1
+    """
+
+    def test_record_date_column_exists_and_is_date_type(self):
         from data.persistence.models import ShiborDaily
 
-        col = ShiborDaily.__table__.c["date"]
-        assert col.name == "date"
+        col = ShiborDaily.__table__.c["record_date"]
+        assert col.name == "record_date"
+        assert isinstance(col.type, Date)
 
-    def test_on_column_maps_to_db_on(self):
-        from data.persistence.models import ShiborDaily
-
-        col = ShiborDaily.__table__.c["on"]
-        assert col.name == "on"
-
-    def test_on_column_is_numeric_type(self):
+    def test_on_rate_column_exists_and_is_numeric_type(self):
         from sqlalchemy import Numeric
         from data.persistence.models import ShiborDaily
 
-        col = ShiborDaily.__table__.c["on"]
-        assert isinstance(col.type, Numeric), f"on should be Numeric, got {type(col.type).__name__}"
+        col = ShiborDaily.__table__.c["on_rate"]
+        assert col.name == "on_rate"
+        assert isinstance(col.type, Numeric), f"on_rate should be Numeric, got {type(col.type).__name__}"
 
-    def test_date_column_is_date_type(self):
+    def test_no_reserved_word_or_digit_leading_column_names(self):
+        """R17: shibor_daily 表不得包含 SQL 保留字或数字开头的列名。"""
         from data.persistence.models import ShiborDaily
 
-        col = ShiborDaily.__table__.c["date"]
-        assert isinstance(col.type, Date)
+        # SQL 保留字黑名单（仅检查本项目历史问题列）
+        reserved = {"date", "on", "key", "value", "level", "order", "group", "select", "from", "where"}
+        for col in ShiborDaily.__table__.columns:
+            assert col.name not in reserved, f"R17 violation: column '{col.name}' is a SQL reserved word"
+            assert not col.name[0].isdigit(), f"R17 violation: column '{col.name}' starts with a digit"
 
-    def test_reserved_word_columns_have_explicit_name(self):
+    def test_attribute_names_match_column_names(self):
+        """R17: 迁移 0015 后属性名与列名一致，无需 ORM name= 映射。"""
         from data.persistence.models import ShiborDaily
 
-        for attr_name in ("date", "on"):
-            col = getattr(ShiborDaily, attr_name)
-            assert hasattr(col, "name"), f"Column '{attr_name}' should have explicit name mapping"
+        mapper_cols = {c.key: c.name for c in ShiborDaily.__table__.columns}
+        for attr_key, db_name in mapper_cols.items():
+            assert attr_key == db_name, (
+                f"R17 violation: attribute '{attr_key}' maps to column '{db_name}' (should be identical)"
+            )
 
 
 class TestNullProtectedFromMetadata:

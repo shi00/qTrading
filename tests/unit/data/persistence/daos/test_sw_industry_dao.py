@@ -57,7 +57,7 @@ class TestSaveSwIndustryClassify:
             {
                 "index_code": ["801010.SI", "801020.SI"],
                 "index_name": ["农林牧渔", "采掘"],
-                "level": ["L1", "L1"],
+                "sw_level": ["L1", "L1"],
                 "industry_code": ["110000", "220000"],
                 "industry_name": ["农林牧渔", "采掘"],
                 "parent_code": ["", ""],
@@ -71,7 +71,7 @@ class TestSaveSwIndustryClassify:
         assert call_args.args[1] == "sw_industry_classify"
         pk_columns = call_args.kwargs["pk_columns"]
         assert "index_code" in pk_columns
-        assert "level" in pk_columns
+        assert "sw_level" in pk_columns
 
 
 class TestSaveSwIndustryMember:

@@ -45,7 +45,7 @@ def _make_classify_df(n_levels: int = 3, codes_per_level: int = 1) -> pd.DataFra
                 {
                     "index_code": f"8010{i:03d}.SI",
                     "index_name": f"行业_{level}_{i}",
-                    "level": level,
+                    "sw_level": level,
                     "industry_code": f"{i:06d}",
                     "industry_name": f"行业_{i}",
                     "parent_code": "",
@@ -363,7 +363,7 @@ class TestSyncMembersExceptions:
         """内层循环抛 EngineDisposedError 必须传播（不吞为 skip）。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
         ctx.api.get_index_member_all = AsyncMock(side_effect=EngineDisposedError("disposed"))
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
@@ -375,7 +375,7 @@ class TestSyncMembersExceptions:
         """内层 TushareAPIPermissionError：记录 skipped_permission 并提前 return。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "level": ["L1", "L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L1", "L1"]})
         ctx.api.get_index_member_all = AsyncMock(side_effect=TushareAPIPermissionError("index_member_all", "no perm"))
 
         with patch.object(strategy, "_check_cancelled", return_value=False):
@@ -391,7 +391,7 @@ class TestSyncMembersExceptions:
         """内层通用 Exception：errors 计数 +1，循环继续，最终 save 被跳过（无数据）。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "level": ["L1", "L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI", "801020.SI"], "sw_level": ["L1", "L1"]})
         # 第一次抛错，第二次返回空 → all_dfs 空，触发 no data warning
         ctx.api.get_index_member_all = AsyncMock(side_effect=[RuntimeError("blip"), pd.DataFrame()])
 
@@ -412,7 +412,7 @@ class TestSyncMembersExceptions:
         """所有 index_code 返回空：all_dfs 空，日志 warning，不调用 save。"""
         ctx = _make_ctx()
         strategy = _wire_strategy(ctx)
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
         ctx.api.get_index_member_all = AsyncMock(return_value=pd.DataFrame())
 
         with (
@@ -432,7 +432,7 @@ class TestSyncMembersExceptions:
         strategy = _wire_strategy(ctx)
         # save_sw_industry_member 抛错 → 触发外层 except
         strategy.member_dao.save_sw_industry_member = AsyncMock(side_effect=RuntimeError("save failed"))
-        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "level": ["L1"]})
+        classify_df = pd.DataFrame({"index_code": ["801010.SI"], "sw_level": ["L1"]})
         ctx.api.get_index_member_all = AsyncMock(return_value=_make_member_df("801010.SI"))
 
         with (

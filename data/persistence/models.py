@@ -553,9 +553,10 @@ class StkHoldertrade(Base):
 class SwIndustryClassify(Base):
     """申万行业分类（Phase 3F-1，全局快照，月度更新，对应 Tushare index_classify 接口）。"""
 
+    # R17：原列名 level 为 SQL 保留字；迁移 0015 后属性名 sw_level 与列名一致。
     __tablename__ = "sw_industry_classify"
     index_code = Column(String, primary_key=True)
-    level = Column(String(2), primary_key=True, index=True)
+    sw_level = Column(String(2), primary_key=True, index=True)
     index_name = Column(String)
     industry_code = Column(String, index=True)
     industry_name = Column(String)
@@ -665,17 +666,18 @@ class MacroEconomy(Base):
 
 
 class ShiborDaily(Base):
+    # R17：原列名 date/on 为 SQL 保留字，1w-1y 数字开头；迁移 0015 后属性名与列名一致。
     __tablename__ = "shibor_daily"
-    date = Column("date", Date, primary_key=True)
-    on = Column("on", Numeric(12, 4))
-    w1 = Column(Numeric(12, 4), name="1w")
-    w2 = Column(Numeric(12, 4), name="2w")
-    m1 = Column(Numeric(12, 4), name="1m")
-    m3 = Column(Numeric(12, 4), name="3m")
-    m6 = Column(Numeric(12, 4), name="6m")
-    m9 = Column(Numeric(12, 4), name="9m")
-    y1 = Column(Numeric(12, 4), name="1y")
-    # Phase 3G §4.3.4：LPR 数据（shibor_lpr API 返回，与 shibor 同表按 date 合并）
+    record_date = Column(Date, primary_key=True)
+    on_rate = Column(Numeric(12, 4))
+    week_1 = Column(Numeric(12, 4))
+    week_2 = Column(Numeric(12, 4))
+    month_1 = Column(Numeric(12, 4))
+    month_3 = Column(Numeric(12, 4))
+    month_6 = Column(Numeric(12, 4))
+    month_9 = Column(Numeric(12, 4))
+    year_1 = Column(Numeric(12, 4))
+    # Phase 3G §4.3.4：LPR 数据（shibor_lpr API 返回，与 shibor 同表按 record_date 合并）
     lpr_1y = Column(Numeric(12, 4))
     lpr_5y = Column(Numeric(12, 4))
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"))
@@ -779,10 +781,11 @@ class TaskHistory(Base):
 
 
 class AppState(Base):
+    # R17：原列名 key/value 为 SQL 保留字；迁移 0015 后属性名与列名一致。
     __tablename__ = "app_state"
 
-    key = Column(String, primary_key=True)
-    value = Column(String, nullable=False)
+    config_key = Column(String, primary_key=True)
+    config_value = Column(String, nullable=False)
     updated_at = Column(DateTime(timezone=False), server_default=text("now()"), onupdate=text("now()"))
 
 

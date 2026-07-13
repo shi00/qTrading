@@ -2026,15 +2026,15 @@ class AIStrategyMixin:
                 shibor_latest = shibor.iloc[0]
 
                 shibor_lines: list[str] = []
-                on_rate = shibor_latest.get("on")
+                on_rate = shibor_latest.get("on_rate")
                 if on_rate is not None:
                     shibor_lines.append(f"- {I18n.get('macro_shibor_overnight')}: {on_rate:.2f}%")
 
-                w1_rate = shibor_latest.get("1w")
+                w1_rate = shibor_latest.get("week_1")
                 if w1_rate is not None:
                     shibor_lines.append(f"- {I18n.get('macro_shibor_1w')}: {w1_rate:.2f}%")
 
-                m3_rate = shibor_latest.get("3m")
+                m3_rate = shibor_latest.get("month_3")
                 if m3_rate is not None:
                     shibor_lines.append(f"- {I18n.get('macro_shibor_3m')}: {m3_rate:.2f}%")
 
@@ -2046,7 +2046,7 @@ class AIStrategyMixin:
                         "shibor",
                         shibor,
                         lambda _df: shibor_text,
-                        date_column="date",
+                        date_column="record_date",
                     )
                     if shibor_section:
                         lines.append(shibor_section)
@@ -2069,7 +2069,7 @@ class AIStrategyMixin:
                         "shibor_lpr",
                         shibor,
                         lambda _df: lpr_text,
-                        date_column="date",
+                        date_column="record_date",
                     )
                     if lpr_section:
                         lines.append(lpr_section)

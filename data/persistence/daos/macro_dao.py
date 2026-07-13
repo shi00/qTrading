@@ -61,7 +61,7 @@ class MacroDao(BaseDao):
 
     async def get_shibor_latest_date(self):
         """Get latest date in shibor_daily."""
-        df = await self._read_db("SELECT MAX(date) as max_date FROM shibor_daily")
+        df = await self._read_db("SELECT MAX(record_date) as max_date FROM shibor_daily")
         if not df.empty and df.iloc[0]["max_date"]:
             return df.iloc[0]["max_date"]
         return None
@@ -75,30 +75,31 @@ class MacroDao(BaseDao):
                         None 表示不限制（取最新一期）。
 
         Returns:
-            DataFrame with latest shibor rates (date, on, 1w, 2w, 1m, 3m, 6m, 9m, 1y, lpr_1y, lpr_5y)
+            DataFrame with latest shibor rates (record_date, on_rate, week_1, week_2,
+            month_1, month_3, month_6, month_9, year_1, lpr_1y, lpr_5y)
         """
         try:
-            # [DB-005] ShiborDaily contains reserved words ('on') and columns starting with digits ('1w' etc.).
-            # We use SQLAlchemy Core instead of raw SQL to automatically handle identifier quoting.
+            # R17：迁移 0015 后列名 record_date/on_rate/week_1 等均非保留字，
+            # 可直接用 t.c.<attr> 访问，无需 getattr(t.c, "1w") 转义。
             t = ShiborDaily.__table__
             cols = [
-                t.c.date,
-                t.c.on,
-                getattr(t.c, "1w"),
-                getattr(t.c, "2w"),
-                getattr(t.c, "1m"),
-                getattr(t.c, "3m"),
-                getattr(t.c, "6m"),
-                getattr(t.c, "9m"),
-                getattr(t.c, "1y"),
+                t.c.record_date,
+                t.c.on_rate,
+                t.c.week_1,
+                t.c.week_2,
+                t.c.month_1,
+                t.c.month_3,
+                t.c.month_6,
+                t.c.month_9,
+                t.c.year_1,
                 # Phase 3G §4.3.4：LPR 字段
                 t.c.lpr_1y,
                 t.c.lpr_5y,
             ]
             stmt = sa.select(*cols)
             if as_of_date is not None:
-                stmt = stmt.where(t.c.date <= as_of_date)
-            stmt = stmt.order_by(t.c.date.desc()).limit(1)
+                stmt = stmt.where(t.c.record_date <= as_of_date)
+            stmt = stmt.order_by(t.c.record_date.desc()).limit(1)
 
             df = await self._read_db_select(stmt)
             return df if df is not None else pd.DataFrame()

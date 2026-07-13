@@ -40,7 +40,8 @@ class TestNoUnnecessaryFieldMappings:
 
     def test_macro_mappings_are_intentional(self):
         # Phase 2D §3.2.6：cn_gdp 加入 macro mappings（quarter → period）
-        allowed_macro_mappings = {"cn_cpi", "cn_ppi", "cn_m", "cn_gdp"}
+        # R17（迁移 0015）：shibor/shibor_lpr 加入 mappings（date/on/1w-1y → record_date/on_rate/week_1/...）
+        allowed_macro_mappings = {"cn_cpi", "cn_ppi", "cn_m", "cn_gdp", "shibor", "shibor_lpr"}
         actual_mappings = set(TushareClient._COLUMN_RENAMES.keys())
         macro_mappings = actual_mappings - {
             "top_list",
@@ -49,6 +50,8 @@ class TestNoUnnecessaryFieldMappings:
             "suspend_d",
             # Phase 3D：share_float 重命名 float_type → share_type（与 ORM 列名对齐）
             "share_float",
+            # R17（迁移 0015）：index_classify 重命名 level → sw_level（与 ORM 列名对齐）
+            "index_classify",
         }
         assert macro_mappings <= allowed_macro_mappings, (
             f"Unexpected macro mappings: {macro_mappings - allowed_macro_mappings}"
@@ -102,15 +105,17 @@ class TestMacroEconomyColumnRenames:
 
 
 class TestShiborDailyColumnNames:
-    """Test that shibor_daily ORM attribute names vs DB column names are handled correctly."""
+    """R17: Test that shibor_daily ORM attribute names match DB column names
+    (migration 0015 renamed digit-leading columns 1w/2w/1m/3m/6m/9m/1y
+    to week_1/week_2/month_1/month_3/month_6/month_9/year_1)."""
 
-    def test_shibor_dao_uses_db_column_names(self):
+    def test_shibor_dao_uses_renamed_column_names(self):
         from data.persistence.models import ShiborDaily, get_model_columns
 
         cols = get_model_columns(ShiborDaily)
-        db_column_names = {"1w", "2w", "1m", "3m", "6m", "9m", "1y"}
-        for col in db_column_names:
-            assert col in cols, f"save_shibor_daily should use DB column name '{col}'"
+        renamed = {"week_1", "week_2", "month_1", "month_3", "month_6", "month_9", "year_1"}
+        for col in renamed:
+            assert col in cols, f"save_shibor_daily should use renamed column '{col}'"
 
     def test_shibor_orm_uses_python_attribute_names(self):
 
@@ -121,7 +126,7 @@ class TestShiborDailyColumnNames:
             if hasattr(attr, "property") and hasattr(attr.property, "columns"):
                 columns.add(name)
 
-        python_attrs = {"w1", "w2", "m1", "m3", "m6", "m9", "y1"}
+        python_attrs = {"week_1", "week_2", "month_1", "month_3", "month_6", "month_9", "year_1"}
 
         for attr in python_attrs:
             assert attr in columns, f"ShiborDaily ORM should have Python attribute '{attr}'"

@@ -112,9 +112,9 @@ class TestMacroDataLogic:
         assert not df.empty
 
         # MVD 设计：on=1.85 < w1=1.95 < w2=2.10 < m1=2.25 < m3=2.35 < m6=2.40 < m9=2.45 < y1=2.50
-        # 注意：返回列名是数据库列名（on/1w/2w/1m/3m/6m/9m/1y），非 Python 属性名（见约束 6）
-        on_rate = df["on"].iloc[0]
-        y1_rate = df["1y"].iloc[0]
+        # R17（迁移 0015）：列名 on_rate/year_1 等非保留字，属性名与列名一致
+        on_rate = df["on_rate"].iloc[0]
+        y1_rate = df["year_1"].iloc[0]
         assert on_rate < y1_rate, f"短期利率应低于长期利率: on={on_rate}, 1y={y1_rate}"
 
     @pytest.mark.asyncio

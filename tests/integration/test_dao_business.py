@@ -1086,18 +1086,19 @@ class TestMacroDao:
 
     async def test_save_shibor_daily(self, macro_dao, clean_db):
         """保存 Shibor 利率"""
+        # R17（迁移 0015）：列名 record_date/on_rate/week_1/... 均非保留字，属性名与列名一致
         df = pd.DataFrame(
             [
                 {
-                    "date": _RECENT_DATE,
-                    "on": 1.5,
-                    "1w": 1.8,
-                    "2w": 2.0,
-                    "1m": 2.2,
-                    "3m": 2.5,
-                    "6m": 2.7,
-                    "9m": 2.8,
-                    "1y": 2.9,
+                    "record_date": _RECENT_DATE,
+                    "on_rate": 1.5,
+                    "week_1": 1.8,
+                    "week_2": 2.0,
+                    "month_1": 2.2,
+                    "month_3": 2.5,
+                    "month_6": 2.7,
+                    "month_9": 2.8,
+                    "year_1": 2.9,
                 }
             ]
         )
