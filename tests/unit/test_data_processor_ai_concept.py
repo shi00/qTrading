@@ -7,7 +7,7 @@ Covers:
 - Legacy run_doubao_tagging has been removed.
 """
 
-import asyncio
+import threading
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -132,7 +132,7 @@ class TestRunAIConceptTagging:
         dp = _make_dp()
         dp.clear_cancel()
         mock_result = _make_sync_result(status="success", added=0)
-        cancel_event = asyncio.Event()
+        cancel_event = threading.Event()
         cancel_event.set()
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
@@ -159,7 +159,7 @@ class TestRunAIConceptTagging:
         dp = _make_dp()
         dp.clear_cancel()
         mock_result = _make_sync_result(status="success", added=0)
-        cancel_event = asyncio.Event()
+        cancel_event = threading.Event()
         with (
             patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
             patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,

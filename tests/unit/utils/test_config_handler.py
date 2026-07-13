@@ -342,7 +342,7 @@ class TestConfigHandlerSaveConfigReplace:
         saved_data = mock_save.call_args[0][0]
         assert "new_key" in saved_data
         assert "old_key" not in saved_data
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
 
 class TestConfigHandlerGetDbPassword:
@@ -1839,7 +1839,7 @@ class TestTusharePointTier:
             cfg_mod.ConfigHandler._config_cache = {"tushare_point_tier": "points_5000"}
             result = cfg_mod.ConfigHandler.get_tushare_point_tier()
             assert result == "points_5000"
-            cfg_mod.ConfigHandler._config_cache = None
+            cfg_mod.ConfigHandler._clear_cache()
 
     @patch.object(cfg_mod.ConfigHandler, "load_config", return_value={})
     def test_point_tier_default_when_unset(self, mock_load):

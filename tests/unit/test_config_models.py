@@ -208,13 +208,13 @@ class TestGetTypedSetTyped:
     def test_get_typed_returns_default_when_missing(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         assert ConfigHandler.get_typed("log_level", str, "INFO") == "INFO"
 
     def test_get_typed_coerces_type(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump({"db_port": "5433"}, f)
         assert ConfigHandler.get_typed("db_port", int, 5432) == 5433
@@ -222,7 +222,7 @@ class TestGetTypedSetTyped:
     def test_get_typed_bool_from_string(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump({"onboarding_complete": "true"}, f)
         assert ConfigHandler.get_typed("onboarding_complete", bool, False) is True
@@ -230,7 +230,7 @@ class TestGetTypedSetTyped:
     def test_get_typed_fallback_on_bad_type(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump({"db_port": "not_a_number"}, f)
         assert ConfigHandler.get_typed("db_port", int, 5432) == 5432
@@ -238,7 +238,7 @@ class TestGetTypedSetTyped:
     def test_set_typed_saves_value(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         result = ConfigHandler.set_typed("log_level", "DEBUG")
         assert result is True
         with open(config_file, encoding="utf-8") as f:
@@ -248,14 +248,14 @@ class TestGetTypedSetTyped:
     def test_set_typed_validator_rejects(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         result = ConfigHandler.set_typed("db_port", 0, validator=lambda v: 1 <= v <= 65535)
         assert result is False
 
     def test_set_typed_sanitizes_sensitive_key_in_log(self, monkeypatch, tmp_path, caplog):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         secret_value = "sk_super_secret_api_key_1234567890ab"
         with caplog.at_level(logging.WARNING):
             result = ConfigHandler.set_typed("ai_api_key", secret_value, validator=lambda v: False)
@@ -266,7 +266,7 @@ class TestGetTypedSetTyped:
     def test_set_typed_sanitizes_db_password_encrypted(self, monkeypatch, tmp_path, caplog):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         encrypted_value = "AESGCM_encrypted_password_data_abc123"
         with caplog.at_level(logging.WARNING):
             result = ConfigHandler.set_typed("db_password_encrypted", encrypted_value, validator=lambda v: False)
@@ -276,7 +276,7 @@ class TestGetTypedSetTyped:
     def test_set_typed_non_sensitive_key_logged_as_is(self, monkeypatch, tmp_path, caplog):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         with caplog.at_level(logging.WARNING):
             result = ConfigHandler.set_typed("log_level", "INVALID", validator=lambda v: False)
         assert result is False
@@ -287,7 +287,7 @@ class TestLoadConfigWithValidation:
     def test_valid_config(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump({"db_host": "10.0.0.1", "db_port": 5433}, f)
         result = ConfigHandler.load_config_with_validation()
@@ -298,7 +298,7 @@ class TestLoadConfigWithValidation:
     def test_invalid_config_returns_defaults(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump({"db_port": 99999}, f)
         result = ConfigHandler.load_config_with_validation()
@@ -309,7 +309,7 @@ class TestLoadConfigWithValidation:
     def test_missing_file_returns_defaults(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "nonexistent.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         result = ConfigHandler.load_config_with_validation()
         assert result.is_valid is True
         assert result.used_defaults is True
@@ -320,21 +320,21 @@ class TestSaveConfigValidation:
     def test_save_invalid_data_rejected(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         result = ConfigHandler.save_config({"db_port": 99999})
         assert result is False
 
     def test_save_valid_data_passes(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         result = ConfigHandler.save_config({"db_port": 5433})
         assert result is True
 
     def test_save_preserves_dynamic_keys(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         ConfigHandler.save_config({"ai_strategy_prompt_oversold": "custom"})
         with open(config_file, encoding="utf-8") as f:
             saved = json.load(f)
@@ -345,7 +345,7 @@ class TestLocalAiConfigConsistency:
     def test_n_ctx_default_matches_pydantic(self, monkeypatch, tmp_path):
         config_file = str(tmp_path / "test_settings.json")
         monkeypatch.setattr("utils.config_handler.CONFIG_FILE", config_file)
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         ai_config = ConfigHandler.get_local_ai_config()
         pydantic_default = get_default_config()["local_n_ctx"]
         assert ai_config["n_ctx"] == pydantic_default

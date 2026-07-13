@@ -12,7 +12,7 @@ class TestSchedulerPersistentIdempotency:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
         cfg_mod.ConfigHandler.save_config(
             {
@@ -24,7 +24,7 @@ class TestSchedulerPersistentIdempotency:
             },
             replace=True,
         )
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
         cfg_mod.ConfigHandler.ensure_defaults()
         config = cfg_mod.ConfigHandler.load_config()
@@ -41,7 +41,7 @@ class TestSchedulerPersistentIdempotency:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         cfg_mod.ConfigHandler.save_config(
             {
                 _CFG_LAST_DAILY_UPDATE: "20260428",
@@ -49,7 +49,7 @@ class TestSchedulerPersistentIdempotency:
             },
             replace=True,
         )
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         cfg_mod.ConfigHandler.ensure_defaults()
 
         sched_mod.SchedulerService._reset_singleton()
@@ -64,14 +64,14 @@ class TestSchedulerPersistentIdempotency:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
         sched_mod.SchedulerService._reset_singleton()
         service = sched_mod.SchedulerService()
         service._mark_daily_update_done("20260429")
         service._mark_nightly_prediction_done("20260429")
 
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         config = cfg_mod.ConfigHandler.load_config()
 
         assert service._last_update_date == "20260429"
@@ -90,9 +90,9 @@ class TestSchedulerFailureProtection:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         cfg_mod.ConfigHandler.save_config({_CFG_LAST_DAILY_UPDATE: ""}, replace=True)
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
         sched_mod.SchedulerService._reset_singleton()
         service = sched_mod.SchedulerService()
@@ -111,7 +111,7 @@ class TestSchedulerFailureProtection:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
         sched_mod.SchedulerService._reset_singleton()
         _ = sched_mod.SchedulerService()
@@ -133,12 +133,12 @@ class TestAiConceptIdempotency:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         cfg_mod.ConfigHandler.save_config(
             {_CFG_LAST_AI_CONCEPT_REFRESH: "20260428"},
             replace=True,
         )
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         cfg_mod.ConfigHandler.ensure_defaults()
 
         sched_mod.SchedulerService._reset_singleton()
@@ -152,9 +152,9 @@ class TestAiConceptIdempotency:
 
         temp_config = tmp_path / "user_settings.json"
         monkeypatch.setattr(cfg_mod, "CONFIG_FILE", str(temp_config))
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
         cfg_mod.ConfigHandler.save_config({}, replace=True)
-        cfg_mod.ConfigHandler._config_cache = None
+        cfg_mod.ConfigHandler._clear_cache()
 
         sched_mod.SchedulerService._reset_singleton()
         service = sched_mod.SchedulerService()
