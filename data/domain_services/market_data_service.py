@@ -341,7 +341,20 @@ class MarketDataService:
                 try:
                     await ThreadPoolManager().run_async(TaskType.IO, listener)
                 except Exception as e:
-                    logger.error("[MarketDataService] Listener error: %s", DataSanitizer.sanitize_error(e))
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e)
+                    if severity == "system":
+                        _log = logger.critical
+                    elif severity == "recoverable":
+                        _log = logger.warning
+                    else:
+                        _log = logger.error
+                    _log(
+                        "[MarketDataService] Listener error (%s): %s",
+                        error_info["code"],
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _get_indices_batch(self, codes: list[str], date: str) -> list[dict]:

@@ -5,6 +5,8 @@ import typing
 import pandas as pd
 from pandas_market_calendars import get_calendar
 
+from utils.error_classifier import classify_error, classify_severity
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +25,20 @@ class OfflineCalendar:
                 # SSE includes holidays for Shanghai Stock Exchange (A-Share)
                 cls._calendar = get_calendar("SSE")
             except Exception as e:
-                logger.error("[OfflineCalendar] Failed to load SSE calendar: %s", e)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[OfflineCalendar] Failed to load SSE calendar (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
                 return None
         return cls._calendar
 
@@ -50,7 +65,21 @@ class OfflineCalendar:
             return not schedule.empty
 
         except Exception as e:
-            logger.error("[OfflineCalendar] is_trading_day check failed for %s: %s", date_obj, e)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[OfflineCalendar] is_trading_day check failed for %s (%s): %s",
+                date_obj,
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return False
 
     @staticmethod
@@ -72,5 +101,18 @@ class OfflineCalendar:
             return [d.strftime("%Y%m%d") for d in valid]
 
         except Exception as e:
-            logger.error("[OfflineCalendar] Range check failed: %s", e)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[OfflineCalendar] Range check failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return []
