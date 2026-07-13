@@ -1,0 +1,151 @@
+name: 🐛 Bug 报告
+description: 报告一个可复现的问题以帮助改进项目
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你抽时间报告 Bug！请先搜索 [已有 issue](https://github.com/shi00/qTrading/issues?q=is%3Aissue+label%3Abug) 避免重复。
+        填写前请确认已阅读 [CLAUDE.md §3 红线](https://github.com/shi00/qTrading/blob/main/CLAUDE.md#31--绝对禁止) 与 [CONTRIBUTING.md](https://github.com/shi00/qTrading/blob/main/CONTRIBUTING.md)。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug 描述
+      description: 简明扼要地说明问题是什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: 复现步骤
+      description: 详细的可复现步骤，让维护者能重现该问题。
+      placeholder: |
+        1. 启动应用：python main.py
+        2. 进入「选股」标签
+        3. 选择策略 MACD
+        4. 点击「执行回测」
+        5. 观察到错误...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 按照设计，应该发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 错误堆栈
+      description: 相关的日志输出或错误堆栈（请用代码块包裹）。
+      render: shell
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图
+      description: 如有 UI 相关问题，请附上截图或 GIF。
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: 影响层
+      description: Bug 出现在哪个架构层？（参考 [CLAUDE.md §4.1 分层架构](https://github.com/shi00/qTrading/blob/main/CLAUDE.md#41-分层架构)）
+      options:
+        - core (架构核心)
+        - app (引导层)
+        - data (数据层)
+        - services (应用服务)
+        - strategies (策略层)
+        - ui (表现层)
+        - utils (横切关注点)
+        - ci (CI/CD / 构建)
+        - docs (文档)
+        - 不适用
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重度
+      description: |
+        按项目严重度分级：
+        - Critical：阻塞主流程、数据丢失、安全漏洞
+        - High：核心功能不可用、性能严重劣化
+        - Medium：次要功能异常、有 workaround
+        - Low：UI 瑕疵、文档错误、不影响功能
+      options:
+        - Critical (阻塞主流程 / 数据丢失 / 安全漏洞)
+        - High (核心功能不可用 / 性能严重劣化)
+        - Medium (次要功能异常 / 有 workaround)
+        - Low (UI 瑕疵 / 文档错误 / 不影响功能)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: Windows 11 22H2 / macOS 14.4 / Ubuntu 24.04
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python 版本
+      placeholder: 3.13.x
+    validations:
+      required: true
+
+  - type: input
+    id: project-version
+    attributes:
+      label: 项目版本
+      description: 见 pyproject.toml 或应用「关于」对话框。
+      placeholder: 0.9.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: 关键依赖版本
+      description: |
+        请提供以下版本（可执行 `uv pip list | findstr "flet polars"` 获取）：
+        - Flet 版本
+        - Polars 版本
+        - PostgreSQL 版本
+      placeholder: |
+        Flet: 0.85.3
+        Polars: x.x.x
+        PostgreSQL: 16.x
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: 自检清单
+      description: 提交前请确认
+      options:
+        - label: 我已搜索过现有 issue，确认这不是重复报告
+          required: true
+        - label: 我已阅读 CLAUDE.md 红线与 CONTRIBUTING.md
+          required: true
+        - label: 我已按 CLAUDE.md §1.7 调试规范尝试定位根本原因
+          required: false
