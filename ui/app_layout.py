@@ -56,25 +56,50 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _build_view(tab_index: int) -> ft.Control:
-    """根据 tab 索引构造子视图 (直接函数调用, 不缓存实例)。
+@ft.component
+def _build_pages_stack(current_tab: int) -> ft.Stack:
+    """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
-    声明式范式: 每次重渲染重新构造子视图, 由 Flet diff 算法决定实际 DOM 更新。
+    项目内存硬约束 #34: state-driven rendering (ft.Stack + visible prop)
+    替代条件渲染 (if/else 创建不同控件)。所有页面控件预先创建并放入 Stack,
+    通过 ``visible`` prop 切换显示, 不再动态创建/销毁控件。
+
+    声明式范式: 每次重渲染重新构造控件树, 由 Flet diff 算法决定实际 DOM 更新。
     子视图内部用 ``use_state``/``use_viewmodel`` 持久化自身状态, 重建不丢失。
     """
-    if tab_index == NavTabs.MARKET:
-        return HomeView()
-    if tab_index == NavTabs.SCREENER:
-        return ScreenerView()
-    if tab_index == NavTabs.BACKTEST:
-        return BacktestView()
-    if tab_index == NavTabs.DATA:
-        return DataExplorerView()
-    if tab_index == NavTabs.TASKS:
-        return TaskCenterView()
-    if tab_index == NavTabs.SETTINGS:
-        return SettingsView()
-    return ft.Text(I18n.get("view_unknown"))
+    pages = [
+        ft.Container(
+            content=HomeView(),
+            expand=True,
+            visible=current_tab == NavTabs.MARKET,
+        ),
+        ft.Container(
+            content=ScreenerView(),
+            expand=True,
+            visible=current_tab == NavTabs.SCREENER,
+        ),
+        ft.Container(
+            content=BacktestView(),
+            expand=True,
+            visible=current_tab == NavTabs.BACKTEST,
+        ),
+        ft.Container(
+            content=DataExplorerView(),
+            expand=True,
+            visible=current_tab == NavTabs.DATA,
+        ),
+        ft.Container(
+            content=TaskCenterView(),
+            expand=True,
+            visible=current_tab == NavTabs.TASKS,
+        ),
+        ft.Container(
+            content=SettingsView(),
+            expand=True,
+            visible=current_tab == NavTabs.SETTINGS,
+        ),
+    ]
+    return ft.Stack(pages, expand=True)
 
 
 def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
@@ -230,7 +255,7 @@ def AppLayout() -> ft.Container:
     )
 
     body = ft.Container(
-        content=_build_view(int(current_tab)),
+        content=_build_pages_stack(int(current_tab)),
         expand=True,
         padding=20,
         bgcolor=AppColors.BACKGROUND,

@@ -488,3 +488,21 @@ def test_dispose_clears_state_and_subscribers():
     # dispose 后 _notify 无订阅者，received 不再增长
     vm._set_state(probe_in_progress=True)
     assert len(received) == 1  # dispose 前的 1 次
+
+
+def test_unsubscribe_idempotent_when_callback_already_removed():
+    """_unsubscribe 在 callback 已不在订阅列表时为 noop（防御性兜底，避免 ValueError）。
+
+    覆盖 subscribe._unsubscribe 内 `if callback in self._subscribers` 为 False 的分支：
+    重复调用 unsubscribe 或 dispose 后调用 unsubscribe 不应抛异常。
+    """
+    vm = SystemViewModel()
+    received: list = []
+    unsub = vm.subscribe(lambda s: received.append(s))
+
+    unsub()  # 首次：callback 在列表中，正常移除
+    # 第二次：callback 已不在列表，应 noop 不抛 ValueError
+    unsub()
+
+    vm._set_state(probe_in_progress=True)
+    assert len(received) == 0  # 无订阅者，不接收任何通知

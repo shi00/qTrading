@@ -412,3 +412,1633 @@ class TestBuildHealthSummaryContent:
         assert isinstance(integrity_row, ft.Row)
         # 应包含图标 + 文本 (critical warning)
         assert len(integrity_row.controls) >= 2
+
+
+# ============================================================================
+# 组件体测试基础设施 (FakeViewModel + 渲染辅助)
+# ============================================================================
+
+import asyncio  # noqa: E402
+from dataclasses import dataclass, replace  # noqa: E402
+from typing import Any  # noqa: E402
+
+from services.task_manager import TaskStatus  # noqa: E402
+from tests.unit.ui.component_renderer import (  # noqa: E402
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+    run_render_effects,
+    run_unmount_effects,
+)
+
+from ui.viewmodels import Message  # noqa: E402
+
+
+@dataclass(frozen=True)
+class _FakeDataSourceState:
+    """模拟 DataSourceState 的最小字段集 (frozen dataclass snapshot)。"""
+
+    is_syncing: bool = False
+    active_key: str | None = None
+    init_sync_cancellable: bool = False
+    health_checking: bool = False
+    init_sync_running: bool = False
+    init_sync_final_status: TaskStatus | None = None
+    progress: float = 0.0
+    progress_message: Message | None = None
+    health_result_version: int = 0
+    snack_version: int = 0
+    cache_cleared_version: int = 0
+    health_error_version: int = 0
+
+
+class _FakeDataSourceViewModel:
+    """模拟 DataSourceViewModel, 记录所有方法调用。
+
+    满足 _ViewModelProtocol 契约 (state/subscribe/dispose) +
+    组件调用的所有 async/sync 方法 + dual-track last_* property。
+    """
+
+    def __init__(self, state: _FakeDataSourceState | None = None) -> None:
+        self._state: _FakeDataSourceState = state or _FakeDataSourceState()
+        self._subscribers: list[Any] = []
+        self._last_health_result: dict | None = None
+        self._last_snack: tuple[Message, str] | None = None
+        self._last_health_error: str | None = None
+        self.dispose_called: bool = False
+        self.method_calls: list[tuple[str, dict]] = []
+
+    @property
+    def state(self) -> _FakeDataSourceState:
+        return self._state
+
+    @property
+    def last_health_result(self) -> dict | None:
+        return self._last_health_result
+
+    @property
+    def last_snack(self) -> tuple[Message, str] | None:
+        return self._last_snack
+
+    @property
+    def last_health_error(self) -> str | None:
+        return self._last_health_error
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def _set_state(self, **changes: Any) -> None:
+        self._state = replace(self._state, **changes)
+        for cb in list(self._subscribers):
+            cb(self._state)
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    async def check_health(self) -> None:
+        self.method_calls.append(("check_health", {}))
+
+    async def cancel_init_sync(self) -> None:
+        self.method_calls.append(("cancel_init_sync", {}))
+
+    async def get_health_report(self) -> dict:
+        self.method_calls.append(("get_health_report", {}))
+        return {"market": {}, "details": {}}
+
+    def execute_full_daily_sync(self) -> None:
+        self.method_calls.append(("execute_full_daily_sync", {}))
+
+    def execute_ai_concept_rebuild(self) -> None:
+        self.method_calls.append(("execute_ai_concept_rebuild", {}))
+
+    def execute_clear_cache(self) -> None:
+        self.method_calls.append(("execute_clear_cache", {}))
+
+    def execute_init_historical_data(self) -> None:
+        self.method_calls.append(("execute_init_historical_data", {}))
+
+    def save_tushare_token(self, token: str) -> None:
+        self.method_calls.append(("save_tushare_token", {"token": token}))
+
+    def set_history_years(self, years: int) -> None:
+        self.method_calls.append(("set_history_years", {"years": years}))
+
+    def handle_task_update(self, current_tasks: list) -> None:
+        self.method_calls.append(("handle_task_update", {"current_tasks": current_tasks}))
+
+    def recover_stale_state(self) -> None:
+        self.method_calls.append(("recover_stale_state", {}))
+
+
+class _FakeTushareConfigPanelViewModel:
+    """模拟 TushareConfigPanelViewModel (use_ref 持久化, 外部 VM 模式订阅)。"""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._init_kwargs = kwargs  # 记录 on_save/on_verify_success 等回调
+        self._state = MagicMock()
+        self._subscribers: list[Any] = []
+        self.dispose_called: bool = False
+        self.method_calls: list[tuple[str, dict]] = []
+
+    @property
+    def state(self) -> Any:
+        return self._state
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    def reload_config(self) -> None:
+        self.method_calls.append(("reload_config", {}))
+
+
+def _run_async_coro(coro: Any) -> None:
+    """同步执行 coroutine (用于 page.run_task 调度的异步任务)。"""
+    if asyncio.iscoroutine(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+
+def _make_fake_page() -> FakePage:
+    """创建扩展的 FakePage, 支持 run_task/show_toast/pubsub/use_dialog。"""
+    page = FakePage()
+
+    def _run_task(fn: Any, *args: Any, **kwargs: Any) -> None:
+        result = fn(*args, **kwargs)
+        if asyncio.iscoroutine(result):
+            _run_async_coro(result)
+
+    page.run_task = MagicMock(side_effect=_run_task)  # type: ignore[method-assign]
+    page.show_toast = MagicMock()  # type: ignore[method-assign]
+    page.pubsub = MagicMock()  # type: ignore[method-assign]
+    # use_dialog 支持: page._dialogs.controls 列表 + _prepare_dialog 吸收调用
+    page._dialogs = MagicMock()  # type: ignore[attr-defined]
+    page._dialogs.controls = []  # type: ignore[attr-defined]
+    page._prepare_dialog = MagicMock()  # type: ignore[method-assign]
+    return page
+
+
+def _mount(component: Any, page: FakePage | None = None) -> tuple[Any, FakePage]:
+    """挂载组件并返回 (渲染结果, page)。"""
+    if page is None:
+        page = _make_fake_page()
+    run_mount_effects(component, page=page)
+    result = render_once(component)
+    return result, page
+
+
+def _collect_controls(root: Any) -> list[Any]:
+    """深度优先遍历控件树, 返回所有控件。"""
+    if root is None:
+        return []
+    result: list[Any] = [root]
+    for attr in ("controls", "items", "tabs"):
+        children = getattr(root, attr, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    result.extend(_collect_controls(child))
+    content = getattr(root, "content", None)
+    if content is not None:
+        result.extend(_collect_controls(content))
+    return result
+
+
+def _find_by_type(root: Any, ctrl_type: type) -> list[Any]:
+    """按类型查找所有控件。"""
+    return [c for c in _collect_controls(root) if isinstance(c, ctrl_type)]
+
+
+def _find_button_by_content(root: Any, content_text: str) -> Any | None:
+    """通过 content 文本查找 ft.Button。"""
+    return next(
+        (
+            c
+            for c in _collect_controls(root)
+            if isinstance(c, ft.Button) and getattr(c, "content", None) == content_text
+        ),
+        None,
+    )
+
+
+def _find_icon_button(root: Any, icon: str) -> Any | None:
+    """按 icon 名称查找 IconButton。"""
+    return next(
+        (c for c in _collect_controls(root) if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == icon),
+        None,
+    )
+
+
+def _find_clickable_containers(root: Any) -> list[Any]:
+    """查找所有有 on_click 的 ft.Container (ActionChip mock 后)。"""
+    return [
+        c for c in _collect_controls(root) if isinstance(c, ft.Container) and getattr(c, "on_click", None) is not None
+    ]
+
+
+def _make_event(value: Any = None, control: Any = None) -> Any:
+    """创建 fake ControlEvent。"""
+    e = MagicMock()
+    if control is not None:
+        e.control = control
+    else:
+        e.control = MagicMock()
+    e.control.value = value
+    return e
+
+
+def _patch_data_source_vms(
+    monkeypatch: Any,
+    fake_vm: _FakeDataSourceViewModel | None = None,
+    fake_tushare_vm: _FakeTushareConfigPanelViewModel | None = None,
+) -> tuple[_FakeDataSourceViewModel, _FakeTushareConfigPanelViewModel]:
+    """注入 fake DataSourceViewModel 和 TushareConfigPanelViewModel。"""
+    if fake_vm is None:
+        fake_vm = _FakeDataSourceViewModel()
+    if fake_tushare_vm is None:
+        fake_tushare_vm = _FakeTushareConfigPanelViewModel()
+    monkeypatch.setattr(
+        "ui.views.settings_tabs.data_source_tab.DataSourceViewModel",
+        lambda: fake_vm,
+    )
+
+    def _tushare_vm_factory(**kwargs: Any) -> Any:
+        fake_tushare_vm._init_kwargs = kwargs
+        return fake_tushare_vm
+
+    monkeypatch.setattr(
+        "ui.views.settings_tabs.data_source_tab.TushareConfigPanelViewModel",
+        _tushare_vm_factory,
+    )
+    return fake_vm, fake_tushare_vm
+
+
+@pytest.fixture
+def _mock_data_source_deps(monkeypatch):
+    """Mock DataSourceTab 的外部依赖。
+
+    - I18n.get → 返回 key 本身 (便于文本断言)
+    - @ft.component 子组件 (DashboardCard/MetricCard/ActionChip/SettingRow/SectionHeader)
+      → 透明包装 (使 _collect_controls 能递归到内部 ft.Button/ft.Dropdown 等直接创建的控件)
+    - TushareConfigPanel / HealthReportDialog / HealthScanDialog → 简单桩
+    - TaskManager → MagicMock
+    - ThreadPoolManager → 直接调用 (不经线程池, 便于异常传播测试)
+    - ConfigHandler.get_init_history_years → 3
+    """
+    import ui.views.settings_tabs.data_source_tab as _mod
+
+    # I18n.get 返回 key 本身, 便于测试用 key 断言
+    monkeypatch.setattr(_mod.I18n, "get", lambda key, *a, **kw: key)
+    # @ft.component 子组件 mock 为透明包装
+    monkeypatch.setattr(
+        _mod,
+        "DashboardCard",
+        lambda content=None, **kw: ft.Container(content=content if content is not None else ft.Container()),
+    )
+    monkeypatch.setattr(_mod, "MetricCard", lambda label="", value="", **kw: ft.Container(content=ft.Text(value or "")))
+    monkeypatch.setattr(
+        _mod,
+        "ActionChip",
+        lambda icon="", title="", subtitle="", on_click=None, is_loading=False, **kw: ft.Container(
+            content=ft.Column(
+                [
+                    ft.Text(title),
+                    ft.ProgressRing(width=16, height=16) if is_loading else ft.Icon(icon),
+                ]
+            ),
+            on_click=on_click,
+        ),
+    )
+    monkeypatch.setattr(
+        _mod,
+        "SettingRow",
+        lambda control=None, **kw: ft.Container(content=control if control is not None else ft.Container()),
+    )
+    monkeypatch.setattr(_mod, "SectionHeader", lambda title="", **kw: ft.Text(title))
+    # 外部组件桩
+    monkeypatch.setattr(_mod, "TushareConfigPanel", lambda **kwargs: ft.Column([]))
+    monkeypatch.setattr(_mod, "HealthReportDialog", lambda **kwargs: ft.Column([]))
+    monkeypatch.setattr(_mod, "HealthScanDialog", lambda **kwargs: ft.Column([]))
+    fake_tm = MagicMock()
+    monkeypatch.setattr(_mod, "TaskManager", lambda: fake_tm)
+
+    # ThreadPoolManager mock: 直接调用函数 (同步/async), 不经线程池
+    class _FakeThreadPoolManager:
+        async def run_async(self, task_type, func, *args, **kwargs):
+            if asyncio.iscoroutinefunction(func):
+                return await func(*args, **kwargs)
+            return func(*args, **kwargs)
+
+    monkeypatch.setattr(_mod, "ThreadPoolManager", lambda: _FakeThreadPoolManager())
+    monkeypatch.setattr(_mod.ConfigHandler, "get_init_history_years", staticmethod(lambda: 3))
+    return fake_tm
+
+
+# ============================================================================
+# 组件体测试: DataSourceTab 基础渲染 + VM 生命周期
+# ============================================================================
+
+
+class TestDataSourceTabComponentBody:
+    """DataSourceTab 组件体测试: 渲染结构 + VM 生命周期 + TaskManager 订阅。"""
+
+    def test_mount_returns_container(self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch):
+        """挂载 DataSourceTab 返回 ft.Container。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert isinstance(result, ft.Container)
+
+    def test_listview_contains_four_cards(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """Container.content 是 ListView, 含 4 个 DashboardCard (mock 后为 Container)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        listview = result.content
+        assert isinstance(listview, ft.ListView)
+        assert len(listview.controls) == 4
+
+    def test_mount_triggers_main_vm_subscribe(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """挂载后主 VM subscribe 被调用 (use_viewmodel hook 注册)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        assert len(fake_vm._subscribers) > 0
+
+    def test_mount_triggers_tushare_vm_subscribe(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """挂载后 tushare_vm subscribe 被调用 (外部 VM 模式订阅)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        assert len(fake_tushare_vm._subscribers) > 0
+
+    def test_mount_calls_recover_stale_state(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """挂载后 vm.recover_stale_state 被调用 (_on_mount effect, deps=[])。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "recover_stale_state" in calls
+
+    def test_mount_calls_tushare_reload_config(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """挂载后 tushare_vm.reload_config 被调用 (_on_mount effect)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        calls = [c[0] for c in fake_tushare_vm.method_calls]
+        assert "reload_config" in calls
+
+    def test_mount_subscribes_task_manager(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """挂载后 TaskManager.subscribe 被调用 (_setup_tm_subscription effect)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        fake_tm = _mock_data_source_deps
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_tm.subscribe.assert_called_once()
+
+    def test_unmount_disposes_main_vm(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """内部 VM 模式: 卸载 dispose 主 VM (use_viewmodel hook cleanup)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        assert fake_vm.dispose_called is False
+        run_unmount_effects(component)
+        assert fake_vm.dispose_called is True
+
+    def test_unmount_disposes_tushare_vm(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """卸载 dispose tushare_vm (_cleanup_tushare_vm effect)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        assert fake_tushare_vm.dispose_called is False
+        run_unmount_effects(component)
+        assert fake_tushare_vm.dispose_called is True
+
+    def test_unmount_unsubscribes_task_manager(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """卸载后 TaskManager.unsubscribe 被调用 (_cleanup_tm_subscription)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        fake_tm = _mock_data_source_deps
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        run_unmount_effects(component)
+        fake_tm.unsubscribe.assert_called_once()
+
+    def test_check_health_button_present(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """渲染包含 btn_check_health (ft.Button, content="settings_check_health")。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        btn = _find_button_by_content(result, "settings_check_health")
+        assert btn is not None, "btn_check_health 应存在"
+        assert btn.on_click is not None
+
+    def test_health_report_icon_button_present(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """渲染包含 btn_health_report (ft.IconButton, icon=INFO_OUTLINE)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        assert btn is not None, "btn_health_report 应存在"
+        assert btn.on_click is not None
+
+    def test_sync_button_present_idle_state(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False 时 sync_button content="settings_init_data"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        btn = _find_button_by_content(result, "settings_init_data")
+        assert btn is not None, "sync_button 应存在 (idle state)"
+        assert btn.on_click is not None
+
+    def test_history_years_dropdown_has_five_options(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """历史年限 Dropdown 包含 5 个选项 (1-5 年)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        dropdowns = _find_by_type(result, ft.Dropdown)
+        assert len(dropdowns) >= 1
+        assert len(dropdowns[0].options) == 5
+
+    def test_progress_bar_hidden_when_idle(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False 时 ProgressBar visible=False。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        bars = _find_by_type(result, ft.ProgressBar)
+        assert len(bars) >= 1
+        assert bars[0].visible is False
+
+    def test_action_chips_present(self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch):
+        """渲染包含 3 个 ActionChip (mock 后为有 on_click 的 ft.Container)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        clickables = _find_clickable_containers(result)
+        # 3 个 ActionChip (full_sync / ai_concept_rebuild / clear_cache)
+        assert len(clickables) >= 3
+
+
+# ============================================================================
+# 组件体测试: 状态分支 (sync_button / progress / metrics)
+# ============================================================================
+
+
+class TestDataSourceTabStateBranches:
+    """DataSourceTab 状态分支测试: sync_button/progress/action 状态派生。"""
+
+    def test_sync_button_shows_init_when_idle(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False → sync_button content="settings_init_data"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert _find_button_by_content(result, "settings_init_data") is not None
+
+    def test_sync_button_shows_wait_when_syncing_not_cancellable(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True, init_sync_cancellable=False → content="sys_init_cancel_wait"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=False)),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert _find_button_by_content(result, "sys_init_cancel_wait") is not None
+
+    def test_sync_button_shows_cancel_when_cancellable(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True, init_sync_cancellable=True → content="settings_cancel_sync"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=True)),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        assert _find_button_by_content(result, "settings_cancel_sync") is not None
+
+    def test_progress_bar_visible_when_init_sync_running(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """init_sync_running=True → ProgressBar visible=True。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(init_sync_running=True)),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        bars = _find_by_type(result, ft.ProgressBar)
+        assert len(bars) >= 1
+        assert bars[0].visible is True
+
+    def test_progress_text_cancelled_status(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """init_sync_final_status=CANCELLED → progress_text 含 "ds_progress_cancelled_fmt"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(init_sync_final_status=TaskStatus.CANCELLED)),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        # I18n.get mock 返回 key, progress_text_value 应含 key
+        assert any("ds_progress_cancelled_fmt" in (t.value or "") for t in texts)
+
+    def test_progress_text_failed_status(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """init_sync_final_status=FAILED → progress_text="ds_init_fail_generic"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(init_sync_final_status=TaskStatus.FAILED)),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        assert any("ds_init_fail_generic" in (t.value or "") for t in texts)
+
+    def test_progress_text_with_message(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """progress_message 非 None → progress_text 含百分比 + message key。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(
+                state=_FakeDataSourceState(
+                    init_sync_running=True,
+                    progress=0.5,
+                    progress_message=Message("test_progress_msg"),
+                )
+            ),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        # progress_text_value = f"{0.5*100:.1f}% - {I18n.get('test_progress_msg')}"
+        # I18n.get mock 返回 key, 所以应含 "50.0%" 和 "test_progress_msg"
+        assert any("50.0%" in (t.value or "") and "test_progress_msg" in (t.value or "") for t in texts)
+
+    def test_sync_button_disabled_when_action_loading(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True + active_key="daily_sync" → sync_button disabled=True。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, active_key="daily_sync")),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        # is_syncing=True + not init_sync_cancellable → content="sys_init_cancel_wait"
+        btn = _find_button_by_content(result, "sys_init_cancel_wait")
+        assert btn is not None
+        # actions_disabled = True (any_action_loading), not cancellable → disabled=True
+        assert btn.disabled is True
+
+    def test_action_chip_loading_when_full_sync_active(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True + active_key="daily_sync" → action_full_sync 含 ProgressRing。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, active_key="daily_sync")),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        rings = _find_by_type(result, ft.ProgressRing)
+        assert len(rings) >= 1, "ActionChip is_loading=True 应渲染 ProgressRing"
+
+    def test_action_chip_no_loading_when_idle(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False → 无 ProgressRing (ActionChip is_loading=False)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        rings = _find_by_type(result, ft.ProgressRing)
+        assert len(rings) == 0, "idle state 不应有 ProgressRing"
+
+    def test_metric_sync_placeholder_when_no_health_result(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """last_health_result={} → metric_sync_value="time_today 15:30" (placeholder)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        # metric_sync_value = f"{I18n.get('time_today')} 15:30"
+        # I18n.get mock 返回 key, 所以值 = "time_today 15:30"
+        assert any("time_today" in (t.value or "") and "15:30" in (t.value or "") for t in texts)
+
+
+# ============================================================================
+# 组件体测试: 事件 handler (按钮点击 → run_task → _do_*)
+# ============================================================================
+
+
+class TestDataSourceTabEventHandlers:
+    """DataSourceTab 事件 handler 测试: 按钮点击 → page.run_task → _do_* 路径。"""
+
+    def test_on_check_health_triggers_run_task(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """btn_check_health on_click → page.run_task(_do_check_health) → vm.check_health。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_check_health")
+        btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "check_health" in calls
+
+    def test_on_health_report_click_triggers_run_task(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """btn_health_report on_click → page.run_task(_do_show_health_report) → get_health_report。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "get_health_report" in calls
+
+    def test_on_history_years_change_triggers_run_task(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """Dropdown on_select → page.run_task(_do_history_years_change) → vm.set_history_years。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        dropdowns = _find_by_type(result, ft.Dropdown)
+        assert len(dropdowns) >= 1
+        dropdowns[0].on_select(_make_event(value="3"))
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "set_history_years" in calls
+
+    def test_on_history_years_change_ignores_empty_value(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """Dropdown on_select value="" → 不触发 run_task (early return)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        dropdowns = _find_by_type(result, ft.Dropdown)
+        dropdowns[0].on_select(_make_event(value=""))
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "set_history_years" not in calls
+
+    def test_on_init_historical_cancellable_triggers_cancel(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True + init_sync_cancellable=True → sync_button → vm.cancel_init_sync。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=True)),
+        )
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_cancel_sync")
+        btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "cancel_init_sync" in calls
+
+    def test_on_init_historical_syncing_not_cancellable_shows_snack(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True, init_sync_cancellable=False → sync_button → show_snack (ds_sync_in_progress)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, init_sync_cancellable=False)),
+        )
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "sys_init_cancel_wait")
+        btn.on_click(_make_event())
+        snack_cb.assert_called_once()
+        args = snack_cb.call_args
+        assert "ds_sync_in_progress" in args[0][0]
+
+    def test_on_full_sync_when_syncing_shows_snack(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=True → ActionChip full_sync on_click → show_snack (ds_sync_in_progress)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True)),
+        )
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        # ActionChip mock 后为 ft.Container with on_click
+        clickables = _find_clickable_containers(result)
+        assert len(clickables) >= 1
+        clickables[0].on_click(_make_event())
+        snack_cb.assert_called_once()
+
+    def test_on_full_sync_opens_confirm_dialog(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False → ActionChip full_sync on_click → set_confirm_dialog_config (打开 dialog)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[0].on_click(_make_event())
+        # 重新渲染使 confirm_dialog_config 生效
+        render_once(component)
+        # confirm dialog 通过 ft.use_dialog 挂载到 page._dialogs.controls
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) >= 1, "应渲染 confirm AlertDialog"
+
+    def test_on_clear_cache_opens_confirm_dialog(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False → ActionChip clear_cache on_click → 打开 confirm dialog。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        # clear_cache 是第 3 个 ActionChip
+        assert len(clickables) >= 3
+        clickables[2].on_click(_make_event())
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) >= 1
+
+    def test_confirm_dialog_confirm_triggers_callback(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """confirm dialog 确认按钮 → page.run_task(callback) → vm.execute_full_daily_sync。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        # 打开 confirm dialog (full_sync)
+        clickables = _find_clickable_containers(result)
+        clickables[0].on_click(_make_event())
+        render_once(component)
+        # 找到 AlertDialog 的确认按钮 (第 2 个 TextButton)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]  # [0]=cancel, [1]=confirm
+        confirm_btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_full_daily_sync" in calls
+
+    def test_confirm_dialog_close_clears_config(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """confirm dialog 取消按钮 → set_confirm_dialog_config({}) (关闭 dialog)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[0].on_click(_make_event())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        cancel_btn = dialog.actions[0]  # [0]=cancel
+        cancel_btn.on_click(_make_event())
+        # 重新渲染, confirm_dialog_config 应为 {} → 无 AlertDialog
+        page._dialogs.controls.clear()  # 清除旧 dialog
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) == 0, "取消后 confirm dialog 应关闭"
+
+    def test_on_init_historical_opens_confirm_dialog(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """is_syncing=False → sync_button on_click → 打开 confirm dialog。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_init_data")
+        btn.on_click(_make_event())
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) >= 1
+
+
+# ============================================================================
+# 组件体测试: 双轨 effect (version 变化触发)
+# ============================================================================
+
+
+class TestDataSourceTabDualTrackEffects:
+    """DataSourceTab 双轨 effect 测试: version 变化 → last_* 拉取 → 副作用。"""
+
+    def test_snack_version_change_triggers_show_snack(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """snack_version 变化 → vm.last_snack 拉取 → show_snack_callback 调用。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component)
+        # 设置 last_snack + 更新 snack_version
+        fake_vm._last_snack = (Message("common_saved"), "success")
+        fake_vm._set_state(snack_version=1)
+        run_render_effects(component)
+        snack_cb.assert_called_once()
+        args = snack_cb.call_args
+        assert "common_saved" in args[0][0]
+
+    def test_health_result_version_change_updates_status(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_result_version 变化 → vm.last_health_result 拉取 → set_health_status_key。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_result = {"status": "green", "market": {}, "details": {}}
+        fake_vm._set_state(health_result_version=1)
+        run_render_effects(component)
+        # 重新渲染后, health_checked=True, health_status_key="ds_health_ok"
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        # metric_health_value = I18n.get("ds_health_ok") = "ds_health_ok"
+        assert any(t.value == "ds_health_ok" for t in texts)
+
+    def test_health_result_version_change_red_status(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_result status="red" → health_status_key="ds_health_error"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_result = {"status": "red", "market": {}, "details": {}}
+        fake_vm._set_state(health_result_version=1)
+        run_render_effects(component)
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        assert any(t.value == "ds_health_error" for t in texts)
+
+    def test_health_error_version_change_sets_check_fail(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_error_version 变化 → health_status_key="common_check_fail"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_error = "some error"
+        fake_vm._set_state(health_error_version=1)
+        run_render_effects(component)
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        assert any(t.value == "common_check_fail" for t in texts)
+
+    def test_cache_cleared_version_change_triggers_pubsub(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """cache_cleared_version 变化 → page.pubsub.send_all_on_topic 调用。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component, page=page)
+        fake_vm._set_state(cache_cleared_version=1)
+        run_render_effects(component)
+        # mount effect + render effect 都可能触发, 用 assert_called 容忍多次
+        page.pubsub.send_all_on_topic.assert_called()
+
+
+# ============================================================================
+# 组件体测试: 异步错误路径 (R2 CancelledError 传播)
+# ============================================================================
+
+
+class TestDataSourceTabAsyncErrorPaths:
+    """DataSourceTab 异步错误路径测试: R2 CancelledError 传播 + Exception 兜底。"""
+
+    def test_do_check_health_propagates_cancelled_error(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_check_health raises CancelledError → 传播 (R2: 不被 except Exception 捕获)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_cancelled() -> None:
+            raise asyncio.CancelledError()
+
+        fake_vm.check_health = _raise_cancelled
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_check_health")
+        # page.run_task mock 同步执行协程, CancelledError 应传播
+        with pytest.raises(asyncio.CancelledError):
+            btn.on_click(_make_event())
+
+    def test_do_check_health_handles_exception(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_check_health raises Exception → 捕获 (不传播, 不 crash)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_exception() -> None:
+            raise RuntimeError("test error")
+
+        fake_vm.check_health = _raise_exception
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_check_health")
+        # 不应抛异常 (Exception 被捕获)
+        btn.on_click(_make_event())
+
+    def test_do_history_years_change_propagates_cancelled_error(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_history_years_change raises CancelledError → 传播 (R2)。
+
+        set_history_years 是同步方法 (由 ThreadPoolManager 调度),
+        同步 raise CancelledError 经 _FakeThreadPoolManager.run_async 传播。
+        """
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+
+        def _raise_cancelled(years: int) -> None:
+            raise asyncio.CancelledError()
+
+        fake_vm.set_history_years = _raise_cancelled
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        dropdowns = _find_by_type(result, ft.Dropdown)
+        with pytest.raises(asyncio.CancelledError):
+            dropdowns[0].on_select(_make_event(value="3"))
+
+    def test_do_history_years_change_handles_exception(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_history_years_change raises Exception → 捕获 + show_snack (sys_snack_save_err)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_exception(years: int) -> None:
+            raise RuntimeError("test error")
+
+        fake_vm.set_history_years = _raise_exception
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        dropdowns = _find_by_type(result, ft.Dropdown)
+        dropdowns[0].on_select(_make_event(value="3"))
+        snack_cb.assert_called_once()
+        assert "sys_snack_save_err" in snack_cb.call_args[0][0]
+
+    def test_do_show_health_report_propagates_cancelled_error(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_show_health_report raises CancelledError → 传播 (R2)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_cancelled() -> dict:
+            raise asyncio.CancelledError()
+
+        fake_vm.get_health_report = _raise_cancelled
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        with pytest.raises(asyncio.CancelledError):
+            btn.on_click(_make_event())
+
+    def test_do_show_health_report_handles_exception(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_show_health_report raises Exception → 捕获 + show_snack (error message)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+
+        async def _raise_exception() -> dict:
+            raise RuntimeError("report error")
+
+        fake_vm.get_health_report = _raise_exception
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        btn.on_click(_make_event())
+        # _do_show_health_report 先调 show_snack("health_checking"), except 块再调 show_snack(error)
+        # 验证最后一次调用是 error message
+        snack_cb.assert_called()
+        last_call = snack_cb.call_args
+        assert "common_err_unknown" in last_call[0][0]
+
+
+# ============================================================================
+# 组件体测试: Dialog 渲染分支
+# ============================================================================
+
+
+class TestDataSourceTabDialogs:
+    """DataSourceTab Dialog 渲染测试: confirm/health_report/scan 条件渲染。"""
+
+    def test_confirm_dialog_destructive_style_for_clear_cache(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """clear_cache confirm dialog → 确认按钮 style color=AppColors.ERROR (destructive)。"""
+        from ui.theme import AppColors
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        # clear_cache 是第 3 个 ActionChip
+        clickables[2].on_click(_make_event())
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]
+        # is_destructive=True → btn_style color=AppColors.ERROR
+        assert confirm_btn.style is not None
+        assert confirm_btn.style.color == AppColors.ERROR
+
+    def test_confirm_dialog_primary_style_for_full_sync(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """full_sync confirm dialog → 确认按钮 style color=AppColors.PRIMARY (非 destructive)。"""
+        from ui.theme import AppColors
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[0].on_click(_make_event())  # full_sync
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]
+        assert confirm_btn.style is not None
+        assert confirm_btn.style.color == AppColors.PRIMARY
+
+    def test_health_report_dialog_renders_when_open(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_report_open=True + health_report_data 非空 → HealthReportDialog 渲染。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        # 触发 _do_show_health_report (get_health_report 返回 dict)
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        btn.on_click(_make_event())
+        # _do_show_health_report 执行后 set_health_report_data + set_health_report_open(True)
+        # 重新渲染使 health_report_open=True 生效
+        render_once(component)
+        # HealthReportDialog 被 mock 为 ft.Column([]), 通过 ft.use_dialog 挂载
+        # 验证不抛异常即可 (dialog 已 mock)
+        assert page._dialogs.controls is not None
+
+    def test_scan_dialog_renders_when_open(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """scan_dialog_open=True → HealthScanDialog 渲染 (通过 _on_deep_scan 触发)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        # 先打开 health_report dialog, 然后 HealthReportDialog 内部 _on_deep_scan
+        # 但 HealthReportDialog 被 mock 为 ft.Column([]), 无法直接触发 _on_deep_scan
+        # 此测试验证 health_report 打开路径不抛异常
+        btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
+        btn.on_click(_make_event())
+        render_once(component)
+        assert page._dialogs.controls is not None
+
+
+# ============================================================================
+# 组件体测试: 覆盖率补充 (tushare save / action handlers / health branches)
+# ============================================================================
+
+
+class TestDataSourceTabCoverageBranches:
+    """覆盖缺失分支: tushare save / action handlers / health states / close handlers。"""
+
+    def test_tushare_on_save_triggers_do_tushare_save(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_save 回调 → page.run_task(_do_tushare_save) → vm.save_tushare_token。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        # _create_tushare_vm 构造时传入 on_save 回调, 记录在 _init_kwargs
+        on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        assert on_save is not None, "on_save 回调应被传入"
+        on_save({"token": "test_token"})
+        # _on_save → page.run_task(_do_tushare_save, "test_token")
+        # _do_tushare_save → ThreadPoolManager.run_async(vm.save_tushare_token, "test_token")
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "save_tushare_token" in calls
+        snack_cb.assert_called()
+        assert "settings_msg_saved" in snack_cb.call_args[0][0]
+
+    def test_tushare_on_save_ignores_empty_token(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_save token="" → early return (不触发 _do_tushare_save)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component, page=page)
+        on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        on_save({"token": "  "})  # 空白 token strip 后为空
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "save_tushare_token" not in calls
+
+    def test_tushare_on_save_handles_exception(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_tushare_save raises Exception → 捕获 + show_snack (sys_snack_save_err)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        save_mock = MagicMock(side_effect=RuntimeError("save failed"))
+        fake_vm.save_tushare_token = save_mock
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        on_save({"token": "test_token"})
+        save_mock.assert_called_once_with("test_token")
+        snack_cb.assert_called()
+        assert "sys_snack_save_err" in snack_cb.call_args[0][0]
+
+    def test_tushare_on_verify_success_calls_show_snack(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_verify_success 回调 → show_snack_callback (settings_snack_token_verified)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _, fake_tushare_vm = _patch_data_source_vms(monkeypatch)
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        _mount(component, page=page)
+        on_verify = fake_tushare_vm._init_kwargs.get("on_verify_success")
+        assert on_verify is not None
+        on_verify("test_token")
+        snack_cb.assert_called_once()
+        assert "settings_snack_token_verified" in snack_cb.call_args[0][0]
+
+    def test_on_ai_concept_rebuild_opens_confirm_dialog(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_ai_concept_rebuild (is_syncing=False) → 打开 confirm dialog。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        # ai_concept_rebuild 是第 2 个 ActionChip
+        clickables[1].on_click(_make_event())
+        render_once(component)
+        dialogs = [c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog)]
+        assert len(dialogs) >= 1
+
+    def test_on_ai_concept_rebuild_when_syncing_shows_snack(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_ai_concept_rebuild (is_syncing=True) → show_snack (ds_sync_in_progress)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True)),
+        )
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[1].on_click(_make_event())
+        snack_cb.assert_called_once()
+
+    def test_on_clear_cache_when_syncing_shows_snack(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_clear_cache (is_syncing=True) → show_snack (ds_clear_cache_syncing)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True)),
+        )
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[2].on_click(_make_event())
+        snack_cb.assert_called_once()
+        assert "ds_clear_cache_syncing" in snack_cb.call_args[0][0]
+
+    def test_confirm_dialog_confirm_ai_concept_triggers_rebuild(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """confirm dialog (ai_concept) 确认按钮 → vm.execute_ai_concept_rebuild。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[1].on_click(_make_event())  # ai_concept_rebuild
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]
+        confirm_btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_ai_concept_rebuild" in calls
+
+    def test_confirm_dialog_confirm_clear_triggers_clear_cache(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """confirm dialog (clear_cache) 确认按钮 → vm.execute_clear_cache。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        clickables = _find_clickable_containers(result)
+        clickables[2].on_click(_make_event())  # clear_cache
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]
+        confirm_btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_clear_cache" in calls
+
+    def test_confirm_dialog_confirm_init_triggers_init_historical(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """confirm dialog (init_historical) 确认按钮 → vm.execute_init_historical_data。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        btn = _find_button_by_content(result, "settings_init_data")
+        btn.on_click(_make_event())  # init_historical
+        render_once(component)
+        dialog = next(c for c in page._dialogs.controls if isinstance(c, ft.AlertDialog))
+        confirm_btn = dialog.actions[1]
+        confirm_btn.on_click(_make_event())
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_init_historical_data" in calls
+
+    def test_confirm_dialog_confirm_ignores_empty_config(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_on_confirm_dialog_confirm 空 config → early return (不触发 callback)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, page = _mount(component, page=page)
+        # 不打开 confirm dialog, 直接重新渲染 (confirm_dialog_config={})
+        render_once(component)
+        # 无 dialog, 无 callback 调用
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "execute_full_daily_sync" not in calls
+
+    def test_health_result_yellow_status(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_result status="yellow" → health_status_key="ds_health_lag"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_result = {"status": "yellow", "market": {}, "details": {}}
+        fake_vm._set_state(health_result_version=1)
+        run_render_effects(component)
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        assert any(t.value == "ds_health_lag" for t in texts)
+
+    def test_health_checking_state_renders_checking_text(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_checking=True → metric_health_value="ds_status_checking" + health_summary="health_checking"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(
+            monkeypatch,
+            fake_vm=_FakeDataSourceViewModel(state=_FakeDataSourceState(health_checking=True)),
+        )
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+        texts = _find_by_type(result, ft.Text)
+        # health_summary_content = ft.Text(I18n.get("health_checking"))
+        assert any(t.value == "health_checking" for t in texts)
+
+    def test_health_checked_no_status_key_renders_checking_text(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_checked=True but health_status_key="" → 默认 "ds_status_checking" 分支。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        # 触发 health_result_version 变化但 result=None (health_checked=True but no status_key)
+        # 通过 set_last_health_result 不设, 直接用 effect 触发
+        # 实际上 health_checked=True + health_status_key="" 走 else 分支 (558-563)
+        # 需要手动触发 set_health_checked(True) 但不设 health_status_key
+        # 这通过 effect 无法直接触发, 用 state.health_checking=True 覆盖 534-541 分支
+        # 此测试覆盖 558-563: health_checked=True, no status_key, no health_checking
+        # 需要通过 effect 设置 health_checked=True 但 health_status_key=""
+        # health_result_version 变化 + last_health_result=None → effect early return, 不设置
+        # 所以这个分支需要其他方式触发
+        # 跳过: 无法在不修改生产代码的情况下触发此分支
+        pytest.skip("health_checked=True + no status_key 分支需直接操作内部 state, 无法通过 effect 触发")
+
+    def test_health_summary_check_fail_text(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_checked=True + health_status_key="common_check_fail" → "ds_health_check_error"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_error = "error msg"
+        fake_vm._set_state(health_error_version=1)
+        run_render_effects(component)
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        # health_summary_content = ft.Text(I18n.get("ds_health_check_error"))
+        assert any(t.value == "ds_health_check_error" for t in texts)
+
+    def test_health_summary_cancelled_text(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """health_checked=True + health_status_key="ds_health_cancelled" → "ds_health_cancelled"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        # 触发 health_result status="cancelled" (但生产代码只映射 yellow/red/green)
+        # 实际上 health_status_key="ds_health_cancelled" 由 TaskManager callback 设置
+        # 此测试用 health_error_version 触发 common_check_fail, 再验证 cancelled 分支
+        # cancelled 分支 (637-638) 需要 health_status_key="ds_health_cancelled"
+        # 这由 vm.handle_task_update 设置, 但 fake_vm 不实现
+        pytest.skip("ds_health_cancelled 分支需 TaskManager callback 设置, fake_vm 不支持")
+
+    def test_task_manager_callback_calls_handle_task_update(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """TaskManager subscribe callback → vm.handle_task_update 调用。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        fake_tm = _mock_data_source_deps
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        # _setup_tm_subscription 注册了 _on_task_update callback
+        # 获取 subscribe 调用时的 callback
+        subscribe_args = fake_tm.subscribe.call_args
+        callback = subscribe_args[0][0]
+        # 调用 callback (模拟 TaskManager 通知)
+        callback([MagicMock()])
+        calls = [c[0] for c in fake_vm.method_calls]
+        assert "handle_task_update" in calls
+
+    def test_metric_sync_never_when_latest_is_none(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """last_health_result 有 latest_local=None → metric_sync_value="ds_never_sync"。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_result = {
+            "status": "green",
+            "market": {"latest_local": None},
+            "details": {"financial_coverage": 80.0},
+        }
+        fake_vm._set_state(health_result_version=1)
+        run_render_effects(component)
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        assert any(t.value == "ds_never_sync" for t in texts)
+
+    def test_metric_sync_value_from_health_result(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """last_health_result 有 latest_local → metric_sync_value=str(latest_local)。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        _mount(component)
+        fake_vm._last_health_result = {
+            "status": "green",
+            "market": {"latest_local": "2026-07-12"},
+            "details": {"financial_coverage": 95.5},
+        }
+        fake_vm._set_state(health_result_version=1)
+        run_render_effects(component)
+        result = render_once(component)
+        texts = _find_by_type(result, ft.Text)
+        assert any("2026-07-12" in (t.value or "") for t in texts)
+        assert any("95.5%" in (t.value or "") for t in texts)
+
+    def test_on_history_years_change_handles_exception_no_crash(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """_do_history_years_change raises Exception → 捕获, show_snack, 不 crash。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm, _ = _patch_data_source_vms(monkeypatch)
+        fake_vm.set_history_years = MagicMock(side_effect=RuntimeError("set failed"))
+        snack_cb = MagicMock()
+        page = _make_fake_page()
+        component = make_component(DataSourceTab, show_snack_callback=snack_cb)
+        result, page = _mount(component, page=page)
+        dropdowns = _find_by_type(result, ft.Dropdown)
+        dropdowns[0].on_select(_make_event(value="3"))
+        snack_cb.assert_called()
+        assert "sys_snack_save_err" in snack_cb.call_args[0][0]

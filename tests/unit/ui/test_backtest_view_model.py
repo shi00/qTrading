@@ -663,3 +663,108 @@ class TestBacktestViewModelRunBacktest:
         assert vm.state.status_message.key == "backtest_failed"
         # Verify progress was set to 1.0 (final state from finally block)
         assert vm.state.progress == 1.0
+
+
+class TestBacktestViewModelCoverageGaps:
+    """补充测试：覆盖剩余未覆盖分支/行（显式 service 注入、unsubscribe、_cancel_check）。"""
+
+    def test_init_with_explicit_service_skips_default_factory(self):
+        """显式注入 service 时，VM 应直接使用该 service，跳过默认 engine_factory 装配。
+
+        覆盖 __init__ 中 `if service is None` 的 false 分支（行 61->78）。
+        """
+        mock_service = MagicMock()
+        vm = BacktestViewModel(service=mock_service)
+
+        assert vm.service is mock_service
+
+    def test_subscribe_unsubscribe_removes_callback(self):
+        """subscribe 返回的 unsubscribe 函数应从订阅列表移除回调，后续状态变更不再通知。
+
+        覆盖 _unsubscribe 函数体（行 94-95）。
+        """
+        vm = BacktestViewModel()
+        snapshots: list = []
+
+        def cb(s):  # noqa: ANN001
+            snapshots.append(s)
+
+        unsubscribe = vm.subscribe(cb)
+
+        vm._set_state(is_running=True)
+        assert len(snapshots) == 1
+
+        unsubscribe()
+
+        vm._set_state(is_running=False)
+        # 取消订阅后不再收到通知
+        assert len(snapshots) == 1
+        assert vm._subscribers == []
+
+    def test_subscribe_unsubscribe_idempotent(self):
+        """unsubscribe 重复调用不应抛异常（callback 已移除时跳过 remove）。
+
+        覆盖 _unsubscribe 中 `if callback in self._subscribers` 的 false 分支。
+        """
+        vm = BacktestViewModel()
+
+        def cb(s):  # noqa: ANN001
+            pass
+
+        unsubscribe = vm.subscribe(cb)
+
+        unsubscribe()
+        # 第二次调用：callback 已不在列表，不应抛异常
+        unsubscribe()
+
+        assert vm._subscribers == []
+
+    @pytest.mark.asyncio
+    async def test_run_backtest_invokes_cancel_check(self):
+        """_execute_backtest 应将 _cancel_check 传给 service.run_backtest，且该回调委托给 TaskManager.is_cancelled。
+
+        覆盖 _cancel_check 函数体（行 207）。验证 cancel_check 回调被 service 调用后，
+        正确委托给 TaskManager().is_cancelled(task_id)。
+        """
+        vm = BacktestViewModel()
+
+        captured_cancel_check: Callable[[], bool] | None = None
+
+        async def service_run(**kwargs):
+            nonlocal captured_cancel_check
+            captured_cancel_check = kwargs.get("cancel_check")
+            # 调用 cancel_check 验证其委托行为
+            assert captured_cancel_check is not None
+            result = captured_cancel_check()
+            assert result is False
+            return MagicMock(duration_ms=100, metrics={"sharpe_ratio": 1.0})
+
+        vm.service.run_backtest = AsyncMock(side_effect=service_run)
+
+        captured_factory: Callable[..., Awaitable[Any]] | None = None
+
+        def capture_submit(name, task_type, coroutine_factory, cancellable=False, **kwargs):
+            nonlocal captured_factory
+            captured_factory = coroutine_factory
+            return "task_cancel_check"
+
+        config = BacktestConfig(start_date=date(2024, 1, 1), end_date=date(2024, 12, 31))
+
+        with (
+            patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls,
+            patch("ui.viewmodels.backtest_view_model.get_strategy_registry") as mock_registry,
+        ):
+            mock_tm = MagicMock(spec=TaskManager)
+            mock_tm.submit_task = MagicMock(side_effect=capture_submit)
+            mock_tm.is_cancelled = MagicMock(return_value=False)
+            mock_tm_cls.return_value = mock_tm
+            mock_registry.return_value = {"test_strategy": MagicMock(__name__="TestStrategy")}
+
+            await vm.run_backtest("test_strategy", config)
+
+            assert captured_factory is not None
+            # 必须在 patch 作用域内执行，因为 _cancel_check 内部会再次调用 TaskManager()
+            await captured_factory(task_id="task_cancel_check")
+
+            # 验证 cancel_check 已委托给 TaskManager.is_cancelled
+            mock_tm.is_cancelled.assert_called_once_with("task_cancel_check")

@@ -630,3 +630,210 @@ class TestSaveConfigCommand:
         # 不应触达 service 层
         mock_svc.test_connection.assert_not_called()
         mock_svc.ensure_tables_exist.assert_not_called()
+
+
+# --- 覆盖率补全：subscribe/_unsubscribe 边界 + get_config 异常分支 ---
+
+
+class TestSubscribeNotifyEdgeCases:
+    def test_unsubscribe_twice_does_not_raise(self, mock_config_handler):
+        """重复退订不应抛异常（覆盖 _unsubscribe 中 callback 已不在列表的 False 分支）。"""
+        vm = _make_vm(mock_config_handler)
+        unsub = vm.subscribe(lambda s: None)
+        unsub()
+        unsub()  # 第二次退订：callback 已不在 _subscribers
+        assert vm._subscribers == []  # type: ignore[attr-defined]
+
+
+class TestGetConfigEdgeCases:
+    def test_get_config_invalid_port_falls_back_to_5432(self, mock_config_handler):
+        """port 无法解析为 int 时 fallback 5432（覆盖 get_config except 分支）。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_port("abc")
+        config = vm.get_config()
+        assert config["port"] == 5432
+
+
+# --- 覆盖率补全：test_connection 边界与异常路径 ---
+
+
+class TestConnectionEdgeCases:
+    @pytest.mark.asyncio
+    async def test_test_connection_already_verifying_returns_false(self, mock_config_handler, mock_thread_pool):
+        """重入守卫：is_verifying=True 时直接返回 False，不执行测试流程。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+        vm._set_state(is_verifying=True)  # type: ignore[attr-defined]
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock()
+            result = await vm.test_connection()
+
+        assert result is False
+        assert vm.state.status_type == "warning"
+        mock_svc.test_connection.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_success_with_db_info(self, mock_config_handler, mock_thread_pool):
+        """SUCCESS 且 get_database_info 返回非空时，db_info 写入 state。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+
+        mock_info = MagicMock()
+        mock_info.version = "PostgreSQL 16.0"
+        mock_info.size = "100 MB"
+        mock_info.table_count = 42
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.get_database_info = AsyncMock(return_value=mock_info)
+            result = await vm.test_connection()
+
+        assert result is True
+        assert vm.state.db_info is not None
+        assert vm.state.db_info.params["version"] == "PostgreSQL 16.0"
+        assert vm.state.db_info.params["size"] == "100 MB"
+        assert vm.state.db_info.params["tables"] == 42
+
+    @pytest.mark.asyncio
+    async def test_test_connection_db_not_found_with_create_triggers_callback(
+        self, mock_config_handler, mock_thread_pool
+    ):
+        """DATABASE_NOT_FOUND + create_if_not_exists=True 时触发 on_test_success_callback。"""
+        on_test_success = MagicMock()
+        vm = _make_vm(mock_config_handler, on_test_success_callback=on_test_success)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+        vm.update_create_if_not_exists(True)
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.DATABASE_NOT_FOUND
+        mock_result.message = "not found"
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            result = await vm.test_connection()
+
+        assert result is True
+        on_test_success.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_value_error_exception(self, mock_config_handler, mock_thread_pool):
+        """test_connection 抛 ValueError 时分类错误并显示 error 状态。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=ValueError("bad value"))
+            result = await vm.test_connection()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.status_message is not None
+        assert vm.state.is_verifying is False
+
+    @pytest.mark.asyncio
+    async def test_test_connection_generic_exception(self, mock_config_handler, mock_thread_pool):
+        """test_connection 抛通用 Exception 时分类错误并显示 error 状态。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=RuntimeError("boom"))
+            result = await vm.test_connection()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.status_message is not None
+        assert vm.state.is_verifying is False
+
+
+# --- 覆盖率补全：save_config 异常路径 ---
+
+
+class TestSaveConfigEdgeCases:
+    @pytest.mark.asyncio
+    async def test_save_config_create_database_fails(self, mock_config_handler, mock_thread_pool):
+        """DATABASE_NOT_FOUND + create_if_not_exists=True 但 create_database 失败时返回 False。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+        vm.update_create_if_not_exists(True)
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.DATABASE_NOT_FOUND
+        mock_result.message = "not found"
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.create_database = AsyncMock(return_value=(False, "create failed"))
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+
+    @pytest.mark.asyncio
+    async def test_save_config_ensure_tables_fails(self, mock_config_handler, mock_thread_pool):
+        """ensure_tables_exist 失败时返回 False 并显示 error。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        mock_result = MagicMock()
+        mock_result.status = ConnectionStatus.SUCCESS
+        mock_result.message = "ok"
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(return_value=mock_result)
+            mock_svc.ensure_tables_exist = AsyncMock(return_value=(False, "tables failed"))
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+
+    @pytest.mark.asyncio
+    async def test_save_config_exception(self, mock_config_handler, mock_thread_pool):
+        """save_config 流程抛通用 Exception 时分类错误并返回 False。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=RuntimeError("boom"))
+            result = await vm.save_config()
+
+        assert result is False
+        assert vm.state.status_type == "error"
+        assert vm.state.is_saving is False
