@@ -207,7 +207,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.3 单例模式
 
-使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/LocalModelManager/StrategyManager）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [CONTRIBUTING.md「单例模式实现模板」](./CONTRIBUTING.md#单例模式实现模板)。
+使用 `@register_singleton` 装饰器统一管理单例生命周期。**所有单例必须**：① 使用 `@register_singleton` 注册；② 实现 `_reset_singleton()` 方法 (测试隔离)；③ 支持参数依赖注入 (DI) 或注入可选时钟，避免难以测试的隐式全局状态依赖。完整代码模板、锁保护/`_initialized`/`_atexit_cleanup` 实现细节、注册清单（含 CacheManager/ThreadPoolManager/TaskManager/AIService/SchedulerService/DataProcessor/MarketDataService/NewsSubscriptionService/TushareClient/AkshareConceptClient/LocalModelManager/StrategyManager）、非注册单例 (`ConfigHandler`/`ProxyManager`)、非单例服务 (`BacktestService`) 见 [CONTRIBUTING.md「单例模式实现模板」](./CONTRIBUTING.md#单例模式实现模板)。
 
 ---
 
