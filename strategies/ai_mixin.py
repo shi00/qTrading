@@ -37,7 +37,7 @@ from strategies.utils import fmt_val, safe_float
 from core.i18n import I18n
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error
+from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
@@ -272,8 +272,15 @@ class AIStrategyMixin:
                 as_of = parse_date(str(trade_date_raw))
                 if isinstance(as_of, datetime.datetime):
                     as_of = as_of.date()
-            except Exception as e:
-                logger.warning("AI context error: %s", e, exc_info=True)
+            except (ValueError, TypeError) as e:
+                if is_backtest:
+                    raise ValueError(
+                        f"Cannot parse trade_date for backtest learning context: {trade_date_raw!r}. "
+                        f"Refusing to use unbounded learning context to prevent lookahead bias."
+                    ) from e
+                severity = classify_severity(e)
+                log_level = logger.error if severity == "system" else logger.warning
+                log_level("AI context error: %s", e, exc_info=True)
         if as_of is None and is_backtest:
             raise ValueError(
                 f"Cannot compute learning as_of for backtest: trade_date is {trade_date_raw!r}. "
@@ -375,8 +382,15 @@ class AIStrategyMixin:
                     news_as_of = parsed.date()
                 elif isinstance(parsed, date):
                     news_as_of = parsed
-            except Exception as e:
-                logger.warning("AI context error: %s", e, exc_info=True)
+            except (ValueError, TypeError) as e:
+                if context.get("is_backtest"):
+                    raise ValueError(
+                        f"Cannot parse trade_date for backtest news context: {trade_date_raw!r}. "
+                        f"Refusing to use unbounded news context to prevent lookahead bias."
+                    ) from e
+                severity = classify_severity(e)
+                log_level = logger.error if severity == "system" else logger.warning
+                log_level("AI context error: %s", e, exc_info=True)
 
         # --- Fetch Global Context ONCE ---
         # --- Pre-fetch Learning Context ONCE for the entire batch ---
@@ -388,6 +402,7 @@ class AIStrategyMixin:
                 rm = ReviewManager()
                 as_of = self.compute_learning_as_of(context.get("trade_date"), context.get("is_backtest", False))
                 history_context = await rm.get_learning_context(as_of=as_of)
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning(
                     "[AIStrategyMixin] Failed to pre-fetch learning context: %s",
@@ -398,6 +413,7 @@ class AIStrategyMixin:
         if self.should_include_global_context():
             try:
                 global_context = await NewsFetcher.get_us_major_moves(as_of=news_as_of)
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to fetch global context: %s", DataSanitizer.sanitize_error(e))
 
@@ -406,6 +422,7 @@ class AIStrategyMixin:
         all_ts_codes = candidates_df["ts_code"].tolist()
         try:
             concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to pre-fetch concepts: %s", DataSanitizer.sanitize_error(e))
 
@@ -449,6 +466,7 @@ class AIStrategyMixin:
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Ultimate Pipeline init failed: %s", DataSanitizer.sanitize_error(e))
 
@@ -458,6 +476,7 @@ class AIStrategyMixin:
         try:
             if trade_date is None:
                 trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore[union-attr]
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to get latest trade date: %s", DataSanitizer.sanitize_error(e))
 
@@ -469,22 +488,26 @@ class AIStrategyMixin:
         if trade_date:
             try:
                 moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch moneyflow: %s", DataSanitizer.sanitize_error(e))
 
             try:
                 top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch top_list: %s", DataSanitizer.sanitize_error(e))
 
             try:
                 northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))
 
             # Phase 3C：top_inst 龙虎榜机构席位预取（auxiliary 数据，权限不足时由 _build_stale_section 标注）
             try:
                 top_inst_df = await dp.cache.get_top_inst_batch(all_ts_codes, as_of_date=trade_date)  # type: ignore[union-attr]
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch top_inst: %s", DataSanitizer.sanitize_error(e))
 
@@ -501,6 +524,7 @@ class AIStrategyMixin:
         try:
             auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes, as_of_date=trade_date)
             logger.info("[AIStrategyMixin] Pre-fetched auxiliary data for %d stocks", len(auxiliary_data))
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s", DataSanitizer.sanitize_error(e))
 
@@ -530,6 +554,7 @@ class AIStrategyMixin:
         # D7: Prefetch macro_context once before concurrent loop to avoid thundering herd
         try:
             prefetched.macro_context = await self._build_macro_context(dp.cache, as_of_date=prefetched.trade_date)
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to prefetch macro context: %s", DataSanitizer.sanitize_error(e))
 
@@ -769,6 +794,7 @@ class AIStrategyMixin:
                     block_text, block_valid = builder(row, prefetched)
                     if block_valid and block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
+                # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
                 except Exception as e:
                     logger.warning(
                         "[AIStrategyMixin] Context builder '%s' failed: %s", name, DataSanitizer.sanitize_error(e)
@@ -879,6 +905,7 @@ class AIStrategyMixin:
                 DataSanitizer.sanitize_error(e),
             )
             raise
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error(
                 "[AIStrategyMixin] Analysis failed for %s: %s",
@@ -977,10 +1004,18 @@ class AIStrategyMixin:
                 result["price_trend_5d"] = I18n.get("ai_data_insufficient")
 
         except Exception as e:
-            logger.warning(
-                "[AIStrategyMixin] Technical structure computation failed: %s",
-                e,
-            )
+            severity = classify_severity(e)
+            if severity == "system":
+                logger.error(
+                    "[AIStrategyMixin] Technical structure computation system error: %s",
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    "[AIStrategyMixin] Technical structure computation failed (transient): %s",
+                    e,
+                )
             result["ma_alignment"] = I18n.get("ai_calc_error")
             result["volume_trend"] = I18n.get("ai_calc_error")
             result["price_trend_5d"] = I18n.get("ai_calc_error")
@@ -1185,6 +1220,7 @@ class AIStrategyMixin:
 
             return "\n".join(lines)
 
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to build history text: %s", DataSanitizer.sanitize_error(e))
             if labels_out is not None:
@@ -1298,6 +1334,7 @@ class AIStrategyMixin:
 
             return "\n".join(parts)
 
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
                 "[AIStrategyMixin] Failed to build capital flow text for %s: %s",
@@ -1425,6 +1462,7 @@ class AIStrategyMixin:
 
             return ("\n".join(parts), True) if parts else ("", False)
 
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build multi-period financials for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -1457,8 +1495,8 @@ class AIStrategyMixin:
             d = pd.to_datetime(str(end_date))
             q = (d.month - 1) // 3 + 1
             quarter_str = f"{d.year}Q{q}"
-        except Exception:
-            pass
+        except (ValueError, TypeError):
+            logger.warning("[AIStrategyMixin] Failed to parse forecast end_date to quarter: %r", end_date)
 
         # 拼接预告幅度区间
         range_str = ""
@@ -1469,8 +1507,8 @@ class AIStrategyMixin:
         ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
         try:
             ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
-        except Exception:
-            pass
+        except (ValueError, TypeError):
+            logger.warning("[AIStrategyMixin] Failed to format forecast ann_date: %r", ann_date)
 
         return (
             f"- {I18n.get('ai_forecast')}: {quarter_str} {forecast_type}{range_str}"
@@ -1603,8 +1641,8 @@ class AIStrategyMixin:
             d = pd.to_datetime(str(end_date))
             q = (d.month - 1) // 3 + 1
             quarter_str = f"{d.year}Q{q}"
-        except Exception:
-            pass
+        except (ValueError, TypeError):
+            logger.warning("[AIStrategyMixin] Failed to parse express end_date to quarter: %r", end_date)
 
         # 拼接营收/净利/扣非段落（单位转换：元 → 亿元）
         parts: list[str] = []
@@ -1639,8 +1677,8 @@ class AIStrategyMixin:
         ann_str = str(ann_date) if ann_date is not None else I18n.get("ai_unknown")
         try:
             ann_str = pd.to_datetime(str(ann_date)).strftime("%Y-%m-%d")
-        except Exception:
-            pass
+        except (ValueError, TypeError):
+            logger.warning("[AIStrategyMixin] Failed to format express ann_date: %r", ann_date)
 
         return (
             f"- {I18n.get('ai_express')}: {quarter_str} "
@@ -1899,6 +1937,7 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_express")
 
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -2075,6 +2114,7 @@ class AIStrategyMixin:
                         lines.append(lpr_section)
                         has_data = True
 
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIMixin] Failed to build macro context: %s", DataSanitizer.sanitize_error(e))
 
@@ -2125,6 +2165,7 @@ class AIStrategyMixin:
 
             return "\n".join(parts)
 
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIMixin] Failed to build financials text: %s", DataSanitizer.sanitize_error(e))
             if labels_out is not None:

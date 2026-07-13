@@ -265,6 +265,7 @@ class VectorBacktestEngine:
             quotes_df = quotes_df.join(suspend_df, on=["ts_code", "trade_date"], how="left")
 
             return quotes_df.with_columns(pl.col("is_tradable").fill_null(True)), None
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", e)
             warning = DataWarning(
@@ -324,6 +325,7 @@ class VectorBacktestEngine:
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
             return quotes_df, None
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", e)
             warning = DataWarning(
@@ -467,6 +469,7 @@ class VectorBacktestEngine:
                     signals_list.append(signal_df)
             except asyncio.CancelledError:
                 raise
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[Backtest] Strategy failed on %s: %s", signal_date, e)
                 if failed_signal_dates is not None:
