@@ -210,3 +210,31 @@ class TestI18nObservable:
         """initialize() 无参数时使用 DEFAULT_LOCALE 同步 state。"""
         I18n.initialize()
         assert get_observable_state().locale == DEFAULT_LOCALE
+
+
+class TestMetaDataManagerCacheInvalidation:
+    """R.4.2: locale 变更/初始化时同步失效 MetaDataManager 别名缓存.
+
+    ``_sync_i18n_state`` 在 locale 变更时 lazy import ``MetaDataManager`` 并调用
+    ``invalidate_cache()``, 防止旧 locale 翻译残留. lazy import 避免 R1 架构越界
+    (data 层反向 import ui 的循环依赖).
+    """
+
+    def test_set_locale_invalidates_metadata_cache(self):
+        """set_locale 触发 MetaDataManager.invalidate_cache 调用."""
+        with patch("data.persistence.metadata_manager.MetaDataManager.invalidate_cache") as mock_invalidate:
+            I18n.set_locale("en_US")
+        mock_invalidate.assert_called_once()
+
+    def test_initialize_invalidates_metadata_cache(self):
+        """initialize 也触发 MetaDataManager.invalidate_cache 调用."""
+        with patch("data.persistence.metadata_manager.MetaDataManager.invalidate_cache") as mock_invalidate:
+            I18n.initialize("en_US")
+        mock_invalidate.assert_called_once()
+
+    def test_invalidate_cache_called_once_per_locale_change(self):
+        """每次 set_locale 调用对应一次 invalidate_cache 调用."""
+        with patch("data.persistence.metadata_manager.MetaDataManager.invalidate_cache") as mock_invalidate:
+            I18n.set_locale("en_US")
+            I18n.set_locale("zh_CN")
+        assert mock_invalidate.call_count == 2

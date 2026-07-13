@@ -69,8 +69,16 @@ def _sync_i18n_state() -> None:
 
     被 ``I18n.subscribe`` 注册到 core 层 ``_listeners``, 在 ``set_locale``/
     ``initialize`` 时触发. 操作仅 ``state.locale = current_locale()``, 无 raise 路径.
+
+    R.4.2: 同步失效 ``MetaDataManager`` 别名缓存, 防止旧 locale 翻译残留.
+    lazy import 避免模块加载副作用 + 防循环依赖 (data 层反向 import ui 时
+    不触发 ui.i18n 模块加载).
     """
     get_observable_state().locale = I18n.current_locale()
+    # R.4.2: lazy import 避免 R1 架构越界 (data 层 import ui 的反向依赖) + 模块加载副作用.
+    from data.persistence.metadata_manager import MetaDataManager
+
+    MetaDataManager.invalidate_cache()
 
 
 # 模块加载时订阅 locale 变更通知 (core 层通知抽象 → ui 层 Observable 同步).
