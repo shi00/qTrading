@@ -17,9 +17,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 
 from utils.shutdown import ShutdownCoordinator, StepResult, _CLEANUP_STEPS
 
-# P2-5: 文件含真实 asyncio.sleep（10s/60s 长睡眠，虽被 step timeout 截断），
-# 标注 slow 以便 CI 分轨运行
-pytestmark = pytest.mark.slow
+# 大部分测试使用 MagicMock 无真实长睡眠；少数含 asyncio.sleep 的测试类单独标注 slow
+pytestmark = pytest.mark.unit
 
 
 def _wait_until(condition, timeout=2.0, interval=0.01):

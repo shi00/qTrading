@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import threading
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -62,7 +63,7 @@ class TestDataProcessor(unittest.TestCase):
         # Inject mocks
         self.processor.api = self.mock_api
         self.processor.cache = self.mock_cache
-        self.processor._cancel_event = asyncio.Event()  # Updated from _shutdown_event  # type: ignore[untyped]
+        self.processor._cancel_event = threading.Event()  # Updated from _shutdown_event  # type: ignore[untyped]
         # CRITICAL: Inject mocks into TradeCalendarService
         if hasattr(self.processor, "trade_calendar"):
             self.processor.trade_calendar._cache = self.mock_cache

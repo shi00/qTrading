@@ -205,10 +205,10 @@ def reset_config_cache() -> Iterator[None]:
     saved_db_url = config_mod.DB_URL
     saved_env_db_url = os.environ.get("DATABASE_URL")
 
-    ConfigHandler._config_cache = None
+    ConfigHandler._clear_cache()
     ConfigHandler._reset_io_cap_warning()
     yield
-    ConfigHandler._config_cache = None
+    ConfigHandler._clear_cache()
     ConfigHandler._reset_io_cap_warning()
 
     # Restore global DB state that may have been mutated by tests
