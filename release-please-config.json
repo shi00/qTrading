@@ -24,6 +24,10 @@
         {
           "type": "generic",
           "path": "installer.iss"
+        },
+        {
+          "type": "generic",
+          "path": "SECURITY.md"
         }
       ]
     }

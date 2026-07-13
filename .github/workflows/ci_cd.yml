@@ -71,7 +71,7 @@ jobs:
           cache: 'pip'
 
       - name: Install Ruff
-        run: pip install ruff
+        run: pip install ruff==0.15.20
 
       - name: Ruff Lint Check
         run: ruff check .
@@ -80,12 +80,20 @@ jobs:
         run: ruff format --check .
 
   ci-checks:
-    name: Code Quality & Tests (Linux)
+    name: Code Quality & Tests (Linux, Python ${{ matrix.python-version }})
     needs: lint-fast
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.13', '3.14']
+        include:
+          - python-version: '3.14'
+            experimental: true
+    continue-on-error: ${{ matrix.experimental || false }}
 
     services:
       postgres:
@@ -118,7 +126,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python-version }}
           cache: 'pip'
           cache-dependency-path: |
             requirements.txt
@@ -131,15 +139,9 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
           pip install pyright==1.1.411
-
-      - name: Report optional deps status
-        if: env.OPTIONAL_DEPS_FAILED == 'true'
-        run: |
-          echo "::warning::Optional dependencies failed to install. Some tests may be skipped."
-          cat optional-deps.log
 
       - name: Install pre-commit
         run: pip install pre-commit
@@ -182,7 +184,6 @@ jobs:
         run: pyright
 
       - name: Scan weak assertions (advisory)
-        continue-on-error: true
         run: python scripts/scan_weak_assertions.py
 
       - name: Verify Alembic Migrations
@@ -223,13 +224,12 @@ jobs:
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py
 
-      - name: Check diff coverage (advisory)
-        continue-on-error: true
+      - name: Check diff coverage
         run: |
           BASE="${{ github.event.pull_request.base.ref }}"
           BASE="${BASE:-main}"
           git fetch --depth=1 origin "$BASE" 2>/dev/null || true
-          python scripts/check_diff_coverage.py --base "origin/$BASE"
+          python scripts/check_diff_coverage.py --base "origin/$BASE" --strict --threshold 80
 
       - name: Upload coverage to Codecov
         if: always()
@@ -237,19 +237,35 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           verbose: true
 
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: test-reports-${{ runner.os }}
+          name: test-reports-${{ runner.os }}-${{ matrix.python-version }}
           path: |
             coverage.xml
             coverage.json
             junit-*.xml
           retention-days: 14
+
+      - name: Generate SBOM
+        if: always()
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom-ci-checks.cdx.json
+
+      - name: Upload SBOM artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sbom-ci-checks-${{ matrix.python-version }}
+          path: sbom-ci-checks.cdx.json
+          retention-days: 7
 
   e2e-tests-windows:
     name: E2E Tests (Windows)
@@ -289,7 +305,7 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt || echo "Optional deps failed"
+          uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
           pip install playwright pytest-playwright
 
@@ -453,14 +469,8 @@ jobs:
         shell: bash
         run: |
           uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
-
-      - name: Report optional deps status
-        if: env.OPTIONAL_DEPS_FAILED == 'true'
-        run: |
-          echo "::warning::Optional dependencies failed to install. Some tests may be skipped."
-          cat optional-deps.log
 
       - name: Cache pytest
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -496,7 +506,7 @@ jobs:
       contents: read
     outputs:
       drift: ${{ steps.check-drift.outputs.drift }}
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout Code
@@ -618,7 +628,7 @@ jobs:
         run: |
           uv pip install --system llama-cpp-python --extra-index-url ${{ matrix.llama_index_url }}
           uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt || echo "Optional deps failed, continuing..."
+          uv pip install --system -r requirements-optional.txt
           pip install pyinstaller
 
       - name: Install UPX
@@ -634,9 +644,15 @@ jobs:
           if (Test-Path $exePath) {
             Write-Host "Running smoke test on built EXE..."
             $proc = Start-Process -FilePath $exePath -ArgumentList "--help" -NoNewWindow -PassThru -RedirectStandardOutput "smoke-out.txt" -RedirectStandardError "smoke-err.txt"
-            Start-Sleep -Seconds 5
+            # 轮询等待进程退出或超时（最长 30 秒，每 500ms 检查）
+            $timeout = 30
+            $elapsed = 0
+            while (-not $proc.HasExited -and $elapsed -lt $timeout) {
+              Start-Sleep -Milliseconds 500
+              $elapsed += 0.5
+            }
             if (-not $proc.HasExited) {
-              Write-Host "EXE started successfully (process running)"
+              Write-Host "EXE started successfully (process still running after ${timeout}s timeout)"
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             } else {
               $exitCode = $proc.ExitCode
@@ -652,8 +668,15 @@ jobs:
                 exit 1
               }
             }
+            # 校验 --help 输出包含预期关键字
             if (Test-Path "smoke-out.txt") {
               $output = Get-Content "smoke-out.txt" -Raw
+              if ($output -match "AStockScreener|usage") {
+                Write-Host "Smoke test passed: --help output contains expected keyword"
+              } else {
+                Write-Error "Smoke test failed: --help output does not contain expected keyword (AStockScreener|usage)"
+                exit 1
+              }
               if ($output.Length -gt 0) {
                 Write-Host "=== STDOUT Preview ==="
                 Write-Host $output.Substring(0, [Math]::Min(500, $output.Length))
@@ -664,7 +687,6 @@ jobs:
             Write-Error "EXE not found at $exePath"
             exit 1
           }
-        continue-on-error: ${{ matrix.variant == 'cpu' }}
 
       - name: Install Inno Setup
         run: choco install innosetup -y
@@ -782,15 +804,8 @@ jobs:
       - name: Install dependencies
         run: |
           uv pip install --system -r requirements.txt
-          uv pip install --system -r requirements-optional.txt 2>&1 | tee optional-deps.log || echo "OPTIONAL_DEPS_FAILED=true" >> $GITHUB_ENV
+          uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
 
-      - name: Report optional deps status
-        if: env.OPTIONAL_DEPS_FAILED == 'true'
-        run: |
-          echo "::warning::Optional dependencies failed to install. Some tests may be skipped."
-          cat optional-deps.log
-
       - name: Detect flaky tests (advisory)
-        continue-on-error: true
         run: python scripts/detect_flaky.py
