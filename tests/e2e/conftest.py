@@ -369,6 +369,8 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
         except RuntimeError:
             await context.close()
             raise
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.debug("[E2E] DB error UI check failed (non-fatal): %s", exc, exc_info=True)
 
@@ -390,6 +392,8 @@ async def _teardown_page(fp: FletPage, request, *, failed: bool = False) -> None
             await context.tracing.stop(path=str(ARTIFACT_DIR / f"{name}-trace.zip"))
         else:
             await context.tracing.stop()
+    except asyncio.CancelledError:
+        raise
     except Exception as e:  # noqa: BLE001
         logger.debug("[e2e_teardown] tracing stop failed: %s", e)
     finally:
@@ -864,5 +868,7 @@ def pristine_config(request):
     if I18n.current_locale() != locale_snapshot:
         try:
             I18n.set_locale(locale_snapshot)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:  # noqa: BLE001
             logger.warning("[pristine_config] 还原 I18n locale 到 %s 失败: %s", locale_snapshot, e)
