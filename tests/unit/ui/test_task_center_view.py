@@ -567,6 +567,354 @@ class TestBuildTaskCard:
         on_cancel.assert_called_once_with("task-xyz")
 
 
+# ---------------------------------------------------------------------------
+# TaskCenterView 组件体测试 (覆盖 263-408 行 @ft.component 函数体)
+# ---------------------------------------------------------------------------
+
+
+from dataclasses import dataclass, replace  # noqa: E402
+from typing import Any  # noqa: E402
+
+from tests.unit.ui.component_renderer import (  # noqa: E402
+    make_component,
+    render_once,
+    run_mount_effects,
+    run_unmount_effects,
+)
+
+
+@dataclass(frozen=True)
+class _FakeTaskCenterState:
+    """模拟 TaskCenterState 的最小字段集。"""
+
+    tasks: tuple = ()
+    current_page: int = 1
+    total_pages: int = 1
+    total_count: int = 0
+    running_count: int = 0
+
+
+class _FakeTaskCenterViewModel:
+    """模拟 TaskCenterViewModel, 记录所有方法调用。
+
+    满足 _ViewModelProtocol 契约 (state/subscribe/dispose) +
+    TaskCenterView 调用的所有 sync 方法 (cancel_task/clear_finished/go_prev/go_next)。
+    """
+
+    def __init__(self, state: _FakeTaskCenterState | None = None) -> None:
+        self._state: _FakeTaskCenterState = state or _FakeTaskCenterState()
+        self._subscribers: list[Any] = []
+        self.dispose_called: bool = False
+        self.method_calls: list[tuple[str, dict]] = []
+
+    @property
+    def state(self) -> _FakeTaskCenterState:
+        return self._state
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def _set_state(self, **changes: Any) -> None:
+        self._state = replace(self._state, **changes)
+        for cb in self._subscribers:
+            cb(self._state)
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    # --- sync methods ---
+
+    def cancel_task(self, task_id: str) -> None:
+        self.method_calls.append(("cancel_task", {"task_id": task_id}))
+
+    def clear_finished(self) -> None:
+        self.method_calls.append(("clear_finished", {}))
+
+    def go_prev(self) -> None:
+        self.method_calls.append(("go_prev", {}))
+
+    def go_next(self) -> None:
+        self.method_calls.append(("go_next", {}))
+
+
+def _make_task_row(
+    status: TaskStatus = TaskStatus.QUEUED,
+    **kwargs: Any,
+) -> TaskRow:
+    """构造 TaskRow (用于 _FakeTaskCenterState.tasks)。"""
+    defaults: dict[str, Any] = dict(
+        id="task-1",
+        name="Test Task",
+        task_type="System",
+        description="desc",
+        status=status,
+        progress=0.0,
+        cancellable=False,
+        created_at=datetime.datetime(2025, 1, 1, 12, 0, 0),
+        error="",
+    )
+    defaults.update(kwargs)
+    return TaskRow(**defaults)
+
+
+def _collect_all_controls(root: object) -> list:
+    """深度优先遍历控件树, 返回所有 ft.Control 实例。"""
+    if root is None or not isinstance(root, ft.Control):
+        return []
+    result: list = [root]
+    for attr in ("controls", "items", "tabs"):
+        children = getattr(root, attr, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    result.extend(_collect_all_controls(child))
+    content = getattr(root, "content", None)
+    if content is not None:
+        result.extend(_collect_all_controls(content))
+    return result
+
+
+def _find_icon_button(root: object, icon: object) -> ft.IconButton | None:
+    """按 icon 值查找 IconButton。"""
+    return next(
+        (c for c in _collect_all_controls(root) if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == icon),
+        None,
+    )
+
+
+class TestTaskCenterViewComponentBody:
+    """TaskCenterView 组件体测试: 渲染结构 + 分页 + 命令调用 + 生命周期。"""
+
+    @pytest.fixture(autouse=True)
+    def _patch_i18n(self, mock_i18n, mock_app_colors, mock_app_styles):
+        """Patch I18n/AppColors/AppStyles + TaskManager 避免真实实例化。"""
+        self.mock_i18n = mock_i18n
+        self.mock_ac = mock_app_colors
+        self.mock_styles = mock_app_styles
+        with (
+            patch("ui.views.task_center_view.I18n", self.mock_i18n),
+            patch("ui.views.task_center_view.AppColors", self.mock_ac),
+            patch("ui.views.task_center_view.AppStyles", self.mock_styles),
+        ):
+            yield
+
+    def _mount(
+        self,
+        monkeypatch,
+        state: _FakeTaskCenterState | None = None,
+    ) -> tuple[Any, Any, _FakeTaskCenterViewModel]:
+        """挂载 TaskCenterView, 返回 (component, render_result, fake_vm)。"""
+        from ui.views.task_center_view import TaskCenterView
+
+        fake_vm = _FakeTaskCenterViewModel(state=state)
+        monkeypatch.setattr("ui.views.task_center_view.TaskCenterViewModel", lambda: fake_vm)
+        component = make_component(TaskCenterView)
+        run_mount_effects(component)
+        result = render_once(component)
+        return component, result, fake_vm
+
+    def test_mount_returns_container(self, monkeypatch):
+        """挂载 TaskCenterView 返回 ft.Container。"""
+        _, result, _ = self._mount(monkeypatch)
+        assert isinstance(result, ft.Container)
+
+    def test_mount_subscribes_vm(self, monkeypatch):
+        """挂载后 VM.subscribe 被调用 (use_viewmodel hook 注册)。"""
+        _, _, fake_vm = self._mount(monkeypatch)
+        assert len(fake_vm._subscribers) > 0
+
+    def test_empty_state_renders_inbox_icon(self, monkeypatch):
+        """无任务时渲染 empty_view (INBOX_OUTLINED icon)。"""
+        _, result, _ = self._mount(monkeypatch, state=_FakeTaskCenterState(tasks=(), total_count=0))
+        icons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.Icon) and getattr(c, "icon", None) == ft.Icons.INBOX_OUTLINED
+        ]
+        assert len(icons) == 1, "无任务时应显示 INBOX_OUTLINED icon"
+
+    def test_tasks_rendered_as_cards(self, monkeypatch):
+        """有任务时渲染 task cards (非 empty_view)。"""
+        row = _make_task_row(status=TaskStatus.RUNNING, progress=0.5)
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(tasks=(row,), total_count=1, running_count=1),
+        )
+        # 不应有 INBOX_OUTLINED icon
+        icons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.Icon) and getattr(c, "icon", None) == ft.Icons.INBOX_OUTLINED
+        ]
+        assert len(icons) == 0, "有任务时不应显示 empty_view"
+
+    def test_header_renders_stats_text(self, monkeypatch):
+        """header 包含 stats_text (task_stats_fmt 格式化)。"""
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_count=5, running_count=2),
+        )
+        texts = [c for c in _collect_all_controls(result) if isinstance(c, ft.Text)]
+        # task_stats_fmt 是 stats_text 的 i18n key
+        assert any("task_stats_fmt" in (getattr(t, "value", "") or "") for t in texts) or any(
+            "task_stats_fmt" in (getattr(t, "text", "") or "") for t in texts
+        )
+
+    def test_clear_button_present(self, monkeypatch):
+        """header 包含 clear_btn (OutlinedButton)。"""
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        _, result, _ = self._mount(monkeypatch)
+        clear_btns = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.CLEANING_SERVICES_OUTLINED
+        ]
+        assert len(clear_btns) == 1
+
+    def test_clear_button_triggers_clear_finished(self, monkeypatch):
+        """点击 clear_btn → vm.clear_finished。"""
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        _, result, fake_vm = self._mount(monkeypatch)
+        clear_btns = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.CLEANING_SERVICES_OUTLINED
+        ]
+        # _on_clear() 无参数 (与 _on_prev/_on_next 一致, 不接收 event)
+        clear_btns[0].on_click()
+        assert ("clear_finished", {}) in fake_vm.method_calls
+
+    def test_pagination_hidden_on_single_page(self, monkeypatch):
+        """total_pages=1 时 pagination_row 不显示 (visible=False)。"""
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=1, current_page=1),
+        )
+        # 找到包含 btn_prev + btn_next 的 Row, 验证 visible=False
+        rows = [c for c in _collect_all_controls(result) if isinstance(c, ft.Row)]
+        pagination_rows = [
+            r
+            for r in rows
+            if any(isinstance(c, ft.IconButton) for c in (r.controls or []))
+            and any(isinstance(c, ft.Text) for c in (r.controls or []))
+            and len(r.controls or []) == 3
+        ]
+        # pagination_row 应存在但 visible=False (total_pages=1)
+        assert any(not getattr(r, "visible", True) for r in pagination_rows)
+
+    def test_pagination_visible_on_multiple_pages(self, monkeypatch):
+        """total_pages>1 时 pagination_row 显示。"""
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=1),
+        )
+        rows = [c for c in _collect_all_controls(result) if isinstance(c, ft.Row)]
+        pagination_rows = [
+            r
+            for r in rows
+            if any(isinstance(c, ft.IconButton) for c in (r.controls or []))
+            and any(isinstance(c, ft.Text) for c in (r.controls or []))
+            and len(r.controls or []) == 3
+        ]
+        assert any(getattr(r, "visible", True) for r in pagination_rows)
+
+    def test_prev_button_disabled_on_first_page(self, monkeypatch):
+        """current_page=1 时 btn_prev.disabled=True。"""
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=1),
+        )
+        btn_prev = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
+        assert btn_prev is not None
+        assert btn_prev.disabled is True
+
+    def test_next_button_disabled_on_last_page(self, monkeypatch):
+        """current_page=total_pages 时 btn_next.disabled=True。"""
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=3),
+        )
+        btn_next = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
+        assert btn_next is not None
+        assert btn_next.disabled is True
+
+    def test_prev_button_enabled_on_non_first_page(self, monkeypatch):
+        """current_page>1 时 btn_prev 可点击。"""
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=2),
+        )
+        btn_prev = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
+        assert btn_prev is not None
+        assert btn_prev.disabled is False
+
+    def test_next_button_triggers_go_next(self, monkeypatch):
+        """点击 btn_next → vm.go_next。"""
+        _, result, fake_vm = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=1),
+        )
+        btn_next = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
+        assert btn_next is not None
+        btn_next.on_click(MagicMock())
+        assert ("go_next", {}) in fake_vm.method_calls
+
+    def test_prev_button_triggers_go_prev(self, monkeypatch):
+        """点击 btn_prev → vm.go_prev。"""
+        _, result, fake_vm = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=2),
+        )
+        btn_prev = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
+        assert btn_prev is not None
+        btn_prev.on_click(MagicMock())
+        assert ("go_prev", {}) in fake_vm.method_calls
+
+    def test_page_info_text_shown(self, monkeypatch):
+        """pagination_row 包含 "current / total" 文本。"""
+        self.mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        _, result, _ = self._mount(
+            monkeypatch,
+            state=_FakeTaskCenterState(total_pages=3, current_page=2),
+        )
+        texts = [c for c in _collect_all_controls(result) if isinstance(c, ft.Text)]
+        # 应有 "2 / 3" 格式的文本
+        assert any(
+            "2" in (getattr(t, "value", "") or "") and "3" in (getattr(t, "value", "") or "") for t in texts
+        ) or any("2" in (getattr(t, "text", "") or "") and "3" in (getattr(t, "text", "") or "") for t in texts)
+
+    def test_unmount_disposes_vm(self, monkeypatch):
+        """卸载后 vm.dispose 被调用 (内部 VM 模式)。"""
+        component, _, fake_vm = self._mount(monkeypatch)
+        assert fake_vm.dispose_called is False
+        run_unmount_effects(component)
+        assert fake_vm.dispose_called is True
+
+    def test_mount_renders_header_icon(self, monkeypatch):
+        """header 包含 TASK_ALT icon。"""
+        _, result, _ = self._mount(monkeypatch)
+        icons = [
+            c
+            for c in _collect_all_controls(result)
+            if isinstance(c, ft.Icon) and getattr(c, "icon", None) == ft.Icons.TASK_ALT
+        ]
+        assert len(icons) == 1
+
+    def test_mount_renders_divider(self, monkeypatch):
+        """挂载后包含 Divider (header 与 scroll_area 之间)。"""
+        _, result, _ = self._mount(monkeypatch)
+        dividers = [c for c in _collect_all_controls(result) if isinstance(c, ft.Divider)]
+        assert len(dividers) >= 1
+
+
 def _find_control_by_type(root: ft.Control, control_type: type) -> ft.Control | None:
     """Recursively find first control of given type in the control tree."""
     if isinstance(root, control_type):
