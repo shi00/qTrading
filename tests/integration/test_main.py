@@ -128,6 +128,7 @@ class _LoggerSpy:
         self.messages: list[str] = []
         self.warnings: list[str] = []
         self.errors: list[str] = []
+        self.criticals: list[str] = []
         self.debugs: list[str] = []
 
     def info(self, msg, *args, **kwargs):
@@ -141,6 +142,9 @@ class _LoggerSpy:
 
     def error(self, msg, *args, **kwargs):
         self.errors.append(msg % args if args else msg)
+
+    def critical(self, msg, *args, **kwargs):
+        self.criticals.append(msg % args if args else msg)
 
 
 @pytest.fixture(autouse=True)
@@ -254,7 +258,7 @@ class TestMainWindowDestroyError:
         confirm_btn.on_click(MagicMock())
         await asyncio.sleep(0.1)
 
-        assert any("destroy ignored" in msg.lower() or "Window destroy" in msg for msg in logger_spy.debugs)
+        assert any("Window destroy failed" in msg for msg in logger_spy.errors)
 
 
 class TestMainRunTask:
