@@ -148,7 +148,25 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             await self._record_skipped_permission("sw_industry_classify")
             return pd.DataFrame()
         except Exception as e:
-            logger.warning("[SwIndustrySync] Classify | ⚠️ Error: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[SwIndustrySync] Classify | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[SwIndustrySync] Classify | Recoverable error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[SwIndustrySync] Classify | Operational error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             result.errors.append(f"SwIndustry Classify: {e}")
             return pd.DataFrame()
 
@@ -197,12 +215,32 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     return
                 except Exception as e:
                     errors += 1
-                    logger.debug(
-                        "[SwIndustrySync] Members | Skip index_code=%s: %s",
-                        index_code,
-                        e,
-                        exc_info=True,
-                    )
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e, context="general")
+                    if severity == "system":
+                        logger.critical(
+                            "[SwIndustrySync] Members | SYSTEM-LEVEL failure for index_code=%s: %s",
+                            index_code,
+                            e,
+                            exc_info=True,
+                        )
+                        raise
+                    elif severity == "recoverable":
+                        logger.warning(
+                            "[SwIndustrySync] Members | Skip index_code=%s (%s): %s",
+                            index_code,
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
+                    else:
+                        logger.error(
+                            "[SwIndustrySync] Members | Skip index_code=%s (%s): %s",
+                            index_code,
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
 
             if not all_dfs:
                 logger.warning(
@@ -232,7 +270,25 @@ class SwIndustrySyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning("[SwIndustrySync] Members | ⚠️ Error: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[SwIndustrySync] Members | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[SwIndustrySync] Members | Recoverable error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[SwIndustrySync] Members | Operational error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             result.errors.append(f"SwIndustry Members: {e}")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -247,9 +303,29 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
             )
         except Exception as e:
-            logger.debug(
-                "[SwIndustrySync] Failed to record skipped_permission status for %s: %s",
-                table_name,
-                e,
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[SwIndustrySync] SYSTEM-LEVEL failure while recording skipped_permission for %s: %s",
+                    table_name,
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[SwIndustrySync] Failed to record skipped_permission status for %s (%s): %s",
+                    table_name,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[SwIndustrySync] Failed to record skipped_permission status for %s (%s): %s",
+                    table_name,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )

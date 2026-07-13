@@ -177,7 +177,25 @@ class MacroSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug("[MacroSync] Effective trade date fallback: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[MacroSync] Effective trade date | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[MacroSync] Effective trade date fallback (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[MacroSync] Effective trade date fallback (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
         return get_now().date()
 
     @log_async_operation(
@@ -264,7 +282,25 @@ class MacroSyncStrategy(ISyncStrategy):
                 logger.warning("[MacroSync] Monthly | ⛔ Permission denied for cn_gdp, skipping GDP")
                 # GDP 权限不足不阻断 m2/cpi/ppi 同步，df_gdp 保持 None
             except Exception as e:
-                logger.warning("[MacroSync] Monthly | ⚠️ cn_gdp fetch failed, skipping GDP: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical("[MacroSync] Monthly | SYSTEM-LEVEL failure for cn_gdp: %s", e, exc_info=True)
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[MacroSync] Monthly | cn_gdp fetch failed, skipping GDP (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[MacroSync] Monthly | cn_gdp fetch failed, skipping GDP (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
                 # GDP 失败不阻断 m2/cpi/ppi 同步，df_gdp 保持 None
 
             merged = self._merge_macro_data(df_m2, df_cpi, df_ppi, df_gdp)
@@ -304,9 +340,49 @@ class MacroSyncStrategy(ISyncStrategy):
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
             except Exception as e:
-                logger.debug("[MacroSync] Monthly | Failed to record skipped_permission status: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[MacroSync] Monthly | SYSTEM-LEVEL failure while recording skipped_permission: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[MacroSync] Monthly | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[MacroSync] Monthly | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
         except Exception as e:
-            logger.warning("[MacroSync] Monthly | ⚠️ Error: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[MacroSync] Monthly | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[MacroSync] Monthly | Recoverable error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[MacroSync] Monthly | Operational error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             result.errors.append(f"Macro Monthly: {e}")
 
     @classmethod
@@ -466,7 +542,29 @@ class MacroSyncStrategy(ISyncStrategy):
             except TushareAPIPermissionError:
                 logger.warning("[MacroSync] Shibor | ⛔ Permission denied for shibor_lpr API")
             except Exception as lpr_err:
-                logger.debug("[MacroSync] Shibor | LPR fetch failed, continuing with shibor only: %s", lpr_err)
+                error_info = classify_error(lpr_err, context="general")
+                severity = classify_severity(lpr_err, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[MacroSync] Shibor | SYSTEM-LEVEL failure for LPR fetch: %s",
+                        lpr_err,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[MacroSync] Shibor | LPR fetch failed, continuing with shibor only (%s): %s",
+                        error_info["code"],
+                        lpr_err,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[MacroSync] Shibor | LPR fetch failed, continuing with shibor only (%s): %s",
+                        error_info["code"],
+                        lpr_err,
+                        exc_info=True,
+                    )
 
             if df is not None and not df.empty:
                 if lpr_df is not None and not lpr_df.empty:
@@ -507,9 +605,49 @@ class MacroSyncStrategy(ISyncStrategy):
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
             except Exception as e:
-                logger.debug("[MacroSync] Shibor | Failed to record skipped_permission status: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[MacroSync] Shibor | SYSTEM-LEVEL failure while recording skipped_permission: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[MacroSync] Shibor | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[MacroSync] Shibor | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
         except Exception as e:
-            logger.warning("[MacroSync] Shibor | ⚠️ Error: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[MacroSync] Shibor | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[MacroSync] Shibor | Recoverable error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[MacroSync] Shibor | Operational error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             result.errors.append(f"Shibor: {e}")
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -581,7 +719,32 @@ class MacroSyncStrategy(ISyncStrategy):
                         idx_code,
                     )
                 except Exception as e:
-                    logger.warning("[MacroSync] IndexWeight | ⚠️ Failed %s: %s", idx_code, e, exc_info=True)
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e, context="general")
+                    if severity == "system":
+                        logger.critical(
+                            "[MacroSync] IndexWeight | SYSTEM-LEVEL failure for %s: %s",
+                            idx_code,
+                            e,
+                            exc_info=True,
+                        )
+                        raise
+                    elif severity == "recoverable":
+                        logger.warning(
+                            "[MacroSync] IndexWeight | Failed %s (%s): %s",
+                            idx_code,
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
+                    else:
+                        logger.error(
+                            "[MacroSync] IndexWeight | Failed %s (%s): %s",
+                            idx_code,
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
 
             await self.context.cache.update_sync_status(
                 "index_weight",
@@ -606,9 +769,47 @@ class MacroSyncStrategy(ISyncStrategy):
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
             except Exception as e:
-                logger.debug(
-                    "[MacroSync] IndexWeight | Failed to record skipped_permission status: %s", e, exc_info=True
-                )
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[MacroSync] IndexWeight | SYSTEM-LEVEL failure while recording skipped_permission: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[MacroSync] IndexWeight | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[MacroSync] IndexWeight | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
         except Exception as e:
-            logger.warning("[MacroSync] IndexWeight | ⚠️ Flow-level error: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[MacroSync] IndexWeight | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[MacroSync] IndexWeight | Recoverable error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[MacroSync] IndexWeight | Operational error (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             result.errors.append(f"IndexWeight: {e}")

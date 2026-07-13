@@ -117,25 +117,57 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                         except EngineDisposedError:
                             raise
                         except Exception as e:
-                            if attempt < _AKSHARE_MAX_RETRIES - 1:
-                                delay = _AKSHARE_RETRY_BASE_DELAY * (2**attempt)
-                                logger.debug(
-                                    "[AKShareConceptSync] Retry %s attempt %d: %s",
+                            error_info = classify_error(e, context="general")
+                            severity = classify_severity(e, context="general")
+                            if severity == "system":
+                                logger.critical(
+                                    "[AKShareConceptSync] SYSTEM-LEVEL failure for board %s: %s",
                                     board_name,
-                                    attempt + 1,
                                     e,
                                     exc_info=True,
                                 )
+                                raise
+                            if attempt < _AKSHARE_MAX_RETRIES - 1:
+                                delay = _AKSHARE_RETRY_BASE_DELAY * (2**attempt)
+                                if severity == "recoverable":
+                                    logger.warning(
+                                        "[AKShareConceptSync] Retry %s attempt %d (%s): %s",
+                                        board_name,
+                                        attempt + 1,
+                                        error_info["code"],
+                                        e,
+                                        exc_info=True,
+                                    )
+                                else:
+                                    logger.error(
+                                        "[AKShareConceptSync] Retry %s attempt %d (%s): %s",
+                                        board_name,
+                                        attempt + 1,
+                                        error_info["code"],
+                                        e,
+                                        exc_info=True,
+                                    )
                                 await asyncio.sleep(delay)
                             else:
                                 failed_boards.append(f"{board_name}: {e}")
-                                logger.warning(
-                                    "[AKShareConceptSync] Failed board %s after %d retries: %s",
-                                    board_name,
-                                    _AKSHARE_MAX_RETRIES,
-                                    e,
-                                    exc_info=True,
-                                )
+                                if severity == "recoverable":
+                                    logger.warning(
+                                        "[AKShareConceptSync] Failed board %s after %d retries (%s): %s",
+                                        board_name,
+                                        _AKSHARE_MAX_RETRIES,
+                                        error_info["code"],
+                                        e,
+                                        exc_info=True,
+                                    )
+                                else:
+                                    logger.error(
+                                        "[AKShareConceptSync] Failed board %s after %d retries (%s): %s",
+                                        board_name,
+                                        _AKSHARE_MAX_RETRIES,
+                                        error_info["code"],
+                                        e,
+                                        exc_info=True,
+                                    )
 
             # Phase 2F: 循环体每 200 条检查 _check_cancelled，响应取消信号
             tasks: list = []
@@ -331,11 +363,29 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as e:
-                logger.warning(
-                    "[AIConceptTagSync] Failed to load retry queue, continuing without it: %s",
-                    e,
-                    exc_info=True,
-                )
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[AIConceptTagSync] SYSTEM-LEVEL failure while loading retry queue: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
                 retry_pending = []
 
             retry_codes = {ts_code for ts_code, _ in retry_pending}
@@ -351,7 +401,29 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as e:
-                    logger.warning("[AIConceptTagSync] Failed to load fresh pending: %s", e, exc_info=True)
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e, context="general")
+                    if severity == "system":
+                        logger.critical(
+                            "[AIConceptTagSync] SYSTEM-LEVEL failure while loading fresh pending: %s",
+                            e,
+                            exc_info=True,
+                        )
+                        raise
+                    elif severity == "recoverable":
+                        logger.warning(
+                            "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
+                    else:
+                        logger.error(
+                            "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
                     fresh_pending = []
 
             pending = retry_pending + fresh_pending
@@ -428,7 +500,32 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     raise
                 except Exception as e:
                     failed.append(f"{ts_code}: {e}")
-                    logger.warning("[AIConceptTagSync] Failed for %s: %s", ts_code, e, exc_info=True)
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e, context="general")
+                    if severity == "system":
+                        logger.critical(
+                            "[AIConceptTagSync] SYSTEM-LEVEL failure for %s: %s",
+                            ts_code,
+                            e,
+                            exc_info=True,
+                        )
+                        raise
+                    elif severity == "recoverable":
+                        logger.warning(
+                            "[AIConceptTagSync] Failed for %s (%s): %s",
+                            ts_code,
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
+                    else:
+                        logger.error(
+                            "[AIConceptTagSync] Failed for %s (%s): %s",
+                            ts_code,
+                            error_info["code"],
+                            e,
+                            exc_info=True,
+                        )
                     # 写入错题本（不影响主流程；CancelledError/EngineDisposedError 必须传播，R2/R5）
                     try:
                         await stock_dao.upsert_ai_concept_failure(ts_code, name, str(e))
@@ -437,12 +534,32 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     except EngineDisposedError:
                         raise
                     except Exception as fe:
-                        logger.warning(
-                            "[AIConceptTagSync] Failed to persist failure for %s: %s",
-                            ts_code,
-                            fe,
-                            exc_info=True,
-                        )
+                        fe_info = classify_error(fe, context="general")
+                        fe_sev = classify_severity(fe, context="general")
+                        if fe_sev == "system":
+                            logger.critical(
+                                "[AIConceptTagSync] SYSTEM-LEVEL failure while persisting failure for %s: %s",
+                                ts_code,
+                                fe,
+                                exc_info=True,
+                            )
+                            raise
+                        elif fe_sev == "recoverable":
+                            logger.warning(
+                                "[AIConceptTagSync] Failed to persist failure for %s (%s): %s",
+                                ts_code,
+                                fe_info["code"],
+                                fe,
+                                exc_info=True,
+                            )
+                        else:
+                            logger.error(
+                                "[AIConceptTagSync] Failed to persist failure for %s (%s): %s",
+                                ts_code,
+                                fe_info["code"],
+                                fe,
+                                exc_info=True,
+                            )
 
             if self._check_cancelled(result):
                 return result
@@ -462,12 +579,32 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         except EngineDisposedError:
                             raise
                         except Exception as fe:
-                            logger.warning(
-                                "[AIConceptTagSync] Failed to clear failure record for %s: %s",
-                                ts_code,
-                                fe,
-                                exc_info=True,
-                            )
+                            fe_info = classify_error(fe, context="general")
+                            fe_sev = classify_severity(fe, context="general")
+                            if fe_sev == "system":
+                                logger.critical(
+                                    "[AIConceptTagSync] SYSTEM-LEVEL failure while clearing failure record for %s: %s",
+                                    ts_code,
+                                    fe,
+                                    exc_info=True,
+                                )
+                                raise
+                            elif fe_sev == "recoverable":
+                                logger.warning(
+                                    "[AIConceptTagSync] Failed to clear failure record for %s (%s): %s",
+                                    ts_code,
+                                    fe_info["code"],
+                                    fe,
+                                    exc_info=True,
+                                )
+                            else:
+                                logger.error(
+                                    "[AIConceptTagSync] Failed to clear failure record for %s (%s): %s",
+                                    ts_code,
+                                    fe_info["code"],
+                                    fe,
+                                    exc_info=True,
+                                )
 
             if failed:
                 result.status = SyncStatus.PARTIAL.value
@@ -484,7 +621,29 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             except EngineDisposedError:
                 raise
             except Exception as fe:
-                logger.warning("[AIConceptTagSync] Failed to clean expired failures: %s", fe, exc_info=True)
+                fe_info = classify_error(fe, context="general")
+                fe_sev = classify_severity(fe, context="general")
+                if fe_sev == "system":
+                    logger.critical(
+                        "[AIConceptTagSync] SYSTEM-LEVEL failure while cleaning expired failures: %s",
+                        fe,
+                        exc_info=True,
+                    )
+                    raise
+                elif fe_sev == "recoverable":
+                    logger.warning(
+                        "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
+                        fe_info["code"],
+                        fe,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
+                        fe_info["code"],
+                        fe,
+                        exc_info=True,
+                    )
 
             logger.info(
                 "[AIConceptTagSync] Done | added=%d, failed=%d, retry_cleared=%d",
@@ -558,8 +717,14 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     except asyncio.CancelledError:
                         pass  # 内部取消被 suppress，外层 raise 传播外层 CancelledError（R2）
                     except Exception as llm_err:
+                        # 不 raise：避免覆盖外层 CancelledError 传播（R2）。
+                        # classify_error/classify_severity 仅用于记录分类，不改控制流。
+                        llm_info = classify_error(llm_err, context="general")
+                        llm_sev = classify_severity(llm_err, context="general")
                         logger.debug(
-                            "[AIConceptTagSync] llm_task suppressed during cancel: %r",
+                            "[AIConceptTagSync] llm_task suppressed during cancel (%s/%s): %r",
+                            llm_info["code"],
+                            llm_sev,
                             llm_err,
                             exc_info=True,
                         )
@@ -585,8 +750,14 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 except asyncio.CancelledError:
                     pass  # 内部取消被 suppress
                 except Exception as llm_err:
+                    # 不 raise：避免覆盖外层 CancelledError 传播（R2）。
+                    # classify_error/classify_severity 仅用于记录分类，不改控制流。
+                    llm_info = classify_error(llm_err, context="general")
+                    llm_sev = classify_severity(llm_err, context="general")
                     logger.debug(
-                        "[AIConceptTagSync] llm_task suppressed during outer cancel: %r",
+                        "[AIConceptTagSync] llm_task suppressed during outer cancel (%s/%s): %r",
+                        llm_info["code"],
+                        llm_sev,
                         llm_err,
                         exc_info=True,
                     )

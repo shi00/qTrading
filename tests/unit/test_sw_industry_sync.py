@@ -443,7 +443,14 @@ class TestSyncMembersExceptions:
             await strategy._sync_members(result, classify_df)
 
         assert any("SwIndustry Members" in err for err in result.errors)
-        warning_logs = [r for r in caplog.records if "Members" in r.message and "⚠️" in r.message]
+        # T29 标准化后：RuntimeError 默认归 operational → logger.error("Operational error ...")；
+        # 测试同时接受 recoverable(warning) 与 operational(error) 两条分类路径。
+        warning_logs = [
+            r
+            for r in caplog.records
+            if "Members" in r.message
+            and ("⚠️" in r.message or "Recoverable error" in r.message or "Operational error" in r.message)
+        ]
         assert len(warning_logs) == 1
 
 

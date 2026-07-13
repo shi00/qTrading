@@ -60,7 +60,25 @@ class HolderSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.debug("[HolderSync] Effective trade date fallback: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical("[HolderSync] Effective trade date | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] Effective trade date fallback (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] Effective trade date fallback (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
         return get_now().date()
 
     @log_async_operation(
@@ -310,6 +328,17 @@ class HolderSyncStrategy(ISyncStrategy):
                 except Exception as e:
                     stock_errors += 1
                     consecutive_errors += 1
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e, context="general")
+                    if severity == "system":
+                        logger.critical(
+                            "[HolderSync] top10_holders | SYSTEM-LEVEL failure for %s period=%s: %s",
+                            ts_code,
+                            period,
+                            e,
+                            exc_info=True,
+                        )
+                        raise
                     err_str = str(e).lower()
                     is_rate_limit = (
                         "每分钟最多访问" in err_str or "抱歉" in err_str or "频次超限" in err_str or "429" in err_str
@@ -318,13 +347,24 @@ class HolderSyncStrategy(ISyncStrategy):
                         rate_limit_hits += 1
 
                     if stock_errors <= 3 or is_rate_limit:
-                        logger.debug(
-                            "[HolderSync] top10_holders | Skip %s period=%s: %s",
-                            ts_code,
-                            period,
-                            e,
-                            exc_info=True,
-                        )
+                        if severity == "recoverable":
+                            logger.warning(
+                                "[HolderSync] top10_holders | Skip %s period=%s (%s): %s",
+                                ts_code,
+                                period,
+                                error_info["code"],
+                                e,
+                                exc_info=True,
+                            )
+                        else:
+                            logger.error(
+                                "[HolderSync] top10_holders | Skip %s period=%s (%s): %s",
+                                ts_code,
+                                period,
+                                error_info["code"],
+                                e,
+                                exc_info=True,
+                            )
                     if consecutive_errors >= _MAX_ERRORS:
                         logger.warning(
                             "[HolderSync] top10_holders | %s consecutive errors, aborting",
@@ -403,13 +443,34 @@ class HolderSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                "[HolderSync] top10_holders | Failed to query existing ts_codes "
-                "for period=%s, falling back to full sync: %s",
-                period,
-                e,
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[HolderSync] top10_holders | SYSTEM-LEVEL failure while querying existing ts_codes for period=%s: %s",
+                    period,
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] top10_holders | Failed to query existing ts_codes "
+                    "for period=%s, falling back to full sync (%s): %s",
+                    period,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] top10_holders | Failed to query existing ts_codes "
+                    "for period=%s, falling back to full sync (%s): %s",
+                    period,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             return set()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -435,22 +496,64 @@ class HolderSyncStrategy(ISyncStrategy):
         except EngineDisposedError:
             raise
         except Exception as e:
-            logger.warning(
-                "[HolderSync] top10_holders | Checkpoint save failed for period=%s: %s",
-                period,
-                e,
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[HolderSync] top10_holders | SYSTEM-LEVEL failure during checkpoint save for period=%s: %s",
+                    period,
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] top10_holders | Checkpoint save failed for period=%s (%s): %s",
+                    period,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] top10_holders | Checkpoint save failed for period=%s (%s): %s",
+                    period,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             return False
 
     def _log_sync_error(self, table_name: str, date_str: str, e: Exception):
-        logger.warning(
-            "[HolderSync] Table | ⚠️ Error syncing %s date=%s: %s",
-            table_name,
-            date_str,
-            e,
-            exc_info=True,
-        )
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            logger.critical(
+                "[HolderSync] Table | SYSTEM-LEVEL failure syncing %s date=%s: %s",
+                table_name,
+                date_str,
+                e,
+                exc_info=True,
+            )
+            raise
+        elif severity == "recoverable":
+            logger.warning(
+                "[HolderSync] Table | Error syncing %s date=%s (%s): %s",
+                table_name,
+                date_str,
+                error_info["code"],
+                e,
+                exc_info=True,
+            )
+        else:
+            logger.error(
+                "[HolderSync] Table | Error syncing %s date=%s (%s): %s",
+                table_name,
+                date_str,
+                error_info["code"],
+                e,
+                exc_info=True,
+            )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def _sync_one_table(
@@ -499,13 +602,35 @@ class HolderSyncStrategy(ISyncStrategy):
                 )
             return -1
         except Exception as e:
-            logger.warning(
-                "[HolderSync] Table | ⚠️ Error syncing %s end_date=%s: %s",
-                table_name,
-                end_date,
-                e,
-                exc_info=True,
-            )
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[HolderSync] Table | SYSTEM-LEVEL failure syncing %s end_date=%s: %s",
+                    table_name,
+                    end_date,
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] Table | Error syncing %s end_date=%s (%s): %s",
+                    table_name,
+                    end_date,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] Table | Error syncing %s end_date=%s (%s): %s",
+                    table_name,
+                    end_date,
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             return -1
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -538,12 +663,32 @@ class HolderSyncStrategy(ISyncStrategy):
                 except EngineDisposedError:
                     raise
                 except Exception as api_err:
-                    logger.debug(
-                        "[HolderSync] pledge_stat | API error for end_date=%s: %s",
-                        end_date,
-                        api_err,
-                        exc_info=True,
-                    )
+                    error_info = classify_error(api_err, context="general")
+                    severity = classify_severity(api_err, context="general")
+                    if severity == "system":
+                        logger.critical(
+                            "[HolderSync] pledge_stat | SYSTEM-LEVEL failure for end_date=%s: %s",
+                            end_date,
+                            api_err,
+                            exc_info=True,
+                        )
+                        raise
+                    elif severity == "recoverable":
+                        logger.warning(
+                            "[HolderSync] pledge_stat | API error for end_date=%s (%s): %s",
+                            end_date,
+                            error_info["code"],
+                            api_err,
+                            exc_info=True,
+                        )
+                    else:
+                        logger.error(
+                            "[HolderSync] pledge_stat | API error for end_date=%s (%s): %s",
+                            end_date,
+                            error_info["code"],
+                            api_err,
+                            exc_info=True,
+                        )
                     continue
 
                 if df is not None and not df.empty:
@@ -581,12 +726,54 @@ class HolderSyncStrategy(ISyncStrategy):
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
             except Exception as e:
-                logger.debug(
-                    "[HolderSync] pledge_stat | Failed to record skipped_permission status: %s", e, exc_info=True
-                )
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[HolderSync] pledge_stat | SYSTEM-LEVEL failure while recording skipped_permission: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[HolderSync] pledge_stat | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[HolderSync] pledge_stat | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
             return -1, None
         except Exception as e:
-            logger.warning("[HolderSync] Table | ⚠️ Error syncing pledge_stat: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[HolderSync] Table | SYSTEM-LEVEL failure syncing pledge_stat: %s",
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] Table | Error syncing pledge_stat (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] Table | Error syncing pledge_stat (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             return -1, None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -643,12 +830,54 @@ class HolderSyncStrategy(ISyncStrategy):
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
             except Exception as e:
-                logger.debug(
-                    "[HolderSync] share_float | Failed to record skipped_permission status: %s", e, exc_info=True
-                )
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[HolderSync] share_float | SYSTEM-LEVEL failure while recording skipped_permission: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[HolderSync] share_float | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[HolderSync] share_float | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
             return -1, None
         except Exception as e:
-            logger.warning("[HolderSync] Table | ⚠️ Error syncing share_float: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[HolderSync] Table | SYSTEM-LEVEL failure syncing share_float: %s",
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] Table | Error syncing share_float (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] Table | Error syncing share_float (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             return -1, None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
@@ -704,12 +933,54 @@ class HolderSyncStrategy(ISyncStrategy):
                     last_result_status=SYNC_RESULT_SKIPPED_PERMISSION,
                 )
             except Exception as e:
-                logger.debug(
-                    "[HolderSync] stk_holdertrade | Failed to record skipped_permission status: %s", e, exc_info=True
-                )
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    logger.critical(
+                        "[HolderSync] stk_holdertrade | SYSTEM-LEVEL failure while recording skipped_permission: %s",
+                        e,
+                        exc_info=True,
+                    )
+                    raise
+                elif severity == "recoverable":
+                    logger.warning(
+                        "[HolderSync] stk_holdertrade | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
+                else:
+                    logger.error(
+                        "[HolderSync] stk_holdertrade | Failed to record skipped_permission status (%s): %s",
+                        error_info["code"],
+                        e,
+                        exc_info=True,
+                    )
             return -1, None
         except Exception as e:
-            logger.warning("[HolderSync] Table | ⚠️ Error syncing stk_holdertrade: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                logger.critical(
+                    "[HolderSync] Table | SYSTEM-LEVEL failure syncing stk_holdertrade: %s",
+                    e,
+                    exc_info=True,
+                )
+                raise
+            elif severity == "recoverable":
+                logger.warning(
+                    "[HolderSync] Table | Error syncing stk_holdertrade (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
+            else:
+                logger.error(
+                    "[HolderSync] Table | Error syncing stk_holdertrade (%s): %s",
+                    error_info["code"],
+                    e,
+                    exc_info=True,
+                )
             return -1, None
 
     @staticmethod
