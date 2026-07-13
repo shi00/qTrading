@@ -24,6 +24,7 @@ from data.sync.base import ISyncStrategy, SyncResult, SyncStatus
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -506,7 +507,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         logger.critical(
                             "[AIConceptTagSync] SYSTEM-LEVEL failure for %s: %s",
                             ts_code,
-                            e,
+                            DataSanitizer.sanitize_error(e),
                             exc_info=True,
                         )
                         raise
@@ -515,7 +516,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             "[AIConceptTagSync] Failed for %s (%s): %s",
                             ts_code,
                             error_info["code"],
-                            e,
+                            DataSanitizer.sanitize_error(e),
                             exc_info=True,
                         )
                     else:
@@ -523,12 +524,12 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             "[AIConceptTagSync] Failed for %s (%s): %s",
                             ts_code,
                             error_info["code"],
-                            e,
+                            DataSanitizer.sanitize_error(e),
                             exc_info=True,
                         )
                     # 写入错题本（不影响主流程；CancelledError/EngineDisposedError 必须传播，R2/R5）
                     try:
-                        await stock_dao.upsert_ai_concept_failure(ts_code, name, str(e))
+                        await stock_dao.upsert_ai_concept_failure(ts_code, name, DataSanitizer.sanitize_error(e))
                     except asyncio.CancelledError:
                         raise
                     except EngineDisposedError:
@@ -540,7 +541,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             logger.critical(
                                 "[AIConceptTagSync] SYSTEM-LEVEL failure while persisting failure for %s: %s",
                                 ts_code,
-                                fe,
+                                DataSanitizer.sanitize_error(fe),
                                 exc_info=True,
                             )
                             raise
@@ -549,7 +550,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                                 "[AIConceptTagSync] Failed to persist failure for %s (%s): %s",
                                 ts_code,
                                 fe_info["code"],
-                                fe,
+                                DataSanitizer.sanitize_error(fe),
                                 exc_info=True,
                             )
                         else:
@@ -557,7 +558,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                                 "[AIConceptTagSync] Failed to persist failure for %s (%s): %s",
                                 ts_code,
                                 fe_info["code"],
-                                fe,
+                                DataSanitizer.sanitize_error(fe),
                                 exc_info=True,
                             )
 
@@ -725,7 +726,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                             "[AIConceptTagSync] llm_task suppressed during cancel (%s/%s): %r",
                             llm_info["code"],
                             llm_sev,
-                            llm_err,
+                            DataSanitizer.sanitize_error(llm_err),
                             exc_info=True,
                         )
                     raise asyncio.CancelledError("task cancelled by user (cancel_event set in ai concept sync)")
@@ -758,7 +759,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         "[AIConceptTagSync] llm_task suppressed during outer cancel (%s/%s): %r",
                         llm_info["code"],
                         llm_sev,
-                        llm_err,
+                        DataSanitizer.sanitize_error(llm_err),
                         exc_info=True,
                     )
             raise
