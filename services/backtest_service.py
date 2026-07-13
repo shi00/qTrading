@@ -19,7 +19,9 @@ import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from data.cache.cache_manager import CacheManager
 
 if TYPE_CHECKING:
@@ -119,12 +121,22 @@ class BacktestService:
             )
             return result
         except Exception as e:
-            logger.error(
-                "[BacktestService] Failed to persist backtest result: %s",
-                e,
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            sanitized = DataSanitizer.sanitize_error(e)
+            _log(
+                "[BacktestService] Failed to persist backtest result (%s): %s",
+                error_info["code"],
+                sanitized,
                 exc_info=True,
             )
-            new_warnings = list(result.data_warnings) + [f"persist_failed: {e}"]
+            new_warnings = list(result.data_warnings) + [f"persist_failed: {sanitized}"]
             return result.with_warnings(new_warnings)
 
     def _create_engine(self, config: BacktestConfig) -> Any:
@@ -159,10 +171,19 @@ class BacktestService:
             instance.key = strategy_key  # type: ignore[attr-defined]  # 动态打标，pre-existing 行为
             return instance
         except Exception as e:
-            logger.error(
-                "[BacktestService] Failed to instantiate strategy %s: %s",
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[BacktestService] Failed to instantiate strategy %s (%s): %s",
                 strategy_key,
-                e,
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             return None
@@ -174,7 +195,20 @@ class BacktestService:
 
             return version("astock-screener")
         except Exception as e:
-            logger.debug("[BacktestService] Failed to get app version: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[BacktestService] Failed to get app version (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return "dev"
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
