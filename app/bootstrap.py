@@ -8,6 +8,8 @@ from services.news_subscription_service import NewsSubscriptionService
 from data.persistence.db_migrator import DatabaseMigrationNeeded
 from data.persistence.metadata_manager import MetaDataManager
 from services.task_manager import TaskManager
+from utils.error_classifier import classify_error, classify_severity
+from utils.sanitizers import DataSanitizer
 from utils.scheduler_service import SchedulerService
 from core.i18n import I18n
 
@@ -47,7 +49,20 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
             "auto_probe_task": None,
         }
     except Exception as e:
-        logger.error("[Bootstrap] Database initialization failed: %s", e, exc_info=True)
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] Database initialization failed (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
         if show_toast_fn:
             show_toast_fn(I18n.get("error_db_init_failed"), "error")
         return {
@@ -77,7 +92,20 @@ async def initialize_services(cache_manager, show_toast_fn=None) -> InitResult:
     try:
         await TaskManager().init_db()
     except Exception as e:
-        logger.error("[Bootstrap] TaskManager init failed: %s", e, exc_info=True)
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] TaskManager init failed (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
         if show_toast_fn:
             show_toast_fn(I18n.get("error_task_manager_init_failed"), "error")
         return {
@@ -141,7 +169,20 @@ async def _warmup_tushare_capabilities() -> None:
         else:
             logger.debug("[Bootstrap] Tushare capability cache empty after load (first startup or token changed)")
     except Exception as e:
-        logger.warning("[Bootstrap] Tushare capability warmup failed (non-critical): %s", e)
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] Tushare capability warmup failed (non-critical) (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
 
 
 def _validate_failover_credentials() -> None:
@@ -160,7 +201,20 @@ def _validate_failover_credentials() -> None:
                 ", ".join(missing),
             )
     except Exception as e:
-        logger.debug("[Bootstrap] Failover credential validation skipped: %s", e)
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] Failover credential validation skipped (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
 
 
 async def _maybe_auto_probe_on_startup() -> None:
@@ -203,9 +257,20 @@ async def _maybe_auto_probe_on_startup() -> None:
         raise
     except Exception as e:
         # 非取消异常降级 warning，不影响主流程
-        from utils.sanitizers import DataSanitizer
-
-        logger.warning("[Bootstrap] Auto probe failed (non-critical): %s", DataSanitizer.sanitize_error(e))
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] Auto probe failed (non-critical) (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
 
 
 def _validate_strategy_tier_coverage() -> None:
@@ -222,13 +287,39 @@ def _validate_strategy_tier_coverage() -> None:
 
         registered_keys = set(StrategyManager().strategies.keys())
     except Exception as e:
-        logger.warning("[Bootstrap] validate_strategy_tier_coverage skipped: %s", e)
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] validate_strategy_tier_coverage skipped (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
         return
 
     try:
         validate_strategy_tier_coverage(registered_keys)
     except Exception as e:
-        logger.warning("[Bootstrap] validate_strategy_tier_coverage failed: %s", e)
+        error_info = classify_error(e, context="general")
+        severity = classify_severity(e, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[Bootstrap] validate_strategy_tier_coverage failed (%s): %s",
+            error_info["code"],
+            DataSanitizer.sanitize_error(e),
+            exc_info=True,
+        )
 
 
 def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):

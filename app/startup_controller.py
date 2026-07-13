@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from app.bootstrap import check_onboarding_needed, initialize_services
+from utils.error_classifier import classify_error, classify_severity
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +96,20 @@ class StartupController:
         try:
             result = await initialize_services(self._cache_manager, show_toast_fn=self._on_show_toast)
         except Exception as e:
-            logger.error("[Startup] initialize_services raised exception: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Startup] initialize_services raised exception (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             self._transition(StartupState.INIT_FAILED, error="init_exception", detail=str(e))
             return
 
@@ -156,7 +171,20 @@ class StartupController:
             await self._cache_manager.init_db(force=True, auto_migrate=True)
             self._transition(StartupState.UPGRADE_SUCCESS)
         except Exception as e:
-            logger.error("[Startup] DB upgrade failed: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Startup] DB upgrade failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             self._transition(StartupState.UPGRADE_FAILED, error="db_upgrade_failed", detail=str(e))
 
     async def proceed_after_upgrade_success(self):
