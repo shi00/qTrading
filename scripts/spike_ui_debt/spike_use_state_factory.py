@@ -54,7 +54,7 @@ class Factory:
         self.name = name
         self.call_count = 0
 
-    def __call__(self):
+    def __call__(self) -> dict[str, int | str]:
         self.call_count += 1
         return {"id": self.call_count, "name": self.name}
 

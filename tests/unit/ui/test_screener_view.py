@@ -183,6 +183,7 @@ class TestBuildStrategyOptions:
             {"northbound": {"name": "北向资金", "missing_apis": ["api1", "api2"]}},
             mock_mgr,
         )
+        assert result[0].text is not None
         assert "⚠️" in result[0].text
 
     def test_empty_strategies(self):

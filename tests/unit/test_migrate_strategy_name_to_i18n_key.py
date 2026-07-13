@@ -10,8 +10,7 @@ pytestmark = pytest.mark.unit
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-# pyright can't statically resolve scripts/ modules (not on extraPaths); runtime sys.path works.
-from migrate_strategy_name_to_i18n_key import migrate_strategy_name  # type: ignore[reportMissingImports]  # noqa: E402
+from migrate_strategy_name_to_i18n_key import migrate_strategy_name  # noqa: E402
 
 
 class TestMigrateStrategyName:
@@ -80,7 +79,7 @@ class TestStrategyNameMapSync:
         strategy_keys = {k for k in zh_strings if k.startswith("strategy_") and k.endswith("_name")}
         assert strategy_keys, "locales/zh_CN/strings.json 应至少有一个 strategy_*_name key"
 
-        from migrate_strategy_name_to_i18n_key import _STRATEGY_NAME_MAP as scripts_map  # type: ignore[reportMissingImports]
+        from migrate_strategy_name_to_i18n_key import _STRATEGY_NAME_MAP as scripts_map
 
         mapped_values = set(scripts_map.values())
         missing = strategy_keys - mapped_values

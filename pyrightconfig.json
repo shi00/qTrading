@@ -9,10 +9,12 @@
     "**/node_modules",
     "**/.worktrees",
     "venv",
-    "alembic"
+    "alembic",
+    "scripts/spike_ui_debt"
   ],
   "extraPaths": [
-    "."
+    ".",
+    "scripts"
   ],
   "typeCheckingMode": "basic",
   "reportMissingTypeStubs": "warning",
