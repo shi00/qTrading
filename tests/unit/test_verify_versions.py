@@ -21,7 +21,10 @@ def setup_test_files(
     ci_pyright="1.1.300",
 ):
     pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(f'[project]\nversion = "{pyproject_v}"\n', encoding="utf-8")
+    pyproject.write_text(
+        f'[project]\nversion = "{pyproject_v}"\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n',
+        encoding="utf-8",
+    )
 
     installer = tmp_path / "installer.iss"
     installer.write_text(
@@ -59,6 +62,9 @@ def setup_test_files(
     claude = tmp_path / "CLAUDE.md"
     claude.write_text("# CLAUDE.md\n", encoding="utf-8")
 
+    requirements_dev = tmp_path / "requirements-dev.txt"
+    requirements_dev.write_text(f"pyright=={pkg_pyright}\n", encoding="utf-8")
+
     return (
         pyproject,
         installer,
@@ -69,6 +75,7 @@ def setup_test_files(
         contributing,
         security,
         claude,
+        requirements_dev,
     )
 
 
@@ -82,6 +89,7 @@ def _patch_all_paths(
     contributing,
     security,
     claude,
+    requirements_dev,
 ):
     """Helper to patch all path constants used by verify_versions.main()."""
     return [
@@ -94,6 +102,7 @@ def _patch_all_paths(
         patch("verify_versions.CONTRIBUTING_PATH", contributing),
         patch("verify_versions.SECURITY_PATH", security),
         patch("verify_versions.CLAUDE_PATH", claude),
+        patch("verify_versions.REQUIREMENTS_DEV_PATH", requirements_dev),
     ]
 
 
@@ -108,6 +117,7 @@ def test_verify_versions_fix(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, installer_v="0.6.8", manifest_v="0.6.8")
 
     # Mock all paths and argv
@@ -121,6 +131,7 @@ def test_verify_versions_fix(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -196,6 +207,7 @@ def test_verify_versions_all_consistent(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path)
     patches = _patch_all_paths(
         pyproject,
@@ -207,6 +219,7 @@ def test_verify_versions_all_consistent(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     # Test without --fix (exit 0, no exceptions)
     with ExitStack() as stack:
@@ -237,6 +250,7 @@ def test_verify_versions_no_fix_mismatch(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.8")
     patches = _patch_all_paths(
         pyproject,
@@ -248,6 +262,7 @@ def test_verify_versions_no_fix_mismatch(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -271,6 +286,7 @@ def test_verify_versions_installer_mismatch_only(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9")
     patches = _patch_all_paths(
         pyproject,
@@ -282,6 +298,7 @@ def test_verify_versions_installer_mismatch_only(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -305,6 +322,7 @@ def test_verify_versions_manifest_mismatch_only(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8")
     patches = _patch_all_paths(
         pyproject,
@@ -316,6 +334,7 @@ def test_verify_versions_manifest_mismatch_only(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -341,6 +360,7 @@ def test_verify_versions_pyright_mismatch(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pkg_pyright="1.1.300", ci_pyright="1.1.301")
     patches = _patch_all_paths(
         pyproject,
@@ -352,6 +372,7 @@ def test_verify_versions_pyright_mismatch(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -373,6 +394,7 @@ def test_main_initial_read_failure(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.9")
     # Make one file missing to trigger OSError in main()
     missing_pyproject = tmp_path / "non_existent_pyproject.toml"
@@ -386,6 +408,7 @@ def test_main_initial_read_failure(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -407,6 +430,7 @@ def test_main_installer_fix_failure(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.8", manifest_v="0.6.9")
     patches = _patch_all_paths(
         pyproject,
@@ -418,6 +442,7 @@ def test_main_installer_fix_failure(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
@@ -445,6 +470,7 @@ def test_main_manifest_fix_failure(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     ) = setup_test_files(tmp_path, pyproject_v="0.6.9", installer_v="0.6.9", manifest_v="0.6.8")
     patches = _patch_all_paths(
         pyproject,
@@ -456,6 +482,7 @@ def test_main_manifest_fix_failure(tmp_path):
         contributing,
         security,
         claude,
+        requirements_dev,
     )
     with ExitStack() as stack:
         for p in patches:
