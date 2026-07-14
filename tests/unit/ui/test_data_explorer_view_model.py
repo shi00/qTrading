@@ -1,8 +1,9 @@
-"""Unit tests for DataExplorerViewModel — 双轨制形态(frozen state + property)。
+"""Unit tests for DataExplorerViewModel — 声明式形态(frozen state + tuple[Row, ...])。
 
-VM 改造后(方案 §3.0.4 双轨制):
-- 轻量 UI 状态封装为 frozen `DataExplorerState`(tuple/frozenset 替代 list/set);
-- 大体积数据(current_data: DataFrame / sql_result: dict)VM 内部持有 + property 拉取 + version 通知。
+VM 改造后(CLAUDE.md §3.2 + CONTRIBUTING.md L771):
+- 全部业务状态封装为 frozen `DataExplorerState`(tuple/frozenset 替代 list/set);
+- 大体积数据(DataFrame/dict 派生)转换为 tuple[TableRow, ...]/tuple[SqlResultRow, ...]
+  直接放入 state, 无 dual-track property 拉取/version 通知.
 """
 
 import asyncio
@@ -13,7 +14,12 @@ import pandas as pd
 import pytest
 
 from ui.viewmodels import Message
-from ui.viewmodels.data_explorer_view_model import DataExplorerState, DataExplorerViewModel
+from ui.viewmodels.data_explorer_view_model import (
+    DataExplorerState,
+    DataExplorerViewModel,
+    SqlResultRow,
+    TableRow,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -90,12 +96,12 @@ class TestInit:
         assert s.tables_loaded is False
         assert s.error_message is None
         assert s.sql_is_executing is False
-        # dual-track versions
-        assert s.data_version == 0
-        assert s.sql_result_version == 0
-        # 大体积数据 property
-        assert vm.current_data.empty
-        assert vm.sql_result is None
+        # 声明式: 业务数据直接放入 state (tuple[Row, ...])
+        assert s.table_rows == ()
+        assert s.sql_success is False
+        assert s.sql_result_columns == ()
+        assert s.sql_result_rows == ()
+        assert s.sql_error is None
 
 
 class TestSubscribe:
@@ -124,13 +130,25 @@ class TestSubscribe:
 
 class TestDispose:
     def test_dispose_clears_state(self, vm):
-        vm._current_data = pd.DataFrame({"a": [1]})
-        vm._set_state(tables_list=("t1",), table_columns=("col1",), error_message=Message("err"))
+        vm._set_state(
+            tables_list=("t1",),
+            table_columns=("col1",),
+            error_message=Message("err"),
+            table_rows=(TableRow(values=(1,)),),
+            sql_success=True,
+            sql_result_columns=("a",),
+            sql_result_rows=(SqlResultRow(values=(1,)),),
+            sql_error="boom",
+        )
         vm.dispose()
-        assert vm.current_data.empty
         assert vm.state.tables_list == ()
         assert vm.state.table_columns == ()
         assert vm.state.error_message is None
+        assert vm.state.table_rows == ()
+        assert vm.state.sql_success is False
+        assert vm.state.sql_result_columns == ()
+        assert vm.state.sql_result_rows == ()
+        assert vm.state.sql_error is None
 
     def test_dispose_releases_db_reference(self, vm, mock_db):
         vm.dispose()
@@ -159,11 +177,10 @@ class TestDispose:
         result = await vm.query_count()
         assert result == 0
 
-    async def test_query_data_after_dispose_returns_current(self, vm):
+    async def test_query_data_after_dispose_returns_empty(self, vm):
         vm.dispose()
-        vm._current_data = pd.DataFrame({"existing": [1]})
         result = await vm.query_data()
-        assert "existing" in result.columns
+        assert result.empty
 
     async def test_execute_sql_after_dispose_returns_error(self, vm):
         vm.dispose()
@@ -283,12 +300,14 @@ class TestQueryData:
         df = pd.DataFrame({"ts_code": ["000001.SZ"], "close": [10.5]})
         mock_db.query_table.return_value = df
         mock_db.get_table_count.return_value = 100
+        vm._set_state(table_columns=("ts_code", "close"))
         result = await vm.query_data()
         assert len(result) == 1
         assert vm.state.total_rows == 100
         assert vm.state.is_loading is False
-        # dual-track: data_version 递增
-        assert vm.state.data_version == 1
+        # 声明式: table_rows 已写入 state (tuple[Row, ...])
+        assert len(vm.state.table_rows) == 1
+        assert vm.state.table_rows[0].values[0] == "000001.SZ"
 
     async def test_with_filter_override(self, vm, mock_db):
         df = pd.DataFrame({"ts_code": ["000001.SZ"]})
@@ -326,6 +345,7 @@ class TestQueryData:
         result = await vm.query_data()
         assert result.empty
         assert vm.state.total_rows == 0
+        assert vm.state.table_rows == ()
 
     async def test_total_rows_updated(self, vm, mock_db):
         mock_db.query_table.return_value = pd.DataFrame({"a": [1, 2]})
@@ -333,11 +353,14 @@ class TestQueryData:
         await vm.query_data()
         assert vm.state.total_rows == 42
 
-    async def test_concurrent_guard_returns_current_data(self, vm):
-        vm._set_state(is_loading=True)
-        vm._current_data = pd.DataFrame({"existing": [1]})
+    async def test_concurrent_guard_preserves_state(self, vm, mock_db):
+        """is_loading=True 时 query_data 提前返回空 DataFrame, 不触达 DB, state 保留."""
+        preset_rows = (TableRow(values=("existing",)),)
+        vm._set_state(is_loading=True, table_rows=preset_rows, table_columns=("existing",))
         result = await vm.query_data()
-        assert "existing" in result.columns
+        assert result.empty
+        mock_db.query_table.assert_not_called()
+        assert vm.state.table_rows == preset_rows
 
     async def test_cancelled_error_propagates(self, vm, mock_db):
         mock_db.query_table.side_effect = asyncio.CancelledError()
@@ -407,17 +430,23 @@ class TestExecuteSQL:
         mock_db.execute_sql.return_value = expected
         result = await vm.execute_sql("SELECT * FROM stock_basic LIMIT 1")
         assert result["success"] is True
-        assert vm.sql_result == expected  # property 拉取
         assert vm.state.sql_is_executing is False
-        # dual-track: sql_result_version 递增
-        assert vm.state.sql_result_version == 1
+        # 声明式: sql_result_* 已写入 state (tuple[Row, ...])
+        assert vm.state.sql_success is True
+        assert vm.state.sql_result_columns == ("a",)
+        assert len(vm.state.sql_result_rows) == 1
+        assert vm.state.sql_result_rows[0].values == (1,)
+        assert vm.state.sql_error is None
 
     async def test_error_result(self, vm, mock_db):
         expected = {"success": False, "data": None, "error": "Only SELECT allowed"}
         mock_db.execute_sql.return_value = expected
         result = await vm.execute_sql("DROP TABLE stock_basic")
         assert result["success"] is False
-        assert vm.sql_result == expected  # property 拉取
+        # 声明式: error 写入 state.sql_error
+        assert vm.state.sql_success is False
+        assert vm.state.sql_error == "Only SELECT allowed"
+        assert vm.state.sql_result_rows == ()
 
     async def test_exception_handling(self, vm, mock_db):
         mock_db.execute_sql.side_effect = RuntimeError("Connection lost")
@@ -426,15 +455,17 @@ class TestExecuteSQL:
         assert result["error"] is not None
         # get_error_message returns i18n translated message, not raw error string
         assert vm.state.sql_is_executing is False
-        # dual-track: 即使异常也递增 sql_result_version(因为 sql_result 被设为 error dict)
-        assert vm.state.sql_result_version == 1
+        # 声明式: 异常也写入 state (error dict 转换)
+        assert vm.state.sql_success is False
+        assert vm.state.sql_error is not None
 
     async def test_empty_sql_returns_error(self, vm):
         result = await vm.execute_sql("")
         assert result["success"] is False
         assert result["error"] is not None
-        # 不应触发 sql_result_version 递增(空 SQL 提前返回)
-        assert vm.state.sql_result_version == 0
+        # 空 SQL 提前返回, 不触达 _set_state (state 保持初始值)
+        assert vm.state.sql_success is False
+        assert vm.state.sql_result_rows == ()
 
     async def test_cancelled_error_propagates(self, vm, mock_db):
         mock_db.execute_sql.side_effect = asyncio.CancelledError()
@@ -727,13 +758,15 @@ class TestExportDataSeverity:
 
 class TestExecuteSQLSeverity:
     async def test_operational_error_returns_error_dict(self, vm, mock_db):
-        """operational 严重度异常返回 error dict,递增 sql_result_version,finally 重置 sql_is_executing。"""
+        """operational 严重度异常返回 error dict,写入 state.sql_error,finally 重置 sql_is_executing。"""
         mock_db.execute_sql.side_effect = RuntimeError("unknown boom")
         result = await vm.execute_sql("SELECT 1")
         assert result["success"] is False
         assert result["error"] is not None
         assert vm.state.sql_is_executing is False
-        assert vm.state.sql_result_version == 1
+        # 声明式: error 写入 state (L771 合规)
+        assert vm.state.sql_success is False
+        assert vm.state.sql_error is not None
 
     async def test_system_error_propagates(self, vm, mock_db):
         """system 严重度异常(PermissionError)必须抛出,finally 仍重置 sql_is_executing。"""
