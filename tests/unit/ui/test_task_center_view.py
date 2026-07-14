@@ -56,6 +56,17 @@ def _make_task(status=TaskStatus.QUEUED, **kwargs):
     return AppTask(**defaults)
 
 
+def _trigger_callback(cb, event):
+    """Safely trigger Flet optional callback in tests.
+
+    Flet stubs declare callbacks (on_click/on_change/on_horizontal_drag_*/etc.)
+    as Optional[Callable[[], None]], but runtime passes a ControlEvent.
+    Centralize type narrowing + type: ignore here.
+    """
+    assert cb is not None
+    cb(event)  # type: ignore[reportCallIssue, reason: Flet stub declares callbacks as 0-arg, but runtime passes event]
+
+
 # ---------------------------------------------------------------------------
 # Helper function tests
 # ---------------------------------------------------------------------------
@@ -793,7 +804,7 @@ class TestTaskCenterViewComponentBody:
             if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.CLEANING_SERVICES_OUTLINED
         ]
         # _on_clear(e) 接收 ControlEvent (Flet on_click 契约)
-        clear_btns[0].on_click(MagicMock())
+        _trigger_callback(clear_btns[0].on_click, MagicMock())
         assert ("clear_finished", {}) in fake_vm.method_calls
 
     def test_pagination_hidden_on_single_page(self, monkeypatch):
@@ -868,7 +879,7 @@ class TestTaskCenterViewComponentBody:
         )
         btn_next = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
         assert btn_next is not None
-        btn_next.on_click(MagicMock())
+        _trigger_callback(btn_next.on_click, MagicMock())
         assert ("go_next", {}) in fake_vm.method_calls
 
     def test_prev_button_triggers_go_prev(self, monkeypatch):
@@ -879,7 +890,7 @@ class TestTaskCenterViewComponentBody:
         )
         btn_prev = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
         assert btn_prev is not None
-        btn_prev.on_click(MagicMock())
+        _trigger_callback(btn_prev.on_click, MagicMock())
         assert ("go_prev", {}) in fake_vm.method_calls
 
     def test_page_info_text_shown(self, monkeypatch):

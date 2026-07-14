@@ -347,7 +347,8 @@ class TestBuildRow:
         on_row_click = MagicMock()
         data = _make_row_data()
         row = _build_row(0, data, _make_columns(), 800, on_row_click)
-        row.on_click(MagicMock())
+        assert row.on_click is not None
+        row.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
         on_row_click.assert_called_once_with(data)
 
 

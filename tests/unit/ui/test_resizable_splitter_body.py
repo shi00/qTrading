@@ -71,6 +71,17 @@ def _find_divider(container: ft.Container) -> ft.GestureDetector:
     return divider
 
 
+def _trigger_callback(cb, event):
+    """Safely trigger Flet optional callback in tests.
+
+    Flet stubs declare callbacks (on_click/on_change/on_horizontal_drag_*/etc.)
+    as Optional[Callable[[], None]], but runtime passes a ControlEvent.
+    Centralize type narrowing + type: ignore here.
+    """
+    assert cb is not None
+    cb(event)  # type: ignore[reportCallIssue, reason: Flet stub declares callbacks as 0-arg, but runtime passes event]
+
+
 class TestSplitterRenderStructure:
     """验证渲染后的控件树结构 (lines 94-208 中 render 段)。"""
 
@@ -191,7 +202,7 @@ class TestDragHandlers:
         divider = _find_divider(result)
         # on_drag_start 应为可调用且不抛异常
         assert callable(divider.on_horizontal_drag_start)
-        divider.on_horizontal_drag_start(MagicMock())
+        _trigger_callback(divider.on_horizontal_drag_start, MagicMock())
 
     def test_on_drag_update_with_primary_delta(self, mock_i18n_state, mock_app_colors_state):
         """primary_delta 路径：增量更新宽度 + 节流后 set_width。"""
@@ -202,7 +213,7 @@ class TestDragHandlers:
         # 构造 DragUpdateEvent 桩
         e = MagicMock()
         e.primary_delta = 50  # +50px
-        divider.on_horizontal_drag_update(e)
+        _trigger_callback(divider.on_horizontal_drag_update, e)
 
         # set_width 被调用 → schedule_update 被调用
         assert component_in_updates(page, divider)
@@ -219,7 +230,7 @@ class TestDragHandlers:
         local_delta.x = 30
         e.local_delta = local_delta
         # 不应抛异常
-        divider.on_horizontal_drag_update(e)
+        _trigger_callback(divider.on_horizontal_drag_update, e)
         assert component_in_updates(page, divider)
 
     def test_on_drag_update_local_delta_none(self, mock_i18n_state, mock_app_colors_state):
@@ -233,7 +244,7 @@ class TestDragHandlers:
         e.local_delta = None
         updates_before = len(page.session.scheduled_updates)
         # 不应抛异常；delta_x=0 → new_width=current → 提前 return
-        divider.on_horizontal_drag_update(e)
+        _trigger_callback(divider.on_horizontal_drag_update, e)
         assert len(page.session.scheduled_updates) == updates_before
 
     def test_on_drag_update_clamps_to_max(self, mock_i18n_state, mock_app_colors_state):
@@ -245,7 +256,7 @@ class TestDragHandlers:
         e = MagicMock()
         e.primary_delta = 1000  # 远超 max_width
         # 不应抛异常
-        divider.on_horizontal_drag_update(e)
+        _trigger_callback(divider.on_horizontal_drag_update, e)
         assert component_in_updates(page, divider)
 
     def test_on_drag_update_clamps_to_min(self, mock_i18n_state, mock_app_colors_state):
@@ -256,7 +267,7 @@ class TestDragHandlers:
 
         e = MagicMock()
         e.primary_delta = -1000  # 远低于 min_width
-        divider.on_horizontal_drag_update(e)
+        _trigger_callback(divider.on_horizontal_drag_update, e)
         assert component_in_updates(page, divider)
 
     def test_on_drag_update_throttled(self, mock_i18n_state, mock_app_colors_state):
@@ -267,12 +278,12 @@ class TestDragHandlers:
 
         e1 = MagicMock()
         e1.primary_delta = 10
-        divider.on_horizontal_drag_update(e1)
+        _trigger_callback(divider.on_horizontal_drag_update, e1)
         updates_after_first = len(page.session.scheduled_updates)
 
         e2 = MagicMock()
         e2.primary_delta = 20
-        divider.on_horizontal_drag_update(e2)
+        _trigger_callback(divider.on_horizontal_drag_update, e2)
         updates_after_second = len(page.session.scheduled_updates)
 
         # 节流窗口内第二次不应新增调度
@@ -287,7 +298,7 @@ class TestDragHandlers:
 
         e = MagicMock()
         e.primary_delta = 50
-        divider.on_horizontal_drag_update(e)
+        _trigger_callback(divider.on_horizontal_drag_update, e)
         on_resize.assert_called_once()
 
     def test_on_drag_end_with_cache_persists(self, mock_i18n_state, mock_app_colors_state):
@@ -299,11 +310,11 @@ class TestDragHandlers:
         # 先 drag_update 设置 cache
         e_update = MagicMock()
         e_update.primary_delta = 50
-        divider.on_horizontal_drag_update(e_update)
+        _trigger_callback(divider.on_horizontal_drag_update, e_update)
 
         # 再 drag_end
         with patch("ui.components.resizable_splitter._persist_width") as mock_persist:
-            divider.on_horizontal_drag_end(MagicMock())
+            _trigger_callback(divider.on_horizontal_drag_end, MagicMock())
             mock_persist.assert_called_once()
             # 持久化的宽度应为 410 (default 360 + 50)
             assert mock_persist.call_args.args[1] == 410
@@ -315,7 +326,7 @@ class TestDragHandlers:
         divider = _find_divider(result)
 
         with patch("ui.components.resizable_splitter._persist_width") as mock_persist:
-            divider.on_horizontal_drag_end(MagicMock())
+            _trigger_callback(divider.on_horizontal_drag_end, MagicMock())
             mock_persist.assert_called_once_with(CONFIG_KEY, DEFAULT_WIDTH)
 
     def test_on_double_tap_resets_to_default(self, mock_i18n_state, mock_app_colors_state):
@@ -325,7 +336,7 @@ class TestDragHandlers:
         divider = _find_divider(result)
 
         with patch("ui.components.resizable_splitter._persist_width") as mock_persist:
-            divider.on_double_tap(MagicMock())
+            _trigger_callback(divider.on_double_tap, MagicMock())
             mock_persist.assert_called_once_with(CONFIG_KEY, 400)
 
 
@@ -342,7 +353,7 @@ class TestHoverHandlers:
         assert inner_container.bgcolor == ft.Colors.TRANSPARENT
 
         # 触发 on_enter，应调度 set_hovered(True)
-        divider.on_enter(MagicMock())
+        _trigger_callback(divider.on_enter, MagicMock())
         # schedule_update 被调用
         assert component_in_updates(page, divider)
 
@@ -357,11 +368,11 @@ class TestHoverHandlers:
         divider = _find_divider(result)
 
         # 先 enter 使 hovered=True
-        divider.on_enter(MagicMock())
+        _trigger_callback(divider.on_enter, MagicMock())
         # 清空 mount 期间累积的 schedule_update，便于隔离 exit 的影响
         page.session.scheduled_updates.clear()
         # 再 exit 使 hovered=False，状态变化触发 schedule_update
-        divider.on_exit(MagicMock())
+        _trigger_callback(divider.on_exit, MagicMock())
         assert component_in_updates(page, divider)
 
 

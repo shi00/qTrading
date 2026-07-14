@@ -55,6 +55,17 @@ PANEL_PATH = (
 )
 
 
+def _trigger_callback(cb, event):
+    """Safely trigger Flet optional callback in tests.
+
+    Flet stubs declare callbacks (on_click/on_change/on_horizontal_drag_*/etc.)
+    as Optional[Callable[[], None]], but runtime passes a ControlEvent.
+    Centralize type narrowing + type: ignore here.
+    """
+    assert cb is not None
+    cb(event)  # type: ignore[reportCallIssue, reason: Flet stub declares callbacks as 0-arg, but runtime passes event]
+
+
 # --- 模块级纯函数：_render_message ---
 
 
@@ -738,7 +749,7 @@ class TestFailoverConfigPanelBody:
         save_btns = [c for c in ctrls if isinstance(c, ft.Button) and getattr(c, "icon", None) == ft.Icons.SAVE]
         assert len(save_btns) == 1
         # 触发 on_click
-        save_btns[0].on_click(MagicMock())
+        _trigger_callback(save_btns[0].on_click, MagicMock())
         vm.save_config.assert_called_once()
 
     def test_add_click_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
@@ -757,7 +768,7 @@ class TestFailoverConfigPanelBody:
         ctrls = _collect_controls(result)
         add_btns = [c for c in ctrls if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.ADD]
         assert len(add_btns) == 1
-        add_btns[0].on_click(MagicMock())
+        _trigger_callback(add_btns[0].on_click, MagicMock())
         # 应触发 page.run_task 调用 open_add_dialog
         assert any(call[0] == vm.open_add_dialog for call in run_task_calls)
 
@@ -779,7 +790,7 @@ class TestFailoverConfigPanelBody:
             c for c in ctrls if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.VERIFIED_USER
         ]
         assert len(validate_btns) == 1
-        validate_btns[0].on_click(MagicMock())
+        _trigger_callback(validate_btns[0].on_click, MagicMock())
         assert any(call[0] == vm.validate_all for call in run_task_calls)
 
     def test_status_message_rendered(self, mock_i18n_state, mock_app_colors_state):
@@ -838,6 +849,6 @@ class TestFailoverConfigPanelBody:
         assert len(up_btns) == 2
         # 第二项的 up 按钮 enabled（index=1 != 0）
         assert up_btns[1].disabled is False
-        up_btns[1].on_click(MagicMock())
+        _trigger_callback(up_btns[1].on_click, MagicMock())
         # 应触发 vm.move_item(index=1, direction=-1)
         assert any(call[0] == vm.move_item and call[1] == (1, -1) for call in run_task_calls)

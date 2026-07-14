@@ -1101,7 +1101,7 @@ class TestOnboardingWizardComponentBody:
         # 触发第一个有 on_hover 的 container
         for c in containers:
             if hasattr(c, "on_hover") and c.on_hover is not None:
-                c.on_hover(mock_event)
+                c.on_hover(mock_event)  # type: ignore[reportCallIssue, reason: Flet stub declares on_hover as 0-arg, but runtime passes event]
                 break
 
         # 不抛异常即覆盖 _on_card_hover 路径

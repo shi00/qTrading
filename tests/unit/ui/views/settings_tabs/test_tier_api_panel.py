@@ -44,15 +44,6 @@ pytestmark = pytest.mark.unit
 PANEL_PATH = Path(panel_module.__file__)
 
 
-def _make_mock_client():
-    """创建 mock TushareClient，覆盖纯函数所需方法。"""
-    client = MagicMock()
-    client.get_tier_apis.return_value = {"daily", "fina_indicator"}
-    client.is_independent_purchase.return_value = False
-    client.get_last_probe_time.return_value = None
-    return client
-
-
 # ------------------------------------------------------------------
 # _build_tier_options
 # ------------------------------------------------------------------
@@ -596,6 +587,17 @@ def _make_mock_client() -> MagicMock:
     return client
 
 
+def _trigger_callback(cb, event):
+    """Safely trigger Flet optional callback in tests.
+
+    Flet stubs declare callbacks (on_click/on_change/on_horizontal_drag_*/etc.)
+    as Optional[Callable[[], None]], but runtime passes a ControlEvent.
+    Centralize type narrowing + type: ignore here.
+    """
+    assert cb is not None
+    cb(event)  # type: ignore[reportCallIssue, reason: Flet stub declares callbacks as 0-arg, but runtime passes event]
+
+
 class TestTierApiPanelComponentBody:
     """TierApiPanel 组件体渲染测试: 验证控件树结构 + VM 交互 + 事件 handler。"""
 
@@ -718,7 +720,7 @@ class TestTierApiPanelComponentBody:
         # 模拟档位变更事件
         e = MagicMock()
         e.control.value = "points_120"
-        dropdown.on_select(e)
+        _trigger_callback(dropdown.on_select, e)
         assert len(run_task_calls) > 0, "应触发 page.run_task"
 
     def test_on_tier_change_same_tier_does_nothing(self, mock_i18n_state, mock_app_colors_state):
@@ -741,7 +743,7 @@ class TestTierApiPanelComponentBody:
         dropdown = next(c for c in ctrls if isinstance(c, ft.Dropdown))
         e = MagicMock()
         e.control.value = "points_5000"  # 同档位
-        dropdown.on_select(e)
+        _trigger_callback(dropdown.on_select, e)
         assert len(run_task_calls) == 0, "相同档位不应触发 run_task"
 
     def test_on_probe_click_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
@@ -762,7 +764,7 @@ class TestTierApiPanelComponentBody:
 
         ctrls = _collect_controls(result)
         button = next(c for c in ctrls if isinstance(c, ft.Button))
-        button.on_click(MagicMock())
+        _trigger_callback(button.on_click, MagicMock())
         assert len(run_task_calls) > 0, "应触发 page.run_task"
 
     def test_last_probe_time_displayed(self, mock_i18n_state, mock_app_colors_state):
