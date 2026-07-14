@@ -225,8 +225,10 @@ pandas==3.0.3
     #   tushare
 pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
-pillow==12.2.0
-    # via matplotlib
+pillow==12.3.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   matplotlib
 playwright==1.61.0
     # via astockscreener (pyproject.toml)
 polars==1.42.1
