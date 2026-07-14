@@ -255,8 +255,10 @@ pandas-market-calendars==5.4.0
     # via astockscreener (pyproject.toml)
 pandas-stubs==3.0.3.260530
     # via astockscreener (pyproject.toml)
-pillow==12.2.0
-    # via matplotlib
+pillow==12.3.0
+    # via
+    #   astockscreener (pyproject.toml)
+    #   matplotlib
 pip==26.1.2
     # via pip-api
 pip-api==0.0.34
