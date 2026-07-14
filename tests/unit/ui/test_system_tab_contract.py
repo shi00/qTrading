@@ -19,10 +19,11 @@ import pytest
 
 from tests.unit.ui.component_renderer import (
     FakePage,
+    attach_fake_page,
     make_component,
     render_once,
-    run_mount_effects,
 )
+from flet.components.component import Component
 
 pytestmark = pytest.mark.unit
 
@@ -386,9 +387,20 @@ class _FakeSystemVM:
 
 
 def _walk_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树, 返回所有控件列表。"""
+    """深度优先遍历控件树, 返回所有控件列表。
+
+    遇到 @ft.component 子组件实例 (如 DashboardCard) 时, 调 render_once
+    渲染后深入 (子组件调用返回 Component 实例, 需渲染才能获取内部控件)。
+    """
     result: list[Any] = []
     if root is None:
+        return result
+    if isinstance(root, Component):
+        try:
+            root = render_once(root)
+        except Exception:  # noqa: BLE001
+            return result
+    if not isinstance(root, ft.Control):
         return result
     result.append(root)
     for attr in ("controls", "content"):
@@ -397,7 +409,7 @@ def _walk_controls(root: Any) -> list[Any]:
             for c in children:
                 if c is not None:
                     result.extend(_walk_controls(c))
-        elif children is not None:
+        elif isinstance(children, ft.Control):
             result.extend(_walk_controls(children))
     return result
 
@@ -460,12 +472,19 @@ def system_tab_env(mock_i18n, mock_app_colors_state):
 
 
 def _render_with_page(mod: Any, page: Any, show_snack: Any = None) -> Any:
-    """渲染 SystemTab 组件, 返回控件树根节点。"""
+    """渲染 SystemTab 组件, 返回控件树根节点。
+
+    只渲染一次 (run_mount_effects 内部已调 render_once), 避免重复渲染
+    导致子组件函数调用 (如 TierApiPanel) 被执行多次。
+    """
     if show_snack is None:
         show_snack = MagicMock()
     component = make_component(mod.SystemTab, show_snack_callback=show_snack)
-    run_mount_effects(component, page=page)
-    return render_once(component)
+    page = attach_fake_page(component, page)
+    result = render_once(component)
+    component._state.mounted = True
+    component._run_mount_effects()
+    return result
 
 
 def _get_tpm_mock(mod: Any) -> Any:

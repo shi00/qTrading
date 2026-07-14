@@ -42,14 +42,19 @@ def _trigger_click(button):
 
 
 def _find_controls(control, control_type):
-    """Recursively find all controls of a given type in a control tree."""
+    """Recursively find all controls of a given type in a control tree.
+
+    跳过非 ft.Control 对象 (避免 MagicMock 下 getattr/hasattr 自动生成子节点致无限递归)。
+    """
     found = []
+    if not isinstance(control, ft.Control):
+        return found
     if isinstance(control, control_type):
         found.append(control)
     if hasattr(control, "controls") and isinstance(control.controls, list):
         for child in control.controls:
             found.extend(_find_controls(child, control_type))
-    if hasattr(control, "content") and control.content:
+    if hasattr(control, "content") and isinstance(control.content, ft.Control):
         found.extend(_find_controls(control.content, control_type))
     if hasattr(control, "actions") and isinstance(control.actions, list):
         for child in control.actions:

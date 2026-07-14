@@ -556,8 +556,12 @@ class _FakeSystemVM:
 
 
 def _collect_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树。"""
-    if root is None:
+    """深度优先遍历控件树。
+
+    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock I18n/AppColors 下
+    content 属性返回新 MagicMock, 无守卫会无限生成子节点致内存暴涨)。
+    """
+    if root is None or not isinstance(root, ft.Control):
         return []
     result: list[Any] = [root]
     for attr in ("controls", "items", "tabs"):
@@ -567,7 +571,7 @@ def _collect_controls(root: Any) -> list[Any]:
                 if child is not None:
                     result.extend(_collect_controls(child))
     content = getattr(root, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         result.extend(_collect_controls(content))
     return result
 

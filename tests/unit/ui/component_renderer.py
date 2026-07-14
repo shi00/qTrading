@@ -75,6 +75,10 @@ class FakePage:
     含 ``_services`` 属性（``FakeServiceRegistry``），使 ``ft.FilePicker``
     等服务控件在 ``init()`` 时调用 ``context.page._services.register_service``
     不抛异常。
+
+    含 ``_dialogs`` 属性与 ``_prepare_dialog`` 方法，支持 ``ft.use_dialog``
+    声明式 dialog hook（dialog 控件追加到 ``_dialogs.controls`` 列表，
+    ``_prepare_dialog`` 吸收 Flet 内部调用）。
     """
 
     session: FakeSession = field(default_factory=FakeSession)
@@ -82,6 +86,10 @@ class FakePage:
     def __post_init__(self) -> None:
         self._services = FakeServiceRegistry()
         self.services: list[Any] = []
+        self._dialogs: _FakeDialogList = _FakeDialogList()
+
+    def _prepare_dialog(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
+        """吸收 ft.use_dialog 的 _prepare_dialog 调用 (声明式 dialog 测试支持)。"""
 
 
 class FakeServiceRegistry:
@@ -92,6 +100,13 @@ class FakeServiceRegistry:
 
     def unregister_services(self) -> None:
         pass
+
+
+@dataclass
+class _FakeDialogList:
+    """FakePage._dialogs 容器, 支持 weakref (Flet use_dialog 内部弱引用)。"""
+
+    controls: list[Any] = field(default_factory=list)
 
 
 def make_component(fn: Any, *args: Any, **kwargs: Any) -> Component:

@@ -552,15 +552,21 @@ def _make_fake_page() -> FakePage:
 
 
 def _collect_controls(control: Any) -> list[Any]:
-    """递归收集控件树中的所有 ft.Control（含嵌套 content/controls）。"""
-    results = [control]
+    """递归收集控件树中的所有 ft.Control（含嵌套 content/controls）。
+
+    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock 下 content 属性返回新 MagicMock)。
+    """
+    if control is None or not isinstance(control, ft.Control):
+        return []
+    results: list[Any] = [control]
     content = getattr(control, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         results.extend(_collect_controls(content))
     controls = getattr(control, "controls", None)
-    if controls:
+    if isinstance(controls, list):
         for c in controls:
-            results.extend(_collect_controls(c))
+            if c is not None:
+                results.extend(_collect_controls(c))
     return results
 
 

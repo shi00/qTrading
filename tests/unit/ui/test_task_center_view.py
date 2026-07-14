@@ -665,7 +665,11 @@ def _make_task_row(
 
 
 def _collect_all_controls(root: object) -> list:
-    """深度优先遍历控件树, 返回所有 ft.Control 实例。"""
+    """深度优先遍历控件树, 返回所有 ft.Control 实例。
+
+    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock I18n/AppColors 下
+    content 属性返回新 MagicMock, 无守卫会无限生成子节点致内存暴涨)。
+    """
     if root is None or not isinstance(root, ft.Control):
         return []
     result: list = [root]
@@ -676,7 +680,7 @@ def _collect_all_controls(root: object) -> list:
                 if child is not None:
                     result.extend(_collect_all_controls(child))
     content = getattr(root, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         result.extend(_collect_all_controls(content))
     return result
 
@@ -788,8 +792,8 @@ class TestTaskCenterViewComponentBody:
             for c in _collect_all_controls(result)
             if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.CLEANING_SERVICES_OUTLINED
         ]
-        # _on_clear() 无参数 (与 _on_prev/_on_next 一致, 不接收 event)
-        clear_btns[0].on_click()
+        # _on_clear(e) 接收 ControlEvent (Flet on_click 契约)
+        clear_btns[0].on_click(MagicMock())
         assert ("clear_finished", {}) in fake_vm.method_calls
 
     def test_pagination_hidden_on_single_page(self, monkeypatch):
@@ -916,19 +920,26 @@ class TestTaskCenterViewComponentBody:
 
 
 def _find_control_by_type(root: ft.Control, control_type: type) -> ft.Control | None:
-    """Recursively find first control of given type in the control tree."""
+    """Recursively find first control of given type in the control tree.
+
+    跳过非 ft.Control 对象 (避免 MagicMock 下 getattr 自动生成子节点致无限递归)。
+    """
+    if not isinstance(root, ft.Control):
+        return None
     if isinstance(root, control_type):
         return root
     # Check content attribute (Container)
     content = getattr(root, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         found = _find_control_by_type(content, control_type)
         if found is not None:
             return found
     # Check controls attribute (Column/Row/ListView)
     controls = getattr(root, "controls", None)
-    if controls:
+    if isinstance(controls, list):
         for ctrl in controls:
+            if not isinstance(ctrl, ft.Control):
+                continue
             found = _find_control_by_type(ctrl, control_type)
             if found is not None:
                 return found

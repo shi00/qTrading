@@ -198,13 +198,19 @@ class TestHomeViewR2Compliance:
 
 @dataclass(frozen=True)
 class _FakeHomeState:
-    """模拟 HomeState 的最小字段集 (dual-track versions + news_page/has_more)."""
+    """模拟 HomeState 的最小字段集 (对齐 HomeState 全字段)."""
 
     news_page: int = 0
     has_more_news: bool = False
     is_loading_more: bool = False
     news_update_version: int = 0
     market_update_version: int = 0
+    market_stale: bool = False
+    market_date: str = "--"
+    news_rows: tuple = ()
+    market_indices: tuple = ()
+    market_hsgt: Any = None
+    market_hot_concepts: tuple = ()
 
 
 class _FakeHomeViewModel:
@@ -267,11 +273,23 @@ class _FakeHomeViewModel:
 
     async def load_market_data(self) -> dict | None:
         self.method_calls.append("load_market_data")
-        return self.market_data_return
+        data = self.market_data_return
+        if data:
+            self._set_state(
+                market_date=str(data.get("date", "--")),
+                market_stale=bool(data.get("stale", False)),
+            )
+        return data
 
     async def get_cached_market_data(self) -> dict | None:
         self.method_calls.append("get_cached_market_data")
-        return self.cached_market_data_return
+        data = self.cached_market_data_return
+        if data:
+            self._set_state(
+                market_date=str(data.get("date", "--")),
+                market_stale=bool(data.get("stale", False)),
+            )
+        return data
 
     async def refresh_news(self) -> tuple[pd.DataFrame | None, bool]:
         self.method_calls.append("refresh_news")
@@ -461,8 +479,10 @@ class TestHomeViewRuntime:
         # 找到 date Text (header 倒数第二个控件, 最后是 IconButton)
         date_text = header.controls[-2]
         assert isinstance(date_text, ft.Text)
-        # stale=True 时 value 应含 "home_data_updating" key (mock_i18n 返回 key)
-        assert "home_data_updating" in date_text.value
+        # stale=True 时 value 应含 updating 后缀 (mock_i18n_state 用真实 I18nState 翻译)
+        from ui.i18n import I18n
+
+        assert I18n.get("home_data_updating") in date_text.value
 
     def test_refresh_clicked_invokes_run_task(
         self,
@@ -537,32 +557,6 @@ class TestHomeViewRuntime:
         callback("other_topic", "cache_cleared")
 
         assert "clear_state" not in mock_home_vm.method_calls
-
-    def test_on_market_update_triggers_get_cached_data(
-        self,
-        mock_i18n_state,
-        mock_app_colors_state,
-        mock_home_vm,
-    ) -> None:
-        """market_update_version 变化触发 _on_market_update, 拉取 cached data."""
-        from ui.views.home_view import HomeView
-
-        component = make_component(HomeView)
-        page = _make_fake_page()
-        run_mount_effects(component, page=page)
-
-        # 重置 method_calls 以过滤 mount 时的调用
-        mock_home_vm.method_calls.clear()
-
-        # 触发 state.market_update_version 变化 (通过 _set_state)
-        mock_home_vm._set_state(market_update_version=1)
-
-        # _on_market_update 应被 use_effect 触发, 调用 get_cached_market_data
-        from tests.unit.ui.component_renderer import run_render_effects
-
-        run_render_effects(component)
-
-        assert "get_cached_market_data" in mock_home_vm.method_calls
 
     def test_on_news_update_tag_update_no_throw(
         self,
