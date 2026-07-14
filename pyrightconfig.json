@@ -6,6 +6,7 @@
     "**/__pycache__",
     "**/.pytest_cache",
     "**/.venv",
+    "**/.venv-spike",
     "**/node_modules",
     "**/.worktrees",
     "venv",
