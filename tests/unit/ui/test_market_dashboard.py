@@ -14,6 +14,8 @@ from pathlib import Path
 import flet as ft
 import pytest
 
+from ui.viewmodels.home_view_model import HotConceptRow, HsgtRow, MarketIndexRow
+
 pytestmark = pytest.mark.unit
 
 
@@ -178,7 +180,7 @@ class TestBuildIndexCard:
         from ui.i18n import I18n
         from ui.theme import AppColors
 
-        info = {"value": "3000.50", "change": "+1.2%", "color": "RED"}
+        info = MarketIndexRow(value="3000.50", change="+1.2%", color="RED")
         card = _build_index_card("home_index_sh", info)
 
         assert isinstance(card, ft.Container)
@@ -196,7 +198,7 @@ class TestBuildIndexCard:
         """空 info：value/change 显示 '--'。"""
         from ui.components.market_dashboard import _build_index_card
 
-        card = _build_index_card("home_index_sh", {})
+        card = _build_index_card("home_index_sh", MarketIndexRow())
 
         col = card.content
         assert col.controls[1].value == "--"
@@ -207,7 +209,7 @@ class TestBuildIndexCard:
         from ui.components.market_dashboard import _build_index_card
         from ui.theme import AppColors
 
-        card = _build_index_card("home_index_sh", {"value": "1", "change": "0%"})
+        card = _build_index_card("home_index_sh", MarketIndexRow(value="1", change="0%"))
 
         col = card.content
         assert col.controls[2].color == AppColors.TEXT_SECONDARY
@@ -216,7 +218,7 @@ class TestBuildIndexCard:
         """卡片 col 配置：xs/sm=6, md/lg=3（4 列布局）。"""
         from ui.components.market_dashboard import _build_index_card
 
-        card = _build_index_card("home_index_sh", {})
+        card = _build_index_card("home_index_sh", MarketIndexRow())
 
         assert card.col == {"xs": 6, "sm": 6, "md": 3, "lg": 3}
 
@@ -230,7 +232,7 @@ class TestBuildHsgtCard:
         from ui.i18n import I18n
         from ui.theme import AppColors
 
-        info = {"value": "100亿", "sub": "净流入", "color": "RED"}
+        info = HsgtRow(value="100亿", sub="净流入", color="RED")
         card = _build_hsgt_card(info)
 
         assert isinstance(card, ft.Container)
@@ -248,7 +250,7 @@ class TestBuildHsgtCard:
         """空 info：value/sub 显示 '--'。"""
         from ui.components.market_dashboard import _build_hsgt_card
 
-        card = _build_hsgt_card({})
+        card = _build_hsgt_card(HsgtRow())
 
         col = card.content
         assert col.controls[1].value == "--"
@@ -263,7 +265,7 @@ class TestBuildConceptCard:
         from ui.components.market_dashboard import _build_concept_card
         from ui.theme import AppColors
 
-        item = {"name": "AI", "change": "+3.5%", "color": "red"}
+        item = HotConceptRow(name="AI", change="+3.5%", color="red")
         card = _build_concept_card(item)
 
         assert isinstance(card, ft.Container)
@@ -284,7 +286,7 @@ class TestBuildConceptCard:
         from ui.components.market_dashboard import _build_concept_card
         from ui.theme import AppColors
 
-        item = {"name": "新能源", "change": "-2.1%", "color": "green"}
+        item = HotConceptRow(name="新能源", change="-2.1%", color="green")
         card = _build_concept_card(item)
 
         col = card.content
@@ -298,7 +300,7 @@ class TestBuildConceptCard:
         from ui.components.market_dashboard import _build_concept_card
         from ui.theme import AppColors
 
-        item = {"name": "x", "change": "0%"}
+        item = HotConceptRow(name="x", change="0%")
         card = _build_concept_card(item)
 
         col = card.content
@@ -309,7 +311,7 @@ class TestBuildConceptCard:
         """item 无 name → 显示 '--'。"""
         from ui.components.market_dashboard import _build_concept_card
 
-        card = _build_concept_card({"change": "0%"})
+        card = _build_concept_card(HotConceptRow(change="0%"))
 
         col = card.content
         assert col.controls[0].value == "--"
@@ -318,7 +320,7 @@ class TestBuildConceptCard:
         """item 无 change → 显示 '0.00%'。"""
         from ui.components.market_dashboard import _build_concept_card
 
-        card = _build_concept_card({"name": "x"})
+        card = _build_concept_card(HotConceptRow(name="x"))
 
         col = card.content
         row = col.controls[1]
@@ -328,7 +330,7 @@ class TestBuildConceptCard:
         """卡片 col 配置：xs=6, sm=4, md=3, lg=2。"""
         from ui.components.market_dashboard import _build_concept_card
 
-        card = _build_concept_card({"name": "x"})
+        card = _build_concept_card(HotConceptRow(name="x"))
 
         assert card.col == {"xs": 6, "sm": 4, "md": 3, "lg": 2}
 
@@ -349,10 +351,10 @@ class TestMarketDashboardBody:
     """MarketDashboard 组件体测试：验证 data 解析与布局。"""
 
     def test_none_data_renders_empty_state(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """data=None → 空 dict，indices/hsgt 为空，hot_concepts 显示 empty 提示。"""
+        """无参数 → indices/hsgt 为空，hot_concepts 显示 empty 提示。"""
         from ui.components.market_dashboard import MarketDashboard
 
-        component = make_component(MarketDashboard, data=None)
+        component = make_component(MarketDashboard)
         run_mount_effects(component)
         result = render_once(component)
 
@@ -370,19 +372,17 @@ class TestMarketDashboardBody:
         """完整 data：3 indices + hsgt + 多个 hot_concepts。"""
         from ui.components.market_dashboard import MarketDashboard
 
-        data = {
-            "indices": [
-                {"value": "3000", "change": "+1%", "color": "RED"},
-                {"value": "10000", "change": "-0.5%", "color": "GREEN"},
-                {"value": "2000", "change": "+0.3%", "color": "RED"},
-            ],
-            "hsgt": {"value": "50亿", "sub": "净流入", "color": "RED"},
-            "hot_concepts": [
-                {"name": "AI", "change": "+3%", "color": "red"},
-                {"name": "新能源", "change": "-1%", "color": "green"},
-            ],
-        }
-        component = make_component(MarketDashboard, data=data)
+        indices = (
+            MarketIndexRow(value="3000", change="+1%", color="RED"),
+            MarketIndexRow(value="10000", change="-0.5%", color="GREEN"),
+            MarketIndexRow(value="2000", change="+0.3%", color="RED"),
+        )
+        hsgt = HsgtRow(value="50亿", sub="净流入", color="RED")
+        hot_concepts = (
+            HotConceptRow(name="AI", change="+3%", color="red"),
+            HotConceptRow(name="新能源", change="-1%", color="green"),
+        )
+        component = make_component(MarketDashboard, indices=indices, hsgt=hsgt, hot_concepts=hot_concepts)
         run_mount_effects(component)
         result = render_once(component)
 
@@ -393,12 +393,11 @@ class TestMarketDashboardBody:
         assert len(concepts_row.controls) == 2  # 2 concept cards
 
     def test_empty_hot_concepts_shows_empty_hint(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """hot_concepts=[] → 显示 empty 提示卡片。"""
+        """hot_concepts=() → 显示 empty 提示卡片。"""
         from ui.components.market_dashboard import MarketDashboard
         from ui.i18n import I18n
 
-        data = {"hot_concepts": []}
-        component = make_component(MarketDashboard, data=data)
+        component = make_component(MarketDashboard, hot_concepts=())
         run_mount_effects(component)
         result = render_once(component)
 
@@ -411,41 +410,38 @@ class TestMarketDashboardBody:
         assert empty_text.value == I18n.get("home_hot_concepts_empty")
 
     def test_partial_indices_fills_empty_cards(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """indices 不足 3 个：缺失部分用空 dict 填充（仍渲染 4 张卡片）。"""
+        """indices 不足 3 个：缺失部分用 MarketIndexRow() 填充（仍渲染 4 张卡片）。"""
         from ui.components.market_dashboard import MarketDashboard
 
-        data = {"indices": [{"value": "3000", "change": "+1%", "color": "RED"}]}
-        component = make_component(MarketDashboard, data=data)
+        indices = (MarketIndexRow(value="3000", change="+1%", color="RED"),)
+        component = make_component(MarketDashboard, indices=indices)
         run_mount_effects(component)
         result = render_once(component)
 
         indices_row = result.controls[0]
         assert len(indices_row.controls) == 4
 
-    def test_non_dict_hsgt_treated_as_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """hsgt 非 dict（如 list）→ 当作空 dict 处理，不抛异常。"""
+    def test_none_hsgt_renders_dash(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """hsgt=None → HsgtRow() 默认值，渲染 '--'。"""
         from ui.components.market_dashboard import MarketDashboard
 
-        data = {"hsgt": ["invalid"]}
-        component = make_component(MarketDashboard, data=data)
+        component = make_component(MarketDashboard, hsgt=None)
         run_mount_effects(component)
         result = render_once(component)
 
         indices_row = result.controls[0]
-        # hsgt 卡片仍渲染（值为 '--'）
+        # hsgt 卡片渲染默认值 '--'
         hsgt_card = indices_row.controls[3]
         col = hsgt_card.content
         assert col.controls[1].value == "--"
 
-    def test_non_dict_index_item_treated_as_empty(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """indices[i] 非 dict（如 str）→ 当作空 dict 处理。"""
+    def test_empty_indices_renders_4_cards(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """indices=() → 3 张空 index 卡片 + 1 张 hsgt 卡片（共 4 张）。"""
         from ui.components.market_dashboard import MarketDashboard
 
-        data = {"indices": ["invalid", {"value": "1"}, "valid"]}
-        component = make_component(MarketDashboard, data=data)
+        component = make_component(MarketDashboard, indices=())
         run_mount_effects(component)
         result = render_once(component)
 
         indices_row = result.controls[0]
-        # 3 张 index 卡片仍渲染
         assert len(indices_row.controls) == 4
