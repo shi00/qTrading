@@ -42,7 +42,7 @@ class TestBacktestLearningContextAsOf:
             AIStrategyMixin.compute_learning_as_of(None, is_backtest=True)
 
     def test_invalid_trade_date_backtest_raises(self):
-        with pytest.raises(ValueError, match="Cannot compute learning as_of for backtest"):
+        with pytest.raises(ValueError, match="Cannot parse trade_date for backtest learning context"):
             AIStrategyMixin.compute_learning_as_of("not_a_date", is_backtest=True)
 
     def test_none_trade_date_non_backtest_returns_safe_fallback(self):
