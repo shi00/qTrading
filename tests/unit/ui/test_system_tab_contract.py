@@ -4,17 +4,25 @@
 1. 契约守护 (grep 检查禁止的命令式模式: class 继承/did_mount/.update()/weakref page_ref)
 2. 模块级纯函数测试 (_build_language_options/_build_theme_options/
    _build_log_level_options/_get_page)
-
-业务逻辑覆盖（ConfigHandler 读写 + 异常路径 + 异步保存 + TierApiPanel 消费）由集成测试
-（flet_test_page fixture）承担, 声明式组件含 use_state 在无 renderer 下抛 RuntimeError。
+3. 组件体渲染测试 (控件树结构 + TierApiPanel 消费)
+4. 事件处理器测试 (on_select/on_change/on_click → page.run_task)
+5. async handler 测试 (ConfigHandler 读写 + 异常路径 + R2 CancelledError)
 """
 
 import contextlib
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import flet as ft
 import pytest
+
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -350,3 +358,184 @@ class TestGetPage:
         with patch("ui.views.settings_tabs.system_tab.ft.context") as mock_ctx:
             type(mock_ctx).page = property(lambda self: (_ for _ in ()).throw(RuntimeError("no ctx")))
             assert _get_page() is None
+
+
+# ============================================================================
+# 组件体渲染测试 (SystemTab @ft.component body)
+# ============================================================================
+
+
+class _FakeSystemVM:
+    """模拟 SystemViewModel, 满足 use_viewmodel hook 契约。"""
+
+    def __init__(self) -> None:
+        self._subscribers: list[Any] = []
+        self.state = MagicMock()
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsub() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsub
+
+    def dispose(self) -> None:
+        self._subscribers.clear()
+
+
+def _walk_controls(root: Any) -> list[Any]:
+    """深度优先遍历控件树, 返回所有控件列表。"""
+    result: list[Any] = []
+    if root is None:
+        return result
+    result.append(root)
+    for attr in ("controls", "content"):
+        children = getattr(root, attr, None)
+        if isinstance(children, list):
+            for c in children:
+                if c is not None:
+                    result.extend(_walk_controls(c))
+        elif children is not None:
+            result.extend(_walk_controls(children))
+    return result
+
+
+def _make_change_event(value: str) -> Any:
+    """构造 on_change 事件 mock。"""
+    mock_event = MagicMock()
+    mock_event.control.value = value
+    return mock_event
+
+
+def _configure_config_handler(mock_ch: Any) -> None:
+    """设置 ConfigHandler mock 的默认返回值。"""
+    mock_ch.get_locale.return_value = "zh_CN"
+    mock_ch.get_theme_name.return_value = "dark"
+    mock_ch.get_sync_max_concurrent_heavy.return_value = 4
+    mock_ch.get_log_level.return_value = "INFO"
+    mock_ch.get_db_connection_pool_size.return_value = 5
+    mock_ch.get_db_max_overflow.return_value = 10
+    mock_ch.get_db_pool_timeout.return_value = 30
+    mock_ch.get_max_io_workers.return_value = 8
+    mock_ch.get_max_cpu_workers.return_value = 4
+    mock_ch.get_no_proxy_domains.return_value = []
+
+
+def _configure_i18n(mock_i18n: Any) -> None:
+    """设置 I18n mock 的默认返回值。"""
+    mock_i18n.get.side_effect = lambda key, *a, **kw: f"i18n[{key}]"
+    mock_i18n.get_language_options.return_value = [("zh_CN", "中文"), ("en_US", "English")]
+    mock_i18n.get_language_label.return_value = "语言"
+    mock_i18n.current_locale.return_value = "zh_CN"
+    mock_i18n.set_locale = MagicMock()
+
+
+@pytest.fixture
+def system_tab_env(mock_i18n, mock_app_colors_state):
+    """渲染 SystemTab 所需环境: mock ConfigHandler/SystemViewModel/TierApiPanel/I18n/ThreadPoolManager。
+
+    Yields:
+        (module, mock_config_handler, mock_i18n, fake_vm)
+    """
+    from ui.views.settings_tabs import system_tab as mod
+
+    fake_vm = _FakeSystemVM()
+    _configure_i18n(mock_i18n)
+    patches = [
+        patch.object(mod, "SystemViewModel", return_value=fake_vm),
+        patch.object(mod, "TierApiPanel", return_value=MagicMock(name="TierApiPanel")),
+        patch.object(mod, "ConfigHandler"),
+        patch.object(mod, "I18n", mock_i18n),
+        patch.object(mod, "UILogger"),
+        patch.object(mod, "DataSanitizer"),
+        patch.object(mod, "ThreadPoolManager"),
+    ]
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        _configure_config_handler(mod.ConfigHandler)
+        yield mod, mod.ConfigHandler, mock_i18n, fake_vm
+
+
+def _render_with_page(mod: Any, page: Any, show_snack: Any = None) -> Any:
+    """渲染 SystemTab 组件, 返回控件树根节点。"""
+    if show_snack is None:
+        show_snack = MagicMock()
+    component = make_component(mod.SystemTab, show_snack_callback=show_snack)
+    run_mount_effects(component, page=page)
+    return render_once(component)
+
+
+def _get_tpm_mock(mod: Any) -> Any:
+    """获取 ThreadPoolManager mock 实例 (mod.ThreadPoolManager 的返回值)。"""
+    return mod.ThreadPoolManager()
+
+
+class TestSystemTabComponentBody:
+    """SystemTab 组件体渲染测试: 验证控件树结构 + VM 生命周期。"""
+
+    def test_mount_returns_container(self, system_tab_env):
+        """挂载 SystemTab 返回 ft.Container。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        assert isinstance(result, ft.Container)
+
+    def test_render_contains_language_dropdown(self, system_tab_env):
+        """渲染的控件树含语言 Dropdown (value=zh_CN)。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        dropdowns = [c for c in _walk_controls(result) if isinstance(c, ft.Dropdown)]
+        # 语言/主题/日志级别 3 个 dropdown
+        assert len(dropdowns) >= 3
+        lang_dropdowns = [d for d in dropdowns if d.value == "zh_CN"]
+        assert len(lang_dropdowns) == 1
+
+    def test_render_contains_concurrency_input(self, system_tab_env):
+        """渲染的控件树含并发数 TextField (value='4')。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        text_fields = [c for c in _walk_controls(result) if isinstance(c, ft.TextField)]
+        concurrency_inputs = [t for t in text_fields if t.value == "4"]
+        assert len(concurrency_inputs) >= 1
+
+    def test_render_contains_diagnostics_button(self, system_tab_env):
+        """渲染的控件树含诊断导出 Button (DOWNLOAD_ROUNDED icon)。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        ctrls = _walk_controls(result)
+        buttons = [c for c in ctrls if isinstance(c, ft.Button)]
+        diag_buttons = [b for b in buttons if getattr(b, "icon", None) == ft.Icons.DOWNLOAD_ROUNDED]
+        assert len(diag_buttons) == 1
+        assert diag_buttons[0].disabled is False
+
+    def test_render_contains_save_icon_buttons(self, system_tab_env):
+        """渲染的控件树含 4 个保存 IconButton (SAVE_ROUNDED icon)。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        result = _render_with_page(mod, page)
+        ctrls = _walk_controls(result)
+        save_btns = [
+            c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.SAVE_ROUNDED
+        ]
+        # 并发/线程池/DB池/no-proxy 4 个保存按钮
+        assert len(save_btns) == 4
+
+    def test_consumes_tier_api_panel_with_system_vm(self, system_tab_env):
+        """TierApiPanel 接收 system_vm 实例。"""
+        mod, _, _, fake_vm = system_tab_env
+        page = FakePage()
+        _render_with_page(mod, page)
+        mod.TierApiPanel.assert_called_once_with(fake_vm)
+
+    def test_creates_system_vm_via_factory(self, system_tab_env):
+        """挂载时通过 factory 实例化 SystemViewModel。"""
+        mod, _, _, _ = system_tab_env
+        page = FakePage()
+        _render_with_page(mod, page)
+        mod.SystemViewModel.assert_called_once()

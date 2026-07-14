@@ -12,11 +12,30 @@
 - 消费声明式 MarketDashboard(indices=..., hsgt=..., hot_concepts=...) / NewsFeed(news_rows=..., has_more=..., on_load_more_click=...)
 - page 访问用 ft.context.page (非 PageRefMixin/_page_ref)
 - R2: asyncio.CancelledError 传播
+
+运行时测试: 用 FakeHomeViewModel + render_component 驱动组件渲染, 验证
+- 挂载/卸载生命周期 (VM subscribe/dispose, PubSub 订阅/退订)
+- 渲染输出结构 (header/dashboard/news_feed)
+- 事件 handler 行为 (refresh_clicked/on_load_more_click/on_broadcast_message)
+- 数据加载路径 (_load_data/_init_and_load/_on_market_update/_on_news_update)
+- 错误路径 (CancelledError 传播, Exception 不抛出)
 """
 
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
+
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+    run_unmount_effects,
+)
 
 _HOME_VIEW_PATH = Path(__file__).parent.parent.parent.parent / "ui" / "views" / "home_view.py"
 
@@ -170,3 +189,456 @@ class TestHomeViewR2Compliance:
         assert cancelled_guard_count >= except_exception_count, (
             f"R2 违规: {except_exception_count} 处 except Exception 但仅 {cancelled_guard_count} 处 CancelledError 守卫"
         )
+
+
+# ============================================================================
+# 运行时测试: 用 FakeHomeViewModel + render_component 驱动组件渲染
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class _FakeHomeState:
+    """模拟 HomeState 的最小字段集 (dual-track versions + news_page/has_more)."""
+
+    news_page: int = 0
+    has_more_news: bool = False
+    is_loading_more: bool = False
+    news_update_version: int = 0
+    market_update_version: int = 0
+
+
+class _FakeHomeViewModel:
+    """模拟 HomeViewModel, 记录所有方法调用.
+
+    满足 use_viewmodel 契约 (state/subscribe/dispose) + HomeView 调用的所有方法.
+    """
+
+    def __init__(self) -> None:
+        self._state: _FakeHomeState = _FakeHomeState()
+        self._subscribers: list[Any] = []
+        self.dispose_called: bool = False
+        self.method_calls: list[str] = []
+        self.last_market_data: dict = {}
+        self.news_data: pd.DataFrame | None = None
+        self._last_news_update: tuple[Any, Any] | None = None
+        # 可被测试覆盖的返回值
+        self.market_data_return: dict | None = {"date": "2025-01-01", "stale": False}
+        self.news_return: tuple[pd.DataFrame | None, bool] = (pd.DataFrame(), False)
+        self.next_page_return: tuple[pd.DataFrame | None, bool] = (None, False)
+        self.cached_market_data_return: dict | None = {"date": "2025-01-01"}
+
+    @property
+    def state(self) -> _FakeHomeState:
+        return self._state
+
+    @property
+    def last_news_update(self) -> tuple[Any, Any] | None:
+        return self._last_news_update
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsubscribe
+
+    def _notify(self) -> None:
+        snapshot = self._state
+        for cb in self._subscribers:
+            cb(snapshot)
+
+    def _set_state(self, **changes: Any) -> None:
+        self._state = replace(self._state, **changes)
+        self._notify()
+
+    def dispose(self) -> None:
+        self.dispose_called = True
+        self._subscribers.clear()
+
+    # --- HomeView 调用的 VM 方法 ---
+
+    def init(self) -> None:
+        self.method_calls.append("init")
+
+    async def init_data(self) -> None:
+        self.method_calls.append("init_data")
+
+    async def load_market_data(self) -> dict | None:
+        self.method_calls.append("load_market_data")
+        return self.market_data_return
+
+    async def get_cached_market_data(self) -> dict | None:
+        self.method_calls.append("get_cached_market_data")
+        return self.cached_market_data_return
+
+    async def refresh_news(self) -> tuple[pd.DataFrame | None, bool]:
+        self.method_calls.append("refresh_news")
+        return self.news_return
+
+    async def load_next_page(self) -> tuple[pd.DataFrame | None, bool]:
+        self.method_calls.append("load_next_page")
+        return self.next_page_return
+
+    def clear_state(self) -> None:
+        self.method_calls.append("clear_state")
+        self.last_market_data = {}
+        self.news_data = None
+
+
+@pytest.fixture
+def mock_home_vm(monkeypatch):
+    """注入 _FakeHomeViewModel 替换 HomeViewModel 类."""
+    import ui.views.home_view as home_view_module
+
+    fake_vm = _FakeHomeViewModel()
+    monkeypatch.setattr(home_view_module, "HomeViewModel", lambda: fake_vm)
+    return fake_vm
+
+
+def _make_fake_page() -> FakePage:
+    """创建带 pubsub/run_task 的 fake page (用于 attach_fake_page).
+
+    使用 component_renderer.FakePage 以获得真实执行 effect 的 FakeSession,
+    再补 pubsub/run_task 以支持 HomeView 的 PubSub 订阅/退订 + run_task 调度.
+    """
+    page = FakePage()
+    page.pubsub = MagicMock()  # type: ignore[attr-defined]
+    page.pubsub.subscribe_topic = MagicMock()  # type: ignore[attr-defined]
+    page.pubsub.unsubscribe_topic = MagicMock()  # type: ignore[attr-defined]
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    return page
+
+
+class TestHomeViewRuntime:
+    """HomeView 运行时测试: 验证挂载/卸载/渲染/handler 行为."""
+
+    def test_mount_returns_container(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """挂载 HomeView 不抛异常, 返回 ft.Container."""
+        import flet as ft
+
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        assert isinstance(result, ft.Container)
+        # content 是 Column
+        assert isinstance(result.content, ft.Column)
+
+    def test_mount_triggers_vm_subscribe_and_init(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """挂载后 VM.subscribe 被调用 + init/init_data 被调用 (mount effect)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        # VM subscribe 被调用 (use_viewmodel hook 注册)
+        assert len(mock_home_vm._subscribers) > 0
+        # init/init_data 被 mount effect 调用
+        assert "init" in mock_home_vm.method_calls
+        assert "init_data" in mock_home_vm.method_calls
+
+    def test_mount_triggers_load_data(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """挂载后 _load_data 被调用 (load_market_data + refresh_news)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        assert "load_market_data" in mock_home_vm.method_calls
+        assert "refresh_news" in mock_home_vm.method_calls
+
+    def test_unmount_triggers_dispose(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """卸载后 VM.dispose 被调用 (use_viewmodel cleanup)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        assert mock_home_vm.dispose_called is False
+
+        run_unmount_effects(component)
+        assert mock_home_vm.dispose_called is True
+
+    def test_mount_subscribes_pubsub(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """挂载后 pubsub.subscribe_topic(CACHE_CLEARED_TOPIC) 被调用."""
+        from ui.views.home_view import HomeView
+        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        page.pubsub.subscribe_topic.assert_called_once()
+        args = page.pubsub.subscribe_topic.call_args
+        assert args.args[0] == CACHE_CLEARED_TOPIC
+
+    def test_unmount_unsubscribes_pubsub(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """卸载后 pubsub.unsubscribe_topic(CACHE_CLEARED_TOPIC) 被调用."""
+        from ui.views.home_view import HomeView
+        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        run_unmount_effects(component)
+
+        page.pubsub.unsubscribe_topic.assert_called_once_with(CACHE_CLEARED_TOPIC)
+
+    def test_render_header_contains_title_and_refresh_button(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """渲染输出 header 含 title Text + IconButton (refresh)."""
+        import flet as ft
+
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        col = result.content
+        # 第 1 项是 header (Row)
+        header = col.controls[0]
+        assert isinstance(header, ft.Row)
+        # header 至少含: title Text, spacer Container, date Text, refresh IconButton
+        assert len(header.controls) >= 4
+        assert isinstance(header.controls[0], ft.Text)  # title
+        assert isinstance(header.controls[-1], ft.IconButton)  # refresh
+
+    def test_render_includes_dashboard_and_news_section(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """渲染输出含 MarketDashboard 区域 + NewsFeed 区域 (5+ 控件)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        col = result.content
+        # col 至少含: header, Divider, MarketDashboard, Text(home_live_news), NewsFeed
+        assert len(col.controls) >= 5
+
+    def test_render_stale_data_shows_updating_suffix(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """market_data.stale=True 时 date_text 含 updating 后缀."""
+        import flet as ft
+
+        from ui.views.home_view import HomeView
+
+        # 配置 market_data 返回 stale=True
+        mock_home_vm.market_data_return = {"date": "2025-01-01", "stale": True}
+        # market_update_effect 也会读 cached_market_data, 保持一致
+        mock_home_vm.cached_market_data_return = {"date": "2025-01-01", "stale": True}
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        col = result.content
+        header = col.controls[0]
+        # 找到 date Text (header 倒数第二个控件, 最后是 IconButton)
+        date_text = header.controls[-2]
+        assert isinstance(date_text, ft.Text)
+        # stale=True 时 value 应含 "home_data_updating" key (mock_i18n 返回 key)
+        assert "home_data_updating" in date_text.value
+
+    def test_refresh_clicked_invokes_run_task(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """refresh button on_click 触发 page.run_task(_load_data)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        # 渲染一次使 handlers 绑定
+        result = render_once(component)
+
+        # reset mock 以过滤 mount 时的调用
+        page.run_task.reset_mock()
+
+        # 找到 refresh IconButton 的 on_click 并触发
+        header = result.content.controls[0]
+        refresh_btn = header.controls[-1]
+        # 触发 on_click (传入 mock event)
+        refresh_btn.on_click(MagicMock())
+
+        # run_task 被调用 (传入 _load_data 协程函数)
+        assert page.run_task.called
+
+    def test_on_broadcast_message_clears_state(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """CACHE_CLEARED_TOPIC 事件触发 vm.clear_state + set_market_data({})."""
+        from ui.views.home_view import HomeView
+        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        # 找到 _setup_pubsub 注册的 callback
+        subscribe_call = page.pubsub.subscribe_topic.call_args
+        callback = subscribe_call.args[1]
+
+        # 触发 cache_cleared 事件
+        callback(CACHE_CLEARED_TOPIC, "cache_cleared")
+
+        # vm.clear_state 被调用
+        assert "clear_state" in mock_home_vm.method_calls
+
+    def test_on_broadcast_message_ignores_other_messages(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """非 cache_cleared 消息不触发 clear_state."""
+        from ui.views.home_view import HomeView
+        from ui.pubsub_topics import CACHE_CLEARED_TOPIC
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        subscribe_call = page.pubsub.subscribe_topic.call_args
+        callback = subscribe_call.args[1]
+
+        # 触发非 cache_cleared 事件
+        callback(CACHE_CLEARED_TOPIC, "other_message")
+        callback("other_topic", "cache_cleared")
+
+        assert "clear_state" not in mock_home_vm.method_calls
+
+    def test_on_market_update_triggers_get_cached_data(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """market_update_version 变化触发 _on_market_update, 拉取 cached data."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        # 重置 method_calls 以过滤 mount 时的调用
+        mock_home_vm.method_calls.clear()
+
+        # 触发 state.market_update_version 变化 (通过 _set_state)
+        mock_home_vm._set_state(market_update_version=1)
+
+        # _on_market_update 应被 use_effect 触发, 调用 get_cached_market_data
+        from tests.unit.ui.component_renderer import run_render_effects
+
+        run_render_effects(component)
+
+        assert "get_cached_market_data" in mock_home_vm.method_calls
+
+    def test_on_news_update_tag_update_no_throw(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """news_update_version 变化 + TAG_UPDATE 类型 → 更新已有 news_items 的 tags."""
+        from services.news_subscription_service import NewsUpdateType
+
+        from ui.views.home_view import HomeView
+
+        # 设置 _last_news_update 为 TAG_UPDATE 类型
+        mock_home_vm._last_news_update = (
+            NewsUpdateType.TAG_UPDATE,
+            {"content": "test content", "tags": "tag1,tag2"},
+        )
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        # 触发 news_update_version 变化
+        mock_home_vm._set_state(news_update_version=1)
+        from tests.unit.ui.component_renderer import run_render_effects
+
+        run_render_effects(component)
+
+        # TAG_UPDATE 路径不调用 refresh_news (仅 NEW_ITEM/其他类型才调用)
+        # 验证无异常抛出即可 (TAG_UPDATE 在 news_items 为空时静默处理)
+
+    def test_on_news_update_none_returns_early(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_home_vm,
+    ) -> None:
+        """news_update_version 变化但 last_news_update=None 时早返回."""
+        from ui.views.home_view import HomeView
+
+        # 确保 _last_news_update 为 None
+        mock_home_vm._last_news_update = None
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        # 重置 method_calls 以过滤 mount 时的调用
+        mock_home_vm.method_calls.clear()
+
+        # 触发 news_update_version 变化
+        mock_home_vm._set_state(news_update_version=1)
+        from tests.unit.ui.component_renderer import run_render_effects
+
+        run_render_effects(component)
+
+        # last_news_update=None 时早返回, 不调用 refresh_news
+        assert "refresh_news" not in mock_home_vm.method_calls
+
+    def test_load_data_handles_exception(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """_load_data 中 VM 方法抛 Exception 时不传播 (logger.error 降级)."""
+        from ui.views.home_view import HomeView
+
+        # 配置 load_market_data 抛 Exception
+        mock_home_vm.market_data_return = None  # 先正常返回 None
+        original_load = mock_home_vm.load_market_data
+
+        async def raise_exc() -> None:
+            raise RuntimeError("test error")
+
+        mock_home_vm.load_market_data = raise_exc
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        # mount effect 会调 _init_and_load → _load_data, 异常被 except 捕获
+        # 不抛出即测试通过
+        run_mount_effects(component, page=page)
+        # 恢复以避免影响其他测试
+        mock_home_vm.load_market_data = original_load

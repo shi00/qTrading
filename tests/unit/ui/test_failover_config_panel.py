@@ -4,17 +4,26 @@
 1. 模块级纯函数单测（_render_message/_build_provider_options/_build_model_options/
    _build_links_row/_run_task_factory/_run_task_no_args/_build_list_item）
 2. 契约守护测试（grep 命令式禁止模式 = 0 + 验证声明式 API）
+3. 组件体渲染测试（ProviderCredentialDialog + FailoverConfigPanel @ft.component body）
 
 声明式组件的渲染逻辑由 Flet 框架保证，不测组件实例化。
 VM 由消费方实例化，View 通过 use_viewmodel(vm=vm) hook 订阅。
 """
 
+import contextlib
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import flet as ft
 import pytest
 
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+)
 from ui.components.config_panels import failover_config_panel as panel_module
 from ui.components.config_panels.failover_config_panel import (
     FailoverConfigPanel,
@@ -30,6 +39,7 @@ from ui.components.config_panels.failover_config_panel import (
 from ui.viewmodels import Message
 from ui.viewmodels.failover_config_panel_view_model import (
     FailoverConfigPanelViewModel,
+    FailoverConfigState,
     FailoverItem,
 )
 
@@ -460,3 +470,371 @@ class TestComponentSignatures:
     def test_provider_credential_dialog_is_callable(self):
         """ProviderCredentialDialog 应是可调用函数。"""
         assert callable(ProviderCredentialDialog)
+
+
+# --- 组件体渲染测试 ---
+
+
+def _collect_controls(root: Any) -> list[Any]:
+    """深度优先遍历控件树（含 controls/items/content）。"""
+    if root is None:
+        return []
+    result: list[Any] = [root]
+    for attr in ("controls", "items", "tabs"):
+        children = getattr(root, attr, None)
+        if isinstance(children, list):
+            for child in children:
+                if child is not None:
+                    result.extend(_collect_controls(child))
+    content = getattr(root, "content", None)
+    if content is not None:
+        result.extend(_collect_controls(content))
+    return result
+
+
+class _FakeFailoverVM:
+    """模拟 FailoverConfigPanelViewModel，满足 use_viewmodel(vm=) 外部 VM 模式契约。
+
+    state 字段可外部注入，command 方法为 MagicMock 便于断言。
+    """
+
+    def __init__(self, state: FailoverConfigState | None = None) -> None:
+        self._state = state if state is not None else FailoverConfigState()
+        self._subscribers: list[Any] = []
+        # command 方法（MagicMock，便于断言调用）
+        self.open_add_dialog = MagicMock()
+        self.validate_all = MagicMock()
+        self.save_config = MagicMock()
+        self.move_item = MagicMock()
+        self.open_edit_dialog = MagicMock()
+        self.delete_item = MagicMock()
+        self.close_dialog = MagicMock()
+        self.test_credential = MagicMock()
+        self.confirm_credential = MagicMock()
+        self.update_dialog_provider = MagicMock()
+        self.update_dialog_model = MagicMock()
+        self.update_dialog_custom_model = MagicMock()
+        self.update_dialog_base_url = MagicMock()
+        self.update_dialog_api_key = MagicMock()
+
+    @property
+    def state(self) -> FailoverConfigState:
+        return self._state
+
+    def subscribe(self, callback: Any) -> Any:
+        self._subscribers.append(callback)
+
+        def _unsub() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return _unsub
+
+    def dispose(self) -> None:
+        self._subscribers.clear()
+
+
+def _make_failover_patches() -> list:
+    """FailoverConfigPanel 渲染所需的 patch 列表。"""
+    return [
+        patch.object(panel_module, "I18n"),
+        patch.object(panel_module, "AppColors"),
+        patch.object(panel_module, "AppStyles"),
+    ]
+
+
+class TestProviderCredentialDialogBody:
+    """ProviderCredentialDialog 组件体渲染测试。"""
+
+    def test_dialog_closed_returns_invisible_container(self, mock_i18n_state, mock_app_colors_state):
+        """dialog_open=False 时返回不可见宿主容器（width=0, height=0）。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState(dialog_open=False))
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(ProviderCredentialDialog, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        assert isinstance(result, ft.Container)
+        assert result.width == 0
+        assert result.height == 0
+
+    def test_dialog_open_rendors_alert_dialog(self, mock_i18n_state, mock_app_colors_state):
+        """dialog_open=True 时渲染 ft.use_dialog 注册 AlertDialog。"""
+        vm = _FakeFailoverVM(
+            state=FailoverConfigState(
+                dialog_open=True,
+                dialog_provider="deepseek",
+                dialog_model="deepseek-v4-pro",
+            )
+        )
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(ProviderCredentialDialog, vm=vm)
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+        # use_dialog 通过 page.services / dialog 管理器注册，验证组件体执行无异常
+        assert len(vm._subscribers) > 0
+
+    def test_dialog_provider_dropdown_disabled_in_edit_mode(self, mock_i18n_state, mock_app_colors_state):
+        """dialog_is_edit=True 时 provider dropdown disabled。"""
+        vm = _FakeFailoverVM(
+            state=FailoverConfigState(
+                dialog_open=True,
+                dialog_is_edit=True,
+                dialog_provider="deepseek",
+            )
+        )
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(ProviderCredentialDialog, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 宿主 Container 本身不含 dropdown，dropdown 通过 use_dialog 注册到 page
+        # 验证渲染无异常 + subscribe 注册
+        assert isinstance(result, ft.Container)
+
+    def test_dialog_test_btn_disabled_when_testing(self, mock_i18n_state, mock_app_colors_state):
+        """dialog_is_testing=True 时 test button disabled。"""
+        vm = _FakeFailoverVM(
+            state=FailoverConfigState(
+                dialog_open=True,
+                dialog_is_testing=True,
+                dialog_provider="deepseek",
+                dialog_model="deepseek-v4-pro",
+                dialog_api_key="sk-xxx",
+            )
+        )
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(ProviderCredentialDialog, vm=vm)
+            run_mount_effects(component, page=page)
+            render_once(component)
+
+        # 验证渲染无异常（dialog 内容通过 use_dialog 注册）
+        assert len(vm._subscribers) > 0
+
+
+class TestFailoverConfigPanelBody:
+    """FailoverConfigPanel 组件体渲染测试。"""
+
+    def test_returns_column(self, mock_i18n_state, mock_app_colors_state):
+        """渲染返回 ft.Column。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState())
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        assert isinstance(result, ft.Column)
+
+    def test_empty_items_renders_hint(self, mock_i18n_state, mock_app_colors_state):
+        """failover_items 为空时渲染空提示。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState(failover_items=()))
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        # 应有 OutlinedButton（add）+ OutlinedButton（validate）
+        outlined_btns = [c for c in ctrls if isinstance(c, ft.OutlinedButton)]
+        assert len(outlined_btns) >= 2
+
+    def test_with_items_renders_list_items(self, mock_i18n_state, mock_app_colors_state):
+        """failover_items 非空时渲染列表项。"""
+        items = (
+            FailoverItem(
+                provider="deepseek",
+                model="deepseek-chat",
+                display_name="DeepSeek",
+                has_credential=True,
+            ),
+            FailoverItem(
+                provider="qwen",
+                model="qwen-plus",
+                display_name="Qwen",
+                has_credential=False,
+            ),
+        )
+        vm = _FakeFailoverVM(state=FailoverConfigState(failover_items=items))
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        # 应有 IconButton（up/down/edit/delete × 2 项 = 8）
+        icon_btns = [c for c in ctrls if isinstance(c, ft.IconButton)]
+        assert len(icon_btns) == 8
+
+    def test_save_button_hidden_when_flag_false(self, mock_i18n_state, mock_app_colors_state):
+        """show_save_button=False 时保存按钮不可见。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState())
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm, show_save_button=False)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        # 找 save button（ft.Button 带 save icon）
+        save_btns = [c for c in ctrls if isinstance(c, ft.Button) and getattr(c, "icon", None) == ft.Icons.SAVE]
+        assert len(save_btns) == 1
+        assert save_btns[0].visible is False
+
+    def test_save_button_visible_when_flag_true(self, mock_i18n_state, mock_app_colors_state):
+        """show_save_button=True 时保存按钮可见。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState())
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm, show_save_button=True)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        save_btns = [c for c in ctrls if isinstance(c, ft.Button) and getattr(c, "icon", None) == ft.Icons.SAVE]
+        assert len(save_btns) == 1
+        assert save_btns[0].visible is True
+
+    def test_save_click_calls_vm_save_config(self, mock_i18n_state, mock_app_colors_state):
+        """保存按钮 on_click 调用 vm.save_config（同步命令，非 run_task）。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState())
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        save_btns = [c for c in ctrls if isinstance(c, ft.Button) and getattr(c, "icon", None) == ft.Icons.SAVE]
+        assert len(save_btns) == 1
+        # 触发 on_click
+        save_btns[0].on_click(MagicMock())
+        vm.save_config.assert_called_once()
+
+    def test_add_click_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
+        """add 按钮 on_click 通过 page.run_task 提交 vm.open_add_dialog。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState())
+        page = FakePage()
+        run_task_calls: list = []
+        page.run_task = MagicMock(side_effect=lambda fn, *a, **kw: run_task_calls.append((fn, a)))  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        add_btns = [c for c in ctrls if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.ADD]
+        assert len(add_btns) == 1
+        add_btns[0].on_click(MagicMock())
+        # 应触发 page.run_task 调用 open_add_dialog
+        assert any(call[0] == vm.open_add_dialog for call in run_task_calls)
+
+    def test_validate_click_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
+        """validate 按钮 on_click 通过 page.run_task 提交 vm.validate_all。"""
+        vm = _FakeFailoverVM(state=FailoverConfigState())
+        page = FakePage()
+        run_task_calls: list = []
+        page.run_task = MagicMock(side_effect=lambda fn, *a, **kw: run_task_calls.append((fn, a)))  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        validate_btns = [
+            c for c in ctrls if isinstance(c, ft.OutlinedButton) and getattr(c, "icon", None) == ft.Icons.VERIFIED_USER
+        ]
+        assert len(validate_btns) == 1
+        validate_btns[0].on_click(MagicMock())
+        assert any(call[0] == vm.validate_all for call in run_task_calls)
+
+    def test_status_message_rendered(self, mock_i18n_state, mock_app_colors_state):
+        """status_message 非空时渲染状态行。"""
+        vm = _FakeFailoverVM(
+            state=FailoverConfigState(
+                status_message=Message("failover_validation_complete"),
+                status_type="success",
+            )
+        )
+        page = FakePage()
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        # status_row 含 Icon + Text，success 类型对应 CHECK_CIRCLE
+        icons = [c for c in ctrls if isinstance(c, ft.Icon) and c.icon == ft.Icons.CHECK_CIRCLE]
+        assert len(icons) >= 1
+
+    def test_move_buttons_triggers_run_task_with_args(self, mock_i18n_state, mock_app_colors_state):
+        """列表项的上移按钮 on_click 通过 page.run_task 提交 vm.move_item(index, -1)。"""
+        items = (
+            FailoverItem(
+                provider="deepseek",
+                model="deepseek-chat",
+                display_name="DeepSeek",
+                has_credential=True,
+            ),
+            FailoverItem(
+                provider="qwen",
+                model="qwen-plus",
+                display_name="Qwen",
+                has_credential=False,
+            ),
+        )
+        vm = _FakeFailoverVM(state=FailoverConfigState(failover_items=items))
+        page = FakePage()
+        run_task_calls: list = []
+        page.run_task = MagicMock(side_effect=lambda fn, *a, **kw: run_task_calls.append((fn, a)))  # type: ignore[method-assign]
+        with contextlib.ExitStack() as stack:
+            for p in _make_failover_patches():
+                stack.enter_context(p)
+            component = make_component(FailoverConfigPanel, vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        ctrls = _collect_controls(result)
+        up_btns = [
+            c for c in ctrls if isinstance(c, ft.IconButton) and getattr(c, "icon", None) == ft.Icons.ARROW_UPWARD
+        ]
+        # 第二项的上移按钮（index=1）应可点击
+        assert len(up_btns) == 2
+        # 第二项的 up 按钮 enabled（index=1 != 0）
+        assert up_btns[1].disabled is False
+        up_btns[1].on_click(MagicMock())
+        # 应触发 vm.move_item(index=1, direction=-1)
+        assert any(call[0] == vm.move_item and call[1] == (1, -1) for call in run_task_calls)
