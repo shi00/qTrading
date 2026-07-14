@@ -142,7 +142,7 @@ def BacktestView() -> ft.Container:
                 ft.Container(height=16),
                 ResizableSplitter(
                     left_content=BacktestConfigPanel(on_run_backtest=_on_run_backtest),
-                    right_content=BacktestResultPanel(result=vm.result, chart_min_height=None),
+                    right_content=BacktestResultPanel(result=state.result, chart_min_height=None),
                     config_key="ui_splitter_backtest_config",
                     default_width=360,
                     min_width=280,

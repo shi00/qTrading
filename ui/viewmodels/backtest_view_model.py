@@ -4,7 +4,7 @@
 - frozen dataclass BacktestState + subscribe/_notify
 - 调用 BacktestService 运行回测
 - 通过 TaskManager.submit_task() 异步执行
-- 管理回测状态和结果（_result 内部持有，result_version 通知 View 拉取）
+- 回测结果直接放入 state.result (L771 合规, 无 dual-track version + property)
 """
 
 from __future__ import annotations
@@ -28,17 +28,51 @@ logger = logging.getLogger(__name__)
 TASK_NAME_PREFIX = "backtest"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class BacktestState:
-    """BacktestViewModel 的不可变状态快照。"""
+    """BacktestViewModel 的不可变状态快照 (L771 合规, 无 dual-track).
+
+    NOTE(lazy): result 字段类型为 BacktestResult | None (strategies 层 frozen
+    dataclass 领域对象, 内部含 pl.DataFrame/pl.Series). 自定义 __eq__ 让 result
+    用 identity 比较, 避免 BacktestResult.__eq__ 触发 DataFrame __eq__ 抛
+    TypeError (Flet use_state setter L110 `if new_value != hook.value:` 安全性,
+    spec.md §Flet use_state setter 安全性).
+    ceiling: BacktestResult 拆解为 tuple[Row, ...] 需重写 BacktestResultPanel.
+    upgrade: BacktestResultPanel 接收 tuple[Row, ...] 形式时, 移除自定义 __eq__/__hash__.
+    """
 
     is_running: bool = False
     progress: float = 0.0
     progress_message: Message | None = None
     status_message: Message | None = None
     status_color: str = ""
-    # Incremented when _result changes; View pulls vm.result on change (dual-track, §3.0.4).
-    result_version: int = 0
+    # 回测结果直接放入 state (BacktestResult 是 strategies 层 frozen dataclass 领域对象)
+    result: BacktestResult | None = None
+
+    def __eq__(self, other: object) -> bool:
+        """自定义 __eq__: result 字段用 identity 比较, 避免 DataFrame __eq__ 抛 TypeError."""
+        if not isinstance(other, BacktestState):
+            return NotImplemented
+        return (
+            self.is_running == other.is_running
+            and self.progress == other.progress
+            and self.progress_message == other.progress_message
+            and self.status_message == other.status_message
+            and self.status_color == other.status_color
+            and self.result is other.result
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.is_running,
+                self.progress,
+                self.progress_message,
+                self.status_message,
+                self.status_color,
+                id(self.result),
+            )
+        )
 
 
 class BacktestViewModel:
@@ -49,7 +83,7 @@ class BacktestViewModel:
     1. 管理回测配置状态（frozen BacktestState snapshot）
     2. 调用 BacktestService 运行回测
     3. 通过 TaskManager 异步执行
-    4. 管理回测结果（_result 内部持有，result_version 通知 View 拉取）
+    4. 回测结果直接放入 state.result (L771 合规, 无 dual-track)
     """
 
     def __init__(
@@ -77,7 +111,6 @@ class BacktestViewModel:
             )
         self.service = service
 
-        self._result: BacktestResult | None = None
         self._task_id: str | None = None
         self._state: BacktestState = BacktestState()
         self._subscribers: list[Callable[[BacktestState], None]] = []
@@ -108,18 +141,9 @@ class BacktestViewModel:
     def dispose(self):
         """清理资源：先取消运行中任务（防孤儿），再清引用与状态。"""
         self.cancel_backtest()
-        self._result = None
         self._task_id = None
         self._subscribers.clear()
         self._state = BacktestState()
-
-    @property
-    def result(self) -> BacktestResult | None:
-        return self._result
-
-    @property
-    def is_running(self) -> bool:
-        return self.state.is_running
 
     def get_available_strategies(self) -> dict[str, str]:
         """获取可用策略列表。"""
@@ -177,7 +201,6 @@ class BacktestViewModel:
             )
             return
 
-        self._result = None
         self._task_id = None
         self._set_state(
             is_running=True,
@@ -185,6 +208,7 @@ class BacktestViewModel:
             progress_message=Message("backtest_initializing"),
             status_message=Message("backtest_starting"),
             status_color="blue",
+            result=None,
         )
 
         async def _execute_backtest(task_id: str, **kwargs):
@@ -211,18 +235,18 @@ class BacktestViewModel:
                     config=config,
                     params=params,
                     progress_callback=_progress_callback,
-                    persist=persist,
                     cancel_check=_cancel_check,
                 )
 
-                self._result = result
+                # await 后重新读取 self._state 获取最新快照 (竞态安全);
+                # result 直接放入 state.result (L771 合规, 无 dual-track)
                 self._set_state(
+                    result=result,
                     status_message=Message(
                         "backtest_completed",
                         {"duration": result.duration_ms},
                     ),
                     status_color="green",
-                    result_version=self.state.result_version + 1,
                 )
 
                 return I18n.get("backtest_success").format(sharpe=f"{result.metrics['sharpe_ratio']:.2f}")

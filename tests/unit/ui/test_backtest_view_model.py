@@ -24,8 +24,8 @@ class TestBacktestViewModel:
     def test_init(self):
         """测试初始化。"""
         vm = BacktestViewModel()
-        assert vm.result is None
-        assert vm.is_running is False
+        assert vm.state.result is None
+        assert vm.state.is_running is False
 
     def test_state_defaults(self):
         """VM 不再有回调属性；state 字段覆盖原回调承载的 UI 状态。"""
@@ -35,7 +35,7 @@ class TestBacktestViewModel:
         assert vm.state.progress_message is None
         assert vm.state.status_message is None
         assert vm.state.status_color == ""
-        assert vm.state.result_version == 0
+        assert vm.state.result is None
 
     def test_notifies_subscribers(self):
         """subscribe 接收状态快照；_set_state 触发通知。"""
@@ -71,7 +71,7 @@ class TestBacktestViewModel:
         vm._set_state(is_running=True, status_color="blue", progress=0.5)
         vm.dispose()
 
-        assert vm.result is None
+        assert vm.state.result is None
         assert vm.state.is_running is False
         assert vm.state.status_color == ""
         assert vm.state.progress == 0.0
@@ -81,8 +81,6 @@ class TestBacktestViewModel:
         vm = BacktestViewModel()
         vm._task_id = "running_task_001"
         vm._set_state(is_running=True, progress=0.5, status_color="blue")
-        mock_result = MagicMock()
-        vm._result = mock_result
 
         with patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls:
             mock_tm = MagicMock(spec=TaskManager)
@@ -93,13 +91,12 @@ class TestBacktestViewModel:
             mock_tm.cancel_task.assert_called_once_with("running_task_001")
 
         assert vm._task_id is None
-        assert vm.result is None
+        assert vm.state.result is None
         assert vm.state.is_running is False
         assert vm.state.progress == 0.0
         assert vm.state.status_color == ""
         assert vm.state.status_message is None
         assert vm.state.progress_message is None
-        assert vm.state.result_version == 0
 
     def test_dispose_no_running_task_is_noop(self):
         """dispose() 在无运行任务时不应调用 cancel_task（幂等性，R.1.1）。"""
@@ -130,25 +127,16 @@ class TestBacktestViewModel:
             mock_tm.cancel_task.assert_called_once_with("running_task_001")
 
         assert vm._task_id is None
-        assert vm.result is None
+        assert vm.state.result is None
         assert vm.state.is_running is False
 
-    def test_result_property(self):
-        """测试 result 属性。"""
+    def test_is_running_via_state(self):
+        """测试 is_running 通过 state 暴露（L771 合规, 无 property dual-track）。"""
         vm = BacktestViewModel()
-        assert vm.result is None
-
-        mock_result = MagicMock()
-        vm._result = mock_result
-        assert vm.result == mock_result
-
-    def test_is_running_property(self):
-        """测试 is_running 属性。"""
-        vm = BacktestViewModel()
-        assert vm.is_running is False
+        assert vm.state.is_running is False
 
         vm._set_state(is_running=True)
-        assert vm.is_running is True
+        assert vm.state.is_running is True
 
     def test_create_config(self):
         """测试创建配置。"""
@@ -368,9 +356,8 @@ class TestBacktestViewModelRunBacktest:
 
         execution_result = await captured_factory(task_id="task_123")
 
-        assert vm.result == mock_result
+        assert vm.state.result is mock_result
         assert vm.state.is_running is False
-        assert vm.state.result_version >= 1
         assert vm.state.status_color == "green"
         assert execution_result is not None
 
@@ -500,7 +487,7 @@ class TestBacktestViewModelRunBacktest:
             await vm.run_backtest("test_strategy", config)
 
         assert vm.state.is_running is True
-        assert vm.result is None
+        assert vm.state.result is None
         assert vm.state.status_color == "blue"
         assert vm.state.progress == 0.0
 
@@ -605,7 +592,7 @@ class TestBacktestViewModelRunBacktest:
         # After cancellation, is_running must be False
         assert vm.state.is_running is False
         # Result must remain None (no partial result)
-        assert vm.result is None
+        assert vm.state.result is None
 
         # Verify final progress was set to 1.0 (from finally block)
         assert vm.state.progress == 1.0
@@ -654,9 +641,7 @@ class TestBacktestViewModelRunBacktest:
 
         # Verify state reverts properly
         assert vm.state.is_running is False
-        assert vm.result is None
-        # result_version should not have incremented (no result was set)
-        assert vm.state.result_version == 0
+        assert vm.state.result is None
         # Verify status was set to error (red)
         assert vm.state.status_color == "red"
         assert vm.state.status_message is not None
