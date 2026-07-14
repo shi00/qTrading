@@ -9,7 +9,7 @@
 - use_viewmodel(HomeViewModel) 内部 VM 模式
 - ft.use_state(*.get_observable_state) i18n/theme 订阅
 - PubSub use_effect(setup, [], cleanup=cleanup) 模式 (Phase 3.0.3)
-- 消费声明式 MarketDashboard(data=...) / NewsFeed(news_items=..., has_more=..., on_load_more_click=...)
+- 消费声明式 MarketDashboard(indices=..., hsgt=..., hot_concepts=...) / NewsFeed(news_rows=..., has_more=..., on_load_more_click=...)
 - page 访问用 ft.context.page (非 PageRefMixin/_page_ref)
 - R2: asyncio.CancelledError 传播
 """
@@ -123,15 +123,15 @@ class TestHomeViewDeclarativeContract:
         assert "page.pubsub.unsubscribe()" not in content
 
     def test_consumes_declarative_market_dashboard(self) -> None:
-        """验证消费声明式 MarketDashboard(data=...) props 推送."""
+        """验证消费声明式 MarketDashboard(indices=...) props 推送."""
         content = _read_source()
-        assert "MarketDashboard(data=" in content
+        assert "MarketDashboard(indices=" in content
 
     def test_consumes_declarative_news_feed(self) -> None:
-        """验证消费声明式 NewsFeed(news_items=..., has_more=..., on_load_more_click=...)."""
+        """验证消费声明式 NewsFeed(news_rows=..., has_more=..., on_load_more_click=...)."""
         content = _read_source()
         assert "NewsFeed(" in content
-        assert "news_items=" in content
+        assert "news_rows=" in content
         assert "has_more=" in content
         assert "on_load_more_click=" in content
 
@@ -152,12 +152,12 @@ class TestHomeViewR2Compliance:
         不会触发 CancelledError, 无需守卫. 含 await 的数据加载路径必须守卫.
         """
         content = _read_source()
-        # 含 await 的 async 函数: _on_load_more_click, _load_data, _init_and_load,
-        # _on_market_update, _on_news_update (5 个)
+        # 含 await 的 async 函数: _on_load_more_click, _load_data, _init_and_load (3 个)
         # 每个都有 `except asyncio.CancelledError: raise` 守卫
+        # (dual-track 移除后, _on_market_update/_on_news_update 已删除)
         cancelled_raise_count = content.count("raise  # R2")
-        assert cancelled_raise_count >= 5, (
-            f"R2 违规: 含 await 的 async 函数应至少 5 处 CancelledError raise, 实际 {cancelled_raise_count}"
+        assert cancelled_raise_count >= 3, (
+            f"R2 违规: 含 await 的 async 函数应至少 3 处 CancelledError raise, 实际 {cancelled_raise_count}"
         )
 
     def test_no_bare_exception_swallows_cancelled_error(self) -> None:

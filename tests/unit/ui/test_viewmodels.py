@@ -61,28 +61,60 @@ class TestHomeViewModelDispose:
 
 
 class TestHomeViewModelServiceHandlers:
-    def test_on_news_service_update_emits_state_and_stores_last(self, home_vm):
+    async def test_on_news_service_update_new_item(self, home_vm):
+        from services.news_subscription_service import NewsUpdateType
+        from ui.viewmodels.home_view_model import NewsRow
+
         snapshots: list = []
         home_vm.subscribe(lambda s: snapshots.append(s))
-        home_vm._on_news_service_update("added", {"id": 1})
-        assert home_vm.state.news_update_version == 1
-        assert home_vm.last_news_update == ("added", {"id": 1})
-        assert any(s.news_update_version == 1 for s in snapshots)
 
-    def test_on_news_service_update_without_subscribers(self, home_vm):
-        home_vm._on_news_service_update("added", {})
-        assert home_vm.last_news_update == ("added", {})
+        with patch("ui.viewmodels.home_view_model._news_item_to_row") as mock_to_row:
+            mock_to_row.return_value = NewsRow(content="test")
+            await home_vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [{"content": "test"}])
 
-    def test_on_market_service_update_emits_state(self, home_vm):
+        assert len(home_vm.state.news_rows) == 1
+        assert any(len(s.news_rows) == 1 for s in snapshots)
+
+    async def test_on_news_service_update_without_subscribers(self, home_vm):
+        from services.news_subscription_service import NewsUpdateType
+        from ui.viewmodels.home_view_model import NewsRow
+
+        with patch("ui.viewmodels.home_view_model._news_item_to_row") as mock_to_row:
+            mock_to_row.return_value = NewsRow(content="test")
+            await home_vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [{"content": "test"}])
+
+        assert len(home_vm.state.news_rows) == 1
+
+    def test_on_market_service_update_emits_state(self, home_vm, mock_market_service):
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [{"name": "AI", "change": "+5%", "color": "red"}],
+            "date": "2024-03-21",
+            "stale": False,
+        }
+        mock_market_service.get_cached_data.return_value = mock_data
+
         snapshots: list = []
         home_vm.subscribe(lambda s: snapshots.append(s))
         home_vm._on_market_service_update()
-        assert home_vm.state.market_update_version == 1
-        assert any(s.market_update_version == 1 for s in snapshots)
 
-    def test_on_market_service_update_without_subscribers(self, home_vm):
+        assert len(home_vm.state.market_indices) == 1
+        assert any(len(s.market_indices) == 1 for s in snapshots)
+
+    def test_on_market_service_update_without_subscribers(self, home_vm, mock_market_service):
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "2024-03-21",
+            "stale": False,
+        }
+        mock_market_service.get_cached_data.return_value = mock_data
+
         home_vm._on_market_service_update()
-        assert home_vm.state.market_update_version == 1
+
+        assert len(home_vm.state.market_indices) == 1
 
 
 class TestHomeViewModelInitData:
@@ -93,14 +125,26 @@ class TestHomeViewModelInitData:
 
 class TestHomeViewModelLoadMarketData:
     async def test_returns_cached_data_immediately(self, home_vm, mock_market_service):
-        fake_data = {"SH000001": {"price": 3000}}
+        fake_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "2024-03-21",
+            "stale": False,
+        }
         mock_market_service.get_cached_data.return_value = fake_data
         result = await home_vm.load_market_data()
         assert result is fake_data
-        assert home_vm.last_market_data is fake_data
+        assert len(home_vm.state.market_indices) == 1
 
     async def test_retries_until_data(self, home_vm, mock_market_service):
-        fake_data = {"SH000001": {"price": 3000}}
+        fake_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "2024-03-21",
+            "stale": False,
+        }
         mock_market_service.get_cached_data.side_effect = [None, None, fake_data]
         with patch("ui.viewmodels.home_view_model.asyncio.sleep", new_callable=AsyncMock):
             result = await home_vm.load_market_data()
@@ -115,11 +159,17 @@ class TestHomeViewModelLoadMarketData:
 
 class TestHomeViewModelGetCachedMarketData:
     async def test_returns_data(self, home_vm, mock_market_service):
-        fake_data = {"SH000001": {"price": 3000}}
+        fake_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "2024-03-21",
+            "stale": False,
+        }
         mock_market_service.get_cached_data.return_value = fake_data
         result = await home_vm.get_cached_market_data()
         assert result is fake_data
-        assert home_vm.last_market_data is fake_data
+        assert len(home_vm.state.market_indices) == 1
 
     async def test_returns_none(self, home_vm, mock_market_service):
         mock_market_service.get_cached_data.return_value = None
@@ -129,11 +179,21 @@ class TestHomeViewModelGetCachedMarketData:
 
 class TestHomeViewModelRefreshNews:
     async def test_resets_page_and_increments_generation(self, home_vm, mock_processor):
+        """refresh_news 递增 generation; 空数据时重置 news_page=0."""
+        home_vm._load_generation = 5
+        home_vm._set_state(news_page=3)
+        with patch.object(home_vm, "_fetch_news_batch", new_callable=AsyncMock, return_value=pd.DataFrame()):
+            await home_vm.refresh_news()
+        assert home_vm.state.news_page == 0
+        assert home_vm._load_generation == 6
+
+    async def test_preserves_state_when_fetch_fails(self, home_vm, mock_processor):
+        """batch 为 None (获取失败) 时保留当前 state, 不丢失已有数据."""
         home_vm._load_generation = 5
         home_vm._set_state(news_page=3)
         with patch.object(home_vm, "_fetch_news_batch", new_callable=AsyncMock, return_value=None):
             await home_vm.refresh_news()
-        assert home_vm.state.news_page == 0
+        assert home_vm.state.news_page == 3
         assert home_vm._load_generation == 6
 
 
@@ -161,32 +221,39 @@ class TestHomeViewModelLoadNextPage:
         assert has_more is False
 
     async def test_succeeds_with_data(self, home_vm, mock_processor):
-        home_vm._set_state(is_loading_more=False, has_more_news=True)
-        home_vm.news_data = pd.DataFrame({"title": ["old"]})
+        from ui.viewmodels.home_view_model import NewsRow
+
+        home_vm._set_state(
+            is_loading_more=False,
+            has_more_news=True,
+            news_rows=(NewsRow(content="old"),),
+        )
         home_vm.PAGE_SIZE = 20
-        batch = pd.DataFrame({"title": [f"news_{i}" for i in range(20)]})
+        batch = pd.DataFrame({"content": [f"news_{i}" for i in range(20)]})
         with patch.object(home_vm, "_fetch_news_batch", new_callable=AsyncMock, return_value=batch):
-            with patch("ui.viewmodels.home_view_model.ThreadPoolManager") as tp_cls:
-                tp_instance = MagicMock()
-                tp_instance.run_async = AsyncMock(return_value=pd.concat([home_vm.news_data, batch], ignore_index=True))
-                tp_cls.return_value = tp_instance
-                result, has_more = await home_vm.load_next_page()
+            result, has_more = await home_vm.load_next_page()
         assert result is batch
         assert has_more is True
         assert home_vm.state.news_page == 1
         assert home_vm.state.is_loading_more is False
+        assert len(home_vm.state.news_rows) == 21
 
 
 class TestHomeViewModelClearState:
     def test_clear_state_resets_all(self, home_vm):
-        home_vm.last_market_data = {"x": 1}
-        home_vm.news_data = pd.DataFrame()
-        home_vm._set_state(has_more_news=True, news_page=5)
+        from ui.viewmodels.home_view_model import MarketIndexRow, NewsRow
+
+        home_vm._set_state(
+            has_more_news=True,
+            news_page=5,
+            news_rows=(NewsRow(content="test"),),
+            market_indices=(MarketIndexRow(value="3000"),),
+        )
         home_vm.clear_state()
-        assert home_vm.last_market_data == {}
-        assert home_vm.news_data is None
         assert home_vm.state.has_more_news is False
         assert home_vm.state.news_page == 0
+        assert home_vm.state.news_rows == ()
+        assert home_vm.state.market_indices == ()
 
 
 # ============================================================================
