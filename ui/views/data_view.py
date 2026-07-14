@@ -31,7 +31,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel
+from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, SqlResultRow, TableRow
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -107,30 +107,47 @@ def _build_table_columns_spec(current_table: str, columns: tuple[str, ...]) -> l
     ]
 
 
-def _df_to_rows(df: pd.DataFrame, columns: tuple[str, ...]) -> list[dict[str, str]]:
-    """DataFrame → PaginatedTable rows (dict 列表), 格式化日期/None。"""
-    if df.empty:
+def _table_rows_to_paginated_rows(
+    rows: tuple[TableRow, ...],
+    columns: tuple[str, ...],
+) -> list[dict[str, str]]:
+    """tuple[TableRow, ...] → PaginatedTable rows (dict 列表), 格式化日期/None.
+
+    values 与 columns 按索引对齐 (L771 合规).
+    """
+    if not rows or not columns:
         return []
-    return [{col: _format_cell_value(row.get(col), col) for col in columns} for _, row in df.iterrows()]
+    return [
+        {col: _format_cell_value(value, col) for col, value in zip(columns, row.values, strict=False)} for row in rows
+    ]
 
 
-def _build_sql_columns_spec(df: pd.DataFrame) -> list[dict[str, object]]:
-    """构建 SQL 结果表的 columns spec。"""
+def _build_sql_columns_spec(columns: tuple[str, ...]) -> list[dict[str, object]]:
+    """构建 SQL 结果表的 columns spec (从 state.sql_result_columns)."""
     return [
         {
             "id": col,
             "label": MetaDataManager.get_column_alias(None, col),
             "width": 140,
         }
-        for col in df.columns
+        for col in columns
     ]
 
 
-def _df_to_sql_rows(df: pd.DataFrame) -> list[dict[str, str]]:
-    """SQL 结果 DataFrame → rows。"""
-    if df.empty:
+def _sql_rows_to_paginated_rows(
+    rows: tuple[SqlResultRow, ...],
+    columns: tuple[str, ...],
+) -> list[dict[str, str]]:
+    """tuple[SqlResultRow, ...] → PaginatedTable rows (dict 列表).
+
+    values 与 columns 按索引对齐 (L771 合规).
+    """
+    if not rows or not columns:
         return []
-    return [{str(col): _format_cell_value(val, str(col)) for col, val in row.items()} for _, row in df.iterrows()]
+    return [
+        {str(col): _format_cell_value(value, str(col)) for col, value in zip(columns, row.values, strict=False)}
+        for row in rows
+    ]
 
 
 def _ceil_div(n: int, d: int) -> int:
@@ -380,7 +397,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         else None
     )
     columns_spec = _build_table_columns_spec(state.current_table, state.table_columns)
-    rows_data = _df_to_rows(vm.current_data, state.table_columns)
+    rows_data = _table_rows_to_paginated_rows(state.table_rows, state.table_columns)
 
     # --- 构建 UI ---
     table_selector = ft.Dropdown(
@@ -612,8 +629,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     """Tab 2: SQL 控制台 (声明式).
 
     通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
-    SQL 结果通过 dual-track ``vm.sql_result`` property 拉取, ``state.sql_result_version``
-    变化触发重渲染。
+    SQL 结果从 ``state.sql_success``/``sql_result_columns``/``sql_result_rows`` 读取 (L771 合规).
     """
     # --- 订阅 VM state (外部模式) ---
     state, _ = use_viewmodel(vm=vm)
@@ -636,18 +652,22 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         set_status_color(ft.Colors.BLUE)
         try:
             start_time = time.time()
-            result = await vm.execute_sql(sql_text)
+            await vm.execute_sql(sql_text)
             elapsed = time.time() - start_time
-            if result.get("success"):
-                df = result.get("data")
-                if df is not None and not df.empty:
+            # 重读 state 拿最新 snapshot (race safety)
+            s = vm.state
+            if s.sql_success:
+                row_count = len(s.sql_result_rows)
+                if row_count > 0:
                     MAX_ROWS_UI = 100
-                    if len(df) > MAX_ROWS_UI:
+                    if row_count > MAX_ROWS_UI:
                         set_status_text(
-                            I18n.get("data_sql_success_truncated").format(time=elapsed, limit=MAX_ROWS_UI, rows=len(df))
+                            I18n.get("data_sql_success_truncated").format(
+                                time=elapsed, limit=MAX_ROWS_UI, rows=row_count
+                            )
                         )
                     else:
-                        set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=len(df)))
+                        set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=row_count))
                     set_status_color(ft.Colors.GREEN)
                 else:
                     set_status_text(I18n.get("data_sql_error"))
@@ -666,18 +686,14 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     def _set_sql(sql: str) -> None:
         set_sql_text(sql)
 
-    # --- 派生渲染数据 (dual-track: vm.sql_result property 拉取) ---
-    sql_result = vm.sql_result
-    has_data = bool(
-        sql_result and sql_result.get("success") and sql_result.get("data") is not None and not sql_result["data"].empty
-    )
-
+    # --- 派生渲染数据 (声明式: 从 state 读取, L771 合规) ---
+    MAX_ROWS_UI = 100
+    all_sql_rows = state.sql_result_rows
+    has_data = state.sql_success and bool(all_sql_rows)
     if has_data:
-        df = sql_result["data"]
-        MAX_ROWS_UI = 100
-        display_df = df.head(MAX_ROWS_UI) if len(df) > MAX_ROWS_UI else df
-        result_cols = _build_sql_columns_spec(display_df)
-        result_rows = _df_to_sql_rows(display_df)
+        display_rows = all_sql_rows[:MAX_ROWS_UI] if len(all_sql_rows) > MAX_ROWS_UI else all_sql_rows
+        result_cols = _build_sql_columns_spec(state.sql_result_columns)
+        result_rows = _sql_rows_to_paginated_rows(display_rows, state.sql_result_columns)
     else:
         result_cols = []
         result_rows = []

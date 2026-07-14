@@ -11,6 +11,7 @@ import threading
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from config import APP_ROOT
+from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,20 @@ def _hide_file_windows(filepath):
             if not result:
                 logger.debug("SetFileAttributesW returned False for %s", filepath)
         except Exception as e:
-            logger.debug("Failed to hide file via Win32 API: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Failed to hide file via Win32 API (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
     else:
         try:
             os.chmod(filepath, 0o600)
@@ -172,7 +186,20 @@ class SecurityManager:
                 cls._ensure_legacy_marker()
                 return cls._key
             except Exception as e:
-                logger.error("Failed to load primary key file: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "Failed to load primary key file (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
         # 2. Try to recover from backup
         if os.path.exists(cls.KEY_FILE_BAK):
@@ -185,7 +212,20 @@ class SecurityManager:
                 cls._ensure_legacy_marker()
                 return cls._key
             except Exception as e:
-                logger.critical("Failed to load backup key file: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "Failed to load backup key file (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
                 raise RuntimeError(
                     "CRITICAL: Both primary and backup key files are corrupt. Cannot proceed.",
                 ) from e
@@ -258,7 +298,20 @@ class SecurityManager:
         try:
             cls._load_key_file(cls.KEY_FILE)
         except Exception as e:
-            logger.error("Cannot read old key file for migration: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Cannot read old key file for migration (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return False
 
         salt = cls._get_or_create_salt()
@@ -275,8 +328,17 @@ class SecurityManager:
         try:
             cls._save_key(new_key)
         except Exception as e:
-            logger.error(
-                "Failed to save new derived key during migration: %s",
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Failed to save new derived key during migration (%s): %s",
+                error_info["code"],
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
@@ -313,7 +375,20 @@ class SecurityManager:
             os.replace(tmp_file, _MACHINE_SALT_FILE)
             _hide_file_windows(_MACHINE_SALT_FILE)
         except Exception as e:
-            logger.error("Error saving salt file: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Error saving salt file (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             if os.path.exists(tmp_file):
                 with contextlib.suppress(OSError):
                     os.remove(tmp_file)
@@ -351,7 +426,20 @@ class SecurityManager:
             _hide_file_windows(cls.KEY_FILE)
             _hide_file_windows(cls.KEY_FILE_BAK)
         except Exception as e:
-            logger.error("Error saving key: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Error saving key (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             if os.path.exists(tmp_file):
                 with contextlib.suppress(OSError):
                     os.remove(tmp_file)
@@ -362,7 +450,22 @@ class SecurityManager:
         try:
             shutil.copy2(src, dst)
         except Exception as e:
-            logger.warning("Failed to copy %s to %s: %s", src, dst, e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Failed to copy %s to %s (%s): %s",
+                src,
+                dst,
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     @classmethod
     def encrypt_data(cls, plaintext):
@@ -384,7 +487,20 @@ class SecurityManager:
 
             return base64.b64encode(nonce + ciphertext).decode("utf-8")
         except Exception as e:
-            logger.error("Encryption error: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Encryption error (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             raise EncryptionError(f"Encryption failed: {e}") from e
 
     @classmethod
@@ -401,6 +517,20 @@ class SecurityManager:
             try:
                 decoded = base64.b64decode(encrypted_text.encode("utf-8"))
             except Exception as e:
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "Base64 decode failed during decryption (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
                 raise DecryptionError("Invalid Base64 encoding") from e
 
             if len(decoded) < 28:  # 12 nonce + 16 tag
@@ -419,4 +549,18 @@ class SecurityManager:
             raise DecryptionError(f"Data corruption: {e}") from e
         except Exception as e:
             # cryptography library raises built-in exceptions like InvalidTag
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "Decryption error (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             raise DecryptionError(f"Decryption failed (Wrong Key?): {e}") from e

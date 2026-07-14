@@ -128,12 +128,24 @@ class _FakeAlertDialog:
 class _LoggerSpy:
     def __init__(self):
         self.messages: list[str] = []
+        self.warnings: list[str] = []
+        self.errors: list[str] = []
+        self.criticals: list[str] = []
 
-    def info(self, msg, *args):
+    def info(self, msg, *args, **kwargs):
         self.messages.append(msg % args if args else msg)
 
-    def debug(self, msg, *args):
+    def debug(self, msg, *args, **kwargs):
         self.messages.append(msg % args if args else msg)
+
+    def warning(self, msg, *args, **kwargs):
+        self.warnings.append(msg % args if args else msg)
+
+    def error(self, msg, *args, **kwargs):
+        self.errors.append(msg % args if args else msg)
+
+    def critical(self, msg, *args, **kwargs):
+        self.criticals.append(msg % args if args else msg)
 
 
 @pytest.fixture(autouse=True)

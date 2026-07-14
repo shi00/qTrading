@@ -27,14 +27,25 @@ _DATE_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 @dataclass(frozen=True)
-class DataExplorerState:
-    """DataExplorerViewModel 的不可变状态快照(方案 §3.0.4 双轨制)。
+class TableRow:
+    """表数据行 (L771: frozen dataclass). values 与 state.table_columns 按索引对齐."""
 
-    轻量 UI 状态封装为 frozen dataclass:
-    - 标量字段直接放入 state;
-    - 集合字段用 tuple/frozenset 替代 list/set(frozen 契约);
-    - 大体积数据(current_data: DataFrame / sql_result: dict)VM 内部持有,
-      通过 property 拉取 + dual-track version 通知 View。
+    values: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class SqlResultRow:
+    """SQL 结果行 (L771: frozen dataclass). values 与 state.sql_result_columns 按索引对齐."""
+
+    values: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class DataExplorerState:
+    """DataExplorerViewModel 的不可变状态快照 (L771 合规).
+
+    所有业务数据直接放入 state, 用 tuple[Row, ...] 替代 DataFrame/dict.
+    View = f(state), 无 dual-track.
     """
 
     # Table Explorer State
@@ -54,24 +65,28 @@ class DataExplorerState:
     tables_list: tuple[str, ...] = ()
     table_columns: tuple[str, ...] = ()
     numeric_cols: frozenset[str] = frozenset()
-    # dual-track versions(大体积数据变化通知)
-    data_version: int = 0  # current_data 变化
-    sql_result_version: int = 0  # sql_result 变化
-
-    # SQL Console State(轻量标志位)
+    # 业务数据 (L771 合规: tuple[Row, ...], 直接暴露)
+    table_rows: tuple[TableRow, ...] = ()
+    # SQL Console State
     sql_is_executing: bool = False
+    sql_success: bool = False
+    sql_result_columns: tuple[str, ...] = ()
+    sql_result_rows: tuple[SqlResultRow, ...] = ()
+    # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
+    sql_error: str | None = None
 
 
 class DataExplorerViewModel:
-    """ViewModel for DataExplorerView (MVVM-001 fix, 双轨制形态)。
+    """ViewModel for DataExplorerView (MVVM-001 fix, 声明式形态).
 
     Holds all business state for both TableViewerTab and SQLConsoleTab.
     No Flet dependencies. All DB access goes through DataExplorerQueryClient
     dispatched to ThreadPoolManager.
 
-    形态契约(方案 §3.0.4 双轨制):
-    - 轻量 UI 状态:frozen `DataExplorerState` + `subscribe/_notify`;
-    - 大体积数据(DataFrame/dict):VM 内部持有 + property 拉取 + version 通知。
+    形态契约(CLAUDE.md §3.2 + CONTRIBUTING.md L771):
+    - 全部业务状态(含 DataFrame/dict 派生数据)封装为 frozen `DataExplorerState`
+      的 tuple[Row, ...] 字段;
+    - View = f(state), 无 dual-track property 拉取/version 通知.
     """
 
     def __init__(
@@ -86,25 +101,11 @@ class DataExplorerViewModel:
         self._state = DataExplorerState()
         self._subscribers: list[Callable[[DataExplorerState], None]] = []
 
-        # 大体积数据(VM 内部持有,View 通过 property 拉取)
-        self._current_data: pd.DataFrame = pd.DataFrame()
-        self._sql_result: dict | None = None
-
         self._disposed = False
 
     @property
     def state(self) -> DataExplorerState:
         return self._state
-
-    @property
-    def current_data(self) -> pd.DataFrame:
-        """大体积数据 property(dual-track 拉取)。"""
-        return self._current_data
-
-    @property
-    def sql_result(self) -> dict | None:
-        """大体积数据 property(dual-track 拉取)。"""
-        return self._sql_result
 
     def subscribe(self, callback: Callable[[DataExplorerState], None]) -> Callable[[], None]:
         """订阅 state 变更,返回取消订阅函数。"""
@@ -132,14 +133,17 @@ class DataExplorerViewModel:
         if self._disposed:
             return
         self._disposed = True
-        self._current_data = pd.DataFrame()
-        self._sql_result = None
         self._set_state(
             tables_list=(),
             table_columns=(),
             numeric_cols=frozenset(),
+            table_rows=(),
             tables_loaded=False,
             error_message=None,
+            sql_success=False,
+            sql_result_columns=(),
+            sql_result_rows=(),
+            sql_error=None,
         )
         if self._db is not None:
             self._db.close()
@@ -239,13 +243,17 @@ class DataExplorerViewModel:
         filters: list | None = None,
         sort_col_name: str | None = None,
         sort_ascending: bool | None = None,
-    ):
-        """Query table data with pagination, filters, and sorting."""
+    ) -> pd.DataFrame:
+        """Query table data with pagination, filters, and sorting.
+
+        返回原始 DataFrame (供测试/export 场景), 同时将数据转换为
+        ``tuple[TableRow, ...]`` 写入 ``state.table_rows`` (供 View 渲染).
+        """
         ensure_correlation_id()
         if self._disposed:
-            return self._current_data
+            return pd.DataFrame()
         if self._state.is_loading:
-            return self._current_data
+            return pd.DataFrame()
 
         self._set_state(is_loading=True)
         try:
@@ -264,16 +272,17 @@ class DataExplorerViewModel:
                 TaskType.CPU,
                 functools.partial(self._db.query_table, tbl, pg, self._state.page_size, flt, sort, asc),
             )
-            self._current_data = df
-            # dual-track: 递增 data_version 通知 View 拉取 current_data
+            # 声明式: 数据写入 state.table_rows (L771 合规, tuple[Row, ...])
+            # 重读 self._state 拿最新 snapshot 避免 await 期间竞态 (race safety)
+            columns = self._state.table_columns
             changes: dict[str, Any] = {
                 "total_rows": count,
-                "data_version": self._state.data_version + 1,
+                "table_rows": _df_to_table_rows(df, columns),
             }
             if page is not None:
                 changes["current_page"] = page
             self._set_state(**changes)
-            return self._current_data
+            return df
         except asyncio.CancelledError:
             logger.warning("[DataExplorerVM] Cancelled during query_data.")
             raise
@@ -298,7 +307,7 @@ class DataExplorerViewModel:
                     error_info.get("format_args") or {},
                 )
             )
-            return self._current_data
+            return pd.DataFrame()
         finally:
             self._set_state(is_loading=False)
 
@@ -397,8 +406,13 @@ class DataExplorerViewModel:
             return pd.DataFrame()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
-    async def execute_sql(self, sql: str):
-        """Execute a read-only SQL query from the SQL Console."""
+    async def execute_sql(self, sql: str) -> dict:
+        """Execute a read-only SQL query from the SQL Console.
+
+        返回原始 dict ``{success, data, error}`` (供测试/状态显示), 同时将结果
+        转换为 ``sql_success``/``sql_result_columns``/``sql_result_rows``/``sql_error``
+        写入 state (供 View 渲染).
+        """
         ensure_correlation_id()
         if self._disposed:
             return {"success": False, "data": None, "error": "ViewModel disposed"}
@@ -408,9 +422,8 @@ class DataExplorerViewModel:
         self._set_state(sql_is_executing=True)
         try:
             result = await self._tp.run_async(TaskType.CPU, self._db.execute_sql, sql)
-            self._sql_result = result
-            # dual-track: 递增 sql_result_version 通知 View 拉取 sql_result
-            self._set_state(sql_result_version=self._state.sql_result_version + 1)
+            # 声明式: 结果写入 state (L771 合规, tuple[Row, ...])
+            self._set_state(**_sql_result_to_state_fields(result))
             return result
         except asyncio.CancelledError:
             logger.warning("[DataExplorerVM] Cancelled during execute_sql.")
@@ -430,10 +443,11 @@ class DataExplorerViewModel:
                 )
             else:
                 logger.error("[DataExplorerVM] Operational error in execute_sql: %s", e, exc_info=True)
-            # NOTE(lazy): _sql_result.error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: View 声明式重写已完成(Phase F.2), _sql_result.error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
-            self._sql_result = {"success": False, "data": None, "error": get_error_message(error_info)}
-            self._set_state(sql_result_version=self._state.sql_result_version + 1)
-            return self._sql_result
+            # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
+            error_msg = get_error_message(error_info)
+            error_result = {"success": False, "data": None, "error": error_msg}
+            self._set_state(**_sql_result_to_state_fields(error_result))
+            return error_result
         finally:
             self._set_state(sql_is_executing=False)
 
@@ -501,3 +515,47 @@ class DataExplorerViewModel:
             if _NUMERIC_TYPE_PATTERN.search(col_type):
                 result.add(col_info["name"])
         return result
+
+
+# ============================================================================
+# Module-level pure conversion functions (L771 合规: DataFrame/dict → tuple[Row, ...])
+# ============================================================================
+
+
+def _df_to_table_rows(df: pd.DataFrame, columns: tuple[str, ...]) -> tuple[TableRow, ...]:
+    """DataFrame → tuple[TableRow, ...] (L771 合规).
+
+    values 与 columns 按索引对齐; DataFrame 缺列时用 None 占位.
+    """
+    if df is None or df.empty or not columns:
+        return ()
+    return tuple(TableRow(values=tuple(row.get(col) for col in columns)) for _, row in df.iterrows())
+
+
+def _sql_result_to_state_fields(result: dict) -> dict[str, Any]:
+    """execute_sql 返回的 dict → DataExplorerState 字段 dict (供 _set_state 使用).
+
+    将 ``{success, data, error}`` 转换为 ``sql_success``/``sql_result_columns``/
+    ``sql_result_rows``/``sql_error`` 不可变字段.
+    """
+    success = bool(result.get("success", False))
+    data = result.get("data")
+    error = result.get("error")
+
+    if data is None or (isinstance(data, pd.DataFrame) and data.empty):
+        return {
+            "sql_success": success,
+            "sql_result_columns": (),
+            "sql_result_rows": (),
+            "sql_error": error,
+        }
+
+    # data 预期为 pd.DataFrame
+    columns = tuple(str(col) for col in data.columns)
+    rows = tuple(SqlResultRow(values=tuple(row[col] for col in data.columns)) for _, row in data.iterrows())
+    return {
+        "sql_success": success,
+        "sql_result_columns": columns,
+        "sql_result_rows": rows,
+        "sql_error": error,
+    }

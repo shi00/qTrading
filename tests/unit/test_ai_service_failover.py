@@ -32,7 +32,7 @@ class TestFailoverConfig:
         from utils import config_handler
 
         monkeypatch.setattr(config_handler, "CONFIG_FILE", str(config_file))
-        config_handler.ConfigHandler._config_cache = None
+        config_handler.ConfigHandler._clear_cache()
 
         config = config_handler.ConfigHandler.get_failover_config()
 
@@ -56,7 +56,7 @@ class TestFailoverConfig:
         from utils import config_handler
 
         monkeypatch.setattr(config_handler, "CONFIG_FILE", str(config_file))
-        config_handler.ConfigHandler._config_cache = None
+        config_handler.ConfigHandler._clear_cache()
 
         config = config_handler.ConfigHandler.get_failover_config()
 

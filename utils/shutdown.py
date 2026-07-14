@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from collections.abc import Callable
 
+from utils.error_classifier import classify_error, classify_severity
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -212,8 +213,21 @@ class ShutdownCoordinator:
             logger.error("[Shutdown] Cleanup timed out after %.1fs.", timeout_s)
             return False
         except Exception as ex:
+            error_info = classify_error(ex, context="general")
+            severity = classify_severity(ex, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
             self._cleanup_success = False
-            logger.error("[Shutdown] Cleanup failed unexpectedly: %s", ex, exc_info=True)
+            _log(
+                "[Shutdown] Cleanup failed unexpectedly (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(ex),
+                exc_info=True,
+            )
             return False
         finally:
             self._cleanup_done = True
@@ -295,9 +309,18 @@ class ShutdownCoordinator:
                 error=DataSanitizer.sanitize_error(ex),
             )
         except Exception as ex:
-            logger.warning(
-                "[Shutdown] %s failed (likely shutdown-related): %s",
+            error_info = classify_error(ex, context="general")
+            severity = classify_severity(ex, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Shutdown] %s failed (likely shutdown-related) (%s): %s",
                 name,
+                error_info["code"],
                 DataSanitizer.sanitize_error(ex),
                 exc_info=True,
             )
@@ -393,7 +416,20 @@ class ShutdownCoordinator:
                     await res
                 logger.info("[Shutdown]   - Toast Manager stopped.")
             except Exception as e:
-                logger.debug("[Shutdown]   - Toast Manager cleanup skipped: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[Shutdown]   - Toast Manager cleanup skipped (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
         else:
             logger.info("[Shutdown]   - Toast Manager not initialized, skipping.")
 

@@ -18,6 +18,8 @@ from data.data_processor import DataProcessor
 from data.persistence.review_manager import ReviewManager
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_error, classify_severity
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
@@ -81,7 +83,21 @@ class SchedulerService:
         except RuntimeError:
             logger.debug("[Scheduler] Event loop unavailable during %s, skipping graceful shutdown", context)
         except Exception as e:
-            logger.warning("[Scheduler] Error during shutdown (%s): %s", context, e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Scheduler] Error during shutdown (%s) (%s): %s",
+                context,
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     @classmethod
     def _atexit_cleanup(cls):
@@ -175,7 +191,20 @@ class SchedulerService:
                 replace_existing=True,
             )
         except Exception as e:
-            logger.error("[Scheduler] Failed to start: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Scheduler] Failed to start (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     async def _load_db_state(self):
         """Load idempotency state from database (primary source of truth).
@@ -215,9 +244,18 @@ class SchedulerService:
                 self._last_ai_concept_date,
             )
         except Exception as e:
-            logger.warning(
-                "[Scheduler] Failed to load DB state, using ConfigHandler cache: %s",
-                e,
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Scheduler] Failed to load DB state, using ConfigHandler cache (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
 
@@ -279,7 +317,20 @@ class SchedulerService:
             )
             raise
         except Exception as e:
-            logger.error("[Scheduler] Config check failed: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Scheduler] Config check failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return
 
         if not hasattr(self, "_last_known_config"):
@@ -400,7 +451,20 @@ class SchedulerService:
                 )
                 return
         except Exception as e:
-            logger.warning("[Scheduler] Trade calendar check failed: %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Scheduler] Trade calendar check failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             if get_now().weekday() >= 5:
                 return
 
@@ -509,9 +573,18 @@ class SchedulerService:
                 )
                 return
         except Exception as e:
-            logger.warning(
-                "[Scheduler] Trade calendar check failed for prediction: %s",
-                e,
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Scheduler] Trade calendar check failed for prediction (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
             if get_now().weekday() >= 5:

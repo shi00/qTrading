@@ -15,6 +15,7 @@ from core.i18n import I18n
 from services.local_model_manager import LocalModelManager, LocalInferenceTimeoutError
 from utils.config_handler import ConfigHandler
 from utils.config_models import NEWS_CATEGORY_MAP
+from utils.error_classifier import classify_error, classify_severity
 from utils.loop_local import del_loop_local, get_loop_local
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
@@ -428,10 +429,20 @@ def _check_reasoning_support(model: str) -> bool:
     try:
         return litellm.utils.supports_reasoning(model=model)
     except Exception as exc:
-        logger.debug(
-            "[AIService] supports_reasoning check failed for %s: %s, using LLM_PROVIDERS fallback",
+        error_info = classify_error(exc, context="general")
+        severity = classify_severity(exc, context="general")
+        if severity == "system":
+            _log = logger.critical
+        elif severity == "recoverable":
+            _log = logger.warning
+        else:
+            _log = logger.error
+        _log(
+            "[AIService] supports_reasoning check failed (%s) for %s: %s, using LLM_PROVIDERS fallback",
+            error_info["code"],
             model,
             DataSanitizer.sanitize_error(exc),
+            exc_info=True,
         )
         from utils.llm_providers import LLM_PROVIDERS
 
@@ -546,7 +557,20 @@ class AIService:
                     with contextlib.suppress(OSError):
                         os.remove(file_path)
         except Exception as e:
-            logger.debug("[AIService] Prompt dump cleanup skipped: %s", DataSanitizer.sanitize_error(e))
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] Prompt dump cleanup skipped (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     def _configure_litellm(self):
         """配置 LiteLLM 全局参数 (1.82+ 优化)"""
@@ -623,7 +647,20 @@ class AIService:
                     if fb_provider not in self._failover_credentials:
                         self._failover_credentials[fb_provider] = ConfigHandler.get_llm_config_for_provider(fb_provider)
         except Exception as e:
-            logger.debug("[AIService] Failover credential pre-load skipped: %s", DataSanitizer.sanitize_error(e))
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] Failover credential pre-load skipped (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
         logger.info(
             "[AIService] Init | Cloud client ready. provider=%s, reasoning=%s",
@@ -899,7 +936,20 @@ class AIService:
                     _flush_content_buf()
                     _flush_reasoning_buf()
                 except Exception as flush_err:
-                    logger.debug("[AIService] Failed to flush chunk buffer after stream: %s", flush_err)
+                    error_info = classify_error(flush_err, context="general")
+                    severity = classify_severity(flush_err, context="general")
+                    if severity == "system":
+                        _log = logger.critical
+                    elif severity == "recoverable":
+                        _log = logger.warning
+                    else:
+                        _log = logger.error
+                    _log(
+                        "[AIService] Failed to flush chunk buffer after stream (%s): %s",
+                        error_info["code"],
+                        flush_err,
+                        exc_info=True,
+                    )
 
                 if not response_content and reasoning_content:
                     response_content = reasoning_content
@@ -1021,7 +1071,20 @@ class AIService:
                     except json.JSONDecodeError:
                         pass
             except Exception as e:
-                logger.debug("[AIService] JSON heuristic extraction failed: %s", DataSanitizer.sanitize_error(e))
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[AIService] JSON heuristic extraction failed (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
             raise ValueError(f"Invalid JSON response: {DataSanitizer.sanitize_error(response_content[:100])}...")
 
@@ -1099,6 +1162,18 @@ class AIService:
             except Exception as e:
                 last_error = e
                 error_type = type(e).__name__
+                error_info = classify_error(e, context="llm")
+                severity = classify_severity(e, context="llm")
+
+                # System-level errors (MemoryError, etc.) must propagate at CRITICAL
+                if severity == "system":
+                    logger.critical(
+                        "[AIService] Failover | SYSTEM-LEVEL failure for %s: %s",
+                        model,
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
+                    raise
 
                 is_transient = False
 
@@ -1152,7 +1227,8 @@ class AIService:
                     continue
                 else:
                     logger.error(
-                        "[AIService] Failover | ❌ Non-transient error for %s: %s",
+                        "[AIService] Failover | ❌ Non-transient error (%s) for %s: %s",
+                        error_info["code"],
                         model,
                         error_type,
                     )
@@ -1231,7 +1307,20 @@ class AIService:
                 stock_info.pop("concepts", None)
 
         except Exception as e:
-            logger.warning("[AIService] Analyze | Concepts processing failed: %s", DataSanitizer.sanitize_error(e))
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] Analyze | Concepts processing failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             stock_info.pop("concepts", None)
 
         # Convert dicts to XML-like string, filtering out Pandas artifacts and private injected keys like `_23` or `_rsi_period`
@@ -1269,8 +1358,17 @@ class AIService:
                 safe_as_of = get_now().date() - datetime.timedelta(days=SAFE_LIVE_LEARNING_OFFSET_DAYS)
                 history_context = await rm.get_learning_context(as_of=safe_as_of)
             except Exception as e:
-                logger.warning(
-                    "[AIService] Analyze | ⚠️ Learning context fetch failed: %s",
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[AIService] Analyze | ⚠️ Learning context fetch failed (%s): %s",
+                    error_info["code"],
                     DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
@@ -1399,7 +1497,20 @@ class AIService:
             raise
         except Exception as exc:
             # 过滤失败不应阻塞 AI 分析（labels 已含全部 key，AI 按 prompt 契约兜底）
-            logger.warning("[AIService] filter_available_labels failed, using unfiltered labels: %s", exc)
+            error_info = classify_error(exc, context="general")
+            severity = classify_severity(exc, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] filter_available_labels failed (%s), using unfiltered labels: %s",
+                error_info["code"],
+                exc,
+                exc_info=True,
+            )
 
         available_data_block = build_available_data_block(labels)
         if available_data_block:
@@ -1480,8 +1591,17 @@ class AIService:
                     dump_file,
                 )
             except Exception as e:
-                logger.debug(
-                    "[AIService] Analyze | Failed to dump prompt to file: %s",
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[AIService] Analyze | Failed to dump prompt to file (%s): %s",
+                    error_info["code"],
                     e,
                     exc_info=True,
                 )
@@ -1512,7 +1632,20 @@ class AIService:
             )
             return {"error": "Local model timeout", "score": 0}
         except Exception as e:
-            logger.error("[AIService] Analyze | ❌ Top-level failure: %s", DataSanitizer.sanitize_error(e))
+            error_info = classify_error(e, context="llm")
+            severity = classify_severity(e, context="llm")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] Analyze | ❌ Top-level failure (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             logger.debug("[AIService] Analyze | Top-level failure traceback:", exc_info=True)
             return {"error": DataSanitizer.sanitize_error(e), "score": 0}
 
@@ -1638,18 +1771,30 @@ class AIService:
             return result
         except Exception as local_e:
             # Local failed (not configured, crash, etc.)
+            error_info = classify_error(local_e, context="llm")
+            severity = classify_severity(local_e, context="llm")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
             # Log only if it wasn't just "not configured" (which is common)
             if "not installed" not in str(local_e) and "not configured" not in str(
                 local_e,
             ):
-                logger.warning(
-                    "[AIService] Classify | Local failed, falling back to cloud: %s",
+                _log(
+                    "[AIService] Classify | Local failed, falling back to cloud (%s): %s",
+                    error_info["code"],
                     DataSanitizer.sanitize_error(local_e),
+                    exc_info=True,
                 )
             else:
-                logger.warning(
-                    "[AIService] Classify | Local model unavailable, falling back to cloud: %s",
+                _log(
+                    "[AIService] Classify | Local model unavailable, falling back to cloud (%s): %s",
+                    error_info["code"],
                     DataSanitizer.sanitize_error(local_e),
+                    exc_info=True,
                 )
 
         # 2. Fallback to Cloud
@@ -1672,7 +1817,20 @@ class AIService:
             )
             return result
         except Exception as e:
-            logger.error("[AIService] Classify | ❌ All providers failed: %s", DataSanitizer.sanitize_error(e))
+            error_info = classify_error(e, context="llm")
+            severity = classify_severity(e, context="llm")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] Classify | ❌ All providers failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             logger.debug("[AIService] Classify | All providers failed traceback:", exc_info=True)
             return {"category": "unknown", "sentiment": "neutral", "error": DataSanitizer.sanitize_error(e)}
 
@@ -1695,7 +1853,20 @@ class AIService:
             )
             return True
         except Exception as e:
-            logger.error("[AIService] Verify | ❌ Connection verification failed: %s", DataSanitizer.sanitize_error(e))
+            error_info = classify_error(e, context="llm")
+            severity = classify_severity(e, context="llm")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] Verify | ❌ Connection verification failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             logger.debug("[AIService] Verify | Connection verification traceback:", exc_info=True)
             raise
 
@@ -1823,8 +1994,20 @@ class AIService:
             return result
 
         except Exception as e:
-            logger.error("[AIService] TestConn | Test connection failed: %s", DataSanitizer.sanitize_error(e))
             error_info = _classify_api_error(e)
+            severity = classify_severity(e, context="llm")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[AIService] TestConn | Test connection failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
             return {
                 "success": False,
                 "message": error_info["message_key"],

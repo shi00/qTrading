@@ -19,6 +19,7 @@ from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.config_handler import ConfigHandler
 from utils.loop_local import del_loop_local, get_loop_local
+from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 from utils.thread_pool import ThreadPoolManager
 from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
@@ -155,7 +156,20 @@ class TaskManager:
                 if limit <= 0:
                     limit = 5
             except Exception as e:
-                logger.debug("[TaskManager] Failed to read cpu_pool max_workers, using default: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[TaskManager] Failed to read cpu_pool max_workers, using default (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
                 limit = 5
 
         def _factory():
@@ -174,7 +188,20 @@ class TaskManager:
             try:
                 callback(self.get_all_tasks())
             except Exception as e:
-                logger.error("[TaskManager] Error in subscriber initial push: %s", e, exc_info=True)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[TaskManager] Error in subscriber initial push (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
     def unsubscribe(self, callback: Callable[[list[AppTask]], None]):
         if callback in self._subscribers:
@@ -200,11 +227,20 @@ class TaskManager:
             except Exception as e:
                 consecutive_errors = self._subscriber_error_counts.get(cb, 0) + 1
                 self._subscriber_error_counts[cb] = consecutive_errors
-                logger.error(
-                    "[TaskManager] Subscriber callback failed (consecutive: %s/%s): %s",
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e)
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[TaskManager] Subscriber callback failed (consecutive: %s/%s) (%s): %s",
                     consecutive_errors,
                     self._MAX_SUBSCRIBER_ERRORS,
-                    e,
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
                 if consecutive_errors >= self._MAX_SUBSCRIBER_ERRORS:
@@ -555,7 +591,7 @@ class TaskManager:
                 logger.info(
                     "[TaskManager] Suppressed FAILED (already CANCELLED): [%s] %s",
                     task.id,
-                    e,
+                    DataSanitizer.sanitize_error(e),
                     exc_info=True,
                 )
             else:
@@ -568,7 +604,7 @@ class TaskManager:
                     logger.critical(
                         "[TaskManager] Task %s SYSTEM-LEVEL failure: %s",
                         task.id,
-                        e,
+                        DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
                 else:
@@ -576,7 +612,7 @@ class TaskManager:
                         "[TaskManager] Task %s Failed (%s): %s",
                         task.id,
                         severity,
-                        e,
+                        DataSanitizer.sanitize_error(e),
                         exc_info=True,
                     )
         finally:
@@ -658,7 +694,20 @@ class TaskManager:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    logger.warning("[TaskManager] Skipping malformed history row: %s", str(e), exc_info=True)
+                    error_info = classify_error(e, context="general")
+                    severity = classify_severity(e)
+                    if severity == "system":
+                        _log = logger.critical
+                    elif severity == "recoverable":
+                        _log = logger.warning
+                    else:
+                        _log = logger.error
+                    _log(
+                        "[TaskManager] Skipping malformed history row (%s): %s",
+                        error_info["code"],
+                        DataSanitizer.sanitize_error(e),
+                        exc_info=True,
+                    )
             logger.info(
                 "[TaskManager] Loaded %s historical task(s) from DB.",
                 len(self._history),
@@ -794,7 +843,20 @@ class TaskManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug("[TaskManager] Persist failed (non-critical): %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[TaskManager] Persist failed, non-critical (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
     async def _persist_task_async(self, task: AppTask):
@@ -830,4 +892,17 @@ class TaskManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.debug("[TaskManager] DB clear failed (non-critical): %s", e, exc_info=True)
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e)
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[TaskManager] DB clear failed, non-critical (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )

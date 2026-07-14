@@ -13,6 +13,9 @@ import typing
 import logging
 from dataclasses import dataclass
 
+from utils.error_classifier import classify_error, classify_severity
+from utils.sanitizers import DataSanitizer
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +46,16 @@ async def validate_prompt_declarations(
             decl.status = "available" if has_data else "missing"
         except Exception as e:
             results[decl.name] = False
-            decl.status = f"error: {e}"
+            decl.status = f"error: {DataSanitizer.sanitize_error(e)}"
+            severity = classify_severity(e)
+            error_info = classify_error(e, context="general")
+            log_level = logger.error if severity == "system" else logger.warning
+            log_level(
+                "[PromptValidator] Declaration %s check failed: %s (code=%s)",
+                decl.name,
+                DataSanitizer.sanitize_error(e),
+                error_info.get("code", "unknown"),
+            )
     return results
 
 
@@ -86,6 +98,7 @@ async def check_multi_period_data(field: str) -> bool:
                 if df is not None and not df.empty:
                     if field in df.columns and not df[field].isna().all():  # type: ignore[union-attr]
                         passed += 1
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.debug("[PromptValidator] check_field_populous sample %s failed: %s", ts_code, e)
                 continue
@@ -93,6 +106,7 @@ async def check_multi_period_data(field: str) -> bool:
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
+    # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
     except Exception as e:
         logger.debug("[PromptValidator] check_field_populous failed: %s", e)
         return False
@@ -122,6 +136,7 @@ async def check_field_exists(field: str) -> bool:
                 df = await cache.get_financial_reports_history(ts_code, periods=1)
                 if df is not None and not df.empty and field in df.columns:
                     passed += 1
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.debug("[PromptValidator] check_field_exists sample %s failed: %s", ts_code, e)
                 continue
@@ -129,6 +144,7 @@ async def check_field_exists(field: str) -> bool:
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
+    # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
     except Exception as e:
         logger.debug("[PromptValidator] check_field_exists failed: %s", e)
         return False

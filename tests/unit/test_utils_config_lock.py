@@ -18,7 +18,7 @@ class TestConfigThreadSafety:
 
     def test_config_thread_safety(self):
         """多线程并发读写配置文件"""
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         ConfigHandler.save_config({"test_counter": 0})
 
         NUM_WRITERS = 20
@@ -70,7 +70,7 @@ class TestConfigThreadSafety:
 
     def test_config_concurrent_read(self):
         """多线程并发读取配置"""
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         ConfigHandler.save_config({"test_value": "test_data"})
 
         results = []
@@ -96,7 +96,7 @@ class TestConfigThreadSafety:
 
     def test_config_write_merge(self):
         """并发写入时合并配置"""
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         ConfigHandler.save_config({})
 
         def write_task(idx):

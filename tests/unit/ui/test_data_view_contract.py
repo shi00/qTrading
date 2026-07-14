@@ -1,7 +1,7 @@
 """ui/views/data_view.py 声明式契约守护 + 组件体 + 事件 handler 测试.
 
 测试层次:
-1. 纯函数测试 (_format_cell_value / _build_*_options / _ceil_div / _df_to_rows 等)
+1. 纯函数测试 (_format_cell_value / _build_*_options / _ceil_div / _table_rows_to_paginated_rows 等)
 2. 契约守护 (声明式范式: @ft.component / use_viewmodel / 禁止命令式 API)
 3. 组件体测试 (attach_fake_page 驱动 mount/unmount, 验证控件树结构 + VM 生命周期)
 4. 事件 handler 测试 (触发 on_click/on_select → page.run_task → async _do_* 路径)
@@ -29,6 +29,11 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.viewmodels import Message
+from ui.viewmodels.data_explorer_view_model import (
+    SqlResultRow,
+    TableRow,
+    _sql_result_to_state_fields,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -155,29 +160,28 @@ class TestCeilDiv:
         assert _ceil_div(1, 50) == 1
 
 
-class TestDfToRows:
-    """_df_to_rows: DataFrame → PaginatedTable rows。"""
+class TestTableRowsToPaginatedRows:
+    """_table_rows_to_paginated_rows: tuple[TableRow, ...] → PaginatedTable rows。"""
 
-    def test_empty_df_returns_empty_list(self):
-        from ui.views.data_view import _df_to_rows
+    def test_empty_rows_returns_empty_list(self):
+        from ui.views.data_view import _table_rows_to_paginated_rows
 
-        df = pd.DataFrame()
-        assert _df_to_rows(df, ("col1",)) == []
+        assert _table_rows_to_paginated_rows((), ("col1",)) == []
 
     def test_formats_date_columns(self):
-        from ui.views.data_view import _df_to_rows
+        from ui.views.data_view import _table_rows_to_paginated_rows
 
-        df = pd.DataFrame({"trade_date": ["20240115"], "name": ["测试"]})
-        rows = _df_to_rows(df, ("trade_date", "name"))
-        assert rows[0]["trade_date"] == "2024-01-15"
-        assert rows[0]["name"] == "测试"
+        rows = (TableRow(values=("20240115", "测试")),)
+        result = _table_rows_to_paginated_rows(rows, ("trade_date", "name"))
+        assert result[0]["trade_date"] == "2024-01-15"
+        assert result[0]["name"] == "测试"
 
     def test_none_values_become_dash(self):
-        from ui.views.data_view import _df_to_rows
+        from ui.views.data_view import _table_rows_to_paginated_rows
 
-        df = pd.DataFrame({"col1": [None], "col2": [1.0]})
-        rows = _df_to_rows(df, ("col1", "col2"))
-        assert rows[0]["col1"] == "-"
+        rows = (TableRow(values=(None, 1.0)),)
+        result = _table_rows_to_paginated_rows(rows, ("col1", "col2"))
+        assert result[0]["col1"] == "-"
 
 
 class TestBuildTableSelectorOptions:
@@ -223,35 +227,34 @@ class TestBuildTableColumnsSpec:
 
 
 class TestBuildSqlColumnsSpec:
-    """_build_sql_columns_spec: 构建 SQL 结果表 columns spec。"""
+    """_build_sql_columns_spec: 构建 SQL 结果表 columns spec (从 tuple[str, ...])。"""
 
-    def test_returns_spec_from_df_columns(self):
+    def test_returns_spec_from_columns_tuple(self):
         from ui.views.data_view import _build_sql_columns_spec
 
         MetaDataManager._alias_cache.clear()
-        df = pd.DataFrame({"col1": [1], "col2": [2]})
-        spec = _build_sql_columns_spec(df)
+        spec = _build_sql_columns_spec(("col1", "col2"))
         assert len(spec) == 2
         assert spec[0]["id"] == "col1"
         assert spec[0]["width"] == 140
 
 
-class TestDfToSqlRows:
-    """_df_to_sql_rows: SQL 结果 DataFrame → rows。"""
+class TestSqlRowsToPaginatedRows:
+    """_sql_rows_to_paginated_rows: tuple[SqlResultRow, ...] → PaginatedTable rows。"""
 
-    def test_empty_df_returns_empty_list(self):
-        from ui.views.data_view import _df_to_sql_rows
+    def test_empty_rows_returns_empty_list(self):
+        from ui.views.data_view import _sql_rows_to_paginated_rows
 
-        assert _df_to_sql_rows(pd.DataFrame()) == []
+        assert _sql_rows_to_paginated_rows((), ()) == []
 
-    def test_converts_df_to_dict_rows(self):
-        from ui.views.data_view import _df_to_sql_rows
+    def test_converts_rows_to_dict(self):
+        from ui.views.data_view import _sql_rows_to_paginated_rows
 
-        df = pd.DataFrame({"col1": [1, 2], "col2": ["a", "b"]})
-        rows = _df_to_sql_rows(df)
-        assert len(rows) == 2
-        assert rows[0]["col1"] == "1"
-        assert rows[0]["col2"] == "a"
+        rows = (SqlResultRow(values=(1, "a")), SqlResultRow(values=(2, "b")))
+        result = _sql_rows_to_paginated_rows(rows, ("col1", "col2"))
+        assert len(result) == 2
+        assert result[0]["col1"] == "1"
+        assert result[0]["col2"] == "a"
 
 
 class TestGetPage:
@@ -318,7 +321,7 @@ class TestDataViewDeclarativeContract:
 
 @dataclass(frozen=True)
 class _FakeDataExplorerState:
-    """模拟 DataExplorerState 的最小字段集。"""
+    """模拟 DataExplorerState 的最小字段集 (声明式: tuple[Row, ...])."""
 
     current_table: str = "stock_basic"
     current_page: int = 1
@@ -335,9 +338,12 @@ class _FakeDataExplorerState:
     tables_list: tuple[str, ...] = ("stock_basic", "daily_quotes")
     table_columns: tuple[str, ...] = ("ts_code", "name", "trade_date")
     numeric_cols: frozenset[str] = frozenset()
-    data_version: int = 0
-    sql_result_version: int = 0
+    table_rows: tuple[TableRow, ...] = ()
     sql_is_executing: bool = False
+    sql_success: bool = False
+    sql_result_columns: tuple[str, ...] = ()
+    sql_result_rows: tuple[SqlResultRow, ...] = ()
+    sql_error: str | None = None
 
 
 class _FakeDataExplorerViewModel:
@@ -350,6 +356,7 @@ class _FakeDataExplorerViewModel:
     def __init__(self, state: _FakeDataExplorerState | None = None) -> None:
         self._state: _FakeDataExplorerState = state or _FakeDataExplorerState()
         self._subscribers: list[Any] = []
+        # 测试 fixture: 驱动 export_data 返回值 / execute_sql state 更新 (非 dual-track property)
         self._current_data: pd.DataFrame = pd.DataFrame()
         self._sql_result: dict | None = None
         self.dispose_called: bool = False
@@ -358,14 +365,6 @@ class _FakeDataExplorerViewModel:
     @property
     def state(self) -> _FakeDataExplorerState:
         return self._state
-
-    @property
-    def current_data(self) -> pd.DataFrame:
-        return self._current_data
-
-    @property
-    def sql_result(self) -> dict | None:
-        return self._sql_result
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -406,7 +405,10 @@ class _FakeDataExplorerViewModel:
 
     async def execute_sql(self, sql: str) -> dict:
         self.method_calls.append(("execute_sql", {"sql": sql}))
-        return self._sql_result or {"success": False, "data": None, "error": "no result"}
+        result = self._sql_result or {"success": False, "data": None, "error": "no result"}
+        # 声明式: 从 result 更新 state (镜像真实 VM execute_sql 行为)
+        self._set_state(**_sql_result_to_state_fields(result))
+        return result
 
     # --- sync methods ---
 
@@ -471,8 +473,11 @@ def _mount(component: Any, page: FakePage | None = None) -> tuple[Any, FakePage]
 
 
 def _collect_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树, 返回所有控件 (含 Component 描述)。"""
-    if root is None:
+    """深度优先遍历控件树, 返回所有控件 (含 Component 描述)。
+
+    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock 下 content 属性返回新 MagicMock)。
+    """
+    if root is None or not isinstance(root, ft.Control):
         return []
     result: list[Any] = [root]
     for attr in ("controls", "items", "tabs"):
@@ -482,7 +487,7 @@ def _collect_controls(root: Any) -> list[Any]:
                 if child is not None:
                     result.extend(_collect_controls(child))
     content = getattr(root, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         result.extend(_collect_controls(content))
     return result
 
@@ -777,7 +782,13 @@ class TestSQLConsoleTabComponentBody:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        vm._sql_result = {"success": True, "data": pd.DataFrame({"col1": [1, 2]}), "error": None}
+        # 声明式: 直接设置 state (mount-time 渲染从 state 读取, 非 dual-track property)
+        vm._set_state(
+            sql_success=True,
+            sql_result_columns=("col1",),
+            sql_result_rows=(SqlResultRow(values=(1,)), SqlResultRow(values=(2,))),
+            sql_error=None,
+        )
         component = make_component(SQLConsoleTab, vm=vm)
         result, _ = _mount(component)
 
@@ -1431,7 +1442,6 @@ class TestSQLConsoleTabEventHandlers:
         from ui.views.data_view import SQLConsoleTab
 
         vm = _FakeDataExplorerViewModel()
-        vm._sql_result = None
 
         async def _raise_sql(sql):
             raise RuntimeError("DB error")

@@ -18,14 +18,14 @@ def isolated_config(tmp_path):
     original_config_file = config_module.CONFIG_FILE
     config_module.CONFIG_FILE = test_config_file
 
-    ConfigHandler._config_cache = None
+    ConfigHandler._clear_cache()
 
     if os.path.exists(test_config_file):
         os.remove(test_config_file)
 
     yield test_config_file
 
-    ConfigHandler._config_cache = None
+    ConfigHandler._clear_cache()
     config_module.CONFIG_FILE = original_config_file
 
 
@@ -81,7 +81,7 @@ class TestConfigHandler:
         with open(isolated_config, "w") as f:
             f.write("{invalid_json")
 
-        ConfigHandler._config_cache = None
+        ConfigHandler._clear_cache()
         config_data = ConfigHandler.load_config()
         assert config_data == {}
 

@@ -102,6 +102,24 @@ def _v1_page_compat(monkeypatch):
     monkeypatch.setattr(ft.Control, "update", update)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_tushare_token_file(tmp_path_factory):
+    """隔离 tushare SDK 的 tk.csv 写入 (TRAE Sandbox 会拒绝 ~/tk.csv).
+
+    tushare set_token() 写入 ~/tk.csv，受限环境会 PermissionError。
+    将 USERPROFILE 重定向到 session 临时目录，隔离文件写入。
+    与 tests/e2e/conftest.py 的 _spawn 同源方案。
+    """
+    original_userprofile = os.environ.get("USERPROFILE")
+    isolated_home = str(tmp_path_factory.mktemp("tushare_home"))
+    os.environ["USERPROFILE"] = isolated_home
+    yield
+    if original_userprofile is not None:
+        os.environ["USERPROFILE"] = original_userprofile
+    else:
+        os.environ.pop("USERPROFILE", None)
+
+
 TEST_DB_HOST = os.environ.get("TEST_DB_HOST", "localhost")
 TEST_DB_PORT = int(os.environ.get("TEST_DB_PORT", "5432"))
 TEST_DB_USER = os.environ.get("TEST_DB_USER", "postgres")

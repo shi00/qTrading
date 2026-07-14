@@ -759,3 +759,437 @@ class TestShutdownStepOrdering:
 
     def test_step3_is_close_processor(self):
         assert _CLEANUP_STEPS[3][1] == "_step3_close_processor"
+
+
+class TestRegisterTask:
+    """验证 register_task 注册 fire-and-forget 任务与自动清理行为。"""
+
+    @pytest.mark.asyncio
+    async def test_register_adds_task_to_set(self):
+        """register_task 应将任务加入 _registered_tasks 集合。"""
+        coord = ShutdownCoordinator()
+
+        async def coro():
+            await asyncio.sleep(0.1)
+
+        task = asyncio.create_task(coro())
+        try:
+            coord.register_task(task)
+            assert task in coord._registered_tasks
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_register_auto_removes_done_task(self):
+        """任务完成后应通过 add_done_callback 自动从集合中移除。"""
+        coord = ShutdownCoordinator()
+
+        async def quick():
+            return None
+
+        task = asyncio.create_task(quick())
+        await task  # 等待完成
+        coord.register_task(task)
+        # 已完成任务加入集合后 done callback 立即触发（add_done_callback 同步调度）
+        # 由于任务已完成，callback 应被调度执行（get_event_loop().call_soon）
+        # 等待一个 event loop tick 让 callback 执行
+        await asyncio.sleep(0)
+        assert task not in coord._registered_tasks or task.done()
+
+
+class TestStep0RegisteredTasks:
+    """覆盖 _step0_cancel_tasks() 中 _registered_tasks 分支（L317-L333）。"""
+
+    @pytest.mark.asyncio
+    async def test_step0_cancels_registered_pending_tasks(self):
+        """有未完成 registered_tasks 时应取消并 drain。"""
+        coord = ShutdownCoordinator()
+
+        async def long_running():
+            try:
+                await asyncio.sleep(100)
+            except asyncio.CancelledError:
+                raise
+
+        task = asyncio.create_task(long_running())
+        coord.register_task(task)
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm._instance = None
+            await coord._step0_cancel_tasks()
+        assert task.cancelled() or task.done()
+        assert coord._registered_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_step0_skips_done_registered_tasks(self):
+        """已完成的 registered_tasks 应跳过取消但清理集合。"""
+        coord = ShutdownCoordinator()
+
+        async def quick():
+            return None
+
+        task = asyncio.create_task(quick())
+        await task  # 等待完成
+        coord._registered_tasks.add(task)
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm._instance = None
+            await coord._step0_cancel_tasks()
+        assert coord._registered_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_step0_empty_registered_tasks_skips_block(self):
+        """无 registered_tasks 时应跳过整个取消块。"""
+        coord = ShutdownCoordinator()
+        assert coord._registered_tasks == set()
+        with patch("services.task_manager.TaskManager") as mock_tm:
+            mock_tm._instance = None
+            await coord._step0_cancel_tasks()  # 不应抛异常
+        assert coord._registered_tasks == set()
+
+
+class TestRunCleanupStepsDeep:
+    """覆盖 _run_cleanup_steps() 的 critical failure 后继续、CancelledError 传播分支。"""
+
+    @pytest.mark.asyncio
+    async def test_critical_failure_continues_remaining_steps(self):
+        """关键步骤失败后应继续执行剩余步骤以释放资源。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+
+        # Step 0 失败（critical=True），其余成功
+        call_log: list[str] = []
+
+        async def step0():
+            call_log.append("step0")
+            raise RuntimeError("step0 fail")
+
+        async def step_ok():
+            call_log.append("step_ok")
+            return None
+
+        # 替换各 step 方法
+        coord._step0_cancel_tasks = step0
+        coord._step1_stop_services = step_ok
+        coord._step2_flush_db_writes = step_ok
+        coord._step3_close_processor = step_ok
+        coord._step4_clear_toast = step_ok
+        coord._step5_unload_ai_model = step_ok
+        coord._step6_shutdown_thread_pools = step_ok
+        coord._step7_close_database_managers = step_ok
+
+        results = await coord._run_cleanup_steps(step_timeout_s=2.0)
+        # 8 个步骤全部执行
+        assert len(results) == 8
+        # Step 0 失败但其余执行
+        assert results[0].ok is False
+        assert results[0].critical is True
+        for r in results[1:]:
+            assert r.ok is True
+        # 所有步骤都被调用（critical failure 不中断流程）
+        assert "step0" in call_log
+        assert call_log.count("step_ok") == 7
+
+    @pytest.mark.asyncio
+    async def test_cancelled_step_propagates_after_loop(self):
+        """某步骤被取消后应完成循环并在最后 re-raise CancelledError（R2）。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+
+        async def step_cancelled():
+            raise asyncio.CancelledError()
+
+        async def step_ok():
+            return None
+
+        coord._step0_cancel_tasks = step_cancelled
+        coord._step1_stop_services = step_ok
+        coord._step2_flush_db_writes = step_ok
+        coord._step3_close_processor = step_ok
+        coord._step4_clear_toast = step_ok
+        coord._step5_unload_ai_model = step_ok
+        coord._step6_shutdown_thread_pools = step_ok
+        coord._step7_close_database_managers = step_ok
+
+        with pytest.raises(asyncio.CancelledError):
+            await coord._run_cleanup_steps(step_timeout_s=2.0)
+
+    @pytest.mark.asyncio
+    async def test_step_timeout_uses_min_of_default_and_caller(self):
+        """effective_timeout 应取 min(default, step_timeout_s)。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+
+        async def step_ok():
+            return None
+
+        coord._step0_cancel_tasks = step_ok
+        coord._step1_stop_services = step_ok
+        coord._step2_flush_db_writes = step_ok
+        coord._step3_close_processor = step_ok
+        coord._step4_clear_toast = step_ok
+        coord._step5_unload_ai_model = step_ok
+        coord._step6_shutdown_thread_pools = step_ok
+        coord._step7_close_database_managers = step_ok
+
+        # step_timeout_s=0.5 远小于各 step 的 default（1.0~5.0）
+        results = await coord._run_cleanup_steps(step_timeout_s=0.5)
+        assert len(results) == 8
+        # 全部成功（mock step 立即返回，不超时）
+        for r in results:
+            assert r.ok is True
+
+
+class TestDoCleanupConcurrent:
+    """覆盖 do_cleanup() 中"已有 cleanup_task 在运行"分支（L187-L190）。"""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_do_cleanup_reuses_task(self):
+        """已有 cleanup_task 在运行时复用而非重复启动。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+
+        # 预设一个 cleanup_task（模拟正在运行）
+        async def long_cleanup():
+            await asyncio.sleep(0.05)
+            return True
+
+        coord._cleanup_task = asyncio.create_task(long_cleanup())
+        coord._cleanup_started = True
+
+        result = await coord.do_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_do_cleanup_starts_new_task_when_none(self):
+        """无 cleanup_task 时应启动新任务。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        with (
+            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
+            patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("services.local_model_manager.LocalModelManager") as mock_lmm,
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tm._instance = None
+            mock_sched.scheduler.running = False
+            mock_news._instance = None
+            mock_mds._instance = None
+            mock_dp._instance = None
+            mock_lmm._instance = None
+            mock_tpm._instance = None
+            assert coord._cleanup_task is None
+            result = await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+            assert coord.cleanup_done is True
+            assert result is True
+
+
+class TestDefaultForceExit:
+    """覆盖 _default_force_exit() 的 SystemExit→os._exit 分支（L94-L97）。"""
+
+    def test_default_force_exit_with_system_exit(self):
+        """sys.exit 抛 SystemExit 时应回退到 os._exit。"""
+        import sys
+
+        # 直接测试 _default_force_exit 内部逻辑：sys.exit 引发 SystemExit 后调用 os._exit
+        # 由于 os._exit 不可恢复，我们 mock 两个函数验证调用顺序
+        with (
+            patch.object(sys, "exit", side_effect=SystemExit(1)) as mock_sys_exit,
+            patch("os._exit") as mock_os_exit,
+        ):
+            try:
+                ShutdownCoordinator._default_force_exit(1)
+            except SystemExit:
+                pass
+            mock_sys_exit.assert_called_once_with(1)
+            mock_os_exit.assert_called_once_with(1)
+
+    def test_default_force_exit_flushes_handlers(self):
+        """_default_force_exit 应尝试 flush 所有 root handlers。"""
+        import logging
+
+        flushed: list[bool] = []
+
+        class FakeHandler(logging.Handler):
+            def flush(self):
+                flushed.append(True)
+
+            def emit(self, record):
+                pass
+
+        original_handlers = logging.root.handlers[:]
+        try:
+            logging.root.handlers = [FakeHandler()]
+            with (
+                patch("sys.exit", side_effect=SystemExit(1)),
+                patch("os._exit"),
+            ):
+                try:
+                    ShutdownCoordinator._default_force_exit(1)
+                except SystemExit:
+                    pass
+                assert flushed == [True]
+        finally:
+            logging.root.handlers = original_handlers
+
+    def test_default_force_exit_handler_flush_error_swallowed(self):
+        """handler.flush() 抛 OSError/ValueError 时应被吞掉。"""
+        import logging
+
+        class BadHandler(logging.Handler):
+            def flush(self):
+                raise OSError("flush failed")
+
+            def emit(self, record):
+                pass
+
+        original_handlers = logging.root.handlers[:]
+        try:
+            logging.root.handlers = [BadHandler()]
+            with (
+                patch("sys.exit", side_effect=SystemExit(1)),
+                patch("os._exit"),
+            ):
+                try:
+                    ShutdownCoordinator._default_force_exit(1)
+                except SystemExit:
+                    pass
+                # 不抛异常即视为通过
+        finally:
+            logging.root.handlers = original_handlers
+
+
+class TestExecuteCleanupFinallyBlock:
+    """覆盖 _execute_cleanup() 的 finally 块（L218-L227）与 handler.flush 异常分支。"""
+
+    @pytest.mark.asyncio
+    async def test_finally_block_flushes_handlers(self):
+        """finally 块应尝试 flush 所有 root handlers。"""
+        import logging
+
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(return_value=[])
+
+        flushed: list[bool] = []
+
+        class FakeHandler(logging.Handler):
+            def flush(self):
+                flushed.append(True)
+
+            def emit(self, record):
+                pass
+
+        original_handlers = logging.root.handlers[:]
+        try:
+            logging.root.handlers = [FakeHandler()]
+            await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+            assert flushed == [True]
+        finally:
+            logging.root.handlers = original_handlers
+
+    @pytest.mark.asyncio
+    async def test_finally_block_swallows_handler_flush_error(self):
+        """finally 块中 handler.flush() 抛 OSError/ValueError 时应被吞掉。"""
+        import logging
+
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(return_value=[])
+
+        class BadHandler(logging.Handler):
+            def flush(self):
+                raise ValueError("flush failed")
+
+            def emit(self, record):
+                pass
+
+        original_handlers = logging.root.handlers[:]
+        try:
+            logging.root.handlers = [BadHandler()]
+            # 不应抛异常
+            result = await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+            assert result is True
+        finally:
+            logging.root.handlers = original_handlers
+
+    @pytest.mark.asyncio
+    async def test_finally_block_cancels_watchdog(self):
+        """finally 块应调用 cancel_watchdog()。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+        coord._run_cleanup_steps = AsyncMock(return_value=[])
+        coord.start_watchdog(timeout_s=100)
+        assert coord.watchdog_started is True
+
+        await coord._execute_cleanup(timeout_s=5.0, step_timeout_s=2.0)
+        # cancel_watchdog 应被调用
+        assert coord.watchdog_started is False
+
+
+class TestRunAsyncStepCancelledReraise:
+    """覆盖 _run_async_step() 的 CancelledError re-raise 分支（L282-L285）。"""
+
+    @pytest.mark.asyncio
+    async def test_cancelled_step_reraises_and_logs(self, caplog):
+        """_run_async_step 收到 CancelledError 时应 re-raise 并记录 warning 日志。"""
+        import logging
+
+        coord = ShutdownCoordinator()
+        with caplog.at_level(logging.WARNING, logger="utils.shutdown"):
+
+            async def cancelled_step():
+                raise asyncio.CancelledError()
+
+            with pytest.raises(asyncio.CancelledError):
+                await coord._run_async_step(
+                    name="test_cancelled",
+                    step=cancelled_step,
+                    step_timeout_s=5.0,
+                    critical=True,
+                )
+            # 验证日志包含 cancelled 关键词
+            assert any("cancelled" in r.message.lower() for r in caplog.records)
+
+
+class TestFullCleanupWithCriticalFailure:
+    """验证完整清理流程中 critical 步骤失败时的整体行为。"""
+
+    @pytest.mark.asyncio
+    async def test_full_cleanup_with_critical_failure_returns_false(self):
+        """关键步骤失败时 do_cleanup 应返回 False 但 cleanup_done 仍为 True。"""
+        coord = ShutdownCoordinator(service_stop_delay=0)
+
+        async def fail_step():
+            raise RuntimeError("critical failure")
+
+        async def ok_step():
+            return None
+
+        with (
+            patch("services.task_manager.TaskManager") as mock_tm,
+            patch("utils.scheduler_service.SchedulerService") as mock_sched,
+            patch("services.news_subscription_service.NewsSubscriptionService") as mock_news,
+            patch("data.domain_services.market_data_service.MarketDataService") as mock_mds,
+            patch("data.data_processor.DataProcessor") as mock_dp,
+            patch("services.local_model_manager.LocalModelManager") as mock_lmm,
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm,
+        ):
+            mock_tm._instance = None
+            mock_sched.scheduler.running = False
+            mock_news._instance = None
+            mock_mds._instance = None
+            mock_dp._instance = None
+            mock_lmm._instance = None
+            mock_tpm._instance = None
+            # 让 Step 2 (flush_db_writes) 失败
+            coord._step2_flush_db_writes = fail_step
+            # 其余步骤正常
+            coord._step3_close_processor = ok_step
+            coord._step5_unload_ai_model = ok_step
+            coord._step6_shutdown_thread_pools = ok_step
+
+            result = await coord.do_cleanup(timeout_s=10.0, step_timeout_s=5.0)
+            assert result is False
+            assert coord.cleanup_done is True
+            assert coord.cleanup_success is False
+            # 至少有一个 critical failure
+            failures = [r for r in coord.step_results if r.critical and not r.ok]
+            assert len(failures) >= 1

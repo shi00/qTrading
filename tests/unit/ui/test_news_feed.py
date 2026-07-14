@@ -9,8 +9,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import flet as ft
-import pandas as pd
 import pytest
+
+from ui.viewmodels.home_view_model import NewsRow
 
 pytestmark = pytest.mark.unit
 
@@ -270,7 +271,7 @@ class TestBuildNewsItem:
             "tags": "公告",
         }
         defaults.update(kwargs)
-        return pd.Series(defaults)
+        return NewsRow(**defaults)
 
     def test_build_news_item_positive_content(self):
         from ui.components.news_feed import _build_news_item
@@ -299,14 +300,14 @@ class TestBuildNewsItem:
     def test_build_news_item_missing_tags(self):
         from ui.components.news_feed import _build_news_item
 
-        row = pd.Series({"content": "Test news", "publish_time": "2024-06-15 10:30:00"})
+        row = NewsRow(content="Test news", publish_time="2024-06-15 10:30:00")
         item = _build_news_item(row, "0")
         assert isinstance(item, ft.Container)
 
     def test_build_news_item_missing_content(self):
         from ui.components.news_feed import _build_news_item
 
-        row = pd.Series({"content": None, "publish_time": "2024-06-15 10:30:00", "tags": "公告"})
+        row = NewsRow(content="", publish_time="2024-06-15 10:30:00", tags="公告")
         item = _build_news_item(row, "0")
         assert isinstance(item, ft.Container)
 

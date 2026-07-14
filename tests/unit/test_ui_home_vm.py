@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
-from ui.viewmodels.home_view_model import HomeViewModel
+from ui.viewmodels.home_view_model import HomeViewModel, MarketIndexRow, NewsRow
 
 pytestmark = pytest.mark.unit
 
@@ -27,10 +27,12 @@ class TestHomeViewModelInit:
         assert vm.PAGE_SIZE == 20
         assert vm.state.has_more_news is False
         assert vm.state.is_loading_more is False
-        assert vm.last_market_data == {}
-        assert vm.news_data is None
-        assert vm.state.news_update_version == 0
-        assert vm.state.market_update_version == 0
+        assert vm.state.news_rows == ()
+        assert vm.state.market_indices == ()
+        assert vm.state.market_hsgt.value == "--"
+        assert vm.state.market_hot_concepts == ()
+        assert vm.state.market_date == "--"
+        assert vm.state.market_stale is False
 
     def test_init_subscribes_services(self):
         """init 订阅 NewsSubscriptionService / MarketDataService"""
@@ -93,8 +95,11 @@ class TestHomeViewModelMarketData:
     async def test_load_market_data_with_cache(self, vm):
         """从缓存加载市场数据"""
         mock_data = {
-            "index_data": pd.DataFrame({"close": [3000.0]}),
-            "last_update": "2024-03-21 15:00:00",
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [{"name": "AI", "change": "+5%", "color": "red"}],
+            "date": "2024-03-21",
+            "stale": False,
         }
 
         with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
@@ -103,12 +108,22 @@ class TestHomeViewModelMarketData:
             result = await vm.load_market_data()
 
             assert result == mock_data
-            assert vm.last_market_data == mock_data
+            assert len(vm.state.market_indices) == 1
+            assert vm.state.market_indices[0].value == "3000"
+            assert vm.state.market_hsgt.value == "100亿"
+            assert len(vm.state.market_hot_concepts) == 1
+            assert vm.state.market_date == "2024-03-21"
 
     @pytest.mark.asyncio
     async def test_load_market_data_retry(self, vm):
         """市场数据重试逻辑"""
-        mock_data = {"index_data": pd.DataFrame()}
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "2024-03-21",
+            "stale": False,
+        }
 
         with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
             call_count = [0]
@@ -139,7 +154,13 @@ class TestHomeViewModelMarketData:
     @pytest.mark.asyncio
     async def test_get_cached_market_data(self, vm):
         """获取缓存市场数据"""
-        mock_data = {"index_data": pd.DataFrame()}
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [],
+            "date": "2024-03-21",
+            "stale": False,
+        }
 
         with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
             mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
@@ -147,7 +168,7 @@ class TestHomeViewModelMarketData:
             result = await vm.get_cached_market_data()
 
             assert result == mock_data
-            assert vm.last_market_data == mock_data
+            assert len(vm.state.market_indices) == 1
 
 
 class TestHomeViewModelNewsData:
@@ -178,6 +199,7 @@ class TestHomeViewModelNewsData:
         assert len(result) == 20
         assert has_more is True
         assert vm.state.news_page == 0
+        assert len(vm.state.news_rows) == 20
 
     @pytest.mark.asyncio
     async def test_refresh_news_empty(self, vm):
@@ -186,8 +208,9 @@ class TestHomeViewModelNewsData:
 
         result, has_more = await vm.refresh_news()
 
-        assert result is None
+        assert result.empty
         assert has_more is False
+        assert vm.state.news_rows == ()
 
     @pytest.mark.asyncio
     async def test_load_next_page(self, vm):
@@ -211,7 +234,7 @@ class TestHomeViewModelNewsData:
         assert len(new_batch) == 20
         assert has_more is True
         assert vm.state.news_page == 1
-        assert len(vm.news_data) == 40
+        assert len(vm.state.news_rows) == 40
 
     @pytest.mark.asyncio
     async def test_load_next_page_no_more(self, vm):
@@ -289,44 +312,92 @@ class TestHomeViewModelStateManagement:
 
     def test_clear_state(self, vm):
         """清除状态"""
-        vm.last_market_data = {"test": "data"}
-        vm.news_data = pd.DataFrame({"title": ["test"]})
-        vm._set_state(has_more_news=True, news_page=5)
+        vm._set_state(
+            has_more_news=True,
+            news_page=5,
+            news_rows=(NewsRow(content="test"),),
+            market_indices=(MarketIndexRow(value="3000"),),
+        )
 
         vm.clear_state()
 
-        assert vm.last_market_data == {}
-        assert vm.news_data is None
         assert vm.state.has_more_news is False
         assert vm.state.news_page == 0
+        assert vm.state.news_rows == ()
+        assert vm.state.market_indices == ()
+        assert vm.state.market_hsgt.value == "--"
+        assert vm.state.market_hot_concepts == ()
 
-    def test_on_news_service_update_emits_state_and_stores_last(self, vm):
-        """新闻服务更新: 递增 news_update_version + 存储 last_news_update"""
+    @pytest.mark.asyncio
+    async def test_on_news_service_update_new_item(self, vm):
+        """NEW_ITEM 事件: 前插新行到 news_rows"""
+        from services.news_subscription_service import NewsUpdateType
+
         snapshots: list = []
         vm.subscribe(lambda s: snapshots.append(s))
 
-        vm._on_news_service_update("update_type", {"data": "test"})
+        with patch("ui.viewmodels.home_view_model._news_item_to_row") as mock_to_row:
+            mock_to_row.return_value = NewsRow(content="test")
+            await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [{"content": "test"}])
 
-        assert vm.state.news_update_version == 1
-        assert vm.last_news_update == ("update_type", {"data": "test"})
-        assert any(s.news_update_version == 1 for s in snapshots)
+        assert len(vm.state.news_rows) == 1
+        assert vm.state.news_rows[0].content == "test"
+        assert any(len(s.news_rows) == 1 for s in snapshots)
+
+    @pytest.mark.asyncio
+    async def test_on_news_service_update_tag_update(self, vm):
+        """TAG_UPDATE 事件: 更新匹配行的 tags"""
+        from services.news_subscription_service import NewsUpdateType
+
+        vm._set_state(news_rows=(NewsRow(content="old", tags="old_tag"),))
+
+        await vm._on_news_service_update(NewsUpdateType.TAG_UPDATE, {"content": "old", "tags": "new_tag"})
+
+        assert vm.state.news_rows[0].tags == "new_tag"
+
+    @pytest.mark.asyncio
+    async def test_on_news_service_update_initial(self, vm):
+        """INITIAL 事件: 触发 refresh_news 全量刷新"""
+        from services.news_subscription_service import NewsUpdateType
+
+        mock_news = pd.DataFrame({"content": [f"news{i}" for i in range(5)]})
+        vm.processor.cache.get_market_news = AsyncMock(return_value=mock_news)
+
+        await vm._on_news_service_update(NewsUpdateType.INITIAL)
+
+        assert len(vm.state.news_rows) == 5
 
     def test_on_market_service_update_emits_state(self, vm):
-        """市场服务更新: 递增 market_update_version"""
+        """市场服务更新: 更新 market_indices/hsgt/hot_concepts"""
+        mock_data = {
+            "indices": [{"name": "SH", "value": "3000", "change": "+10", "color": "RED"}],
+            "hsgt": {"value": "100亿", "color": "RED", "sub": "净流入"},
+            "hot_concepts": [{"name": "AI", "change": "+5%", "color": "red"}],
+            "date": "2024-03-21",
+            "stale": False,
+        }
         snapshots: list = []
         vm.subscribe(lambda s: snapshots.append(s))
 
-        vm._on_market_service_update()
+        with patch("ui.viewmodels.home_view_model.MarketDataService") as mock_svc:
+            mock_svc.return_value.get_cached_data = MagicMock(return_value=mock_data)
+            vm._on_market_service_update()
 
-        assert vm.state.market_update_version == 1
-        assert any(s.market_update_version == 1 for s in snapshots)
+        assert len(vm.state.market_indices) == 1
+        assert vm.state.market_indices[0].value == "3000"
+        assert vm.state.market_hsgt.value == "100亿"
+        assert any(len(s.market_indices) == 1 for s in snapshots)
 
-    def test_on_news_service_update_without_subscribers(self, vm):
-        """无 subscribers 时新闻服务更新不报错,仍存储 last_news_update"""
-        vm._on_news_service_update("update_type", {"data": "test"})
+    @pytest.mark.asyncio
+    async def test_on_news_service_update_without_subscribers(self, vm):
+        """无 subscribers 时新闻服务更新不报错"""
+        from services.news_subscription_service import NewsUpdateType
 
-        assert vm.last_news_update == ("update_type", {"data": "test"})
-        assert vm.state.news_update_version == 1
+        with patch("ui.viewmodels.home_view_model._news_item_to_row") as mock_to_row:
+            mock_to_row.return_value = NewsRow(content="test")
+            await vm._on_news_service_update(NewsUpdateType.NEW_ITEM, [{"content": "test"}])
+
+        assert len(vm.state.news_rows) == 1
 
 
 class TestHomeViewModelInitData:

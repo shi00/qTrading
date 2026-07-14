@@ -60,6 +60,17 @@ def _raw_source() -> str:
     return Path(mod.__file__).read_text(encoding="utf-8")
 
 
+def _trigger_callback(cb, event):
+    """Safely trigger Flet optional callback in tests.
+
+    Flet stubs declare callbacks (on_click/on_change/on_horizontal_drag_*/etc.)
+    as Optional[Callable[[], None]], but runtime passes a ControlEvent.
+    Centralize type narrowing + type: ignore here.
+    """
+    assert cb is not None
+    cb(event)  # type: ignore[reportCallIssue, reason: Flet stub declares callbacks as 0-arg, but runtime passes event]
+
+
 # ---------------------------------------------------------------------------
 # 契约守护：声明式范式
 # ---------------------------------------------------------------------------
@@ -451,7 +462,7 @@ class TestSettingsViewComponentBody:
         component, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
         # 点击 data="2" 的 button
-        buttons[2].on_click(_make_tab_event("2"))
+        _trigger_callback(buttons[2].on_click, _make_tab_event("2"))
         # 重渲染
         result = render_once(component)
         buttons = _find_buttons(result)
@@ -471,7 +482,7 @@ class TestSettingsViewComponentBody:
         component, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
         with patch("ui.views.settings_view.logger") as mock_logger:
-            buttons[0].on_click(_make_tab_event("invalid"))
+            _trigger_callback(buttons[0].on_click, _make_tab_event("invalid"))
             mock_logger.warning.assert_called_once()
 
     def test_tab_click_out_of_range_logs_warning(
@@ -483,7 +494,7 @@ class TestSettingsViewComponentBody:
         component, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
         with patch("ui.views.settings_view.logger") as mock_logger:
-            buttons[0].on_click(_make_tab_event("99"))
+            _trigger_callback(buttons[0].on_click, _make_tab_event("99"))
             mock_logger.warning.assert_called_once()
 
     def test_tab_click_none_data_logs_warning(
@@ -495,7 +506,7 @@ class TestSettingsViewComponentBody:
         component, result = self._mount(mock_i18n_state, mock_app_colors_state)
         buttons = _find_buttons(result)
         with patch("ui.views.settings_view.logger") as mock_logger:
-            buttons[0].on_click(_make_tab_event(None))
+            _trigger_callback(buttons[0].on_click, _make_tab_event(None))
             mock_logger.warning.assert_called_once()
 
     def test_mount_renders_header_title(

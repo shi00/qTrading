@@ -201,14 +201,17 @@ class TestDataSourceTabContract:
         """DoD: 必须使用 ft.use_dialog() 声明式挂载 dialog。"""
         assert "ft.use_dialog" in _code_source(), "必须使用 ft.use_dialog() 声明式挂载 dialog"
 
-    def test_uses_use_effect_for_dual_track(self):
-        """DoD: 必须使用 use_effect 处理双轨字段 (version 依赖)。"""
+    def test_uses_use_effect_for_transient_signals(self):
+        """DoD: 必须使用 use_effect 处理瞬态信号 (snack.seq + cache_cleared_version)。
+
+        L771 合规: health_result/health_error 直接从 state 读取 (渲染时派生),
+        无 dual-track version + use_effect 拉取. 仅 snack (瞬态通知) 和
+        cache_cleared (瞬态信号) 需要 use_effect 触发副作用.
+        """
         source = _code_source()
-        assert "use_effect" in source, "必须使用 use_effect 处理双轨字段"
-        assert "state.snack_version" in source, "必须订阅 snack_version"
-        assert "state.health_result_version" in source, "必须订阅 health_result_version"
-        assert "state.cache_cleared_version" in source, "必须订阅 cache_cleared_version"
-        assert "state.health_error_version" in source, "必须订阅 health_error_version"
+        assert "use_effect" in source, "必须使用 use_effect 处理瞬态信号"
+        assert "state.snack.seq" in source, "必须订阅 state.snack.seq (snack 瞬态通知)"
+        assert "state.cache_cleared_version" in source, "必须订阅 cache_cleared_version (瞬态信号)"
 
     def test_no_page_ref_param(self):
         """DoD: DataSourceTab 签名不应包含 page_ref 参数 (声明式用 ft.context.page)。"""
@@ -376,19 +379,14 @@ class TestBuildHealthSummaryContent:
         """返回 ft.Column 实例。"""
         from ui.views.settings_tabs.data_source_tab import _build_health_summary_content
 
-        result = _build_health_summary_content({"market": {}, "details": {}})
+        result = _build_health_summary_content(HealthResultRow())
         assert isinstance(result, ft.Column)
 
     def test_includes_sys_text_row(self):
         """包含系统状态文本行。"""
         from ui.views.settings_tabs.data_source_tab import _build_health_summary_content
 
-        result = _build_health_summary_content(
-            {
-                "market": {"lag_days": 2},
-                "details": {"financial_coverage": 85.5},
-            }
-        )
+        result = _build_health_summary_content(HealthResultRow(market_lag_days=2, details_financial_coverage=85.5))
         # Column 应包含至少 2 个 Row (sys_text + integrity_items)
         assert len(result.controls) >= 2
 
@@ -397,15 +395,13 @@ class TestBuildHealthSummaryContent:
         from ui.views.settings_tabs.data_source_tab import _build_health_summary_content
 
         result = _build_health_summary_content(
-            {
-                "market": {"lag_days": 0},
-                "details": {
-                    "missing_critical": 3,
-                    "missing_depth": 0,
-                    "missing_breadth": 0,
-                    "financial_coverage": 50.0,
-                },
-            }
+            HealthResultRow(
+                market_lag_days=0,
+                details_missing_critical=3,
+                details_missing_depth=0,
+                details_missing_breadth=0,
+                details_financial_coverage=50.0,
+            )
         )
         # 第二个 Row 是 integrity_items
         integrity_row = result.controls[1]
@@ -433,11 +429,16 @@ from tests.unit.ui.component_renderer import (  # noqa: E402
 )
 
 from ui.viewmodels import Message  # noqa: E402
+from ui.viewmodels.data_source_view_model import HealthResultRow, SnackRow  # noqa: E402
 
 
 @dataclass(frozen=True)
 class _FakeDataSourceState:
-    """模拟 DataSourceState 的最小字段集 (frozen dataclass snapshot)。"""
+    """模拟 DataSourceState 的最小字段集 (frozen dataclass snapshot)。
+
+    L771 合规: health_result/snack/health_error 直接放入 state (frozen dataclass / Message),
+    无 dual-track version + last_* property 间接暴露.
+    """
 
     is_syncing: bool = False
     active_key: str | None = None
@@ -447,43 +448,31 @@ class _FakeDataSourceState:
     init_sync_final_status: TaskStatus | None = None
     progress: float = 0.0
     progress_message: Message | None = None
-    health_result_version: int = 0
-    snack_version: int = 0
+    # L771 合规: 业务数据直接放入 state (frozen dataclass / Message)
+    health_result: HealthResultRow | None = None
+    snack: SnackRow | None = None
+    health_error: Message | None = None
+    # 瞬态信号 (无数据负载, 非 dual-track)
     cache_cleared_version: int = 0
-    health_error_version: int = 0
 
 
 class _FakeDataSourceViewModel:
     """模拟 DataSourceViewModel, 记录所有方法调用。
 
     满足 _ViewModelProtocol 契约 (state/subscribe/dispose) +
-    组件调用的所有 async/sync 方法 + dual-track last_* property。
+    组件调用的所有 async/sync 方法。
+    L771 合规: 无 dual-track last_* property, 业务数据直接从 state 读取。
     """
 
     def __init__(self, state: _FakeDataSourceState | None = None) -> None:
         self._state: _FakeDataSourceState = state or _FakeDataSourceState()
         self._subscribers: list[Any] = []
-        self._last_health_result: dict | None = None
-        self._last_snack: tuple[Message, str] | None = None
-        self._last_health_error: str | None = None
         self.dispose_called: bool = False
         self.method_calls: list[tuple[str, dict]] = []
 
     @property
     def state(self) -> _FakeDataSourceState:
         return self._state
-
-    @property
-    def last_health_result(self) -> dict | None:
-        return self._last_health_result
-
-    @property
-    def last_snack(self) -> tuple[Message, str] | None:
-        return self._last_snack
-
-    @property
-    def last_health_error(self) -> str | None:
-        return self._last_health_error
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -608,8 +597,11 @@ def _mount(component: Any, page: FakePage | None = None) -> tuple[Any, FakePage]
 
 
 def _collect_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树, 返回所有控件。"""
-    if root is None:
+    """深度优先遍历控件树, 返回所有控件。
+
+    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock 下 content 属性返回新 MagicMock)。
+    """
+    if root is None or not isinstance(root, ft.Control):
         return []
     result: list[Any] = [root]
     for attr in ("controls", "items", "tabs"):
@@ -619,7 +611,7 @@ def _collect_controls(root: Any) -> list[Any]:
                 if child is not None:
                     result.extend(_collect_controls(child))
     content = getattr(root, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         result.extend(_collect_controls(content))
     return result
 
@@ -1123,7 +1115,7 @@ class TestDataSourceTabStateBranches:
     def test_metric_sync_placeholder_when_no_health_result(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """last_health_result={} → metric_sync_value="time_today 15:30" (placeholder)。"""
+        """state.health_result=None → metric_sync_value="time_today 15:30" (placeholder)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         _patch_data_source_vms(monkeypatch)
@@ -1359,77 +1351,75 @@ class TestDataSourceTabEventHandlers:
 
 
 # ============================================================================
-# 组件体测试: 双轨 effect (version 变化触发)
+# 组件体测试: state 变化 effect (snack/cache_cleared 瞬态信号)
 # ============================================================================
 
 
-class TestDataSourceTabDualTrackEffects:
-    """DataSourceTab 双轨 effect 测试: version 变化 → last_* 拉取 → 副作用。"""
+class TestDataSourceTabStateEffects:
+    """DataSourceTab state 变化 effect 测试: snack/cache_cleared 瞬态信号触发副作用。
 
-    def test_snack_version_change_triggers_show_snack(
+    L771 合规: health_result/health_error 直接从 state 读取 (渲染时派生),
+    无 dual-track version + use_effect 拉取. 仅 snack (瞬态通知) 和
+    cache_cleared (瞬态信号) 需要 use_effect 触发副作用.
+    """
+
+    def test_snack_state_change_triggers_show_snack(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """snack_version 变化 → vm.last_snack 拉取 → show_snack_callback 调用。"""
+        """state.snack 变化 → use_effect → show_snack_callback 调用。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         snack_cb = MagicMock()
         component = make_component(DataSourceTab, show_snack_callback=snack_cb)
         _mount(component)
-        # 设置 last_snack + 更新 snack_version
-        fake_vm._last_snack = (Message("common_saved"), "success")
-        fake_vm._set_state(snack_version=1)
+        # L771 合规: 直接设置 state.snack (SnackRow), 无 dual-track version + last_* property
+        fake_vm._set_state(snack=SnackRow(message=Message("common_saved"), color_name="success", seq=1))
         run_render_effects(component)
         snack_cb.assert_called_once()
         args = snack_cb.call_args
         assert "common_saved" in args[0][0]
 
-    def test_health_result_version_change_updates_status(
+    def test_health_result_state_renders_ok_status(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """health_result_version 变化 → vm.last_health_result 拉取 → set_health_status_key。"""
+        """state.health_result (status=green) → metric_health_value="ds_health_ok"。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_result = {"status": "green", "market": {}, "details": {}}
-        fake_vm._set_state(health_result_version=1)
-        run_render_effects(component)
-        # 重新渲染后, health_checked=True, health_status_key="ds_health_ok"
+        # L771 合规: 直接设置 state.health_result (HealthResultRow), 渲染时派生
+        fake_vm._set_state(health_result=HealthResultRow(status="green"))
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
-        # metric_health_value = I18n.get("ds_health_ok") = "ds_health_ok"
         assert any(t.value == "ds_health_ok" for t in texts)
 
-    def test_health_result_version_change_red_status(
+    def test_health_result_state_renders_red_status(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """health_result status="red" → health_status_key="ds_health_error"。"""
+        """state.health_result status="red" → health_status_key="ds_health_error"。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_result = {"status": "red", "market": {}, "details": {}}
-        fake_vm._set_state(health_result_version=1)
-        run_render_effects(component)
+        fake_vm._set_state(health_result=HealthResultRow(status="red"))
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
         assert any(t.value == "ds_health_error" for t in texts)
 
-    def test_health_error_version_change_sets_check_fail(
+    def test_health_error_state_renders_check_fail(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """health_error_version 变化 → health_status_key="common_check_fail"。"""
+        """state.health_error 非 None → metric_health_value="common_check_fail"。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_error = "some error"
-        fake_vm._set_state(health_error_version=1)
-        run_render_effects(component)
+        # L771 合规: 直接设置 state.health_error (Message), 渲染时派生
+        fake_vm._set_state(health_error=Message("common_check_fail"))
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
         assert any(t.value == "common_check_fail" for t in texts)
@@ -1713,6 +1703,7 @@ class TestDataSourceTabCoverageBranches:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component, page=page)
         on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        assert on_save is not None
         on_save({"token": "  "})  # 空白 token strip 后为空
         calls = [c[0] for c in fake_vm.method_calls]
         assert "save_tushare_token" not in calls
@@ -1731,6 +1722,7 @@ class TestDataSourceTabCoverageBranches:
         component = make_component(DataSourceTab, show_snack_callback=snack_cb)
         _mount(component, page=page)
         on_save = fake_tushare_vm._init_kwargs.get("on_save")
+        assert on_save is not None
         on_save({"token": "test_token"})
         save_mock.assert_called_once_with("test_token")
         snack_cb.assert_called()
@@ -1883,15 +1875,14 @@ class TestDataSourceTabCoverageBranches:
     def test_health_result_yellow_status(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """health_result status="yellow" → health_status_key="ds_health_lag"。"""
+        """state.health_result status="yellow" → health_status_key="ds_health_lag"。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_result = {"status": "yellow", "market": {}, "details": {}}
-        fake_vm._set_state(health_result_version=1)
-        run_render_effects(component)
+        # L771 合规: 直接设置 state.health_result (HealthResultRow), 渲染时派生
+        fake_vm._set_state(health_result=HealthResultRow(status="yellow"))
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
         assert any(t.value == "ds_health_lag" for t in texts)
@@ -1912,59 +1903,21 @@ class TestDataSourceTabCoverageBranches:
         # health_summary_content = ft.Text(I18n.get("health_checking"))
         assert any(t.value == "health_checking" for t in texts)
 
-    def test_health_checked_no_status_key_renders_checking_text(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """health_checked=True but health_status_key="" → 默认 "ds_status_checking" 分支。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        fake_vm, _ = _patch_data_source_vms(monkeypatch)
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        _mount(component)
-        # 触发 health_result_version 变化但 result=None (health_checked=True but no status_key)
-        # 通过 set_last_health_result 不设, 直接用 effect 触发
-        # 实际上 health_checked=True + health_status_key="" 走 else 分支 (558-563)
-        # 需要手动触发 set_health_checked(True) 但不设 health_status_key
-        # 这通过 effect 无法直接触发, 用 state.health_checking=True 覆盖 534-541 分支
-        # 此测试覆盖 558-563: health_checked=True, no status_key, no health_checking
-        # 需要通过 effect 设置 health_checked=True 但 health_status_key=""
-        # health_result_version 变化 + last_health_result=None → effect early return, 不设置
-        # 所以这个分支需要其他方式触发
-        # 跳过: 无法在不修改生产代码的情况下触发此分支
-        pytest.skip("health_checked=True + no status_key 分支需直接操作内部 state, 无法通过 effect 触发")
-
     def test_health_summary_check_fail_text(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """health_checked=True + health_status_key="common_check_fail" → "ds_health_check_error"。"""
+        """state.health_error 非 None → health_summary="ds_health_check_error"。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_error = "error msg"
-        fake_vm._set_state(health_error_version=1)
-        run_render_effects(component)
+        # L771 合规: 直接设置 state.health_error (Message), 渲染时派生
+        fake_vm._set_state(health_error=Message("common_check_fail"))
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
         # health_summary_content = ft.Text(I18n.get("ds_health_check_error"))
         assert any(t.value == "ds_health_check_error" for t in texts)
-
-    def test_health_summary_cancelled_text(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """health_checked=True + health_status_key="ds_health_cancelled" → "ds_health_cancelled"。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        fake_vm, _ = _patch_data_source_vms(monkeypatch)
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        _mount(component)
-        # 触发 health_result status="cancelled" (但生产代码只映射 yellow/red/green)
-        # 实际上 health_status_key="ds_health_cancelled" 由 TaskManager callback 设置
-        # 此测试用 health_error_version 触发 common_check_fail, 再验证 cancelled 分支
-        # cancelled 分支 (637-638) 需要 health_status_key="ds_health_cancelled"
-        # 这由 vm.handle_task_update 设置, 但 fake_vm 不实现
-        pytest.skip("ds_health_cancelled 分支需 TaskManager callback 设置, fake_vm 不支持")
 
     def test_task_manager_callback_calls_handle_task_update(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1985,22 +1938,17 @@ class TestDataSourceTabCoverageBranches:
         calls = [c[0] for c in fake_vm.method_calls]
         assert "handle_task_update" in calls
 
-    def test_metric_sync_never_when_latest_is_none(
+    def test_metric_sync_never_when_latest_is_empty(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """last_health_result 有 latest_local=None → metric_sync_value="ds_never_sync"。"""
+        """state.health_result market_latest_local="" → metric_sync_value="ds_never_sync"。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_result = {
-            "status": "green",
-            "market": {"latest_local": None},
-            "details": {"financial_coverage": 80.0},
-        }
-        fake_vm._set_state(health_result_version=1)
-        run_render_effects(component)
+        # L771 合规: 直接设置 state.health_result (HealthResultRow), market_latest_local="" (默认)
+        fake_vm._set_state(health_result=HealthResultRow(status="green", details_financial_coverage=80.0))
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
         assert any(t.value == "ds_never_sync" for t in texts)
@@ -2008,19 +1956,20 @@ class TestDataSourceTabCoverageBranches:
     def test_metric_sync_value_from_health_result(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
-        """last_health_result 有 latest_local → metric_sync_value=str(latest_local)。"""
+        """state.health_result 有 market_latest_local → metric_sync_value=str(latest_local)。"""
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         _mount(component)
-        fake_vm._last_health_result = {
-            "status": "green",
-            "market": {"latest_local": "2026-07-12"},
-            "details": {"financial_coverage": 95.5},
-        }
-        fake_vm._set_state(health_result_version=1)
-        run_render_effects(component)
+        # L771 合规: 直接设置 state.health_result (HealthResultRow)
+        fake_vm._set_state(
+            health_result=HealthResultRow(
+                status="green",
+                market_latest_local="2026-07-12",
+                details_financial_coverage=95.5,
+            )
+        )
         result = render_once(component)
         texts = _find_by_type(result, ft.Text)
         assert any("2026-07-12" in (t.value or "") for t in texts)

@@ -1118,6 +1118,8 @@ except Exception as e:
 
 **UI 层错误展示** 使用 `get_error_message(error_info)` 把 `message_key` 翻译为本地化文案。
 
+**优雅降级例外**：当 `severity == "system"` 但当前处于关闭流程、降级路径或基础设施兜底场景时（如窗口 destroy 失败、keyring fallback、日志系统初始化失败），可不 `raise`，但须满足以下条件之一：① 场景明确无法重试或 raise 无意义（如已处于 shutdown 流程）；② 降级路径已提供合理兜底返回值（如策略空结果、AI 计算降级文案）；③ 基础设施层兜底（如 exception_hooks/logger 不适合走 classify）。此类场景应添加注释说明不 raise 的理由。
+
 ## 测试规范
 
 > 宪法依据：CLAUDE.md §3.1 R7（测试状态污染红线）与 §1.5（目标驱动与验证）；实现细则以本节为准。
@@ -1310,6 +1312,8 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
 | ~~P3~~ | ~~**命令式 UI 存量需整改为声明式**~~ **[已收官]** | 原 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型。 | Phase A-H 声明式迁移已收官（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：所有 View/Tab/Component 已重写为 `@ft.component` + `use_viewmodel` 范式；`PageRefMixin`/`v1_compat.py` 兼容垫片已删除；`refresh_dropdown_options` 已在 Phase R.4.1 删除（生产零调用）。 |
 | **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R18 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
+| **P3** | **strategies/ 层 38 处 except Exception 待统一走 classify_error** | T34 P3 登记技术债：strategies/ 层 49 处 except Exception 中，P0 必修 5 处 + P2 优化 7 处已完成，剩余 38 处已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。 | 策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构或累计标记数变化时。 |
+| **P3** | **utils/ 层 40 处 except Exception 待统一走 classify_error** | R3 场景遗漏检视发现：utils/ 层 spec 任务列表外的 40 处 except Exception（config_handler 28 + exception_hooks 3 + logger 3 + singleton_registry 3 + diagnostics 2 + time_utils 1）既未走 classify 也未标记 NOTE(lazy)。其中 exception_hooks/logger 属基础设施兜底（不适合走 classify），config_handler keyring fallback 属合理降级。 | 后续统一改造时走 `classify_error` 或补标 `# NOTE(lazy):` 说明豁免原因。upgrade 触发条件：utils 层异常处理统一改造时。 |
 
 ---
 

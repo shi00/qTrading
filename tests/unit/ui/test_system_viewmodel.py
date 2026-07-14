@@ -3,11 +3,12 @@
 测试覆盖：
 - on_tier_changed 完整链路（set_tier → reload_rate_limiters → clear_capability_cache → probe → _emit_probe_result）
 - _emit_probe_result 三态分类（completed / tier_too_high / all_failed）
-- subscribe + state.probe_result_version 通知（Phase 2 改造：替代 on_probe_completed 回调）
+- subscribe + state.probe_result 通知（L771 合规：probe 结果直接放入 state，无 dual-track）
 - probe_in_progress state transitions（on_tier_changed / run_probe 执行期间 True→False）
 - 无订阅者时 logger.warning 不抛异常（M-5：自动 probe 在 TierApiPanel 未挂载时不静默丢失）
 """
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
@@ -15,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from data.external.tushare_client import TushareClient
-from ui.viewmodels.system_viewmodel import SystemViewModel
+from ui.viewmodels.system_viewmodel import ProbeResultRow, SystemViewModel
 
 pytestmark = pytest.mark.unit
 
@@ -83,7 +84,7 @@ async def test_on_tier_changed_full_chain(monkeypatch):
     """on_tier_changed 完整链路：set_tier → reload_rate_limiters → clear_capability_cache → probe → _emit_probe_result。
 
     probe 返回 3 个 True + 1 个 False（非全失败、非 >50% False），应分类为 completed。
-    state.probe_result_version 应递增；last_probe_result 返回 dict type == "completed"。
+    state.probe_result 应被设置为 ProbeResultRow(type="completed")（L771 合规，无 dual-track）。
     """
     probe_results = {
         "daily": True,
@@ -106,10 +107,15 @@ async def test_on_tier_changed_full_chain(monkeypatch):
     mock_client.clear_capability_cache.assert_called_once()
     # 链路 4：probe_api_capabilities 被调用
     mock_client.probe_api_capabilities.assert_called_once()
-    # 链路 5：state.probe_result_version 递增（至少一次通知）
-    assert any(s.probe_result_version > 0 for s in snapshots)
-    assert vm.last_probe_result is result
-    # 返回值分类为 completed
+    # 链路 5：state.probe_result 被设置（L771 合规，无 dual-track version）
+    assert any(s.probe_result is not None for s in snapshots)
+    assert vm.state.probe_result is not None
+    assert vm.state.probe_result.type == "completed"
+    assert vm.state.probe_result.tier == "points_5000"
+    assert vm.state.probe_result.available == 3
+    assert vm.state.probe_result.unavailable == 1
+    assert vm.state.probe_result.unknown == 0
+    # 返回值仍为 dict（供测试断言）
     assert result["type"] == "completed"
     assert result["tier"] == "points_5000"
     assert result["available"] == 3
@@ -137,8 +143,9 @@ async def test_on_tier_changed_too_high_detection(monkeypatch):
     assert result["tier"] == "points_15000"
     assert result["false_count"] == 3
     assert result["total"] == 4
-    assert any(s.probe_result_version > 0 for s in snapshots)
-    assert vm.last_probe_result is result  # dual-track storage
+    assert any(s.probe_result is not None for s in snapshots)
+    assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
+    assert vm.state.probe_result.type == "tier_too_high"
 
 
 @pytest.mark.asyncio
@@ -159,16 +166,16 @@ async def test_on_tier_changed_all_failed_detection(monkeypatch):
 
     assert result["type"] == "all_failed"
     assert result["tier"] == "points_15000"
-    assert any(s.probe_result_version > 0 for s in snapshots)
-    assert vm.last_probe_result is result  # dual-track storage
+    assert any(s.probe_result is not None for s in snapshots)
+    assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
+    assert vm.state.probe_result.type == "all_failed"
 
 
 @pytest.mark.asyncio
 async def test_viewmodel_no_subscribers_logs_warning(monkeypatch, caplog):
     """无订阅者时 logger.warning 不抛异常（M-5：自动 probe 在 TierApiPanel 未挂载时不静默丢失）。
 
-    Phase 2 改造：原 on_probe_completed is None 检查改为 not self._subscribers，
-    warning 消息改为 "no subscribers, probe result dropped"。
+    L771 合规: probe 结果直接放入 state.probe_result, 无 dual-track _last_probe_result.
     """
     probe_results = {"daily": True, "fina_indicator": True}
     _patch_full_chain(monkeypatch, probe_results=probe_results)
@@ -185,8 +192,10 @@ async def test_viewmodel_no_subscribers_logs_warning(monkeypatch, caplog):
     # 返回值仍为 completed（不应因无订阅者而失败）
     assert result["type"] == "completed"
     assert result["available"] == 2
-    # last_probe_result 仍存储（供 did_mount 拉取）
-    assert vm.last_probe_result is result
+    # state.probe_result 仍存储（L771 合规: 直接放入 state, 供 View 挂载后读取）
+    assert vm.state.probe_result is not None
+    assert vm.state.probe_result.type == "completed"
+    assert vm.state.probe_result.available == 2
 
 
 # ---------------------------------------------------------------------------
@@ -242,8 +251,10 @@ async def test_on_tier_changed_set_tier_exception_notifies_state(monkeypatch):
     assert result["type"] == "set_tier_failed"
     assert result["tier"] == "points_5000"  # 回滚到旧档位
     assert "config file read-only" in result["error"]
-    assert any(s.probe_result_version > 0 for s in snapshots)
-    assert vm.last_probe_result is result  # dual-track storage
+    assert any(s.probe_result is not None for s in snapshots)
+    assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
+    assert vm.state.probe_result.type == "set_tier_failed"
+    assert "config file read-only" in vm.state.probe_result.error
     # 链路应在此中断，未调用 reload/clear/probe
     mock_client.reload_rate_limiters.assert_not_called()
     mock_client.clear_capability_cache.assert_not_called()
@@ -279,8 +290,9 @@ async def test_on_tier_changed_set_tier_returns_false_notifies_state(monkeypatch
 
     assert result["type"] == "set_tier_failed"
     assert result["tier"] == "points_5000"
-    assert any(s.probe_result_version > 0 for s in snapshots)
-    assert vm.last_probe_result is result  # dual-track storage
+    assert any(s.probe_result is not None for s in snapshots)
+    assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
+    assert vm.state.probe_result.type == "set_tier_failed"
     # 链路中断
     mock_client.reload_rate_limiters.assert_not_called()
     mock_client.probe_api_capabilities.assert_not_awaited()
@@ -327,7 +339,7 @@ async def test_on_tier_changed_probe_returns_empty_restores_snapshot(monkeypatch
     assert len(restore_logs) == 1
     # 最终 results 来自恢复后的 get_capability_cache
     assert result["type"] == "completed"
-    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert any(s.probe_result is not None for s in snapshots)
 
 
 @pytest.mark.asyncio
@@ -353,8 +365,12 @@ async def test_run_probe_emits_result_with_current_tier(monkeypatch):
     assert result["tier"] == "points_5000"
     assert result["available"] == 1
     assert result["unavailable"] == 1
-    assert any(s.probe_result_version > 0 for s in snapshots)
-    assert vm.last_probe_result is result  # dual-track storage
+    assert any(s.probe_result is not None for s in snapshots)
+    assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
+    assert vm.state.probe_result.type == "completed"
+    assert vm.state.probe_result.tier == "points_5000"
+    assert vm.state.probe_result.available == 1
+    assert vm.state.probe_result.unavailable == 1
 
 
 @pytest.mark.asyncio
@@ -372,7 +388,7 @@ async def test_emit_probe_result_unknown_count_in_completed_payload(monkeypatch)
     assert result["available"] == 1
     assert result["unavailable"] == 0
     assert result["unknown"] == 2  # 2 个 None
-    assert any(s.probe_result_version > 0 for s in snapshots)
+    assert any(s.probe_result is not None for s in snapshots)
 
 
 # ---------------------------------------------------------------------------
@@ -474,17 +490,16 @@ def test_subscribe_returns_unsubscribe_and_removes_callback():
 
 
 def test_dispose_clears_state_and_subscribers():
-    """dispose 清空 _last_probe_result / _subscribers / _state。"""
+    """dispose 清空 _subscribers / _state（L771 合规：无 _last_probe_result 内部字段）。"""
     vm = SystemViewModel()
     received: list = []
     vm.subscribe(lambda s: received.append(s))
-    vm._set_state(probe_in_progress=True, probe_result_version=5)
+    vm._set_state(probe_in_progress=True, probe_result=ProbeResultRow(type="completed"))
 
     vm.dispose()
 
     assert vm.state.probe_in_progress is False
-    assert vm.state.probe_result_version == 0
-    assert vm.last_probe_result is None
+    assert vm.state.probe_result is None  # L771 合规: state.probe_result 重置为 None
     # dispose 后 _notify 无订阅者，received 不再增长
     vm._set_state(probe_in_progress=True)
     assert len(received) == 1  # dispose 前的 1 次
@@ -506,3 +521,75 @@ def test_unsubscribe_idempotent_when_callback_already_removed():
 
     vm._set_state(probe_in_progress=True)
     assert len(received) == 0  # 无订阅者，不接收任何通知
+
+
+# ---------------------------------------------------------------------------
+# R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_tier_changed_propagates_cancelled_error(monkeypatch):
+    """R2 红线: on_tier_changed 链路中 set_tier 抛 CancelledError 必须传播, 不得被 except Exception 吞没。
+
+    覆盖 system_viewmodel.on_tier_changed 内层 ``except asyncio.CancelledError: raise`` 守卫
+    (set_tier 经 ThreadPoolManager.run_async 调用, 取消传播需穿透 except Exception as exc 块)。
+    """
+    mock_client = MagicMock(spec=TushareClient)
+    mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
+    mock_client.get_capability_cache = MagicMock(return_value={"daily": True})
+    mock_client.clear_capability_cache = MagicMock()
+    mock_client.reload_rate_limiters = MagicMock()
+
+    async def _mock_run_async(task_type, func, *args, **kwargs):
+        # set_tier 抛 CancelledError → 应穿透 except Exception 守卫
+        raise asyncio.CancelledError()
+
+    mock_tp = MagicMock()
+    mock_tp.return_value.run_async = _mock_run_async
+
+    mock_ch = MagicMock()
+    mock_ch.get_tushare_point_tier.return_value = "points_5000"
+
+    monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
+
+    vm = SystemViewModel()
+    _subscribe(vm)
+
+    with pytest.raises(asyncio.CancelledError):
+        await vm.on_tier_changed("points_15000")
+
+    # 链路在 set_tier 处中断, 后续步骤未调用
+    mock_client.reload_rate_limiters.assert_not_called()
+    mock_client.clear_capability_cache.assert_not_called()
+    mock_client.probe_api_capabilities.assert_not_awaited()
+    # finally 仍重置 probe_in_progress (R2 不破坏 state 一致性)
+    assert vm.state.probe_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_run_probe_propagates_cancelled_error(monkeypatch):
+    """R2 红线: run_probe 链路中 probe_api_capabilities 抛 CancelledError 必须传播。
+
+    run_probe 仅 try/finally 无 except Exception, CancelledError 自动穿透 finally 传播。
+    """
+    mock_client = MagicMock(spec=TushareClient)
+    mock_client.probe_api_capabilities = AsyncMock(side_effect=asyncio.CancelledError())
+
+    mock_ch = MagicMock()
+    mock_ch.get_tushare_point_tier.return_value = "points_5000"
+
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
+
+    vm = SystemViewModel()
+    _subscribe(vm)
+
+    with pytest.raises(asyncio.CancelledError):
+        await vm.run_probe()
+
+    mock_client.probe_api_capabilities.assert_awaited_once()
+    # finally 仍重置 probe_in_progress
+    assert vm.state.probe_in_progress is False

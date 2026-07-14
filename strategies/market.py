@@ -6,6 +6,7 @@ import polars as pl
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
+from utils.error_classifier import classify_severity
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,9 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
                 .sort("ratio", descending=True)
             )
         except Exception as e:
-            logger.warning(
+            severity = classify_severity(e)
+            log_level = logger.error if severity == "system" else logger.warning
+            log_level(
                 "[%s] Logic error: %s. Params: %s",
                 self.name,
                 e,
@@ -209,6 +212,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
                     target_flow,
                 )
                 return pd.DataFrame()
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[%s] Gating check failed: %s", self.name, e, exc_info=True)
             return pd.DataFrame()
@@ -272,7 +276,9 @@ class InstitutionalStrategy(PolarsBaseStrategy):
                 .sort("net_amount", descending=True)
             )
         except Exception as e:
-            logger.warning(
+            severity = classify_severity(e)
+            log_level = logger.error if severity == "system" else logger.warning
+            log_level(
                 "[%s] Logic error: %s. Params: %s",
                 self.name,
                 e,
@@ -335,7 +341,9 @@ class BlockTradeStrategy(PolarsBaseStrategy):
                 .sort("amount", descending=True)
             )
         except Exception as e:
-            logger.warning(
+            severity = classify_severity(e)
+            log_level = logger.error if severity == "system" else logger.warning
+            log_level(
                 "[%s] Logic error: %s. Params: %s",
                 self.name,
                 e,

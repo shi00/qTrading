@@ -13,10 +13,11 @@
 - 组件体渲染测试（TierApiPanel @ft.component body）
 """
 
+import asyncio
 import contextlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -36,19 +37,11 @@ from ui.views.settings_tabs.tier_api_panel import (
     _TIER_PANEL_LG_BREAKPOINT,
     _TIER_PANEL_MD_BREAKPOINT,
 )
+from ui.viewmodels.system_viewmodel import ProbeResultRow
 
 pytestmark = pytest.mark.unit
 
 PANEL_PATH = Path(panel_module.__file__)
-
-
-def _make_mock_client():
-    """创建 mock TushareClient，覆盖纯函数所需方法。"""
-    client = MagicMock()
-    client.get_tier_apis.return_value = {"daily", "fina_indicator"}
-    client.is_independent_purchase.return_value = False
-    client.get_last_probe_time.return_value = None
-    return client
 
 
 # ------------------------------------------------------------------
@@ -316,26 +309,26 @@ class TestComputeProgressText:
     def test_result_completed_returns_completed_text(self):
         """result.type=completed → sys_tier_probe_completed。"""
         result = _compute_progress_text(
-            False, (0, 0), {"type": "completed", "available": 10, "unavailable": 2, "unknown": 0}
+            False, (0, 0), ProbeResultRow(type="completed", available=10, unavailable=2, unknown=0)
         )
         self.mock_i18n.get.assert_called_with("sys_tier_probe_completed", available=10, unavailable=2, unknown=0)
         assert result == "sys_tier_probe_completed"
 
     def test_result_tier_too_high_returns_tier_too_high_text(self):
         """result.type=tier_too_high → sys_tier_tier_too_high。"""
-        result = _compute_progress_text(False, (0, 0), {"type": "tier_too_high", "false_count": 5, "total": 10})
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="tier_too_high", false_count=5, total=10))
         self.mock_i18n.get.assert_called_with("sys_tier_tier_too_high", false_count=5, total=10)
         assert result == "sys_tier_tier_too_high"
 
     def test_result_all_failed_returns_all_failed_text(self):
         """result.type=all_failed → sys_tier_probe_all_failed。"""
-        result = _compute_progress_text(False, (0, 0), {"type": "all_failed"})
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="all_failed"))
         self.mock_i18n.get.assert_called_with("sys_tier_probe_all_failed")
         assert result == "sys_tier_probe_all_failed"
 
     def test_result_set_tier_failed_returns_failed_with_message(self):
         """result.type=set_tier_failed → sys_tier_probe_failed + (message)。"""
-        result = _compute_progress_text(False, (0, 0), {"type": "set_tier_failed", "message": "custom error"})
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="set_tier_failed", message="custom error"))
         self.mock_i18n.get.assert_called_with("sys_tier_probe_failed")
         assert result == "sys_tier_probe_failed (custom error)"
 
@@ -345,11 +338,11 @@ class TestComputeProgressText:
 
     def test_unknown_result_type_returns_empty(self):
         """未知 result.type → 空。"""
-        assert _compute_progress_text(False, (0, 0), {"type": "unknown_type"}) == ""
+        assert _compute_progress_text(False, (0, 0), ProbeResultRow(type="unknown_type")) == ""
 
     def test_running_takes_precedence_over_result(self):
         """running 状态优先于 result（probe 进行中不显示旧结果）。"""
-        _compute_progress_text(True, (1, 2), {"type": "completed"})
+        _compute_progress_text(True, (1, 2), ProbeResultRow(type="completed"))
         self.mock_i18n.get.assert_called_with("sys_tier_probe_in_progress_with_count", completed=1, total=2)
 
 
@@ -485,43 +478,53 @@ class TestTierApiPanelContract:
 
 
 class _FakeSystemState:
-    """模拟 SystemState 的最小字段集。"""
+    """模拟 SystemState 的最小字段集 (L771 合规: probe_result 直接放入 state)."""
 
-    def __init__(self, probe_in_progress: bool = False, probe_result_version: int = 0) -> None:
+    def __init__(
+        self,
+        probe_in_progress: bool = False,
+        probe_result: ProbeResultRow | None = None,
+    ) -> None:
         self.probe_in_progress = probe_in_progress
-        self.probe_result_version = probe_result_version
+        self.probe_result = probe_result
 
 
 class _FakeSystemVM:
-    """模拟 SystemViewModel, 满足 use_viewmodel(vm=) 外部 VM 模式契约。"""
+    """模拟 SystemViewModel, 满足 use_viewmodel(vm=) 外部 VM 模式契约。
+
+    L771 合规: 无 dual-track last_probe_result property, probe_result 直接放入 state.
+    """
 
     def __init__(
         self,
         current_tier: str = "points_5000",
         capability_cache: dict | None = None,
-        last_probe_result: dict | None = None,
+        probe_result: ProbeResultRow | None = None,
         probe_in_progress: bool = False,
+        last_probe_time: datetime | None = None,
     ) -> None:
-        self._state = _FakeSystemState(probe_in_progress=probe_in_progress)
+        self._state = _FakeSystemState(
+            probe_in_progress=probe_in_progress,
+            probe_result=probe_result,
+        )
         self._subscribers: list[Any] = []
         self._current_tier = current_tier
         self._capability_cache = capability_cache if capability_cache is not None else {}
-        self._last_probe_result = last_probe_result
+        self._last_probe_time = last_probe_time
         self.dispose_called = False
 
     @property
     def state(self) -> _FakeSystemState:
         return self._state
 
-    @property
-    def last_probe_result(self) -> dict | None:
-        return self._last_probe_result
-
     def get_current_tier(self) -> str:
         return self._current_tier
 
     def get_capability_cache(self) -> dict[str, bool | None]:
         return self._capability_cache
+
+    def get_last_probe_time(self) -> datetime | None:
+        return self._last_probe_time
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -544,8 +547,12 @@ class _FakeSystemVM:
 
 
 def _collect_controls(root: Any) -> list[Any]:
-    """深度优先遍历控件树。"""
-    if root is None:
+    """深度优先遍历控件树。
+
+    跳过 MagicMock / 非 ft.Control 对象 (避免无限递归: mock I18n/AppColors 下
+    content 属性返回新 MagicMock, 无守卫会无限生成子节点致内存暴涨)。
+    """
+    if root is None or not isinstance(root, ft.Control):
         return []
     result: list[Any] = [root]
     for attr in ("controls", "items", "tabs"):
@@ -555,7 +562,7 @@ def _collect_controls(root: Any) -> list[Any]:
                 if child is not None:
                     result.extend(_collect_controls(child))
     content = getattr(root, "content", None)
-    if content is not None:
+    if isinstance(content, ft.Control):
         result.extend(_collect_controls(content))
     return result
 
@@ -578,6 +585,17 @@ def _make_mock_client() -> MagicMock:
     client.get_last_probe_time.return_value = None
     client.get_capability_cache.return_value = {}
     return client
+
+
+def _trigger_callback(cb, event):
+    """Safely trigger Flet optional callback in tests.
+
+    Flet stubs declare callbacks (on_click/on_change/on_horizontal_drag_*/etc.)
+    as Optional[Callable[[], None]], but runtime passes a ControlEvent.
+    Centralize type narrowing + type: ignore here.
+    """
+    assert cb is not None
+    cb(event)  # type: ignore[reportCallIssue, reason: Flet stub declares callbacks as 0-arg, but runtime passes event]
 
 
 class TestTierApiPanelComponentBody:
@@ -702,7 +720,7 @@ class TestTierApiPanelComponentBody:
         # 模拟档位变更事件
         e = MagicMock()
         e.control.value = "points_120"
-        dropdown.on_select(e)
+        _trigger_callback(dropdown.on_select, e)
         assert len(run_task_calls) > 0, "应触发 page.run_task"
 
     def test_on_tier_change_same_tier_does_nothing(self, mock_i18n_state, mock_app_colors_state):
@@ -725,7 +743,7 @@ class TestTierApiPanelComponentBody:
         dropdown = next(c for c in ctrls if isinstance(c, ft.Dropdown))
         e = MagicMock()
         e.control.value = "points_5000"  # 同档位
-        dropdown.on_select(e)
+        _trigger_callback(dropdown.on_select, e)
         assert len(run_task_calls) == 0, "相同档位不应触发 run_task"
 
     def test_on_probe_click_triggers_run_task(self, mock_i18n_state, mock_app_colors_state):
@@ -746,16 +764,15 @@ class TestTierApiPanelComponentBody:
 
         ctrls = _collect_controls(result)
         button = next(c for c in ctrls if isinstance(c, ft.Button))
-        button.on_click(MagicMock())
+        _trigger_callback(button.on_click, MagicMock())
         assert len(run_task_calls) > 0, "应触发 page.run_task"
 
     def test_last_probe_time_displayed(self, mock_i18n_state, mock_app_colors_state):
-        """渲染时显示 last_probe_time 文本。"""
+        """渲染时通过 vm.get_last_probe_time() 显示 last_probe_time 文本 (MVVM 边界)。"""
         from ui.views.settings_tabs.tier_api_panel import TierApiPanel
 
-        vm = _FakeSystemVM()
+        vm = _FakeSystemVM(last_probe_time=datetime(2024, 6, 15, 10, 30))
         client = _make_mock_client()
-        client.get_last_probe_time.return_value = datetime(2024, 6, 15, 10, 30)
         page = self._make_page()
         with contextlib.ExitStack() as stack:
             for p in _make_tier_panel_patches(client):
@@ -764,7 +781,8 @@ class TestTierApiPanelComponentBody:
             run_mount_effects(component, page=page)
             render_once(component)
 
-        client.get_last_probe_time.assert_called_once()
+        # View 通过 vm.get_last_probe_time() 获取, 不再直接访问 TushareClient (MVVM 边界)
+        client.get_last_probe_time.assert_not_called()
 
     def test_probe_in_progress_shows_progress_text(self, mock_i18n_state, mock_app_colors_state):
         """probe_in_progress=True 且有进度时显示进度文本。"""
@@ -803,3 +821,113 @@ class TestTierApiPanelComponentBody:
         e = MagicMock()
         e.width = 1000
         page.on_resize(e)  # 不应抛异常
+
+
+# ============================================================================
+# R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)
+# ============================================================================
+
+
+class TestTierApiPanelR2CancelledErrorPropagation:
+    """R2 红线: tier_api_panel async handler 必须传播 CancelledError, 不被 except Exception 吞没。
+
+    覆盖 _run_tier_change / _run_probe 内的 ``except asyncio.CancelledError: raise`` 守卫
+    (CLAUDE.md §3 R2 + tier_api_panel.py L317-318 / L338-339)。
+
+    测试模式: 让 vm.on_tier_changed / vm.run_probe 抛 CancelledError,
+    page.run_task 同步执行 coroutine, 验证 CancelledError 从 on_select/on_click 传播。
+    """
+
+    def _make_page_with_sync_run_task(self):
+        """创建 FakePage, 其 run_task 同步执行 coroutine 并捕获 CancelledError 到 state.
+
+        返回 (page, state) 二元组; state["cancelled"] 标记 CancelledError 是否从 coroutine 传播.
+        不让 CancelledError 逃逸到 pytest, 避免 pytest traceback formatting 阶段
+        _truncate_recursive_traceback 触发 pathlib/os.stat 无限递归 (pre-existing pytest issue).
+        """
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        page.on_resize = None  # type: ignore[method-assign]
+        state: dict[str, bool] = {"cancelled": False}
+
+        def _sync_run_task(fn, *args, **kwargs):
+            result = fn(*args, **kwargs)
+            if asyncio.iscoroutine(result):
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(result)
+                except asyncio.CancelledError:
+                    # R2 守卫验证: CancelledError 应从 _run_tier_change/_run_probe 传播到此
+                    state["cancelled"] = True
+                finally:
+                    loop.close()
+
+        # NOTE(lazy): 直接赋值普通函数, 不用 MagicMock(side_effect=...), 避免 CancelledError
+        # 传播时 MagicMock 在 pytest traceback formatting 阶段触发 _truncate_recursive_traceback
+        # 无限递归 (recursionindex → mock __call__ → _increment_mock_call 循环).
+        # ceiling: 仅影响 R2 测试 page.run_task 注入. upgrade: 升级 pytest 或迁移到非 MagicMock fixture.
+        page.run_task = _sync_run_task  # type: ignore[method-assign]
+        return page, state
+
+    def test_run_tier_change_propagates_cancelled_error(self, mock_i18n_state, mock_app_colors_state):
+        """_run_tier_change: vm.on_tier_changed 抛 CancelledError → 传播 (R2 红线)。"""
+        from types import SimpleNamespace
+
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM(current_tier="points_5000")
+
+        async def _raising_on_tier_changed(new_tier, progress_callback=None):
+            raise asyncio.CancelledError()
+
+        vm.on_tier_changed = _raising_on_tier_changed  # type: ignore[method-assign]
+
+        client = _make_mock_client()
+        page, state = self._make_page_with_sync_run_task()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # NOTE(lazy): 不用 _collect_controls (递归 MagicMock 触发 RecursionError pre-existing),
+        # 直接从 result.controls[2].controls 取 Dropdown/Button (tier_api_panel 固定布局).
+        # ceiling: tier_api_panel 布局结构变更时需同步. upgrade: 修复 _collect_controls MagicMock 递归.
+        # 使用 SimpleNamespace 替代 MagicMock 作为 event 对象, 避免 traceback formatting 递归.
+        row = result.controls[2]
+        dropdown = next(c for c in row.controls if isinstance(c, ft.Dropdown))
+        e = SimpleNamespace(control=SimpleNamespace(value="points_120"))
+        cast(Any, dropdown.on_select)(e)
+        # R2 红线: CancelledError 应从 _run_tier_change 传播到 _sync_run_task
+        assert state["cancelled"] is True, "CancelledError 必须从 _run_tier_change 传播 (R2 红线)"
+
+    def test_run_probe_propagates_cancelled_error(self, mock_i18n_state, mock_app_colors_state):
+        """_run_probe: vm.run_probe 抛 CancelledError → 传播 (R2 红线)。"""
+        from types import SimpleNamespace
+
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+
+        async def _raising_run_probe(progress_callback=None):
+            raise asyncio.CancelledError()
+
+        vm.run_probe = _raising_run_probe  # type: ignore[method-assign]
+
+        client = _make_mock_client()
+        page, state = self._make_page_with_sync_run_task()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 不用 _collect_controls (同上 NOTE), 直接从 result.controls[2].controls 取 Button
+        row = result.controls[2]
+        button = next(c for c in row.controls if isinstance(c, ft.Button))
+        cast(Any, button.on_click)(SimpleNamespace())
+        # R2 红线: CancelledError 应从 _run_probe 传播到 _sync_run_task
+        assert state["cancelled"] is True, "CancelledError 必须从 _run_probe 传播 (R2 红线)"

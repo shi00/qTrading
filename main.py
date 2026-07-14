@@ -7,10 +7,12 @@ import flet as ft
 
 from ui.i18n import I18n, get_observable_state
 from utils.config_handler import ConfigHandler
+from utils.error_classifier import classify_error, classify_severity
 from utils.exception_hooks import install_asyncio_handler_for_loop, install_global_exception_hooks
 from utils.log_decorators import UILogger
 from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
+from utils.sanitizers import DataSanitizer
 from data.cache.cache_manager import CacheManager
 from ui.components.toast_manager import ToastManager
 from ui.theme import apply_page_theme
@@ -103,7 +105,20 @@ async def main(page: ft.Page):
                     page.window.prevent_close = False
                     await page.window.destroy()
             except Exception as e:
-                logger.debug("Window destroy ignored: %s", e)
+                error_info = classify_error(e, context="general")
+                severity = classify_severity(e, context="general")
+                if severity == "system":
+                    _log = logger.critical
+                elif severity == "recoverable":
+                    _log = logger.warning
+                else:
+                    _log = logger.error
+                _log(
+                    "[Main] Window destroy failed (%s): %s",
+                    error_info["code"],
+                    DataSanitizer.sanitize_error(e),
+                    exc_info=True,
+                )
 
             if cleanup_ok:
                 coordinator.cancel_watchdog()
@@ -237,8 +252,21 @@ async def main(page: ft.Page):
             page.window.height = 800
         try:
             await page.window.center()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Main] Window center failed (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
 
     page.padding = 0
     apply_page_theme(page)
@@ -261,8 +289,21 @@ async def main(page: ft.Page):
             if not _is_web_mode():
                 page.window.prevent_close = False
                 await page.window.destroy()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:
+            error_info = classify_error(e, context="general")
+            severity = classify_severity(e, context="general")
+            if severity == "system":
+                _log = logger.critical
+            elif severity == "recoverable":
+                _log = logger.warning
+            else:
+                _log = logger.error
+            _log(
+                "[Main] Window destroy failed during upgrade exit (%s): %s",
+                error_info["code"],
+                DataSanitizer.sanitize_error(e),
+                exc_info=True,
+            )
         coordinator._force_exit(1)
 
     def _on_show_toast(message_key, toast_type="info"):
