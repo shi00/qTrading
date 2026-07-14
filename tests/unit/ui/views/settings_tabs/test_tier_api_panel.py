@@ -36,6 +36,7 @@ from ui.views.settings_tabs.tier_api_panel import (
     _TIER_PANEL_LG_BREAKPOINT,
     _TIER_PANEL_MD_BREAKPOINT,
 )
+from ui.viewmodels.system_viewmodel import ProbeResultRow
 
 pytestmark = pytest.mark.unit
 
@@ -316,26 +317,26 @@ class TestComputeProgressText:
     def test_result_completed_returns_completed_text(self):
         """result.type=completed → sys_tier_probe_completed。"""
         result = _compute_progress_text(
-            False, (0, 0), {"type": "completed", "available": 10, "unavailable": 2, "unknown": 0}
+            False, (0, 0), ProbeResultRow(type="completed", available=10, unavailable=2, unknown=0)
         )
         self.mock_i18n.get.assert_called_with("sys_tier_probe_completed", available=10, unavailable=2, unknown=0)
         assert result == "sys_tier_probe_completed"
 
     def test_result_tier_too_high_returns_tier_too_high_text(self):
         """result.type=tier_too_high → sys_tier_tier_too_high。"""
-        result = _compute_progress_text(False, (0, 0), {"type": "tier_too_high", "false_count": 5, "total": 10})
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="tier_too_high", false_count=5, total=10))
         self.mock_i18n.get.assert_called_with("sys_tier_tier_too_high", false_count=5, total=10)
         assert result == "sys_tier_tier_too_high"
 
     def test_result_all_failed_returns_all_failed_text(self):
         """result.type=all_failed → sys_tier_probe_all_failed。"""
-        result = _compute_progress_text(False, (0, 0), {"type": "all_failed"})
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="all_failed"))
         self.mock_i18n.get.assert_called_with("sys_tier_probe_all_failed")
         assert result == "sys_tier_probe_all_failed"
 
     def test_result_set_tier_failed_returns_failed_with_message(self):
         """result.type=set_tier_failed → sys_tier_probe_failed + (message)。"""
-        result = _compute_progress_text(False, (0, 0), {"type": "set_tier_failed", "message": "custom error"})
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="set_tier_failed", message="custom error"))
         self.mock_i18n.get.assert_called_with("sys_tier_probe_failed")
         assert result == "sys_tier_probe_failed (custom error)"
 
@@ -345,11 +346,11 @@ class TestComputeProgressText:
 
     def test_unknown_result_type_returns_empty(self):
         """未知 result.type → 空。"""
-        assert _compute_progress_text(False, (0, 0), {"type": "unknown_type"}) == ""
+        assert _compute_progress_text(False, (0, 0), ProbeResultRow(type="unknown_type")) == ""
 
     def test_running_takes_precedence_over_result(self):
         """running 状态优先于 result（probe 进行中不显示旧结果）。"""
-        _compute_progress_text(True, (1, 2), {"type": "completed"})
+        _compute_progress_text(True, (1, 2), ProbeResultRow(type="completed"))
         self.mock_i18n.get.assert_called_with("sys_tier_probe_in_progress_with_count", completed=1, total=2)
 
 
@@ -485,37 +486,42 @@ class TestTierApiPanelContract:
 
 
 class _FakeSystemState:
-    """模拟 SystemState 的最小字段集。"""
+    """模拟 SystemState 的最小字段集 (L771 合规: probe_result 直接放入 state)."""
 
-    def __init__(self, probe_in_progress: bool = False, probe_result_version: int = 0) -> None:
+    def __init__(
+        self,
+        probe_in_progress: bool = False,
+        probe_result: ProbeResultRow | None = None,
+    ) -> None:
         self.probe_in_progress = probe_in_progress
-        self.probe_result_version = probe_result_version
+        self.probe_result = probe_result
 
 
 class _FakeSystemVM:
-    """模拟 SystemViewModel, 满足 use_viewmodel(vm=) 外部 VM 模式契约。"""
+    """模拟 SystemViewModel, 满足 use_viewmodel(vm=) 外部 VM 模式契约。
+
+    L771 合规: 无 dual-track last_probe_result property, probe_result 直接放入 state.
+    """
 
     def __init__(
         self,
         current_tier: str = "points_5000",
         capability_cache: dict | None = None,
-        last_probe_result: dict | None = None,
+        probe_result: ProbeResultRow | None = None,
         probe_in_progress: bool = False,
     ) -> None:
-        self._state = _FakeSystemState(probe_in_progress=probe_in_progress)
+        self._state = _FakeSystemState(
+            probe_in_progress=probe_in_progress,
+            probe_result=probe_result,
+        )
         self._subscribers: list[Any] = []
         self._current_tier = current_tier
         self._capability_cache = capability_cache if capability_cache is not None else {}
-        self._last_probe_result = last_probe_result
         self.dispose_called = False
 
     @property
     def state(self) -> _FakeSystemState:
         return self._state
-
-    @property
-    def last_probe_result(self) -> dict | None:
-        return self._last_probe_result
 
     def get_current_tier(self) -> str:
         return self._current_tier

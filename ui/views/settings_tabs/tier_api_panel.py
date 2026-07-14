@@ -8,7 +8,7 @@
 - VM 由消费方实例化（system_tab 创建 SystemViewModel 并注入）
 - View 通过 ``use_viewmodel(vm=system_vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
 - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-- probe 三态（idle/running/result）由 VM state + last_probe_result 驱动渲染
+- probe 三态（idle/running/result）由 VM state.probe_result 驱动渲染 (L771 合规, 无 dual-track)
 - 响应式断点用 ``use_state`` + ``page.on_resize``（use_effect 挂载，链式保留 prev）
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
 - 实例方法 → 模块级纯函数；stale_hint_text 移除（原 _stale_apis 从未赋值，死代码，YAGNI）
@@ -22,7 +22,7 @@ import flet as ft
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
-from ui.viewmodels.system_viewmodel import SystemViewModel
+from ui.viewmodels.system_viewmodel import ProbeResultRow, SystemViewModel
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +161,7 @@ def _format_last_probe_text(last_probe_time: datetime | None) -> str:
 def _compute_progress_text(
     probe_in_progress: bool,
     progress: tuple[int, int],
-    result: dict | None,
+    result: ProbeResultRow | None,
 ) -> str:
     """根据 probe 三态计算进度文本。
 
@@ -182,24 +182,24 @@ def _compute_progress_text(
             )
         return I18n.get("sys_tier_probe_in_progress")
     if result is not None:
-        rtype = result.get("type")
+        rtype = result.type
         if rtype == "completed":
             return I18n.get(
                 "sys_tier_probe_completed",
-                available=result.get("available", 0),
-                unavailable=result.get("unavailable", 0),
-                unknown=result.get("unknown", 0),
+                available=result.available,
+                unavailable=result.unavailable,
+                unknown=result.unknown,
             )
         if rtype == "tier_too_high":
             return I18n.get(
                 "sys_tier_tier_too_high",
-                false_count=result.get("false_count", 0),
-                total=result.get("total", 0),
+                false_count=result.false_count,
+                total=result.total,
             )
         if rtype == "all_failed":
             return I18n.get("sys_tier_probe_all_failed")
         if rtype == "set_tier_failed":
-            return I18n.get("sys_tier_probe_failed") + " (" + result.get("message", "") + ")"
+            return I18n.get("sys_tier_probe_failed") + " (" + result.message + ")"
     return ""
 
 
@@ -230,7 +230,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     - VM 由消费方实例化（system_tab 创建 SystemViewModel 并注入）
     - View 通过 ``use_viewmodel(vm=system_vm)`` hook 订阅 ``vm.state`` 变化触发重渲染（外部 VM 模式）
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-    - probe 三态（idle/running/result）由 VM state + last_probe_result 驱动渲染
+    - probe 三态（idle/running/result）由 VM state.probe_result 驱动渲染 (L771 合规, 无 dual-track)
     - 响应式断点用 ``use_state`` + ``page.on_resize``（use_effect 挂载，链式保留 prev）
     - 无 page ref / 生命周期回调 / 手动刷新
 
@@ -295,9 +295,9 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
 
     ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
 
-    # --- 从 VM 拉取数据 ---
+    # --- 从 state 读取业务数据 (L771 合规, 无 dual-track property 拉取) ---
     probe_status = vm.get_capability_cache()
-    result = vm.last_probe_result
+    result = state.probe_result
 
     from data.external.tushare_client import TushareClient
 

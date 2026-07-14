@@ -4,9 +4,9 @@
 其他 SystemTab 业务（语言/主题/线程池/DB 池等）暂保留在 SystemTab 中，后续 Phase
 再逐步迁移。**不使用 @register_singleton**（半迁移阶段由 SystemTab 单一实例化持有）。
 
-Phase 2 改造: frozen dataclass state snapshot + subscribe/_notify。
-probe 结果采用双轨制(§3.0.4): 内部持有 _last_probe_result + state.probe_result_version
-通知 View 拉取,避免大体积 dict 放入 frozen state。
+L771 合规: state 字段全部用 frozen dataclass, VM 内部不持有 dict 作为业务状态
+(移除 dual-track: _last_probe_result dict + probe_result_version + last_probe_result property).
+probe 结果直接放入 state.probe_result (ProbeResultRow frozen dataclass).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
 from utils.config_handler import ConfigHandler
 
@@ -21,12 +22,37 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class ProbeResultRow:
+    """probe 结果行数据 frozen dataclass (L771 合规).
+
+    替代 dual-track 的 dict 持有模式, 扁平化原 result dict 直接放入 state.
+    不同 type 用不同子集字段 (completed: available/unavailable/unknown;
+    tier_too_high: false_count/total; all_failed: 仅 type/tier;
+    set_tier_failed: message/error).
+    """
+
+    type: str
+    tier: str = ""
+    available: int = 0
+    unavailable: int = 0
+    unknown: int = 0
+    false_count: int = 0
+    total: int = 0
+    message: str = ""
+    error: str = ""
+
+
+@dataclass(frozen=True)
 class SystemState:
-    """SystemViewModel 的不可变状态快照。View 通过 subscribe 接收。"""
+    """SystemViewModel 的不可变状态快照。View 通过 subscribe 接收。
+
+    L771 合规: 业务数据直接放入 state (frozen dataclass),
+    无 dual-track version + property 间接暴露模式.
+    """
 
     probe_in_progress: bool = False
-    # Incremented when probe result changes; View pulls vm.last_probe_result on change (dual-track, §3.0.4)
-    probe_result_version: int = 0
+    # probe 结果直接放入 state (ProbeResultRow frozen dataclass, L771 合规)
+    probe_result: ProbeResultRow | None = None
 
 
 class SystemViewModel:
@@ -38,19 +64,17 @@ class SystemViewModel:
           （set_tier → reload_rate_limiters → clear_capability_cache → probe → _emit_probe_result）
         - ``run_probe(progress_callback) -> dict``：执行 probe
         - ``_emit_probe_result(tier, results) -> dict``：分类 probe 结果并通过 state 通知 View
-        - ``get_capability_cache() -> dict``：返回 capability cache 副本
+        - ``get_capability_cache() -> dict``：返回 capability cache 副本（pass-through 到 TushareClient）
 
-    Phase 2 改造: on_probe_completed 回调移除,改用 state + subscribe/_notify。
-    View 通过 ``subscribe(callback)`` 订阅 state 变化,当 ``probe_result_version`` 递增时
-    拉取 ``last_probe_result`` property 获取结果 dict。
+    L771 合规: probe 结果直接放入 state.probe_result (ProbeResultRow frozen dataclass),
+    View 通过 ``subscribe(callback)`` 订阅 state 变化, 直接从 state.probe_result 读取.
+    无 dual-track version + property 间接暴露模式.
     """
 
     def __init__(self) -> None:
         # --- State snapshot + subscribers ---
         self._state: SystemState = SystemState()
         self._subscribers: list[Callable[[SystemState], None]] = []
-        # --- Internal probe result (dual-track, §3.0.4) ---
-        self._last_probe_result: dict | None = None
 
     # ------------------------------------------------------------------
     # State / subscribe / notify
@@ -59,11 +83,6 @@ class SystemViewModel:
     @property
     def state(self) -> SystemState:
         return self._state
-
-    @property
-    def last_probe_result(self) -> dict | None:
-        """最近一次 probe 结果 dict（dual-track,View 在 probe_result_version 变化时拉取）。"""
-        return self._last_probe_result
 
     def subscribe(self, callback: Callable[[SystemState], None]) -> Callable[[], None]:
         self._subscribers.append(callback)
@@ -85,7 +104,6 @@ class SystemViewModel:
 
     def dispose(self):
         """清理资源。"""
-        self._last_probe_result = None
         self._subscribers.clear()
         self._state = SystemState()
 
@@ -111,7 +129,7 @@ class SystemViewModel:
         2. ``TushareClient().reload_rate_limiters()``  # 重建 limiter
         3. ``TushareClient().clear_capability_cache()``  # 清除旧 probe 结果
         4. ``await TushareClient().probe_api_capabilities()``  # 重新 probe（按新档位预筛）
-        5. UI 提示通过 state + subscribe 通知 View (dual-track: probe_result_version)
+        5. UI 提示通过 state + subscribe 通知 View (state.probe_result: ProbeResultRow)
 
         v1.9.0 M-1/M-3 修订：
         - M-1：clear 之前拍快照，probe 返回空 dict 或失败时恢复快照
@@ -119,7 +137,7 @@ class SystemViewModel:
         - M-3：probe 失败时 ``probe_api_capabilities`` 内部已回退入口快照，无需额外处理。
 
         Returns:
-            probe 结果 dict（供测试断言）；正常路径下通过 state 推送给 View。
+            probe 结果 dict（供测试断言）；正常路径下通过 state.probe_result 推送给 View。
         """
         from data.external.tushare_client import TushareClient
         from utils.thread_pool import TaskType, ThreadPoolManager
@@ -205,16 +223,15 @@ class SystemViewModel:
             self._set_state(probe_in_progress=False)
 
     def _emit_result(self, result: dict) -> dict:
-        """存储 probe 结果并通过 state 通知 View (dual-track, §3.0.4)。
+        """存储 probe 结果并通过 state 通知 View (L771 合规, 无 dual-track).
 
         v1.9.0 M-5 修订：无订阅者时 logger.warning（避免自动 probe 在
         TierApiPanel 未挂载时静默丢失），由 TierApiPanel 挂载时主动拉取最新缓存刷新。
 
         Returns:
-            result dict（供测试断言）；正常路径下通过 state.probe_result_version 推送给 View。
+            result dict（供测试断言）；正常路径下通过 state.probe_result 推送给 View。
         """
-        self._last_probe_result = result
-        self._set_state(probe_result_version=self._state.probe_result_version + 1)
+        self._set_state(probe_result=_result_dict_to_row(result))
         if not self._subscribers:
             # v1.9.0 M-5：自动 probe 在 TierApiPanel 未挂载时无订阅者，
             # 静默丢失会让用户错过 probe 结果。改为 warning 提示，由 TierApiPanel 挂载时主动拉取刷新。
@@ -258,3 +275,27 @@ class SystemViewModel:
             }
 
         return self._emit_result(result)
+
+
+# ============================================================
+# 纯转换函数 (dict → frozen dataclass, 模块级, 无副作用)
+# ============================================================
+
+
+def _result_dict_to_row(result: dict[str, Any]) -> ProbeResultRow:
+    """result dict → ProbeResultRow (L771 合规, 扁平化 dict 结构).
+
+    替代 dual-track 的 _last_probe_result dict 持有模式, 直接放入 state.
+    不同 type 用不同子集字段, 缺失字段用默认值 (0 / "").
+    """
+    return ProbeResultRow(
+        type=str(result.get("type", "")),
+        tier=str(result.get("tier", "")),
+        available=int(result.get("available", 0)),
+        unavailable=int(result.get("unavailable", 0)),
+        unknown=int(result.get("unknown", 0)),
+        false_count=int(result.get("false_count", 0)),
+        total=int(result.get("total", 0)),
+        message=str(result.get("message", "")),
+        error=str(result.get("error", "")),
+    )
