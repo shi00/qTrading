@@ -13,10 +13,11 @@
 - 组件体渲染测试（TierApiPanel @ft.component body）
 """
 
+import asyncio
 import contextlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import flet as ft
@@ -509,6 +510,7 @@ class _FakeSystemVM:
         capability_cache: dict | None = None,
         probe_result: ProbeResultRow | None = None,
         probe_in_progress: bool = False,
+        last_probe_time: datetime | None = None,
     ) -> None:
         self._state = _FakeSystemState(
             probe_in_progress=probe_in_progress,
@@ -517,6 +519,7 @@ class _FakeSystemVM:
         self._subscribers: list[Any] = []
         self._current_tier = current_tier
         self._capability_cache = capability_cache if capability_cache is not None else {}
+        self._last_probe_time = last_probe_time
         self.dispose_called = False
 
     @property
@@ -528,6 +531,9 @@ class _FakeSystemVM:
 
     def get_capability_cache(self) -> dict[str, bool | None]:
         return self._capability_cache
+
+    def get_last_probe_time(self) -> datetime | None:
+        return self._last_probe_time
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -756,12 +762,11 @@ class TestTierApiPanelComponentBody:
         assert len(run_task_calls) > 0, "应触发 page.run_task"
 
     def test_last_probe_time_displayed(self, mock_i18n_state, mock_app_colors_state):
-        """渲染时显示 last_probe_time 文本。"""
+        """渲染时通过 vm.get_last_probe_time() 显示 last_probe_time 文本 (MVVM 边界)。"""
         from ui.views.settings_tabs.tier_api_panel import TierApiPanel
 
-        vm = _FakeSystemVM()
+        vm = _FakeSystemVM(last_probe_time=datetime(2024, 6, 15, 10, 30))
         client = _make_mock_client()
-        client.get_last_probe_time.return_value = datetime(2024, 6, 15, 10, 30)
         page = self._make_page()
         with contextlib.ExitStack() as stack:
             for p in _make_tier_panel_patches(client):
@@ -770,7 +775,8 @@ class TestTierApiPanelComponentBody:
             run_mount_effects(component, page=page)
             render_once(component)
 
-        client.get_last_probe_time.assert_called_once()
+        # View 通过 vm.get_last_probe_time() 获取, 不再直接访问 TushareClient (MVVM 边界)
+        client.get_last_probe_time.assert_not_called()
 
     def test_probe_in_progress_shows_progress_text(self, mock_i18n_state, mock_app_colors_state):
         """probe_in_progress=True 且有进度时显示进度文本。"""
@@ -809,3 +815,113 @@ class TestTierApiPanelComponentBody:
         e = MagicMock()
         e.width = 1000
         page.on_resize(e)  # 不应抛异常
+
+
+# ============================================================================
+# R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)
+# ============================================================================
+
+
+class TestTierApiPanelR2CancelledErrorPropagation:
+    """R2 红线: tier_api_panel async handler 必须传播 CancelledError, 不被 except Exception 吞没。
+
+    覆盖 _run_tier_change / _run_probe 内的 ``except asyncio.CancelledError: raise`` 守卫
+    (CLAUDE.md §3 R2 + tier_api_panel.py L317-318 / L338-339)。
+
+    测试模式: 让 vm.on_tier_changed / vm.run_probe 抛 CancelledError,
+    page.run_task 同步执行 coroutine, 验证 CancelledError 从 on_select/on_click 传播。
+    """
+
+    def _make_page_with_sync_run_task(self):
+        """创建 FakePage, 其 run_task 同步执行 coroutine 并捕获 CancelledError 到 state.
+
+        返回 (page, state) 二元组; state["cancelled"] 标记 CancelledError 是否从 coroutine 传播.
+        不让 CancelledError 逃逸到 pytest, 避免 pytest traceback formatting 阶段
+        _truncate_recursive_traceback 触发 pathlib/os.stat 无限递归 (pre-existing pytest issue).
+        """
+        from tests.unit.ui.component_renderer import FakePage
+
+        page = FakePage()
+        page.on_resize = None  # type: ignore[method-assign]
+        state: dict[str, bool] = {"cancelled": False}
+
+        def _sync_run_task(fn, *args, **kwargs):
+            result = fn(*args, **kwargs)
+            if asyncio.iscoroutine(result):
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(result)
+                except asyncio.CancelledError:
+                    # R2 守卫验证: CancelledError 应从 _run_tier_change/_run_probe 传播到此
+                    state["cancelled"] = True
+                finally:
+                    loop.close()
+
+        # NOTE(lazy): 直接赋值普通函数, 不用 MagicMock(side_effect=...), 避免 CancelledError
+        # 传播时 MagicMock 在 pytest traceback formatting 阶段触发 _truncate_recursive_traceback
+        # 无限递归 (recursionindex → mock __call__ → _increment_mock_call 循环).
+        # ceiling: 仅影响 R2 测试 page.run_task 注入. upgrade: 升级 pytest 或迁移到非 MagicMock fixture.
+        page.run_task = _sync_run_task  # type: ignore[method-assign]
+        return page, state
+
+    def test_run_tier_change_propagates_cancelled_error(self, mock_i18n_state, mock_app_colors_state):
+        """_run_tier_change: vm.on_tier_changed 抛 CancelledError → 传播 (R2 红线)。"""
+        from types import SimpleNamespace
+
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM(current_tier="points_5000")
+
+        async def _raising_on_tier_changed(new_tier, progress_callback=None):
+            raise asyncio.CancelledError()
+
+        vm.on_tier_changed = _raising_on_tier_changed  # type: ignore[method-assign]
+
+        client = _make_mock_client()
+        page, state = self._make_page_with_sync_run_task()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # NOTE(lazy): 不用 _collect_controls (递归 MagicMock 触发 RecursionError pre-existing),
+        # 直接从 result.controls[2].controls 取 Dropdown/Button (tier_api_panel 固定布局).
+        # ceiling: tier_api_panel 布局结构变更时需同步. upgrade: 修复 _collect_controls MagicMock 递归.
+        # 使用 SimpleNamespace 替代 MagicMock 作为 event 对象, 避免 traceback formatting 递归.
+        row = result.controls[2]
+        dropdown = next(c for c in row.controls if isinstance(c, ft.Dropdown))
+        e = SimpleNamespace(control=SimpleNamespace(value="points_120"))
+        cast(Any, dropdown.on_select)(e)
+        # R2 红线: CancelledError 应从 _run_tier_change 传播到 _sync_run_task
+        assert state["cancelled"] is True, "CancelledError 必须从 _run_tier_change 传播 (R2 红线)"
+
+    def test_run_probe_propagates_cancelled_error(self, mock_i18n_state, mock_app_colors_state):
+        """_run_probe: vm.run_probe 抛 CancelledError → 传播 (R2 红线)。"""
+        from types import SimpleNamespace
+
+        from ui.views.settings_tabs.tier_api_panel import TierApiPanel
+
+        vm = _FakeSystemVM()
+
+        async def _raising_run_probe(progress_callback=None):
+            raise asyncio.CancelledError()
+
+        vm.run_probe = _raising_run_probe  # type: ignore[method-assign]
+
+        client = _make_mock_client()
+        page, state = self._make_page_with_sync_run_task()
+        with contextlib.ExitStack() as stack:
+            for p in _make_tier_panel_patches(client):
+                stack.enter_context(p)
+            component = make_component(TierApiPanel, system_vm=vm)
+            run_mount_effects(component, page=page)
+            result = render_once(component)
+
+        # 不用 _collect_controls (同上 NOTE), 直接从 result.controls[2].controls 取 Button
+        row = result.controls[2]
+        button = next(c for c in row.controls if isinstance(c, ft.Button))
+        cast(Any, button.on_click)(SimpleNamespace())
+        # R2 红线: CancelledError 应从 _run_probe 传播到 _sync_run_task
+        assert state["cancelled"] is True, "CancelledError 必须从 _run_probe 传播 (R2 红线)"

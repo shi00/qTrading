@@ -11,9 +11,11 @@ probe 结果直接放入 state.probe_result (ProbeResultRow frozen dataclass).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
 from utils.config_handler import ConfigHandler
@@ -117,6 +119,12 @@ class SystemViewModel:
 
         return TushareClient().get_capability_cache()
 
+    def get_last_probe_time(self) -> datetime | None:
+        """返回上次 probe 完成时间（pass-through 到 TushareClient，避免 View 直接访问 service 层）。"""
+        from data.external.tushare_client import TushareClient
+
+        return TushareClient().get_last_probe_time()
+
     async def on_tier_changed(
         self,
         new_tier: str,
@@ -151,6 +159,8 @@ class SystemViewModel:
                 success = await ThreadPoolManager().run_async(
                     TaskType.IO, ConfigHandler.set_tushare_point_tier, new_tier
                 )
+            except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+                raise
             except Exception as exc:
                 # IO 失败 → 通过 _emit_result 通知 View 显示失败消息
                 logger.warning("[SystemViewModel] set_tushare_point_tier failed: %s", exc)

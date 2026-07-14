@@ -14,6 +14,7 @@
 - 实例方法 → 模块级纯函数；stale_hint_text 移除（原 _stale_apis 从未赋值，死代码，YAGNI）
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -298,10 +299,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     # --- 从 state 读取业务数据 (L771 合规, 无 dual-track property 拉取) ---
     probe_status = vm.get_capability_cache()
     result = state.probe_result
-
-    from data.external.tushare_client import TushareClient
-
-    last_probe_time = TushareClient().get_last_probe_time()
+    last_probe_time = vm.get_last_probe_time()
 
     # --- 计算 UI 状态 ---
     progress_text = _compute_progress_text(probe_in_progress, progress, result)
@@ -316,6 +314,8 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         set_progress((0, 0))
         try:
             await vm.on_tier_changed(new_tier, progress_callback=_on_progress)
+        except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+            raise
         except Exception as exc:
             logger.error("[TierApiPanel] on_tier_changed failed: %s", exc, exc_info=True)
 
@@ -335,6 +335,8 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         set_progress((0, 0))
         try:
             await vm.run_probe(progress_callback=_on_progress)
+        except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+            raise
         except Exception as exc:
             logger.error("[TierApiPanel] run_probe failed: %s", exc, exc_info=True)
 

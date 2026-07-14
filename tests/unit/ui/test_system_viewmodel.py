@@ -8,6 +8,7 @@
 - 无订阅者时 logger.warning 不抛异常（M-5：自动 probe 在 TierApiPanel 未挂载时不静默丢失）
 """
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from unittest.mock import AsyncMock, MagicMock
@@ -520,3 +521,75 @@ def test_unsubscribe_idempotent_when_callback_already_removed():
 
     vm._set_state(probe_in_progress=True)
     assert len(received) == 0  # 无订阅者，不接收任何通知
+
+
+# ---------------------------------------------------------------------------
+# R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_tier_changed_propagates_cancelled_error(monkeypatch):
+    """R2 红线: on_tier_changed 链路中 set_tier 抛 CancelledError 必须传播, 不得被 except Exception 吞没。
+
+    覆盖 system_viewmodel.on_tier_changed 内层 ``except asyncio.CancelledError: raise`` 守卫
+    (set_tier 经 ThreadPoolManager.run_async 调用, 取消传播需穿透 except Exception as exc 块)。
+    """
+    mock_client = MagicMock(spec=TushareClient)
+    mock_client.probe_api_capabilities = AsyncMock(return_value={"daily": True})
+    mock_client.get_capability_cache = MagicMock(return_value={"daily": True})
+    mock_client.clear_capability_cache = MagicMock()
+    mock_client.reload_rate_limiters = MagicMock()
+
+    async def _mock_run_async(task_type, func, *args, **kwargs):
+        # set_tier 抛 CancelledError → 应穿透 except Exception 守卫
+        raise asyncio.CancelledError()
+
+    mock_tp = MagicMock()
+    mock_tp.return_value.run_async = _mock_run_async
+
+    mock_ch = MagicMock()
+    mock_ch.get_tushare_point_tier.return_value = "points_5000"
+
+    monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tp)
+
+    vm = SystemViewModel()
+    _subscribe(vm)
+
+    with pytest.raises(asyncio.CancelledError):
+        await vm.on_tier_changed("points_15000")
+
+    # 链路在 set_tier 处中断, 后续步骤未调用
+    mock_client.reload_rate_limiters.assert_not_called()
+    mock_client.clear_capability_cache.assert_not_called()
+    mock_client.probe_api_capabilities.assert_not_awaited()
+    # finally 仍重置 probe_in_progress (R2 不破坏 state 一致性)
+    assert vm.state.probe_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_run_probe_propagates_cancelled_error(monkeypatch):
+    """R2 红线: run_probe 链路中 probe_api_capabilities 抛 CancelledError 必须传播。
+
+    run_probe 仅 try/finally 无 except Exception, CancelledError 自动穿透 finally 传播。
+    """
+    mock_client = MagicMock(spec=TushareClient)
+    mock_client.probe_api_capabilities = AsyncMock(side_effect=asyncio.CancelledError())
+
+    mock_ch = MagicMock()
+    mock_ch.get_tushare_point_tier.return_value = "points_5000"
+
+    monkeypatch.setattr("data.external.tushare_client.TushareClient", lambda: mock_client)
+    monkeypatch.setattr("ui.viewmodels.system_viewmodel.ConfigHandler", mock_ch)
+
+    vm = SystemViewModel()
+    _subscribe(vm)
+
+    with pytest.raises(asyncio.CancelledError):
+        await vm.run_probe()
+
+    mock_client.probe_api_capabilities.assert_awaited_once()
+    # finally 仍重置 probe_in_progress
+    assert vm.state.probe_in_progress is False
