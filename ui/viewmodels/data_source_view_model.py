@@ -2,21 +2,22 @@
 
 Extracts business logic from DataSourceTab into a pure ViewModel.
 Holds business state, calls services/data layer, notifies View via
-frozen state snapshot + subscribe/_notify (Phase 2 改造).
+frozen state snapshot + subscribe/_notify.
 
-Phase 2 改造: 11 个 on_* 回调移除,改用 state + subscribe/_notify。
-- 状态型字段直接放入 frozen state (is_syncing/health_checking/init_sync_running 等)
-- 瞬态事件/大体积数据用 dual-track (§3.0.4): version 递增 + last_* property
+L771 合规: state 字段全部用 frozen dataclass / tuple[Row, ...],
+VM 内部不持有 dict/DataFrame 作为业务状态 (移除 dual-track).
+VM 不感知 locale: i18n 消息用 Message (key + params) 透传.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
-from utils.error_classifier import classify_error, get_error_message
+from utils.error_classifier import classify_error
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
@@ -32,8 +33,42 @@ class InitSyncError(Exception):
 
 
 @dataclass(frozen=True)
+class SnackRow:
+    """Snack 通知行数据 frozen dataclass (L771 合规).
+
+    替代 dual-track 的 (Message, str) tuple + version 持有模式, 直接放入 state.
+    seq 字段确保连续相同内容也触发 use_state setter 更新 (非 dual-track:
+    无 property 包装, 直接放 state 字段).
+    """
+
+    message: Message
+    color_name: str
+    seq: int = 0
+
+
+@dataclass(frozen=True)
+class HealthResultRow:
+    """健康检查结果行数据 frozen dataclass (L771 合规).
+
+    替代 dual-track 的 dict 持有模式, 扁平化 dict 结构直接放入 state.
+    """
+
+    status: str = "green"
+    market_latest_local: str = ""
+    market_lag_days: int = 0
+    details_financial_coverage: float = 0.0
+    details_missing_critical: int = 0
+    details_missing_depth: int = 0
+    details_missing_breadth: int = 0
+
+
+@dataclass(frozen=True)
 class DataSourceState:
-    """DataSourceViewModel 的不可变状态快照。View 通过 subscribe 接收。"""
+    """DataSourceViewModel 的不可变状态快照。View 通过 subscribe 接收。
+
+    L771 合规: 业务数据直接放入 state (frozen dataclass / Message),
+    无 dual-track version + property 间接暴露模式.
+    """
 
     # --- Sync state ---
     is_syncing: bool = False
@@ -54,19 +89,24 @@ class DataSourceState:
     progress: float = 0.0
     progress_message: Message | None = None
 
-    # --- Dual-track versions (View pulls last_* on version change, §3.0.4) ---
-    health_result_version: int = 0
-    snack_version: int = 0
+    # --- 业务数据 (L771 合规: frozen dataclass / Message, 直接暴露) ---
+    # health_result: 最近一次健康检查结果 (None 表示未检查)
+    health_result: HealthResultRow | None = None
+    # snack: 瞬态通知 (None 表示无待消费通知; seq 确保连续相同内容也触发更新)
+    snack: SnackRow | None = None
+    # health_error: 健康检查错误消息 (Message, VM 不感知 locale; None 表示无错误)
+    health_error: Message | None = None
+
+    # --- 瞬态信号 (无数据负载, 用 int 递增表示事件次数; 非 dual-track: 无 property 包装) ---
     cache_cleared_version: int = 0
-    health_error_version: int = 0
 
 
 class DataSourceViewModel:
     """ViewModel for DataSourceTab — manages data source business logic.
 
-    Phase 2 改造: 11 个 on_* 回调移除,改用 state + subscribe/_notify。
-    View 通过 ``subscribe(callback)`` 订阅 state 变化,通过 diff 判断哪些字段变化,
-    分派到对应处理方法。瞬态事件/大体积数据通过 dual-track (version + last_* property) 拉取。
+    L771 合规: state 字段全部用 frozen dataclass / Message,
+    VM 内部不持有 dict/DataFrame 作为业务状态 (移除 dual-track).
+    VM 不感知 locale: i18n 消息用 Message (key + params) 透传, View 渲染时翻译.
     """
 
     def __init__(
@@ -91,10 +131,8 @@ class DataSourceViewModel:
         self._state: DataSourceState = DataSourceState()
         self._subscribers: list[Callable[[DataSourceState], None]] = []
 
-        # --- Dual-track internal storage (§3.0.4) ---
-        self._last_health_result: dict | None = None
-        self._last_snack: tuple[Message, str] | None = None  # (message, color_name)
-        self._last_health_error: str | None = None
+        # --- Snack seq counter (内部计数, 确保 SnackRow.seq 递增) ---
+        self._snack_seq = 0
 
     # ------------------------------------------------------------------
     # State / subscribe / notify
@@ -103,26 +141,6 @@ class DataSourceViewModel:
     @property
     def state(self) -> DataSourceState:
         return self._state
-
-    @property
-    def last_health_result(self) -> dict | None:
-        """最近一次健康检查结果 dict（dual-track,View 在 health_result_version 变化时拉取）。"""
-        return self._last_health_result
-
-    @property
-    def last_snack(self) -> tuple[Message, str] | None:
-        """最近一次 snack 通知 (Message, color_name)（dual-track,View 在 snack_version 变化时拉取）。"""
-        return self._last_snack
-
-    @property
-    def last_health_error(self) -> str | None:
-        """最近一次健康检查错误消息（dual-track,View 在 health_error_version 变化时拉取）。
-
-        NOTE(lazy): 返回 get_error_message() 已翻译字符串,VM 间接感知 locale.
-        ceiling: dual-track 大体积数据非 state 字段,Phase 2 locale 修复仅覆盖 state 字段.
-        upgrade: View 声明式重写已完成(Phase E.2), _last_health_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
-        """
-        return self._last_health_error
 
     def subscribe(self, callback: Callable[[DataSourceState], None]) -> Callable[[], None]:
         self._subscribers.append(callback)
@@ -163,31 +181,35 @@ class DataSourceViewModel:
         任务将继续运行至完成——属设计意图（不可取消任务应原子完成）。
         """
         self._cancel_all_active_tasks()
-        self._last_health_result = None
-        self._last_snack = None
-        self._last_health_error = None
         self._subscribers.clear()
         self._state = DataSourceState()
 
-    # --- Dual-track emitters ---
+    # --- Emitters (直接 _set_state, 无 dual-track) ---
 
     def _emit_snack(self, message: Message, color_name: str) -> None:
-        """Store snack and notify via snack_version (dual-track)."""
-        self._last_snack = (message, color_name)
-        self._set_state(snack_version=self._state.snack_version + 1)
+        """Store snack directly into state (L771 合规, 无 dual-track).
 
-    def _emit_health_result(self, result: dict) -> None:
-        """Store health result and notify via health_result_version (dual-track)."""
-        self._last_health_result = result
-        self._set_state(health_result_version=self._state.health_result_version + 1)
+        seq 字段确保连续相同内容也触发 use_state setter 更新.
+        """
+        self._snack_seq += 1
+        self._set_state(snack=SnackRow(message=message, color_name=color_name, seq=self._snack_seq))
 
-    def _emit_health_error(self, error_msg: str) -> None:
-        """Store health error and notify via health_error_version (dual-track)."""
-        self._last_health_error = error_msg
-        self._set_state(health_error_version=self._state.health_error_version + 1)
+    def _emit_health_result(self, result: HealthResultRow) -> None:
+        """Store health result directly into state and clear health_error.
+
+        新健康结果覆盖旧错误 (状态转换: error → ok).
+        """
+        self._set_state(health_result=result, health_error=None)
+
+    def _emit_health_error(self, error_msg: Message) -> None:
+        """Store health error message directly into state (VM 不感知 locale).
+
+        error_msg 是 Message (i18n key + params), View 渲染时翻译.
+        """
+        self._set_state(health_error=error_msg)
 
     def _emit_cache_cleared(self) -> None:
-        """Notify cache cleared via cache_cleared_version (dual-track)."""
+        """Notify cache cleared via cache_cleared_version (无数据瞬态信号, 非 dual-track)."""
         self._set_state(cache_cleared_version=self._state.cache_cleared_version + 1)
 
     # --- Internal helpers ---
@@ -237,7 +259,7 @@ class DataSourceViewModel:
                 if not self._tm.update_progress(task_id, 0.9, I18n.get("task_progress_analyzing")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
-                self._emit_health_result(result)
+                self._emit_health_result(_health_dict_to_row(result))
 
                 return I18n.get("task_result_health_done")
 
@@ -249,7 +271,7 @@ class DataSourceViewModel:
             except Exception as e:
                 logger.error("[DataSourceVM] Health check failed: %s", e, exc_info=True)
                 error_info = classify_error(e, context="general")
-                self._emit_health_error(get_error_message(error_info))
+                self._emit_health_error(_error_info_to_message(error_info))
                 raise
             finally:
                 self._set_state(health_checking=False)
@@ -547,3 +569,45 @@ class DataSourceViewModel:
     async def get_health_report(self) -> dict:
         """Get health report data for dialog display."""
         return await self._processor.check_data_health()
+
+
+# ============================================================
+# 纯转换函数 (dict → frozen dataclass, 模块级, 无副作用)
+# ============================================================
+
+
+def _health_dict_to_row(result: dict) -> HealthResultRow:
+    """dict → HealthResultRow (L771 合规, 扁平化 dict 结构)."""
+    market_info = result.get("market") or {}
+    details = result.get("details") or {}
+
+    def _to_int(val: Any, default: int = 0) -> int:
+        if isinstance(val, (int, float)):
+            return int(val)
+        return default
+
+    def _to_float(val: Any, default: float = 0.0) -> float:
+        if isinstance(val, (int, float)):
+            return float(val)
+        return default
+
+    return HealthResultRow(
+        status=str(result.get("status", "green")),
+        market_latest_local=str(market_info.get("latest_local", "") or ""),
+        market_lag_days=_to_int(market_info.get("lag_days", 0)),
+        details_financial_coverage=_to_float(details.get("financial_coverage", 0.0)),
+        details_missing_critical=_to_int(details.get("missing_critical", 0)),
+        details_missing_depth=_to_int(details.get("missing_depth", 0)),
+        details_missing_breadth=_to_int(details.get("missing_breadth", 0)),
+    )
+
+
+def _error_info_to_message(error_info: dict) -> Message:
+    """error_info dict → Message (VM 不感知 locale).
+
+    替代 get_error_message() 已翻译字符串, 改为 i18n key + format_args 透传.
+    消除 NOTE(lazy) 标记的 locale 感知技术债.
+    """
+    message_key = error_info.get("message_key", "common_err_unknown")
+    format_args = error_info.get("format_args") or {}
+    return Message(message_key, dict(format_args))

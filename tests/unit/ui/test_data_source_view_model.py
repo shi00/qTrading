@@ -1,9 +1,10 @@
 """Unit tests for DataSourceViewModel — MVVM-002 fix.
 
-Phase 2 改造: 11 个 on_* 回调移除,改用 state snapshot + subscribe/_notify。
+H2-2 改造: 移除 dual-track, state 字段全部用 frozen dataclass / Message (L771 合规).
 - 状态型字段直接放入 frozen DataSourceState (is_syncing/health_checking/init_sync_running 等)
-- 瞬态事件/大体积数据用 dual-track (§3.0.4): version 递增 + last_* property
-- 测试用 snapshots list + state 字段断言 + last_* property 断言替代 on_* mock 断言
+- 业务数据 (health_result/snack/health_error) 直接放入 state (frozen dataclass / Message),
+  无 dual-track (version + last_* property) 间接暴露
+- 测试用 snapshots list + state 字段断言 (替代 last_* property 断言)
 """
 
 import asyncio
@@ -13,7 +14,7 @@ import pytest
 
 from services.task_manager import TaskStatus
 from ui.viewmodels import Message
-from ui.viewmodels.data_source_view_model import DataSourceViewModel
+from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
 
 pytestmark = pytest.mark.unit
 
@@ -124,6 +125,14 @@ def _capture_coroutine_factory(mock_submit_task):
     return mock_submit_task.call_args[1]["coroutine_factory"]
 
 
+def _assert_snack(bound_vm, snapshots, message_key, color_name):
+    """断言 snack 已发射 (L771 合规: 直接从 state.snack 读取, 无 last_* property)."""
+    assert bound_vm.state.snack is not None
+    assert bound_vm.state.snack.message == Message(message_key)
+    assert bound_vm.state.snack.color_name == color_name
+    assert any(s.snack is not None for s in snapshots)
+
+
 # --- Test Classes ---
 
 
@@ -145,9 +154,9 @@ class TestDataSourceViewModelInit:
         assert vm.state.is_syncing is False
         assert vm.state.init_sync_cancellable is False
         assert vm._active_task_ids == {}
-        assert vm.last_snack is None
-        assert vm.last_health_result is None
-        assert vm.last_health_error is None
+        assert vm.state.snack is None
+        assert vm.state.health_result is None
+        assert vm.state.health_error is None
 
 
 class TestDataSourceViewModelSubscribe:
@@ -178,10 +187,9 @@ class TestDataSourceViewModelSubscribe:
 
         assert bound_vm.state.is_syncing is False
         assert bound_vm.state.active_key is None
-        assert bound_vm.state.snack_version == 0
-        assert bound_vm.last_snack is None
-        assert bound_vm.last_health_result is None
-        assert bound_vm.last_health_error is None
+        assert bound_vm.state.snack is None
+        assert bound_vm.state.health_result is None
+        assert bound_vm.state.health_error is None
         assert bound_vm._subscribers == []
 
         # dispose 后 _notify 无订阅者,snapshots 不再增长
@@ -208,8 +216,8 @@ class TestDataSourceViewModelDisposeCancelsTasks:
             progress_message=Message("msg"),
         )
         vm._emit_snack(Message("snack"), "success")
-        vm._emit_health_result({"status": "green"})
-        vm._emit_health_error("err")
+        vm._emit_health_result(HealthResultRow(status="green"))
+        vm._emit_health_error(Message("err"))
 
         vm.dispose()
 
@@ -227,14 +235,11 @@ class TestDataSourceViewModelDisposeCancelsTasks:
         assert vm.state.init_sync_final_status is None
         assert vm.state.progress == 0.0
         assert vm.state.progress_message is None
-        assert vm.state.health_result_version == 0
-        assert vm.state.snack_version == 0
         assert vm.state.cache_cleared_version == 0
-        assert vm.state.health_error_version == 0
-        # dual-track 属性
-        assert vm.last_snack is None
-        assert vm.last_health_result is None
-        assert vm.last_health_error is None
+        # L771 合规: 业务数据字段 (frozen dataclass / Message) 重置为 None
+        assert vm.state.snack is None
+        assert vm.state.health_result is None
+        assert vm.state.health_error is None
 
     def test_dispose_cancels_non_cancellable_task(self, vm, mock_task_manager):
         """dispose() 对 cancellable=False 任务仍调 cancel_task（TaskManager 内部 no-op，R.1.2）。"""
@@ -273,10 +278,10 @@ class TestDataSourceViewModelCheckHealth:
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
 
-        # health_result emitted (dual-track)
-        assert any(s.health_result_version > 0 for s in snapshots)
-        assert bound_vm.last_health_result is not None
-        assert bound_vm.last_health_result["status"] == "green"
+        # health_result emitted (L771 合规: 直接放入 state, 无 dual-track)
+        assert any(s.health_result is not None for s in snapshots)
+        assert bound_vm.state.health_result is not None
+        assert bound_vm.state.health_result.status == "green"
 
         # health_finished: health_checking back to False (False → True → False)
         assert snapshots[-1].health_checking is False
@@ -288,24 +293,20 @@ class TestDataSourceViewModelCheckHealth:
         await bound_vm.check_health()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with (
-            patch("ui.viewmodels.data_source_view_model.classify_error") as mock_classify,
-            patch("ui.viewmodels.data_source_view_model.get_error_message") as mock_get_msg,
-        ):
+        with patch("ui.viewmodels.data_source_view_model.classify_error") as mock_classify:
             mock_classify.return_value = {
                 "code": "runtime",
                 "message_key": "common_op_fail",
             }
-            mock_get_msg.return_value = "Sanitized error"
 
             with pytest.raises(RuntimeError, match="DB down"):
                 await factory(task_id="task_123")
 
             mock_classify.assert_called_once()
-            mock_get_msg.assert_called_once()
-            # health_error emitted (dual-track)
-            assert bound_vm.last_health_error == "Sanitized error"
-            assert any(s.health_error_version > 0 for s in snapshots)
+            # health_error emitted as Message (VM 不感知 locale, 透传 i18n key + params)
+            assert bound_vm.state.health_error is not None
+            assert bound_vm.state.health_error.key == "common_op_fail"
+            assert any(s.health_error is not None for s in snapshots)
 
         # health_finished: health_checking back to False
         assert snapshots[-1].health_checking is False
@@ -321,8 +322,8 @@ class TestDataSourceViewModelCheckHealth:
 
         # cancelled: health_checking transitioned to False, no result/error emitted
         assert snapshots[-1].health_checking is False
-        assert not any(s.health_result_version > 0 for s in snapshots)
-        assert not any(s.health_error_version > 0 for s in snapshots)
+        assert not any(s.health_result is not None for s in snapshots)
+        assert not any(s.health_error is not None for s in snapshots)
 
     async def test_check_health_task_rejected(self, bound_vm, snapshots, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
@@ -343,11 +344,10 @@ class TestDataSourceViewModelFullDailySync:
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
 
-        assert bound_vm.last_snack == (Message("snack_full_sync_done_simple"), "success")
-        assert any(s.snack_version > 0 for s in snapshots)
+        _assert_snack(bound_vm, snapshots, "snack_full_sync_done_simple", "success")
         assert "daily_sync" in bound_vm._active_task_ids
 
-    async def test_daily_sync_cancelled(self, bound_vm, mock_processor, mock_task_manager):
+    async def test_daily_sync_cancelled(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         mock_processor.run_daily_update = AsyncMock(side_effect=asyncio.CancelledError())
 
         bound_vm.execute_full_daily_sync()
@@ -356,11 +356,11 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(asyncio.CancelledError):
             await factory(task_id="task_123")
 
-        assert bound_vm.last_snack == (Message("settings_msg_sync_cancelled"), "warning")
+        _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
         assert bound_vm.state.is_syncing is False
         assert bound_vm.state.active_key is None
 
-    async def test_daily_sync_error(self, bound_vm, mock_processor, mock_task_manager):
+    async def test_daily_sync_error(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         mock_processor.run_daily_update = AsyncMock(side_effect=RuntimeError("Network error"))
 
         bound_vm.execute_full_daily_sync()
@@ -369,7 +369,7 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(RuntimeError):
             await factory(task_id="task_123")
 
-        assert bound_vm.last_snack == (Message("common_op_fail"), "error")
+        _assert_snack(bound_vm, snapshots, "common_op_fail", "error")
         assert bound_vm.state.is_syncing is False
         assert bound_vm.state.active_key is None
 
@@ -383,7 +383,7 @@ class TestDataSourceViewModelFullDailySync:
         assert "daily_sync" in bound_vm._active_task_ids
         assert bound_vm._active_task_ids["daily_sync"] == "task_123"
 
-    async def test_t8_progress_false_raises_cancelled(self, bound_vm, mock_processor, mock_task_manager):
+    async def test_t8_progress_false_raises_cancelled(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         """O1 fix: _daily_logic._progress 回调在 update_progress 返回 False 时应抛 CancelledError 早退。"""
         mock_task_manager.update_progress = MagicMock(return_value=False)
 
@@ -398,7 +398,7 @@ class TestDataSourceViewModelFullDailySync:
         with pytest.raises(asyncio.CancelledError):
             await factory(task_id="task_123")
         # 副作用验证：CancelledError 被外层 except 捕获后应触发 snack warning
-        assert bound_vm.last_snack == (Message("settings_msg_sync_cancelled"), "warning")
+        _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
         # finally 应重置 sync busy 状态
         assert bound_vm.state.is_syncing is False
 
@@ -409,11 +409,11 @@ class TestDataSourceViewModelAiConceptRebuild:
         assert bound_vm.state.is_syncing is True
         assert bound_vm.state.active_key == "ai_concept_sync"
 
-    async def test_rebuild_success(self, bound_vm, mock_processor, mock_task_manager):
+    async def test_rebuild_success(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
         await factory(task_id="task_123")
-        assert bound_vm.last_snack == (Message("snack_ai_concept_done"), "success")
+        _assert_snack(bound_vm, snapshots, "snack_ai_concept_done", "success")
         # 验证通过 get_cancel_event 访问器获取取消事件（P0-2 取消链路）
         mock_task_manager.get_cancel_event.assert_called_once_with("task_123")
         # 验证 manual_trigger=True + cancel_event + ai_service 参数正确传递
@@ -467,7 +467,7 @@ class TestDataSourceViewModelHealthCheckT8:
         mock_processor.check_data_health.assert_not_called()
         # cancelled: health_checking back to False, no result/error
         assert snapshots[-1].health_checking is False
-        assert not any(s.health_result_version > 0 for s in snapshots)
+        assert not any(s.health_result is not None for s in snapshots)
 
 
 class TestDataSourceViewModelClearCache:
@@ -480,8 +480,7 @@ class TestDataSourceViewModelClearCache:
         bound_vm.execute_clear_cache()
 
         # snack emitted (warning)
-        assert bound_vm.last_snack == (Message("ds_clear_cache_syncing"), "warning")
-        assert any(s.snack_version > 0 for s in snapshots)
+        _assert_snack(bound_vm, snapshots, "ds_clear_cache_syncing", "warning")
         assert bound_vm.state.is_syncing is False
 
     async def test_clear_cache_success(self, bound_vm, snapshots, mock_cache, mock_task_manager):
@@ -490,11 +489,11 @@ class TestDataSourceViewModelClearCache:
         await factory(task_id="task_123")
 
         mock_cache.clear_all_cache.assert_awaited_once()
-        assert bound_vm.last_snack == (Message("ds_cache_cleared"), "success")
-        # cache_cleared emitted (dual-track)
+        _assert_snack(bound_vm, snapshots, "ds_cache_cleared", "success")
+        # cache_cleared emitted (瞬态信号, 非 dual-track)
         assert any(s.cache_cleared_version > 0 for s in snapshots)
 
-    async def test_clear_cache_error(self, bound_vm, mock_cache, mock_task_manager):
+    async def test_clear_cache_error(self, bound_vm, snapshots, mock_cache, mock_task_manager):
         mock_cache.clear_all_cache = AsyncMock(side_effect=RuntimeError("DB error"))
 
         bound_vm.execute_clear_cache()
@@ -503,7 +502,7 @@ class TestDataSourceViewModelClearCache:
         with pytest.raises(RuntimeError):
             await factory(task_id="task_123")
 
-        assert bound_vm.last_snack == (Message("ds_clean_fail"), "error")
+        _assert_snack(bound_vm, snapshots, "ds_clean_fail", "error")
 
     def test_clear_cache_resets_busy_on_reject(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
@@ -528,7 +527,7 @@ class TestDataSourceViewModelInitHistorical:
 
         # init_sync_reset with COMPLETED
         assert any(s.init_sync_final_status == TaskStatus.COMPLETED for s in snapshots)
-        assert bound_vm.last_snack == (Message("settings_init_done"), "success")
+        _assert_snack(bound_vm, snapshots, "settings_init_done", "success")
 
     async def test_init_cancelled(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         mock_processor.initialize_system = AsyncMock(side_effect=asyncio.CancelledError())
@@ -551,7 +550,7 @@ class TestDataSourceViewModelInitHistorical:
             await factory(task_id="task_123")
 
         assert any(s.init_sync_final_status == TaskStatus.FAILED for s in snapshots)
-        assert bound_vm.last_snack == (Message("ds_init_fail_fmt"), "error")
+        _assert_snack(bound_vm, snapshots, "ds_init_fail_fmt", "error")
 
     async def test_init_none_report_raises(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         mock_processor.initialize_system = AsyncMock(return_value=None)
@@ -596,8 +595,7 @@ class TestDataSourceViewModelInitHistorical:
 
         assert any(s.init_sync_final_status == TaskStatus.FAILED for s in snapshots)
         # InitSyncError 分支: snack 消息是 ds_init_fail_generic key, 非 ds_init_fail_fmt key
-        snack_msg = bound_vm.last_snack[0]
-        assert snack_msg.key == "ds_init_fail_generic"
+        _assert_snack(bound_vm, snapshots, "ds_init_fail_generic", "error")
 
     def test_task_rejected_resets_state(self, bound_vm, mock_task_manager):
         mock_task_manager.submit_task.return_value = None
@@ -791,10 +789,10 @@ class TestDataSourceViewModelCoverageFill:
         with pytest.raises(asyncio.CancelledError):
             await factory(task_id="task_123")
         # 第二次早退, _emit_health_result 未调用
-        assert bound_vm.last_health_result is None
-        assert not any(s.health_result_version > 0 for s in snapshots)
+        assert bound_vm.state.health_result is None
+        assert not any(s.health_result is not None for s in snapshots)
 
-    async def test_ai_concept_rebuild_error_emits_snack(self, bound_vm, mock_processor, mock_task_manager):
+    async def test_ai_concept_rebuild_error_emits_snack(self, bound_vm, snapshots, mock_processor, mock_task_manager):
         """AI concept rebuild 抛 Exception 时 emit error snack 并 re-raise（348-354）。"""
         mock_processor.run_ai_concept_tagging = AsyncMock(side_effect=RuntimeError("LLM down"))
         bound_vm.execute_ai_concept_rebuild()
@@ -802,7 +800,7 @@ class TestDataSourceViewModelCoverageFill:
         with pytest.raises(RuntimeError, match="LLM down"):
             await factory(task_id="task_123")
         # error snack emitted
-        assert bound_vm.last_snack == (Message("common_op_fail"), "error")
+        _assert_snack(bound_vm, snapshots, "common_op_fail", "error")
         # finally 重置 sync busy
         assert bound_vm.state.is_syncing is False
         assert bound_vm.state.active_key is None

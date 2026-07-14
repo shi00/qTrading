@@ -12,8 +12,10 @@
 - 移除全部 11 个 ``_on_vm_*`` dispatch 方法 (VM subscribe 自动重渲染替代)
 - 移除所有命令式 API: did_mount/will_unmount/refresh_locale/update_theme/handle_resize/
   _safe_update/.update()/PageRefMixin/_page_ref/weakref
-- 双轨字段 (health_result/snack/cache_cleared/health_error) 用 ``use_effect`` +
-  version 依赖 + ``vm.last_*`` property 拉取
+- L771 合规: state 字段全部用 frozen dataclass / Message (VM 直接暴露),
+  View 渲染直接从 state 读取, 无 dual-track (移除 use_state 快照 + use_effect 拉取)
+- snack 瞬态通知用 ``use_effect`` 监听 ``state.snack.seq`` 触发 show_snack_callback
+- cache_cleared 瞬态信号用 ``use_effect`` 监听 ``state.cache_cleared_version`` 广播 PubSub
 - TaskManager 订阅用 ``use_effect(setup, [], cleanup=cleanup)``
 - AlertDialog 用 ``use_state(open)`` + ``ft.use_dialog()`` 条件渲染
 - 异步任务用 ``page.run_task``, R2 CancelledError 必须 raise (不被 except Exception 捕获)
@@ -40,7 +42,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
-from ui.viewmodels.data_source_view_model import DataSourceViewModel
+from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
@@ -93,17 +95,18 @@ def _resolve_snack_color(color_name: str) -> str:
     return color_map.get(color_name, AppColors.INFO)
 
 
-def _build_health_summary_content(result: dict) -> ft.Control:
-    """从健康检查结果构建摘要内容 (纯函数, 供 DataSourceTab 渲染调用)."""
-    market_info = result.get("market", {})
-    details = result.get("details", {})
-    cov_val = details.get("financial_coverage", 0)
-    cov_str = f"{cov_val:.1f}%" if isinstance(cov_val, (int, float)) else str(cov_val)
+def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
+    """从健康检查结果构建摘要内容 (纯函数, 供 DataSourceTab 渲染调用).
 
-    miss_critical = details.get("missing_critical", 0)
-    miss_depth = details.get("missing_depth", 0)
-    miss_breadth = details.get("missing_breadth", 0)
-    lag = market_info.get("lag_days", 0)
+    L771 合规: 接收 frozen dataclass (HealthResultRow), 非 dict.
+    """
+    cov_val = result.details_financial_coverage
+    cov_str = f"{cov_val:.1f}%"
+
+    miss_critical = result.details_missing_critical
+    miss_depth = result.details_missing_depth
+    miss_breadth = result.details_missing_breadth
+    lag = result.market_lag_days
     sys_text = I18n.get("ds_health_summary_sys").format(cov=cov_str, lag=lag)
 
     if miss_critical > 0:
@@ -179,8 +182,10 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     - DataSourceViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化
     - TushareConfigPanelViewModel 外部实例化, ``use_viewmodel(vm=)`` 订阅
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
-    - 双轨字段 (health_result/snack/cache_cleared/health_error) 用 ``use_effect``
-      + version 依赖 + ``vm.last_*`` property 拉取
+    - L771 合规: 渲染直接从 state 读取 (health_result/health_error/snack),
+      无 dual-track use_state 快照 + use_effect 拉取
+    - snack 瞬态通知: ``use_effect`` 监听 ``state.snack.seq`` 触发 show_snack_callback
+    - cache_cleared 瞬态信号: ``use_effect`` 监听 ``state.cache_cleared_version`` 广播 PubSub
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步任务: ``page.run_task`` 调度, R2 CancelledError 不被 ``except Exception`` 捕获
 
@@ -226,13 +231,9 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     # 外部 VM 模式订阅 state 变化 (hook 仅订阅, 不 dispose; tushare_vm 生命周期由本组件管理)
     _tushare_state, _ = use_viewmodel(vm=tushare_vm)
 
-    # --- Pure UI state (空字符串/空 dict 作为 "无值" 哨兵, 避免 Optional use_state 类型问题) ---
-    health_checked, set_health_checked = ft.use_state(False)
-    # 健康检查状态 key, "" 表示未设置
-    health_status_key, set_health_status_key = ft.use_state("")
-    storage_status_key, set_storage_status_key = ft.use_state("")
-    # 健康检查结果, {} 表示无结果
-    last_health_result, set_last_health_result = ft.use_state({})
+    # --- Pure UI state (仅 dialog 开关/配置, 业务数据从 state 直接派生, 无 dual-track) ---
+    # health_report_data: _do_show_health_report 通过 vm.get_health_report() 拉取的报告原始 dict,
+    #   非业务状态 dual-track, 而是按需加载的 dialog 数据 (HealthReportDialog 接收 dict)
     health_report_data, set_health_report_data = ft.use_state({})
     health_report_open, set_health_report_open = ft.use_state(False)
     scan_dialog_open, set_scan_dialog_open = ft.use_state(False)
@@ -479,50 +480,20 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     ft.use_effect(lambda: None, dependencies=[], cleanup=_cleanup_tushare_vm)
 
-    # --- Dual-track effect: snack_version → show_snack ---
-    def _on_snack_version_change() -> None:
-        snack = vm.last_snack
+    # --- Snack effect: state.snack → show_snack (瞬态通知, 监听 seq 变化触发回调) ---
+    # L771 合规: 直接从 state.snack 读取 (frozen SnackRow), 无 vm.last_snack property 拉取.
+    # seq 字段确保连续相同内容也触发 use_state setter 更新.
+    def _on_snack_change() -> None:
+        snack = state.snack
         if snack is None:
             return
-        message, color_name = snack
-        text = I18n.get(message.key, **message.params)
+        text = I18n.get(snack.message.key, **snack.message.params)
         if show_snack_callback:
-            show_snack_callback(text, color=_resolve_snack_color(color_name))
+            show_snack_callback(text, color=_resolve_snack_color(snack.color_name))
 
-    ft.use_effect(_on_snack_version_change, dependencies=[state.snack_version])
+    ft.use_effect(_on_snack_change, dependencies=[state.snack.seq if state.snack else 0])
 
-    # --- Dual-track effect: health_result_version → update health result display ---
-    def _on_health_result_version_change() -> None:
-        result = vm.last_health_result
-        if result is None:
-            return
-        # 从 result 派生 status_key/storage_key
-        status = result.get("status", "red")
-        if status == "yellow":
-            new_health_key = "ds_health_lag"
-        elif status == "red":
-            new_health_key = "ds_health_error"
-        else:
-            new_health_key = "ds_health_ok"
-        set_health_status_key(new_health_key)
-        set_storage_status_key("common_normal")
-        set_last_health_result(result)
-        set_health_checked(True)
-
-    ft.use_effect(_on_health_result_version_change, dependencies=[state.health_result_version])
-
-    # --- Dual-track effect: health_error_version → update error display ---
-    def _on_health_error_version_change() -> None:
-        _error_msg = vm.last_health_error
-        if _error_msg is None:
-            return
-        set_health_status_key("common_check_fail")
-        set_storage_status_key("common_check_fail")
-        set_health_checked(True)
-
-    ft.use_effect(_on_health_error_version_change, dependencies=[state.health_error_version])
-
-    # --- Dual-track effect: cache_cleared_version → broadcast PubSub (topic 模式) ---
+    # --- cache_cleared effect: state.cache_cleared_version → broadcast PubSub (瞬态信号, 非 dual-track) ---
     def _on_cache_cleared_version_change() -> None:
         page = _get_page()
         if page is not None:
@@ -530,38 +501,43 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     ft.use_effect(_on_cache_cleared_version_change, dependencies=[state.cache_cleared_version])
 
-    # --- Derived state for MetricCard rendering ---
-    if health_checked:
-        if state.health_checking:
-            metric_health_value = I18n.get("ds_status_checking")
-            metric_health_icon = ft.Icons.HOURGLASS_TOP
-            metric_health_color = AppColors.INFO
-            metric_storage_value = I18n.get("ds_status_calc")
-            metric_storage_icon = ft.Icons.HOURGLASS_TOP
-            metric_storage_color = AppColors.TEXT_HINT
-        elif health_status_key:
-            metric_health_value = I18n.get(health_status_key)
-            storage_key = storage_status_key or "common_normal"
-            metric_storage_value = I18n.get(storage_key)
-            metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
-                health_status_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
-            )
-            # storage icon/color: cancelled/check_fail 用 health 同色, 否则 STORAGE/SUCCESS
-            if health_status_key in ("ds_health_cancelled", "common_check_fail"):
-                metric_storage_icon, metric_storage_color = _HEALTH_STATUS_VISUALS.get(
-                    health_status_key, (ft.Icons.STORAGE, AppColors.TEXT_HINT)
-                )
-            else:
-                metric_storage_icon = ft.Icons.STORAGE
-                metric_storage_color = AppColors.SUCCESS
+    # --- Derived state for MetricCard rendering (直接从 state 派生, 无 dual-track) ---
+    if state.health_checking:
+        metric_health_value = I18n.get("ds_status_checking")
+        metric_health_icon = ft.Icons.HOURGLASS_TOP
+        metric_health_color = AppColors.INFO
+        metric_storage_value = I18n.get("ds_status_calc")
+        metric_storage_icon = ft.Icons.HOURGLASS_TOP
+        metric_storage_color = AppColors.TEXT_HINT
+    elif state.health_error is not None:
+        # 健康检查出错 (common_check_fail)
+        health_key = "common_check_fail"
+        metric_health_value = I18n.get(health_key)
+        metric_storage_value = I18n.get(health_key)
+        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
+            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
+        )
+        metric_storage_icon, metric_storage_color = _HEALTH_STATUS_VISUALS.get(
+            health_key, (ft.Icons.STORAGE, AppColors.TEXT_HINT)
+        )
+    elif state.health_result is not None:
+        # 有健康检查结果, 从 status 派生 health_key
+        status = state.health_result.status
+        if status == "yellow":
+            health_key = "ds_health_lag"
+        elif status == "red":
+            health_key = "ds_health_error"
         else:
-            metric_health_value = I18n.get("ds_status_checking")
-            metric_health_icon = ft.Icons.HEALTH_AND_SAFETY
-            metric_health_color = AppColors.WARNING
-            metric_storage_value = I18n.get("ds_status_calc")
-            metric_storage_icon = ft.Icons.STORAGE
-            metric_storage_color = AppColors.TEXT_HINT
+            health_key = "ds_health_ok"
+        metric_health_value = I18n.get(health_key)
+        metric_storage_value = I18n.get("common_normal")
+        metric_health_icon, metric_health_color = _HEALTH_STATUS_VISUALS.get(
+            health_key, (ft.Icons.HEALTH_AND_SAFETY, AppColors.WARNING)
+        )
+        metric_storage_icon = ft.Icons.STORAGE
+        metric_storage_color = AppColors.SUCCESS
     else:
+        # 未检查过 (初始状态)
         metric_health_value = I18n.get("ds_status_checking")
         metric_health_icon = ft.Icons.HEALTH_AND_SAFETY
         metric_health_color = AppColors.WARNING
@@ -569,14 +545,12 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         metric_storage_icon = ft.Icons.STORAGE
         metric_storage_color = AppColors.TEXT_HINT
 
-    # metric_sync / metric_coverage: 从 last_health_result 派生 (有结果时) 或占位值
-    if last_health_result:
-        market_info = last_health_result.get("market", {})
-        details = last_health_result.get("details", {})
-        latest = market_info.get("latest_local")
+    # metric_sync / metric_coverage: 从 state.health_result 派生 (有结果时) 或占位值
+    if state.health_result is not None:
+        latest = state.health_result.market_latest_local
         metric_sync_value = I18n.get("ds_never_sync") if not latest or str(latest) == "None" else str(latest)
-        cov_val = details.get("financial_coverage", 0)
-        metric_coverage_value = f"{cov_val:.1f}%" if isinstance(cov_val, (int, float)) else str(cov_val)
+        cov_val = state.health_result.details_financial_coverage
+        metric_coverage_value = f"{cov_val:.1f}%"
     else:
         metric_sync_value = f"{I18n.get('time_today')} 15:30"
         metric_coverage_value = I18n.get("ds_val_placeholder_count")
@@ -625,17 +599,15 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     else:
         progress_text_value = ""
 
-    # --- Health summary content (derived from last_health_result) ---
+    # --- Health summary content (直接从 state 派生, 无 dual-track) ---
     if state.health_checking:
         health_summary_content: ft.Control = ft.Text(
             I18n.get("health_checking"), size=12, color=AppColors.TEXT_SECONDARY
         )
-    elif last_health_result:
-        health_summary_content = _build_health_summary_content(last_health_result)
-    elif health_checked and health_status_key == "common_check_fail":
+    elif state.health_result is not None:
+        health_summary_content = _build_health_summary_content(state.health_result)
+    elif state.health_error is not None:
         health_summary_content = ft.Text(I18n.get("ds_health_check_error"), size=12, color=AppColors.ERROR)
-    elif health_checked and health_status_key == "ds_health_cancelled":
-        health_summary_content = ft.Text(I18n.get("ds_health_cancelled"), size=12, color=AppColors.WARNING)
     else:
         health_summary_content = ft.Text(I18n.get("settings_check_health"), size=12, color=AppColors.TEXT_SECONDARY)
 
