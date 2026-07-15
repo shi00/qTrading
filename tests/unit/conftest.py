@@ -39,3 +39,35 @@ def _reset_data_explorer_shared_engine():
     DataExplorerQueryClient._shared_engine = None
     yield
     DataExplorerQueryClient._shared_engine = None
+
+
+@pytest.fixture(autouse=True)
+def _reset_i18n_state():
+    """Reset I18n class-level state before and after each unit test.
+
+    I18n._locale is a class attribute (not a singleton) that persists across
+    tests. Tests that call I18n.set_locale("en_US") can pollute subsequent
+    tests asserting on localized text (e.g. test_review_manager,
+    test_ai_mixin hard-coded Chinese assertions), causing cross-test locale
+    pollution detected by test_pollution_detection.
+
+    This fixture provides a baseline reset for all unit tests. Module-level
+    fixtures in test_i18n.py / test_ui_i18n.py etc. layer on top (executed
+    after this conftest fixture) and may override _initialized to False for
+    auto-init testing; that is safe because module-level fixtures run inside
+    this one.
+
+    _initialized is set to True to avoid auto-init warning log noise in
+    tests that don't explicitly call I18n.initialize().
+    """
+    from core.i18n import DEFAULT_LOCALE, I18n
+
+    I18n._locale = DEFAULT_LOCALE
+    I18n._initialized = True
+    I18n._listeners = None
+    I18n._missing_keys = set()
+    yield
+    I18n._locale = DEFAULT_LOCALE
+    I18n._initialized = True
+    I18n._listeners = None
+    I18n._missing_keys = set()
