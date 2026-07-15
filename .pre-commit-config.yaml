@@ -62,7 +62,10 @@ repos:
         name: Check docs consistency
         entry: python scripts/check_docs_consistency.py
         language: system
-        files: ^(CLAUDE\.md|CONTRIBUTING\.md|pyproject\.toml|\.pre-commit-config\.yaml|scripts/check_docs_consistency\.py)$
+        # NOTE(lazy): files 含 .py 以触发 NOTE(lazy) 三要素检查(任何 .py 变化都跑).
+        #   ceiling: 仅 .md/.toml/.yaml 变化时漏触发 NOTE(lazy) 守护.
+        #   upgrade: 拆分 NOTE(lazy) 守护为独立 hook 时收窄 files 范围.
+        files: \.(md|toml|yaml|py)$
         pass_filenames: false
 
       - id: lint-imports
