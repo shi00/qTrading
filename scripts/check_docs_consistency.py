@@ -272,7 +272,7 @@ def check_note_lazy_format() -> list[str]:
     for p in ROOT.rglob("*.py"):
         if any(part in _NOTE_LAZY_SKIP_DIRS for part in p.parts):
             continue
-        if p == self_path or p == test_consistency_path:
+        if p in (self_path, test_consistency_path):
             # 跳过脚本自身以及专门的规则测试脚本
             continue
         try:
