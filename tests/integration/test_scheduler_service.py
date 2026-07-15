@@ -133,7 +133,7 @@ async def test_daily_update_logic_handles_dataframe_result_without_bool_error(
                 progress_callback(2, 2, "done")
             return pd.DataFrame([{"ts_code": "000001.SZ"}, {"ts_code": "000002.SZ"}])
 
-    monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
+    monkeypatch.setattr("data.data_processor.DataProcessor", _FakeProcessor)
 
     holder: dict[str, typing.Any] = {"factory": None}
 
@@ -219,8 +219,8 @@ async def test_nightly_prediction_passes_trade_date_to_save_results(monkeypatch)
             assert context["trade_date"] == "20260423"
             return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-    monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
-    monkeypatch.setattr(sched_mod, "ReviewManager", _FakeReviewManager)
+    monkeypatch.setattr("data.data_processor.DataProcessor", _FakeProcessor)
+    monkeypatch.setattr("data.persistence.review_manager.ReviewManager", _FakeReviewManager)
     monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
     monkeypatch.setitem(
         sys.modules,
@@ -306,8 +306,8 @@ async def test_nightly_prediction_raises_when_trade_date_missing(monkeypatch):
         async def filter(self, context):
             return pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["平安银行"]})
 
-    monkeypatch.setattr(sched_mod, "DataProcessor", _FakeProcessor)
-    monkeypatch.setattr(sched_mod, "ReviewManager", _FakeReviewManager)
+    monkeypatch.setattr("data.data_processor.DataProcessor", _FakeProcessor)
+    monkeypatch.setattr("data.persistence.review_manager.ReviewManager", _FakeReviewManager)
     monkeypatch.setattr(tm_mod, "TaskManager", _FakeTaskManager)
     monkeypatch.setitem(
         sys.modules,
