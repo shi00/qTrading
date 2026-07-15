@@ -111,5 +111,5 @@ docs/
 .worktrees/
 
 # 7. AI assistant working state (harness-plan / harness-review products)
-Plans.md
+Plans*.md
 .claude/
