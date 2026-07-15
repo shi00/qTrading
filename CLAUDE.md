@@ -136,10 +136,10 @@
 
 | # | 红线 | 说明 | 强制状态 |
 |---|------|------|---------|
-| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/`/`strategies/`/`ui/`；`services/` 导入 `strategies/`/`ui/`；`strategies/` 导入 `ui/` | 可自动化待实现（import-linter） |
+| R1 | **架构越界** | `core/` 导入任何其他层模块；`data/` 导入 `services/`/`strategies/`/`ui/`；`services/` 导入 `strategies/`/`ui/`；`strategies/` 导入 `ui/` | pre-commit（import-linter 4 条契约） |
 | R2 | **异常吞没** | 吞没 `asyncio.CancelledError` (必须 `raise` 以配合优雅停机) | CI-test |
 | R3 | **模糊压制** | 使用 `# type: ignore` 时不带 `[reason]` 注释 (pre-commit 强制拦截) | pre-commit |
-| R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | 可自动化待实现 |
+| R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | pre-commit（check_redlines.py） |
 | R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) | 仅人工评审 |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) | ruff |
 | R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器) | CI-test |
@@ -147,15 +147,15 @@
 | R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 `DataSanitizer` 脱敏) | 安全扫描 + 仅人工评审 |
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | 安全扫描 + 仅人工评审 |
 | R11 | **跨循环复用同步原语** | 直接将 `asyncio.Event/Lock` 作为类属性 (必须通过 `get_loop_local()` 获取以绑定当前循环) | 仅人工评审 |
-| R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | 可自动化待实现 |
-| R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化、不在 `_create_engine` 中更新 `.engine` 引用 | 可自动化待实现 |
-| R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | 可自动化待实现 |
-| R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | 可自动化待实现 |
-| R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | 可自动化待实现（AST 检查） |
+| R12 | **未注册数据表** | 新增表只改 `models.py` 而不更新 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` | pre-commit（check_redlines.py） |
+| R13 | **未注册 DAO** | 新增 DAO 不在 `CacheManager.__init__` 中实例化、不在 `_create_engine` 中更新 `.engine` 引用 | pre-commit（check_redlines.py） |
+| R14 | **未注册策略** | 新增策略不使用 `@register_strategy("key")` 装饰器 | pre-commit（check_redlines.py） |
+| R15 | **未注册单例** | 新增单例不使用 `@register_singleton` 装饰器、不实现 `_reset_singleton` | pre-commit（check_redlines.py） |
+| R16 | **UI 阻塞主循环** | 在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 `await ThreadPoolManager.run_async()` 提交) | 可自动化待实现（AST 检查，暂缓：误报风险高） |
 | R17 | **保留字作字段** | 禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM `name=` 属性映射，禁止拼接该列名的裸 SQL） | 仅人工评审 |
 | R18 | **未隔离开发** | 新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、`.worktrees/` 内已有隔离） | 仅人工评审 |
 
-> **红线自动化方向**：R1 分层依赖可引入 [`import-linter`](https://import-linter.readthedocs.io/) 在 CI 声明禁止方向；R16 UI 阻塞可用自定义 AST/正则 pre-commit 钩子扫描 `ui/` 中 Flet 事件处理器内的同步阻塞调用。二者登记为后续独立自动化任务。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测可与 superpowers `using-git-worktrees` skill 联动，AI 助手在开始特性/重构任务前应主动声明并触发该 skill。
+> **红线自动化现状**：R1 分层依赖已由 [`import-linter`](https://import-linter.readthedocs.io/) 4 条契约守护（pre-commit `import-linter` hook）；R4/R12/R13/R14/R15 已由 `scripts/check_redlines.py` 实现（pre-commit `redline-check` hook，44 个单元测试守护）；R16 UI 阻塞暂缓（AST 扫描误报风险高，需更精确的事件处理器识别逻辑）。无自动化的红线（标注 `仅人工评审`）尤须 AI 自查。R18 的 worktree 隔离检测可与 superpowers `using-git-worktrees` skill 联动，AI 助手在开始特性/重构任务前应主动声明并触发该 skill。
 
 ### 3.2 ✅ 强制要求
 
@@ -171,7 +171,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-- **Windows 测试泄漏 (P1-2)**: 已解决。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由 `_reset_loop_local_fallback` fixture 清理。integration/e2e fixture 保留 `loop_scope="session"` override。性能基准对比见 `docs/loop-scope-perf-baseline.md`（回归 1.97%）。剩余 20 个测试失败为独立的测试顺序污染（日志配置），登记为独立技术债。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
+- **Windows 测试泄漏 (P1-2)**: 已解决。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由 `_reset_loop_local_fallback` fixture 清理。integration/e2e fixture 保留 `loop_scope="session"` override。性能基准对比见 `docs/loop-scope-perf-baseline.md`（回归 1.97%）。测试顺序污染（日志配置泄漏）已解决：`_reset_logging_state` autouse fixture 重置 `Logger.disabled` 实例属性、`logging.disable`、named logger level，确保 caplog 跨测试不污染。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 
