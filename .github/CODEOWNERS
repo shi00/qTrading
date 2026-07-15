@@ -4,25 +4,34 @@
 # CI/CD workflows
 .github/ @louis2sin
 
+# Architecture core
+core/ @louis2sin
+
 # Database and data layer
-data/persistence/ @louis2sin
-data/data_dictionary.py @louis2sin
+data/ @louis2sin
 alembic/ @louis2sin
 
 # Strategy layer
 strategies/ @louis2sin
 
-# Core utilities
-utils/config_handler.py @louis2sin
-utils/config_models.py @louis2sin
-utils/security_utils.py @louis2sin
+# Services layer
+services/ @louis2sin
 
-# AI services
-services/ai_service.py @louis2sin
+# UI layer
+ui/ @louis2sin
+
+# Utils (cross-cutting concerns)
+utils/ @louis2sin
 
 # Main entry points
 main.py @louis2sin
 app/ @louis2sin
+
+# Tests
+tests/ @louis2sin
+
+# Scripts
+scripts/ @louis2sin
 
 # Dependencies
 pyproject.toml @louis2sin
@@ -38,4 +47,6 @@ CLAUDE.md @louis2sin
 README.md @louis2sin
 CONTRIBUTING.md @louis2sin
 SECURITY.md @louis2sin
+CHANGELOG.md @louis2sin
+man/ @louis2sin
 docs/ @louis2sin

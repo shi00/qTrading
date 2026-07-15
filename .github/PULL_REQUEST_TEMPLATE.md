@@ -1,4 +1,4 @@
-﻿## 🎯 PR 概述
+## 🎯 PR 概述
 <!-- 一句话说明本次修改目标、解决什么问题/实现什么功能 -->
 
 ## 🔗 关联工单/Issue
@@ -48,10 +48,11 @@ Relates to #XXX
 - [ ] CLAUDE.md 架构、单例、策略规范同步对齐
 - [ ] CONTRIBUTING.md 流程、安装命令、测试步骤同步
 - [ ] SECURITY.md 支持版本、依赖CVE更新
+- [ ] man/ 专题文档（flet-best-practices / database-account-separation / table-partitioning-strategy）按变更同步
 - [ ] CHANGELOG.md 由release-please自动生成，无手动修改
 
 ## ✅ 提交前自检清单（强制全部核对）
-- [ ] 代码符合 CLAUDE.md 架构红线、分层规范、单例约束
+- [ ] 代码符合 [CLAUDE.md 架构红线 R1-R18](./CLAUDE.md#31--绝对禁止)、分层规范、单例约束
 - [ ] 无硬编码密钥、数据库密码、Token、隐私信息
 - [ ] 无废弃死代码、注释掉的临时调试代码
 - [ ] 所有新增分支、边界逻辑配套对应测试用例

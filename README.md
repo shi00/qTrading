@@ -91,15 +91,17 @@
 采用清晰分层架构（核心/引导/数据/服务/策略/表现 + 横切 utils）：
 
 ```
-astock_screener/
+qTrading/
 ├── main.py                 # 应用入口，服务编排与生命周期管理
 ├── config.py               # 全局配置（数据库连接、tiktoken 缓存等）
 │
 ├── core/                   # 核心层（架构基础，不依赖任何其他层）
-│   └── i18n.py                 # 国际化引擎（中/英双语）
+│   ├── i18n.py                 # 国际化引擎（中/英双语）
+│   └── prompt_base.py          # Prompt 基础模板
 │
 ├── app/                    # 引导层（服务编排，仅 main.py 调用）
-│   └── bootstrap.py            # 启动初始化、服务编排
+│   ├── bootstrap.py            # 启动初始化、服务编排
+│   └── startup_controller.py   # 启动控制器
 │
 ├── data/                   # 数据层
 │   ├── cache/              # 缓存管理
@@ -110,24 +112,33 @@ astock_screener/
 │   │   ├── market_data_service.py     # 市场数据后台服务
 │   │   └── transaction_cost.py        # 交易成本计算服务
 │   ├── external/           # 外部数据源
-│   │   ├── tushare_client.py   # Tushare API 客户端（限流、重试）
-│   │   └── news_fetcher.py     # 新闻抓取服务
+│   │   ├── tushare_client.py        # Tushare API 客户端（限流、重试）
+│   │   ├── akshare_concept_client.py # Akshare 概念板块客户端
+│   │   └── news_fetcher.py          # 新闻抓取服务
 │   ├── persistence/        # 持久化层
 │   │   ├── daos/           # 数据访问对象
-│   │   │   ├── base_dao.py     # 基础 DAO（类型转换、批量写入）
-│   │   │   ├── stock_dao.py    # 股票基础数据
-│   │   │   ├── quote_dao.py    # 日线行情、质量评分
-│   │   │   ├── financial_dao.py # 财务数据
-│   │   │   ├── holder_dao.py   # 股东数据
-│   │   │   ├── macro_dao.py    # 宏观经济数据
-│   │   │   ├── market_dao.py   # 市场指数数据
-│   │   │   ├── screener_dao.py # 选股结果存储
-│   │   │   ├── sync_dao.py     # 同步状态管理
-│   │   │   └── backtest_dao.py # 回测结果存储
+│   │   │   ├── base_dao.py            # 基础 DAO（类型转换、批量写入）
+│   │   │   ├── stock_dao.py           # 股票基础数据
+│   │   │   ├── quote_dao.py           # 日线行情、质量评分
+│   │   │   ├── financial_dao.py       # 财务数据
+│   │   │   ├── holder_dao.py          # 股东数据
+│   │   │   ├── macro_dao.py           # 宏观经济数据
+│   │   │   ├── market_dao.py          # 市场指数数据
+│   │   │   ├── screener_dao.py        # 选股结果存储
+│   │   │   ├── sync_dao.py            # 同步状态管理
+│   │   │   ├── backtest_dao.py        # 回测结果存储
+│   │   │   ├── express_dao.py         # 快报数据
+│   │   │   ├── pledge_detail_dao.py   # 股权质押明细
+│   │   │   ├── share_float_dao.py     # 限售股解禁数据
+│   │   │   ├── stk_holdertrade_dao.py # 股东增减持数据
+│   │   │   ├── stk_limit_dao.py       # 涨跌停数据
+│   │   │   ├── sw_industry_dao.py     # 申万行业数据
+│   │   │   └── top_inst_dao.py        # 龙虎榜机构明细
 │   │   ├── models.py           # SQLAlchemy ORM 模型
 │   │   ├── db_migrator.py      # 数据库迁移管理
 │   │   ├── data_explorer_query_client.py # 数据库连接管理（同步引擎）
 │   │   ├── db_config_service.py # 数据库配置服务
+│   │   ├── db_url_override.py  # 数据库 URL 覆盖
 │   │   ├── metadata_manager.py # 元数据管理
 │   │   ├── review_manager.py   # AI 回顾管理器
 │   │   ├── app_state_service.py # 应用状态服务
@@ -138,7 +149,9 @@ astock_screener/
 │   │   ├── historical.py       # 历史行情同步
 │   │   ├── financial.py        # 财务数据同步
 │   │   ├── holder.py           # 股东数据同步
-│   │   └── macro.py            # 宏观数据同步
+│   │   ├── macro.py            # 宏观数据同步
+│   │   ├── concept_sync.py     # 概念板块同步
+│   │   └── sw_industry.py      # 申万行业同步
 │   ├── mixins/             # 混入类
 │   │   ├── health_mixin.py     # 健康检查
 │   │   └── calendar_mixin.py   # 日历工具
@@ -179,6 +192,9 @@ astock_screener/
 │   ├── app_layout.py           # 主布局（6 标签页导航：市场 | 选股 | 回测 | 数据 | 任务 | 设置）
 │   ├── i18n.py                 # UI 层国际化封装（核心引擎在 core/i18n.py）
 │   ├── theme.py                # 主题管理
+│   ├── hooks.py                # 声明式 UI hooks（use_viewmodel 等）
+│   ├── pubsub_topics.py        # 发布订阅主题定义
+│   ├── startup_views.py        # 启动视图
 │   ├── components/             # 可复用组件
 │   │   ├── config_panels/      # 配置面板
 │   │   │   ├── database_config_panel.py
@@ -195,6 +211,8 @@ astock_screener/
 │   │   ├── news_feed.py        # 新闻订阅
 │   │   ├── chart_utils.py      # 图表工具
 │   │   ├── settings_widgets.py # 设置组件
+│   │   ├── resizable_splitter.py # 可调整分割器
+│   │   ├── _markdown_safe.py   # Markdown 安全渲染
 │   │   ├── stock_detail_dialog.py
 │   │   └── health_report_dialog.py
 │   ├── viewmodels/             # 视图模型
@@ -203,7 +221,14 @@ astock_screener/
 │   │   ├── backtest_view_model.py
 │   │   ├── data_explorer_view_model.py
 │   │   ├── data_source_view_model.py
-│   │   └── onboarding_view_model.py
+│   │   ├── onboarding_view_model.py
+│   │   ├── task_center_view_model.py
+│   │   ├── system_viewmodel.py
+│   │   ├── database_config_panel_view_model.py
+│   │   ├── llm_config_panel_view_model.py
+│   │   ├── local_model_config_panel_view_model.py
+│   │   ├── tushare_config_panel_view_model.py
+│   │   └── failover_config_panel_view_model.py
 │   └── views/                  # 视图
 │       ├── home_view.py
 │       ├── screener_view.py
@@ -217,10 +242,13 @@ astock_screener/
 │           ├── automation_tab.py
 │           ├── data_source_tab.py
 │           ├── database_tab.py
-│           └── system_tab.py
+│           ├── system_tab.py
+│           └── tier_api_panel.py
 │
 ├── utils/                  # 工具层
 │   ├── config_handler.py       # 配置管理（读写锁）
+│   ├── config_models.py        # 配置数据模型
+│   ├── constants.py            # 常量定义
 │   ├── security_utils.py       # 安全工具（AES-GCM）
 │   ├── thread_pool.py          # 线程池管理（IO/CPU 分离）
 │   ├── rate_limiter.py         # 令牌桶限流器
@@ -234,12 +262,17 @@ astock_screener/
 │   ├── log_decorators.py       # 日志装饰器
 │   ├── singleton_registry.py   # 单例注册表
 │   ├── error_classifier.py     # 错误分类器
+│   ├── exception_hooks.py      # 异常钩子
 │   ├── correlation.py          # 相关性工具
+│   ├── db_utils.py             # 数据库工具
+│   ├── diagnostics.py          # 诊断工具
+│   ├── async_utils.py          # 异步工具
+│   ├── qfq.py                  # 前复权计算
 │   ├── prompt_guard.py         # Prompt 安全防护
 │   ├── sanitizers.py           # 数据脱敏工具
 │   └── time_utils.py           # 时间工具函数
 │
-├── tests/                  # 测试层（210+ 单元测试文件，53+ 集成测试文件）
+├── tests/                  # 测试层（220+ 单元测试文件，55+ 集成测试文件）
 │   ├── conftest.py             # 全局测试配置
 │   ├── unit/                   # 单元测试
 │   │   ├── conftest.py
@@ -252,7 +285,7 @@ astock_screener/
 │   │   ├── strategies/         # 策略测试（含回测模块测试）
 │   │   ├── data/               # 数据层测试
 │   │   ├── ui/                 # UI 层测试
-│   │   └── ... (170+ 文件)
+│   │   └── ... (220+ 文件)
 │   └── integration/            # 集成测试
 │       ├── conftest.py
 │       ├── test_historical_sync_integrity.py
@@ -268,7 +301,9 @@ astock_screener/
 │
 ├── alembic/                # 数据库迁移
 │   ├── env.py                  # Alembic 环境配置
-│   └── versions/               # 迁移脚本
+│   ├── script.py.mako          # 迁移脚本模板
+│   ├── README                  # Alembic 说明
+│   └── versions/               # 迁移脚本（0001~0015）
 │
 ├── locales/                # 国际化
 │   ├── en_US/strings.json
@@ -416,7 +451,7 @@ python main.py
 
 ## 🧪 测试
 
-项目采用双层测试金字塔结构，包含 **210+ 单元测试文件，53+ 集成测试文件**：
+项目采用双层测试金字塔结构，包含 **220+ 单元测试文件，55+ 集成测试文件**：
 
 ```bash
 # 运行所有测试
@@ -441,8 +476,8 @@ python -m pytest tests/integration/test_historical_sync_integrity.py -v
 
 | 层级 | 目录 | 文件数 | 覆盖内容 |
 |------|------|--------|----------|
-| **Unit** | `tests/unit/` | 210+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
-| **Integration** | `tests/integration/` | 53+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度、回测全流程 |
+| **Unit** | `tests/unit/` | 220+ | 纯逻辑验证：AI 服务、策略、DAO、配置、工具类、边界条件、回测模块 |
+| **Integration** | `tests/integration/` | 55+ | 组件协作：数据同步完整性、数据库迁移、回顾系统、任务调度、回测全流程 |
 
 ### 关键测试覆盖
 

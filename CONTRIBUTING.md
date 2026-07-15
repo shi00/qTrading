@@ -57,23 +57,11 @@
 
 ### 报告 Bug
 
-如果你发现了 bug，请通过 [GitHub Issues](https://github.com/shi00/qTrading/issues) 提交。提交前请：
-
-1. 搜索现有 issues，确认没有被报告过
-2. 按以下清单提供信息：
-   - 问题描述
-   - 复现步骤
-   - 期望行为
-   - 实际行为
-   - 环境信息（操作系统、Python 版本等）
+如果你发现了 bug，请通过 [Bug 报告模板](https://github.com/shi00/qTrading/issues/new?template=bug_report.yml) 提交（空白 issue 已禁用，模板位于 [`.github/ISSUE_TEMPLATE/bug_report.yml`](./.github/ISSUE_TEMPLATE/bug_report.yml)）。提交前请先搜索现有 issues 确认无重复，并按模板填写：问题描述、复现步骤、期望/实际行为、环境信息、影响层与严重度。
 
 ### 提出新功能
 
-欢迎提出新功能建议！请在 Issue 中详细描述：
-
-- 功能描述
-- 使用场景
-- 可能的实现方案
+欢迎提出新功能建议！请通过 [功能请求模板](https://github.com/shi00/qTrading/issues/new?template=feature_request.yml) 提交（模板位于 [`.github/ISSUE_TEMPLATE/feature_request.yml`](./.github/ISSUE_TEMPLATE/feature_request.yml)）。新功能需符合 [CLAUDE.md §1.3 极简设计](./CLAUDE.md#13-极简设计-simplicity-first)（YAGNI 优先）。提问与讨论请前往 [GitHub Discussions](https://github.com/shi00/qTrading/discussions)。
 
 ### 代码复用与避免重复造轮子
 
@@ -780,7 +768,7 @@ View 通过 `use_viewmodel(factory) -> (state, commands)` 消费 ViewModel：
 ```python
 import flet as ft
 from core.i18n import I18n
-from ui.hooks import use_viewmodel          # 已实现，见 CLAUDE.md §3.3
+from ui.hooks import use_viewmodel          # 已实现，见 ui/hooks.py
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 @ft.component
@@ -796,7 +784,7 @@ def ScreenerView():
     ])
 ```
 
-`use_viewmodel` 契约（已实现，登记于 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：
+`use_viewmodel` 契约（已实现，见 [ui/hooks.py](./ui/hooks.py)）：
 
 - 首次渲染：调 `factory()` 实例化 VM，调 `vm.subscribe(set_state)` 注册（保存返回的 unsub），返回 `(vm.state, vm)`
 - `_notify` 触发：VM 遍历订阅者调 `callback(self.state)`，hook 注册的 callback 即 `set_state(vm.state)`，触发重渲染
@@ -805,7 +793,7 @@ def ScreenerView():
 
 ### 存量技术债
 
-[ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 已全部重写为 state snapshot + commands + `use_viewmodel` 目标范式（CLAUDE.md §1.4 UI 迁移例外 + §3.3）。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。
+[ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 已全部重写为 state snapshot + commands + `use_viewmodel` 目标范式。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。
 
 ## Flet 0.85.3 (V1) API 关键约束
 
@@ -813,12 +801,12 @@ def ScreenerView():
 
 ### 演进方向
 
-项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 alpha/beta)。**项目策略：全面拥抱 V1 声明式，所有命令式 UI 代码全面重写，不保留兼容垫片**（CLAUDE.md §1.4 UI 迁移例外）。遵循以下原则：
+项目已从 Flet 0.28.3 (V0) 升级到 0.85.3 (V1，Flet 1.0 alpha/beta)。**项目策略：全面拥抱 V1 声明式，所有命令式 UI 代码全面重写，不保留兼容垫片**。遵循以下原则：
 
 - **不得引入任何 V0 兼容垫片**（如 `hasattr(page, "open")` 双路径、`getattr(e, "delta_x", 0)` 兼容取值等）
 - **全面采用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非 `PageRefMixin` 覆写
 - **全面使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`；对话框用 `page.show_dialog()`/`page.pop_dialog()` 而非 `page.dialog=`/`page.open()`
-- **历史命令式代码已全面重写**（§1.4 UI 迁移例外）：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已全部重写为 `@ft.component` + `use_viewmodel` 声明式范式
+- **历史命令式代码已全面重写**：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已全部重写为 `@ft.component` + `use_viewmodel` 声明式范式
 - **兼容垫片已删除**：`PageRefMixin` 与 `mock_flet` 测试桩在依赖代码重写完成后已删除（见下文「兼容垫片使用规则」）
 
 ### 强制 API 约束（Breaking Changes）
@@ -927,7 +915,7 @@ View 消费 ViewModel 必须经 `use_viewmodel(factory) -> (state, commands)` ho
 ```python
 import flet as ft
 from core.i18n import I18n
-from ui.hooks import use_viewmodel          # 已实现，见 CLAUDE.md §3.3
+from ui.hooks import use_viewmodel          # 已实现，见 ui/hooks.py
 from ui.viewmodels.screener_view_model import ScreenerViewModel
 
 @ft.component
@@ -948,15 +936,15 @@ def ScreenerView():
 
 - View 只做两件事：读 `state` 渲染控件树、事件调 `vm.command()`
 - VM 不得出现在 View 的 `use_state`/`use_effect` 之外的任何地方；不持有 VM 引用做副作用
-- `use_viewmodel` hook 已实现（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)），新 UI 必须通过本 hook 消费 ViewModel
+- `use_viewmodel` hook 已实现（见 [ui/hooks.py](./ui/hooks.py)），新 UI 必须通过本 hook 消费 ViewModel
 - 7 个 ViewModel 已全部迁移为 `use_viewmodel` 范式，新代码必须沿用
 
 #### 6. 迁移约束
 
-- **所有命令式 UI 代码已全面重写为声明式**（CLAUDE.md §1.4 UI 迁移例外）：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已全部重写为 `@ft.component` + `use_viewmodel` 声明式范式。
+- **所有命令式 UI 代码已全面重写为声明式**：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已全部重写为 `@ft.component` + `use_viewmodel` 声明式范式。
 - `ft.run(before_main=...)` 属可选优化，YAGNI，暂不强制。
 - async 窗口/控件方法必须 `await`。
-- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法已全面重写完成，命令式控件已删除（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）。
+- 命令式 `@ft.control`/`@dataclass` + `did_mount`/`will_unmount` 写法已全面重写完成，命令式控件已删除。
 
 ### 依赖管理
 
@@ -1001,13 +989,13 @@ def ScreenerView():
 | 维度 | 通用手册 | 项目规范（优先） |
 |------|---------|----------------|
 | 适用范围 | Web/移动/桌面通用 | 仅桌面端（`page.window.min_width=1280`） |
-| UI 模型 | 裸 `use_state`/`use_effect` 组件 | MVVM + `use_viewmodel` hook（CLAUDE.md §3.2 强制；`use_viewmodel` 已实现，见 CLAUDE.md §3.3） |
+| UI 模型 | 裸 `use_state`/`use_effect` 组件 | MVVM + `use_viewmodel` hook（CLAUDE.md §3.2 强制；`use_viewmodel` 已实现，见 [ui/hooks.py](./ui/hooks.py)） |
 | 异步线程 | `asyncio.to_thread` / `page.run_thread` | `ThreadPoolManager.run_async(TaskType.IO/CPU)`（CLAUDE.md §3.1 R16 红线） |
 | API 约束表 | 通用手册 §17 迁移表 | 本节上文 21 行 breaking changes 表（含检测方式，实测对齐 0.85.3） |
 | 版本锁定 | `flet==0.85.3` + charts 解析版本 | `flet`/`flet-desktop`/`flet-charts` 三包全锁 `==0.85.3`（见 [依赖管理](#依赖管理)） |
-| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | compact/standard/wide/ultra_wide 1200/1600/2400（见 [`ui/theme.py`](./ui/theme.py) 的 `AppStyles` 断点常量） |
+| 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400 | compact/standard/ultra_wide 1200/1600/2400（见 [`ui/theme.py`](./ui/theme.py) 的 `AppStyles` 断点常量） |
 | 桌面打包 | `flet pack`（通用手册 §13.5） | PyInstaller（[`AStockScreener.spec`](./AStockScreener.spec)，见 [PyInstaller 打包](#pyinstaller-打包)） |
-| Dialog 管理 | `ft.use_dialog()` Hook（通用手册 §10.1，声明式唯一推荐） | `page.show_dialog()`/`page.pop_dialog()`（V0→V1 迁移完成态；声明式重写已完成，见 CLAUDE.md §3.3） |
+| Dialog 管理 | `ft.use_dialog()` Hook（通用手册 §10.1，声明式唯一推荐） | `page.show_dialog()`/`page.pop_dialog()`（V0→V1 迁移完成态；声明式重写已完成） |
 
 通用手册中 Web/移动专属内容（WASM/CDN、APK/IPA 构建、`SafeArea`、Cupertino `adaptive`、移动端 `NavigationBar` 等）项目桌面端不适用，仅作背景知识。
 
@@ -1231,7 +1219,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### 4. 新增一个 UI 视图
 
-1. 先确认 `ui.hooks.use_viewmodel` 是否已满足当前 ViewModel 消费需求；若未满足，先实现/扩展该 hook（见 [MVVM 表现层](#mvvm-表现层) 与 CLAUDE.md §3.3）。
+1. 先确认 `ui.hooks.use_viewmodel` 是否已满足当前 ViewModel 消费需求；若未满足，先实现/扩展该 hook（见 [MVVM 表现层](#mvvm-表现层)）。
 2. 在 `ui/viewmodels/` 下创建对应 ViewModel：暴露不可变 state snapshot、commands、`subscribe(callback) -> unsub`，禁止 import Flet、禁止持有 Flet 控件、禁止调 `page.update()`/`control.update()`。
 3. 在 `ui/views/` 下创建 `@ft.component` 声明式 View：只读取 state 渲染控件树，只在事件中调用 commands；禁止 `did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`（见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)）。
 4. i18n 文案由 VM 输出 key + params，View 按当前 locale 渲染；locale 变化作为 View 层声明式状态源触发重渲染（见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范) 中的 i18n 状态驱动规则）。
@@ -1310,10 +1298,10 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 |------|---------|---------------|--------------|
 | **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
-| ~~P3~~ | ~~**命令式 UI 存量需整改为声明式**~~ **[已收官]** | 原 UI 全量为命令式（`class X(ft.Container)` + 手动 `self.update()` + `did_mount`/`will_unmount`）。宪法 [§3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求) 已确立声明式 `@ft.component` 为唯一合法模型。 | Phase A-H 声明式迁移已收官（见 [CLAUDE.md §3.3](./CLAUDE.md#33--已知技术债与架构限制-known-limitations)）：所有 View/Tab/Component 已重写为 `@ft.component` + `use_viewmodel` 范式；`PageRefMixin`/`v1_compat.py` 兼容垫片已删除；`refresh_dropdown_options` 已在 Phase R.4.1 删除（生产零调用）。 |
 | **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R18 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
 | **P3** | **strategies/ 层 38 处 except Exception 待统一走 classify_error** | T34 P3 登记技术债：strategies/ 层 49 处 except Exception 中，P0 必修 5 处 + P2 优化 7 处已完成，剩余 38 处已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。 | 策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构或累计标记数变化时。 |
 | **P3** | **utils/ 层 40 处 except Exception 待统一走 classify_error** | R3 场景遗漏检视发现：utils/ 层 spec 任务列表外的 40 处 except Exception（config_handler 28 + exception_hooks 3 + logger 3 + singleton_registry 3 + diagnostics 2 + time_utils 1）既未走 classify 也未标记 NOTE(lazy)。其中 exception_hooks/logger 属基础设施兜底（不适合走 classify），config_handler keyring fallback 属合理降级。 | 后续统一改造时走 `classify_error` 或补标 `# NOTE(lazy):` 说明豁免原因。upgrade 触发条件：utils 层异常处理统一改造时。 |
+| **P3** | **红线自动化覆盖不完整** | CLAUDE.md §3.1 中 R1/R4/R12/R13/R14/R15/R16 标注「可自动化待实现」，目前仅靠人工评审与 CI-test 拦截部分红线（R2/R3/R7/R8）。R1（分层依赖）可引入 import-linter，R16（UI 阻塞）可用 AST/正则 pre-commit 钩子，R4/R12/R13/R14/R15 需自定义检查。 | 分阶段引入自动化：① R1 import-linter 声明禁止方向；② R16 AST 钩子扫描 ui/ 事件处理器同步阻塞；③ R4/R12/R13/R14/R15 自定义 pre-commit 检查。upgrade 触发条件：红线违规频发或 CI 自动化专项迭代时。 |
 
 ---
 

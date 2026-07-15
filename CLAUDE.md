@@ -57,7 +57,6 @@
 - **删除优于添加**：优先通过删除死代码、未使用的灵活性、推测性功能来解决问题，而非添加新代码。重构时先问"能否删除"，再问"如何修改"。但"不可简化清单"中的内容（输入校验、错误处理、安全、专项规范要求）不可因"删除"而省略。
 - **严格融入风格**：必须与现有代码的编码风格（哪怕是你认为不够优雅的风格）保持绝对一致。
 - **残留代码处理**：若发现无关的死代码（Dead Code），在回复中指出，绝不顺手删除。
-- **UI 声明式迁移例外（已完成）**：UI 层的 V0→V1 声明式全面重写已收官（见 §3.3），`PageRefMixin`/`v1_compat.py` 等兼容垫片已全部删除。新增 UI 代码必须遵守声明式 `@ft.component` + `use_viewmodel` 范式；其他层（`core/`/`data/`/`services/`/`strategies/`/`utils/`）严格遵守本节微创原则。
 
 ### 1.5 目标驱动与验证 (Goal-Driven Execution)
 
@@ -102,7 +101,7 @@
 | 修改 i18n 文案 | `core/i18n.py`、`locales/`、CONTRIBUTING.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则 |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
-| 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/` |
+| 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |
 | 性能阈值调整 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
 | Git 操作 / 分支 / worktree | §3 R18、CONTRIBUTING.md「Git 工作流与分支策略」；与 superpowers `using-git-worktrees` / `finishing-a-development-branch` skill 联动 |
 
@@ -110,7 +109,7 @@
 
 修改代码后按顺序自检（完整命令见 CONTRIBUTING.md「常用开发与测试命令」）：
 
-- **默认完整门禁**：`ruff check .` → `ruff format --check .` → `pyright` → `python -m pytest tests/unit/ -v -m "not slow"` → `pre-commit run --all-files`。
+- **默认完整门禁**（与 `.github/workflows/ci_cd.yml` 顺序一致）：`ruff check .` → `ruff format --check .` → `pre-commit run --all-files` → `pyright` → `python -m pytest tests/unit/ -v --tb=short`。
 - **实际开发中**按变更范围优先运行 CONTRIBUTING.md「变更类型 → 最小验证子集」；提交、PR 或跨层修改时运行完整门禁。
 - **不得声称未运行项已通过**；无法运行的验证需说明原因，不得跳过不报。
 
@@ -168,13 +167,11 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别；涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
-- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [CONTRIBUTING.md「V1 声明式 UI 开发规范」](./CONTRIBUTING.md#v1-声明式-ui-开发规范)；声明式迁移已收官（见 §3.3），命令式存量（`PageRefMixin`/`v1_compat.py`/回调注入范式）已全部删除。
+- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [CONTRIBUTING.md「V1 声明式 UI 开发规范」](./CONTRIBUTING.md#v1-声明式-ui-开发规范)；声明式迁移已收官，命令式存量（`PageRefMixin`/`v1_compat.py`/回调注入范式）已全部删除。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-- **Windows 测试泄漏 (P1-2)**: 测试环境下由于 Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 被妥协为 `session` 级，会导致 loop-local 缓存（如 `asyncio.Event`）跨测试泄漏。目前通过 autouse fixture 维持隔离，排查多线程并发测试问题时需格外关注。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
-- **`use_viewmodel` hook 已实现**: C 桥接模式基础设施，契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)，实现见 [ui/hooks.py](./ui/hooks.py)。支持双模式：① 内部 VM 模式（`factory=`，hook 实例化 + dispose）；② 外部 VM 模式（`vm=`，消费方持有 VM 引用调 commands，hook 仅订阅不 dispose）。新增声明式 View 必须通过本 hook 消费 VM；不得用 `use_state`+`use_effect` 内联订阅 `_notify` 的退路绕过，不得继续沿用 `on_update`/`on_log` 回调注入范式写新代码。
-- **UI 声明式迁移已收官**: 原 [ui/viewmodels/](./ui/viewmodels/) 下 7 个 ViewModel 的 `on_update`/`on_log` 回调注入 + 命令式 View（`did_mount`/`will_unmount`/`self.update()`/`PageRefMixin`）已全部重写为 state snapshot + commands + `use_viewmodel` 目标范式。5 个历史控件（`AppLayout`/`TaskCenterView`/`FailoverConfigPanel`/`ProviderCredentialDialog`/`ResizableSplitter`）的 `PageRefMixin` 依赖已消除，`ui/v1_compat.py` 兼容桩已删除。
+- **Windows 测试泄漏 (P1-2)**: 测试环境下由于 Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 被妥协为 `session` 级（见 `pyproject.toml` 中 `asyncio_default_fixture_loop_scope = "session"` 与 `asyncio_default_test_loop_scope = "session"`），会导致 loop-local 缓存（如 `asyncio.Event`）跨测试泄漏。目前通过 autouse fixture 维持隔离，排查多线程并发测试问题时需格外关注。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 
@@ -203,7 +200,7 @@ app → 编排所有层，仅被 main.py 调用
 
 ### 4.2 core 层隔离原则
 
-`core/` 是架构核心层，只包含被所有层共享的基础设施 (目前仅 `i18n`)，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块（`utils/` 虽标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖）；如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`；`ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
+`core/` 是架构核心层，只包含被所有层共享的基础设施 (目前含 `i18n` 与 `prompt_base`)，不得依赖 `data/`、`services/`、`strategies/`、`ui/`、`utils/` 中的任何模块（`utils/` 虽标注为"任意层可引用"，但 `core/` 作为最内层不可反向导入 `utils/`，否则形成循环依赖）；如果某个模块被多层引用且产生循环依赖，应考虑提升到 `core/`；`ui/i18n.py` 是 UI 层对 `core.i18n` 的薄封装 (Flet 文本绑定)，不要直接修改 `core.i18n` 来满足 UI 需求。
 
 ### 4.3 单例模式
 

@@ -1,4 +1,4 @@
-﻿# Database Account Separation Guide
+# Database Account Separation Guide
 
 This document describes how to separate database accounts for production deployments, following the principle of least privilege.
 
@@ -123,16 +123,15 @@ sqlalchemy.url = postgresql+asyncpg://astock_admin:admin_password@db.example.com
 
 Or use environment variable:
 
-```python
-# alembic/env.py
-import os
-from sqlalchemy import URL
+`alembic/env.py` 的 `get_database_url()` 按以下优先级链解析数据库 URL（源码为准）：
 
-config.set_main_option(
-    "sqlalchemy.url",
-    os.environ.get("ALEMBIC_DATABASE_URL", os.environ.get("DATABASE_URL"))
-)
-```
+1. `alembic_config.attributes["database_url"]`（应用代码注入，最高优先级）
+2. `alembic_config.get_main_option("sqlalchemy.url")`（alembic.ini 配置，排除默认占位符）
+3. `ConfigHandler.get_db_url()`（项目 ConfigHandler）
+4. `config.DB_URL`（config 模块）
+5. `os.environ.get("DATABASE_URL")`（环境变量兜底）
+
+因此设置 `DATABASE_URL` 环境变量即可被 Alembic 识别，无需 `ALEMBIC_DATABASE_URL`。
 
 ## Migration Workflow
 
@@ -144,8 +143,8 @@ config.set_main_option(
    # Run migration
    alembic upgrade head
    
-   # Grant privileges to app account
-   psql -U astock_admin -d astock -f scripts/grant_app_privileges.sql
+   # Grant privileges to app account (参见下方 Privilege Summary)
+   psql -U astock_admin -d astock -c "GRANT CONNECT ON DATABASE astock TO astock_app; GRANT USAGE ON SCHEMA public TO astock_app; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO astock_app; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO astock_app;"
    ```
 
 2. **Run application as app user**:

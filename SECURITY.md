@@ -1,5 +1,7 @@
 # Security Policy
 
+<!-- NOTE: 本文件的「Supported Versions」表由 release-please 在发版时自动同步版本号（见 release-please-config.json 的 extra-files）。手动修改版本号会被下次发版覆盖。 -->
+
 ## Supported Versions
 
 | Version | Supported          |
