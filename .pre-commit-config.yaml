@@ -68,6 +68,13 @@ repos:
         files: \.(md|toml|yaml|py)$
         pass_filenames: false
 
+      - id: redline-check
+        name: Redline automation check (R4/R12/R13/R14/R15)
+        entry: python scripts/check_redlines.py
+        language: system
+        files: ^(core|data|services|strategies|utils|app)/.*\.py$|^scripts/check_redlines\.py$|^\.pre-commit-config\.yaml$
+        pass_filenames: false
+
       - id: lint-imports
         name: Import Linter (R1 architecture guard)
         entry: lint-imports

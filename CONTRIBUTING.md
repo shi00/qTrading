@@ -273,7 +273,7 @@ pre-commit install
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ```
 
-> 项目使用 10 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、import-linter 架构守护)，详见 `.pre-commit-config.yaml` 或 [Pre-commit Hooks](#pre-commit-hooks)。
+> 项目使用 11 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护)，详见 `.pre-commit-config.yaml` 或 [Pre-commit Hooks](#pre-commit-hooks)。
 
 ## 数据库设置
 
@@ -1179,7 +1179,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### Pre-commit Hooks
 
-本项目使用 10 个 pre-commit hook (定义在 `.pre-commit-config.yaml`，含 Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、import-linter 架构守护)，提交前必须全部通过。
+本项目使用 11 个 pre-commit hook (定义在 `.pre-commit-config.yaml`，含 Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护)，提交前必须全部通过。
 
 ### 数据库迁移
 
