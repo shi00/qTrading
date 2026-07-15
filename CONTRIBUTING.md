@@ -4,7 +4,7 @@
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
-> **对应版本**：0.9.0，最后校对：2026-07-13（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
+> **对应版本**：0.9.0，最后校对：2026-07-15（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
 
 ## 目录
 
@@ -1296,7 +1296,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 | 级别 | 问题描述 | 产生背景与现状 | 期望的最终解法 |
 |------|---------|---------------|--------------|
-| **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
+| **P1-2** | **Windows 测试事件循环泄露** | 已解决（unit 降 function / integration-e2e 保留 session）。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由精准化的 `_reset_loop_local_fallback` fixture 清理。性能基准对比见 `docs/loop-scope-perf-baseline.md`（function 272.37s vs session 267.07s，回归 1.97%）。 | 已解决。剩余 20 个测试失败为独立的测试顺序污染（日志配置），登记为独立技术债。 |
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
 | **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R18 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
 | **P3** | **strategies/ 层 38 处 except Exception 待统一走 classify_error** | T34 P3 登记技术债：strategies/ 层 49 处 except Exception 中，P0 必修 5 处 + P2 优化 7 处已完成，剩余 38 处已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。 | 策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构或累计标记数变化时。 |
