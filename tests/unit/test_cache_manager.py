@@ -505,7 +505,7 @@ class TestCacheManagerWriteReadDb:
         mock_dao = MagicMock()
         mock_dao._write_db = AsyncMock(return_value=1)
         with patch("data.cache.cache_manager.BaseDao", return_value=mock_dao):
-            await mgr._write_db("INSERT INTO test VALUES (?)", ("val",))
+            await mgr.write_db("INSERT INTO test VALUES (?)", ("val",))
             mock_dao._write_db.assert_called_once()
 
     @pytest.mark.asyncio
@@ -541,9 +541,6 @@ class TestCacheManagerPublicWriteReadDb:
             result = await mgr.read_db("SELECT * FROM test")
             mock_dao._read_db.assert_called_once()
             assert len(result) == 1
-
-    def test_write_db_backward_compat_alias(self):
-        assert CacheManager._write_db is CacheManager.write_db
 
     def test_read_db_backward_compat_alias(self):
         assert CacheManager._read_db is CacheManager.read_db

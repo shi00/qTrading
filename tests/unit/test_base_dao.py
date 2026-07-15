@@ -148,13 +148,6 @@ class TestBaseDaoWriteDb:
         with pytest.raises(RuntimeError, match="Engine not initialized"):
             await dao._write_db("SELECT 1")
 
-    @pytest.mark.asyncio
-    async def test_is_many_no_params(self):
-        dao = BaseDao(MagicMock())
-        with pytest.warns(DeprecationWarning):
-            result = await dao._write_db("INSERT", is_many=True, params=None)
-        assert result == 0
-
 
 class TestBaseDaoMaintenanceEvent:
     @pytest.mark.asyncio
@@ -562,23 +555,6 @@ class TestBaseDaoWriteDbExtended:
             mock_cm._instance = None
             result = await dao._write_db("INSERT INTO t VALUES ($1)", params=(1,))
             assert result == 1
-
-    @pytest.mark.asyncio
-    async def test_write_is_many_with_params(self):
-        mock_engine = MagicMock()
-        mock_conn = AsyncMock()
-        dao = BaseDao(mock_engine)
-        with patch("data.cache.cache_manager.CacheManager") as mock_cm:
-            mock_cm._instance = None
-            params = [(1, "a"), (2, "b")]
-            with pytest.warns(DeprecationWarning):
-                result = await dao._write_db(
-                    "INSERT INTO t VALUES ($1, $2)",
-                    params=params,
-                    is_many=True,
-                    conn=mock_conn,
-                )
-            assert result == 2
 
     @pytest.mark.asyncio
     async def test_write_disposed_engine(self):

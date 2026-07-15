@@ -271,23 +271,14 @@ class CacheManager:
 
     # Backward compatibility for direct SQL usage if any
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
-    async def write_db(self, sql: str, params: tuple | list | None = None, is_many: bool = False):
-        if is_many:
-            import warnings
-
-            warnings.warn(
-                "CacheManager.write_db(is_many=True) is deprecated. Use _save_upsert for batch operations.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+    async def write_db(self, sql: str, params: tuple | list | None = None):
         dao = BaseDao(self.engine)
-        return await dao._write_db(sql, params, is_many, suppress_errors=True)
+        return await dao._write_db(sql, params, suppress_errors=True)
 
     async def read_db(self, sql: str, params: tuple | list | None = None):
         dao = BaseDao(self.engine)
         return await dao._read_db(sql, params, suppress_errors=True)
 
-    _write_db = write_db
     _read_db = read_db
 
     # --- Init & Reset ---

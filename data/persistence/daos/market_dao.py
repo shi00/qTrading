@@ -48,7 +48,7 @@ class MarketDao(BaseDao):
             news_item.get("publish_time"),
             news_item.get("source", "Sina"),
         )
-        return await self._write_db(sql, params, is_many=False)
+        return await self._write_db(sql, params)
 
     async def get_market_news(
         self,
