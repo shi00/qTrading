@@ -64,3 +64,10 @@ repos:
         language: system
         files: ^(CLAUDE\.md|CONTRIBUTING\.md|pyproject\.toml|\.pre-commit-config\.yaml|scripts/check_docs_consistency\.py)$
         pass_filenames: false
+
+      - id: lint-imports
+        name: Import Linter (R1 architecture guard)
+        entry: lint-imports
+        language: system
+        pass_filenames: false
+        files: ^(core|data|services|strategies|ui|app|utils)/|pyproject\.toml$
