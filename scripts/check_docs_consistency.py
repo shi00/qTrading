@@ -1,16 +1,17 @@
-"""文档一致性检查（C5 第一阶段）。
+"""文档一致性检查（C5 第一阶段 + 第二阶段 3a）。
 
 检查项：
 1. Markdown 锚点死链校验：扫描 CLAUDE.md、CONTRIBUTING.md 中带 `#anchor` 的 markdown 链接，
    确认目标标题存在（支持同文件 `#anchor` 与跨文件 `./file.md#anchor`）。
 2. CLAUDE.md 顶部版本与 pyproject.toml `[project].version` 一致。
 3. 文档中"项目使用 N 个 pre-commit hook"的数量与 `.pre-commit-config.yaml` 本地 hook 数量一致。
+4. NOTE(lazy) 三要素格式检查：扫描所有 .py 文件中的 `NOTE(lazy):` 标记，
+   校验后续块内是否含 `ceiling:` 与 `upgrade:` 两个关键字（CLAUDE.md §3.3 要求）。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
 第二阶段扩展（未实现，登记于 CONTRIBUTING.md 已知技术债）：
 - 红线 R1~R17 编号 append-only 检查。
-- `NOTE(lazy):` 三要素格式检查。
 - "强制状态"与实际 hook / CI job 的映射检查。
 """
 
@@ -177,12 +178,120 @@ def check_precommit_hook_count() -> list[str]:
     return errors
 
 
+# NOTE(lazy) 三要素检查常量
+NOTE_LAZY_PATTERN = re.compile(r"NOTE\(lazy\):")
+# 单个 NOTE(lazy) 块向后扫描窗口上限（覆盖单行/多行 # 注释/docstring 多行场景）
+# ceiling: 跨 20 行仍无 ceiling:/upgrade: 时认定为缺要素（实际样本最大跨度 7 行）.
+# upgrade: 调整 NOTE(lazy) 描述风格或新增跨 20 行的块时复核上限.
+NOTE_LAZY_SCAN_WINDOW = 20
+
+# NOTE(lazy) 检查应跳过的目录（第三方代码、构建产物、worktree 副本等）
+_NOTE_LAZY_SKIP_DIRS = frozenset(
+    {
+        "venv",
+        ".venv",
+        "__pycache__",
+        ".git",
+        "node_modules",
+        ".worktrees",
+        ".tmp",
+        ".pytest_cache",
+        ".ruff_cache",
+        "build",
+        "dist",
+    }
+)
+
+
+def _find_note_lazy_blocks(content: str) -> list[tuple[int, str]]:
+    """找到所有 NOTE(lazy) 块的 (起始行号 0-based, 块文本)。
+
+    块边界：从 ``NOTE(lazy):`` 所在行开始，向后扫描最多 NOTE_LAZY_SCAN_WINDOW 行，
+    遇到下一个 ``NOTE(lazy):`` 标记时截断（不含该行），避免吞下下一块的 ceiling/upgrade。
+
+    跳过 fenced code block（```...```）内的 NOTE(lazy) 标记，避免代码示例误判。
+    """
+    lines = content.splitlines()
+    in_code_block = False
+    note_lazy_line_idxs: list[int] = []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if NOTE_LAZY_PATTERN.search(line):
+            note_lazy_line_idxs.append(i)
+
+    blocks: list[tuple[int, str]] = []
+    for pos_idx, line_idx in enumerate(note_lazy_line_idxs):
+        next_line_idx = note_lazy_line_idxs[pos_idx + 1] if pos_idx + 1 < len(note_lazy_line_idxs) else len(lines)
+        block_end = min(line_idx + NOTE_LAZY_SCAN_WINDOW, next_line_idx)
+        block_text = "\n".join(lines[line_idx:block_end])
+        blocks.append((line_idx, block_text))
+    return blocks
+
+
+def _check_note_lazy_in_text(content: str) -> list[tuple[int, list[str]]]:
+    """纯函数：检查给定文本中的 NOTE(lazy) 块，返回 (line_idx 0-based, missing_elements) 列表。
+
+    missing_elements 取值：``"ceiling:"`` / ``"upgrade:"``（或两者）。
+    """
+    issues: list[tuple[int, list[str]]] = []
+    for line_idx, block_text in _find_note_lazy_blocks(content):
+        has_ceiling = "ceiling:" in block_text
+        has_upgrade = "upgrade:" in block_text
+        if not has_ceiling or not has_upgrade:
+            missing: list[str] = []
+            if not has_ceiling:
+                missing.append("ceiling:")
+            if not has_upgrade:
+                missing.append("upgrade:")
+            issues.append((line_idx, missing))
+    return issues
+
+
+def check_note_lazy_format() -> list[str]:
+    """检查项 4：NOTE(lazy) 三要素格式检查（CLAUDE.md §3.3 要求）。
+
+    扫描所有 .py 文件（排除第三方/构建产物/worktree 副本）中的 ``NOTE(lazy):`` 标记，
+    校验后续块内是否含 ``ceiling:`` 与 ``upgrade:`` 两个关键字。
+
+    支持格式：
+    - 单行：所有三要素在 ``NOTE(lazy):`` 同行
+    - 多行 # 注释：ceiling/upgrade 在后续 ``#`` 注释行
+    - docstring 多行：ceiling/upgrade 在后续 docstring 行
+
+    区分 NOTE(lazy) 与 ``# TODO:``：后者不匹配 ``NOTE\\(lazy\\):`` 正则，自然不被检查。
+    """
+    errors: list[str] = []
+    self_path = Path(__file__).resolve()
+    # 显式跳过专门测试 NOTE(lazy) 校验规则的测试文件，防止其单元测试用例中的演示文本被误判
+    test_consistency_path = ROOT / "tests" / "unit" / "test_docs_consistency.py"
+
+    for p in ROOT.rglob("*.py"):
+        if any(part in _NOTE_LAZY_SKIP_DIRS for part in p.parts):
+            continue
+        if p == self_path or p == test_consistency_path:
+            # 跳过脚本自身以及专门的规则测试脚本
+            continue
+        try:
+            content = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line_idx, missing in _check_note_lazy_in_text(content):
+            rel_path = p.relative_to(ROOT)
+            errors.append(f"{rel_path}:{line_idx + 1}: NOTE(lazy) 缺少三要素: {', '.join(missing)}")
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
     all_errors.extend(check_anchor_dead_links())
     all_errors.extend(check_version_consistency())
     all_errors.extend(check_precommit_hook_count())
+    all_errors.extend(check_note_lazy_format())
 
     if all_errors:
         print("❌ 文档一致性检查失败：", file=sys.stderr)
@@ -190,7 +299,7 @@ def main() -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print("✅ 文档一致性检查通过（锚点死链 / 版本一致 / pre-commit hook 数量一致）")
+    print("✅ 文档一致性检查通过（锚点死链 / 版本一致 / pre-commit hook 数量 / NOTE(lazy) 三要素）")
     return 0
 
 

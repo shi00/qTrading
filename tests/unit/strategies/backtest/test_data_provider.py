@@ -981,3 +981,54 @@ class TestGetStockMeta:
         assert isinstance(delist_date, date)
         assert not hasattr(delist_date, "date")  # 不是 Timestamp
         assert delist_date == date(2024, 6, 30)
+
+
+class TestR9SanitizationGuard:
+    """R9 红线守护测试：验证 build_context 中 diagnostics error 字段经 DataSanitizer 脱敏。
+
+    覆盖 1 处修复点：
+    - BacktestDataProvider.build_context: diagnostics["table_status"][key]["error"]
+    """
+
+    # 含 DB 凭证的敏感 payload（password 23 字符，>= 16 字符阈值）
+    _SECRET_URL = "postgresql://dbuser:supersecretpass123456@host:5432/mydb"
+    _SECRET_PASSWORD = "supersecretpass123456"
+
+    @pytest.fixture
+    def mock_cache(self) -> MagicMock:
+        cache = MagicMock()
+        cache.get_screening_data = AsyncMock(
+            return_value=pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ"],
+                    "trade_date": ["20240102"],
+                    "close": [10.0],
+                    "is_tradable": [True],
+                    "turnover_rate": [3.5],
+                }
+            )
+        )
+        cache.get_fundamental_screening_data = AsyncMock(return_value=pd.DataFrame())
+        cache.get_northbound = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow_hsgt = AsyncMock(return_value=pd.DataFrame())
+        cache.get_moneyflow = AsyncMock(return_value=pd.DataFrame())
+        cache.get_top_list = AsyncMock(return_value=pd.DataFrame())
+        cache.get_block_trade = AsyncMock(return_value=pd.DataFrame())
+        return cache
+
+    @pytest.mark.asyncio
+    async def test_diagnostics_error_sanitizes_secrets(self, mock_cache: MagicMock) -> None:
+        """辅助表 fetch 异常时 diagnostics['table_status'][key]['error'] 不含明文密码"""
+        mock_cache.get_northbound = AsyncMock(side_effect=Exception(self._SECRET_URL))
+
+        provider = BacktestDataProvider(mock_cache)
+        context = await provider.build_context(date(2024, 1, 2))
+
+        diagnostics = context.get("_diagnostics", {})
+        table_status = diagnostics.get("table_status", {})
+        assert "northbound_data" in table_status
+        assert table_status["northbound_data"].get("ready") is False
+
+        error_msg = table_status["northbound_data"].get("error", "")
+        assert self._SECRET_PASSWORD not in error_msg
+        assert "***" in error_msg

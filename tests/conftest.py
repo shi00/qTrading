@@ -221,17 +221,20 @@ def reset_config_cache() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def reset_loop_local_cache() -> Iterator[None]:
-    """
-    Reset loop_local cache before each test to prevent cross-test pollution.
-    Tests like TestAIServiceSemaphoreSeparation.test_reload_config_invalidates_both_semaphores
-    store string values in the cache which break subsequent tests expecting asyncio.Semaphore.
-    """
-    from utils.loop_local import clear_all_loop_locals
+def _reset_loop_local_fallback() -> Iterator[None]:
+    """Clear loop_local fallback store before each test.
 
-    clear_all_loop_locals()
+    function scope (asyncio_default_test_loop_scope=function) 下 _stores 通过
+    WeakKeyDictionary 自动隔离——前一个测试的事件循环关闭后自动 GC，不跨测试残留。
+    但 _fallback_store 是普通 dict，在同步上下文中调用 get_loop_local(strict=False)
+    时写入的对象不会自动清理，会通过迁移机制（get_loop_local 第 52-53 行）残留到
+    后续测试的事件循环。本 fixture 清理 _fallback_store 以防止此残留。
+    """
+    from utils.loop_local import _fallback_store
+
+    _fallback_store.clear()
     yield
-    clear_all_loop_locals()
+    _fallback_store.clear()
 
 
 @pytest.fixture(autouse=True)

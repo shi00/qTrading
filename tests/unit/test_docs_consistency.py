@@ -335,3 +335,122 @@ class TestDocsConsistencyScript:
 
         count = _count_local_hooks()
         assert count >= 8, f"Expected at least 8 local hooks, got {count}"
+
+    def test_check_note_lazy_format_passes(self):
+        """现有代码库所有 NOTE(lazy) 标记都含三要素（ceiling + upgrade）。"""
+        from check_docs_consistency import check_note_lazy_format
+
+        errors = check_note_lazy_format()
+        assert errors == [], "NOTE(lazy) missing three-element format:\n  " + "\n  ".join(errors)
+
+
+class TestNoteLazyFormatDetection:
+    """C5 第二阶段 3a: NOTE(lazy) 三要素格式检查的纯函数测试。
+
+    直接调用 _check_note_lazy_in_text 验证块识别与要素校验逻辑，
+    避免构造临时 .py 文件的开销。
+    """
+
+    def test_single_line_all_elements(self):
+        """单行格式：所有三要素在 NOTE(lazy): 同行。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "# NOTE(lazy): except Exception 保留. ceiling: 38处策略层异常. upgrade: 策略层重构.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert issues == [], f"Should not flag valid single-line NOTE(lazy): {issues}"
+
+    def test_multiline_hash_comments(self):
+        """多行 # 注释格式：ceiling/upgrade 在后续 # 注释行。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = (
+            "# NOTE(lazy): _on_exit 不触发 state 变化.\n"
+            "#   ceiling: exit cleanup 5s 窗口内 Retry 可点击.\n"
+            "#   upgrade: 重写为 EXITING 状态时处理.\n"
+        )
+        issues = _check_note_lazy_in_text(content)
+        assert issues == [], f"Should not flag valid multi-line # NOTE(lazy): {issues}"
+
+    def test_docstring_multiline_format(self):
+        """docstring 内多行格式：ceiling/upgrade 在后续 docstring 行。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = (
+            '"""BacktestState.\n\n'
+            "    NOTE(lazy): result 字段类型为 BacktestResult | None.\n"
+            "    dataclass 领域对象, 内部含 pl.DataFrame/pl.Series.\n"
+            "    ceiling: BacktestResult 拆解为 tuple[Row, ...] 需重写 Panel.\n"
+            "    upgrade: BacktestResultPanel 接收 tuple[Row, ...] 时移除自定义 __eq__.\n"
+            '    """\n'
+        )
+        issues = _check_note_lazy_in_text(content)
+        assert issues == [], f"Should not flag valid docstring NOTE(lazy): {issues}"
+
+    def test_missing_ceiling_flagged(self):
+        """缺 ceiling: 应被标记。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "# NOTE(lazy): xxx. upgrade: B.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert len(issues) == 1, f"Should flag 1 issue, got {issues}"
+        line_idx, missing = issues[0]
+        assert "ceiling:" in missing, f"Should report missing ceiling:, got {missing}"
+
+    def test_missing_upgrade_flagged(self):
+        """缺 upgrade: 应被标记。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "# NOTE(lazy): xxx. ceiling: A.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert len(issues) == 1, f"Should flag 1 issue, got {issues}"
+        line_idx, missing = issues[0]
+        assert "upgrade:" in missing, f"Should report missing upgrade:, got {missing}"
+
+    def test_missing_both_flagged(self):
+        """缺 ceiling: 和 upgrade: 都应被标记。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "# NOTE(lazy): xxx without ceiling or upgrade.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert len(issues) == 1, f"Should flag 1 issue, got {issues}"
+        _, missing = issues[0]
+        assert "ceiling:" in missing and "upgrade:" in missing, f"Should report both missing, got {missing}"
+
+    def test_todo_not_flagged(self):
+        """# TODO: 不触发 NOTE(lazy) 检查。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "# TODO: this is a todo without ceiling or upgrade.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert issues == [], f"# TODO: should not be flagged as NOTE(lazy): {issues}"
+
+    def test_note_lazy_in_fenced_code_block_not_flagged(self):
+        """fenced code block 内的 NOTE(lazy) 不被检查（避免代码示例误判）。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "Some markdown.\n\n```\n# NOTE(lazy): xxx without ceiling or upgrade.\n```\n"
+        issues = _check_note_lazy_in_text(content)
+        assert issues == [], f"NOTE(lazy) in fenced code block should not be flagged: {issues}"
+
+    def test_two_independent_blocks_both_flagged(self):
+        """两个 NOTE(lazy) 块各缺要素，应被独立标记。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        content = "# NOTE(lazy): a. upgrade: A.\n# NOTE(lazy): b. ceiling: B.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert len(issues) == 2, f"Should flag 2 independent issues, got {issues}"
+        missing_set = {tuple(missing) for _, missing in issues}
+        assert ("ceiling:",) in missing_set, f"First block should miss ceiling:, got {issues}"
+        assert ("upgrade:",) in missing_set, f"Second block should miss upgrade:, got {issues}"
+
+    def test_note_lazy_block_truncated_at_next_note_lazy(self):
+        """NOTE(lazy) 块在遇到下一个 NOTE(lazy): 时截断（避免吞下下一块要素）。"""
+        from check_docs_consistency import _check_note_lazy_in_text
+
+        # 第一个 NOTE(lazy) 缺 ceiling/upgrade，紧邻的第二个 NOTE(lazy) 有
+        # 第一个块的扫描窗口应在第二个 NOTE(lazy) 行截断，所以第一个块仍应被标记为缺要素
+        content = "# NOTE(lazy): first block missing both.\n# NOTE(lazy): second. ceiling: A. upgrade: B.\n"
+        issues = _check_note_lazy_in_text(content)
+        assert len(issues) == 1, f"First block should be flagged, second should not. Got: {issues}"
+        _, missing = issues[0]
+        assert "ceiling:" in missing and "upgrade:" in missing, f"First block should miss both, got {missing}"

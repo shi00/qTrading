@@ -61,6 +61,7 @@ def _sys_excepthook(exctype: type[BaseException], value: BaseException, tb: Trac
             sanitized_msg,
             exc_info=True,
         )
+    # NOTE(lazy): 主线程钩子内兜底避免钩子自身崩溃导致系统失控. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:
         sys.__excepthook__(exctype, value, tb)
         print(f"[CRITICAL] Exception hook failed: {value} (hook error: {e})", file=sys.stderr)
@@ -89,6 +90,7 @@ def _threading_excepthook(args: threading.ExceptHookArgs) -> None:
             sanitized_msg,
             exc_info=True,
         )
+    # NOTE(lazy): 线程钩子内兜底避免钩子自身崩溃. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:
         print(
             f"[CRITICAL] ThreadingExcepthook failed: {args.exc_value} (hook error: {e})",
@@ -128,6 +130,7 @@ def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -
             )
         else:
             logger.critical("[AsyncioHandler] Event loop error (no exception): %s", message)
+    # NOTE(lazy): asyncio 钩子内兜底避免钩子自身崩溃. ceiling: 钩子内逻辑不应抛异常. upgrade: 钩子内部分类异常处理或移除兜底.
     except Exception as e:
         print(f"[CRITICAL] AsyncioHandler failed: {context} (hook error: {e})", file=sys.stderr)
 

@@ -4,7 +4,7 @@
 
 > **AI 编程助手注意**：[CLAUDE.md](./CLAUDE.md) 是项目宪法（红线、架构边界、交互准则），每次会话自动加载。本文件第三部分「实现规范手册」承接宪法中移出的代码模板与详细规范，需要时按需查阅。
 >
-> **对应版本**：0.9.0，最后校对：2026-07-13（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
+> **对应版本**：0.9.0，最后校对：2026-07-15（与 [CLAUDE.md](./CLAUDE.md) 保持一致）
 
 ## 目录
 
@@ -273,7 +273,7 @@ pre-commit install
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ```
 
-> 项目使用 9 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验)，详见 `.pre-commit-config.yaml` 或 [Pre-commit Hooks](#pre-commit-hooks)。
+> 项目使用 10 个 pre-commit hook (Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、import-linter 架构守护)，详见 `.pre-commit-config.yaml` 或 [Pre-commit Hooks](#pre-commit-hooks)。
 
 ## 数据库设置
 
@@ -1179,7 +1179,7 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 ### Pre-commit Hooks
 
-本项目使用 9 个 pre-commit hook (定义在 `.pre-commit-config.yaml`，含 Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验)，提交前必须全部通过。
+本项目使用 10 个 pre-commit hook (定义在 `.pre-commit-config.yaml`，含 Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、import-linter 架构守护)，提交前必须全部通过。
 
 ### 数据库迁移
 
@@ -1296,11 +1296,11 @@ GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量
 
 | 级别 | 问题描述 | 产生背景与现状 | 期望的最终解法 |
 |------|---------|---------------|--------------|
-| **P1-2** | **Windows 测试事件循环泄露** | Windows 使用 `WindowsSelectorEventLoopPolicy` 时测试 loop scope 妥协为 `session` 级，导致 `asyncio.Event/Lock` 跨测试泄漏。当前依赖 `reset_loop_local_cache` fixture 维持隔离。 | 中期应将 Windows 测试作用域降级回 `function` 彻底修复，降级后删除该隔离 fixture (见探测用例 `test_infra_loop_isolation.py`)。 |
+| **P1-2** | **Windows 测试事件循环泄露** | 已解决（unit 降 function / integration-e2e 保留 session）。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由精准化的 `_reset_loop_local_fallback` fixture 清理。性能基准对比见 `docs/loop-scope-perf-baseline.md`（function 272.37s vs session 267.07s，回归 1.97%）。 | 已解决。剩余 20 个测试失败为独立的测试顺序污染（日志配置），登记为独立技术债。 |
 | **P3** | **`MAX_CONTENT_WIDTH` 代码未实现** | 响应式规范 7（max_width）已从强制规范移出登记为技术债。`ui/app_layout.py` 未实现居中容器（`body_wrapper`）与 `MAX_CONTENT_WIDTH` 宽度逻辑。 | 独立后续任务：实现 `body_wrapper` 居中容器与 `MAX_CONTENT_WIDTH` 逻辑，配套窗口宽度场景测试（4K / 2K / 1080p）。当前状态：独立后续任务。 |
-| **P3** | **doc-lint 自动化第二阶段未实现** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。 | 第二阶段扩展：红线 R1~R18 编号 append-only 检查、`NOTE(lazy):` 三要素格式检查、"强制状态"与实际 hook/CI job 映射检查。当前状态：第一阶段已落地，第二阶段待实现。 |
-| **P3** | **strategies/ 层 38 处 except Exception 待统一走 classify_error** | T34 P3 登记技术债：strategies/ 层 49 处 except Exception 中，P0 必修 5 处 + P2 优化 7 处已完成，剩余 38 处已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。 | 策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构或累计标记数变化时。 |
-| **P3** | **utils/ 层 40 处 except Exception 待统一走 classify_error** | R3 场景遗漏检视发现：utils/ 层 spec 任务列表外的 40 处 except Exception（config_handler 28 + exception_hooks 3 + logger 3 + singleton_registry 3 + diagnostics 2 + time_utils 1）既未走 classify 也未标记 NOTE(lazy)。其中 exception_hooks/logger 属基础设施兜底（不适合走 classify），config_handler keyring fallback 属合理降级。 | 后续统一改造时走 `classify_error` 或补标 `# NOTE(lazy):` 说明豁免原因。upgrade 触发条件：utils 层异常处理统一改造时。 |
+| **P3** | **doc-lint 自动化第二阶段部分实现（3a 已落地，3b/3c 判定为过度工程）** | 第一阶段已实现：`scripts/check_docs_consistency.py` 覆盖 markdown 锚点死链校验、CLAUDE.md 版本与 `pyproject.toml` 一致、pre-commit hook 数量一致性，已接入 `.pre-commit-config.yaml` `docs-consistency` hook。第二阶段 3a（`NOTE(lazy):` 三要素格式检查）已落地（Phase 5.1），扩展 `check_note_lazy_format()` 函数扫描所有 `.py` 文件。五视角评审判定 3b（红线 R1~R18 编号 append-only 检查）与 3c（"强制状态"与实际 hook/CI job 映射检查）为过度工程，不做。 | 仅保留 3a 守护。upgrade 触发条件：红线违规频发或 CI 自动化专项迭代时重新评估 3b/3c。 |
+| **P3** | **strategies/ 层 38 处 except Exception 已标记 NOTE(lazy)（ceiling 动态化），待评估统一走 classify_error** | T34 P3 登记技术债：strategies/ 层 49 处 except Exception 中，P0 必修 5 处 + P2 优化 7 处已完成，剩余 38 处已合理日志的 except Exception 用 `# NOTE(lazy):` 标记保留。Phase 6.1 杠杆评估决策"不引入 `_handle_strategy_exception(e, context)` 统一入口"（YAGNI：`classify_error` 0/38 调用；过度抽象：5 正交维度需 7 字段 context；11 处差异化状态修改无法覆盖）。Phase 6.3 完成 38 处 ceiling 动态化（按方法分组描述，不再硬编码数值）。评估报告见 `docs/strategy-exception-leverage.md`（本地）。 | 策略层重构或新增策略时统一走 `classify_error` + `classify_severity`。upgrade 触发条件：策略层重构时。后续独立改进路径：① R9 合规修复 16 处未调用 `sanitize_error` 的位置；② `classify_error` 接入独立重构任务。 |
+| **P3** | **utils/ 层 39 处 except Exception 已标记 NOTE(lazy)，待评估统一走 classify_error** | R3 场景遗漏检视发现：utils/ 层 spec 任务列表外的 40 处 except Exception（config_handler 28 + exception_hooks 3 + logger 3 + singleton_registry 3 + diagnostics 2 + time_utils 1）。已统一标记 39 处 `# NOTE(lazy):`（三要素齐全：简化内容 + ceiling + upgrade），`time_utils.py:80` 已剔除（无业务消费方语义，调查时判定不适合标记）。40 处中 0 处适合走 `classify_error`（均无业务消费方，属基础设施兜底或合理降级）。 | 后续 utils 层异常处理统一改造时重新评估是否引入 `classify_error`。upgrade 触发条件：utils 层异常处理统一改造时。 |
 | **P3** | **红线自动化覆盖不完整** | CLAUDE.md §3.1 中 R1/R4/R12/R13/R14/R15/R16 标注「可自动化待实现」，目前仅靠人工评审与 CI-test 拦截部分红线（R2/R3/R7/R8）。R1（分层依赖）可引入 import-linter，R16（UI 阻塞）可用 AST/正则 pre-commit 钩子，R4/R12/R13/R14/R15 需自定义检查。 | 分阶段引入自动化：① R1 import-linter 声明禁止方向；② R16 AST 钩子扫描 ui/ 事件处理器同步阻塞；③ R4/R12/R13/R14/R15 自定义 pre-commit 检查。upgrade 触发条件：红线违规频发或 CI 自动化专项迭代时。 |
 
 ---

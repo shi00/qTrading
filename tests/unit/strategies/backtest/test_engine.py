@@ -1418,3 +1418,100 @@ class TestVectorizationEquivalence:
         assert missing_filter.is_empty()
         assert missing_clear.is_empty()
         assert missing_filter.schema == missing_clear.schema
+
+
+class TestR9SanitizationGuard:
+    """R9 红线守护测试：验证 except 块中 str(e) 进入业务数据结构前经 DataSanitizer 脱敏。
+
+    覆盖 3 处修复点：
+    - _enrich_suspend_status: DataWarning.error_message
+    - _enrich_limit_status: DataWarning.error_message
+    - _generate_signals: failed_signal_dates[i]["error"]
+    """
+
+    # 含 DB 凭证的敏感 payload（password 23 字符，>= 16 字符阈值）
+    _SECRET_URL = "postgresql://dbuser:supersecretpass123456@host:5432/mydb"
+    _SECRET_PASSWORD = "supersecretpass123456"
+
+    def _make_engine(self):
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.cost_model = TransactionCostModel(TransactionCostConfig())
+        return engine
+
+    @pytest.mark.asyncio
+    async def test_enrich_suspend_status_sanitizes_secrets(self):
+        """_enrich_suspend_status 异常时 DataWarning.error_message 不含明文密码"""
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_suspend_d = AsyncMock(side_effect=Exception(self._SECRET_URL))
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        _, warning = await engine._enrich_suspend_status(quotes_df, "20240102", "20240131")
+
+        assert warning is not None
+        assert warning.warning_type == "suspend_enrich_failed"
+        assert self._SECRET_PASSWORD not in warning.error_message
+        assert "***" in warning.error_message
+
+    @pytest.mark.asyncio
+    async def test_enrich_limit_status_sanitizes_secrets(self):
+        """_enrich_limit_status 异常时 DataWarning.error_message 不含明文密码"""
+        engine = self._make_engine()
+        engine.cache = MagicMock()
+        engine.cache.get_limit_list = AsyncMock(side_effect=Exception(self._SECRET_URL))
+
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ", "000002.SZ"],
+                "trade_date": [date(2024, 1, 2), date(2024, 1, 3)],
+                "close": [10.0, 20.0],
+            }
+        )
+
+        _, warning = await engine._enrich_limit_status(quotes_df, "20240102", "20240131")
+
+        assert warning is not None
+        assert warning.warning_type == "limit_enrich_failed"
+        assert self._SECRET_PASSWORD not in warning.error_message
+        assert "***" in warning.error_message
+
+    @pytest.mark.asyncio
+    async def test_generate_signals_sanitizes_failed_signal_error(self):
+        """_generate_signals 策略异常时 failed_signal_dates[i]['error'] 不含明文密码"""
+        config = BacktestConfig(
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 31),
+            fail_fast=False,
+        )
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        engine.config = config
+        engine.data_provider = MagicMock()
+        engine.data_provider.preload_range = AsyncMock()
+        engine.strategy_adapter = MagicMock()
+        engine.data_provider.build_context = AsyncMock(return_value={})
+        engine.strategy_adapter.generate_signal = AsyncMock(side_effect=Exception(self._SECRET_URL))
+
+        trade_dates = [date(2024, 1, 2), date(2024, 1, 3)]
+        failed_signal_dates: list[dict] = []
+        await engine._generate_signals(
+            strategy=MagicMock(),
+            params={},
+            trade_dates=trade_dates,
+            failed_signal_dates=failed_signal_dates,
+        )
+
+        assert len(failed_signal_dates) == 1
+        assert self._SECRET_PASSWORD not in failed_signal_dates[0]["error"]
+        assert "***" in failed_signal_dates[0]["error"]

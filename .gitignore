@@ -62,6 +62,7 @@ coverage.json
 .hypothesis/
 .pytest_cache/
 .ruff_cache/
+.import_linter_cache/
 junit-*.xml
 
 # Test runtime helpers (auto-generated, not source code)
