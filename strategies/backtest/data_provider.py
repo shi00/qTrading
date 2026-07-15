@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from data.persistence.quality_gate import QualityTier
 
 if TYPE_CHECKING:
@@ -306,8 +307,9 @@ class BacktestDataProvider:
                     all_aux_ready = False
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[BacktestDataProvider] Failed to fetch %s: %s", key, e)
-                diagnostics["table_status"][key] = {"ready": False, "rows": 0, "error": str(e)}
+                sanitized_msg = DataSanitizer.sanitize_error(e)
+                logger.warning("[BacktestDataProvider] Failed to fetch %s: %s", key, sanitized_msg)
+                diagnostics["table_status"][key] = {"ready": False, "rows": 0, "error": sanitized_msg}
                 all_aux_ready = False
 
         diagnostics["strategy_ready"] = base_complete and all_aux_ready
