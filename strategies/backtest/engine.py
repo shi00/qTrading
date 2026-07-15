@@ -15,6 +15,7 @@ import polars as pl
 
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr
+from utils.sanitizers import DataSanitizer
 from data.domain_services.transaction_cost import TransactionCostModel
 from strategies.backtest.adapter import BacktestStrategyAdapter
 from strategies.backtest.config import BacktestConfig, BacktestResult, DataWarning
@@ -265,15 +266,16 @@ class VectorBacktestEngine:
             quotes_df = quotes_df.join(suspend_df, on=["ts_code", "trade_date"], how="left")
 
             return quotes_df.with_columns(pl.col("is_tradable").fill_null(True)), None
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出停牌状态补充异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", e)
+            sanitized_msg = DataSanitizer.sanitize_error(e)
+            logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", sanitized_msg)
             warning = DataWarning(
                 warning_type="suspend_enrich_failed",
                 start_date=start_date,
                 end_date=end_date,
                 affected_stock_count=quotes_df.height,
-                error_message=str(e),
+                error_message=sanitized_msg,
             )
             # 乐观降级：标记为可交易，避免查询失败导致全市场零交易
             # 停牌股票可能在撮合时因无成交价被自然跳过
@@ -325,15 +327,16 @@ class VectorBacktestEngine:
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
             return quotes_df, None
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出涨跌停状态补充异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", e)
+            sanitized_msg = DataSanitizer.sanitize_error(e)
+            logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", sanitized_msg)
             warning = DataWarning(
                 warning_type="limit_enrich_failed",
                 start_date=start_date,
                 end_date=end_date,
                 affected_stock_count=quotes_df.height,
-                error_message=str(e),
+                error_message=sanitized_msg,
             )
             return quotes_df.with_columns(pl.lit(None).alias("limit_status")), warning
 
@@ -469,11 +472,12 @@ class VectorBacktestEngine:
                     signals_list.append(signal_df)
             except asyncio.CancelledError:
                 raise
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出信号生成异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.warning("[Backtest] Strategy failed on %s: %s", signal_date, e)
+                sanitized_msg = DataSanitizer.sanitize_error(e)
+                logger.warning("[Backtest] Strategy failed on %s: %s", signal_date, sanitized_msg)
                 if failed_signal_dates is not None:
-                    failed_signal_dates.append({"date": signal_date, "error": str(e)})
+                    failed_signal_dates.append({"date": signal_date, "error": sanitized_msg})
                 if self.config.fail_fast:
                     raise
 

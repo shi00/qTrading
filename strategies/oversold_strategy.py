@@ -353,7 +353,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
 
         except QualityGateError:
             raise
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数学过滤异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error(
                 "[OversoldStrategy] Error during execution: %s",
@@ -396,7 +396,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         start_date=start_date,
                         end_date=end_date,
                     )
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[OversoldStrategy] Failed to prefetch indicators: %s", e)
 
@@ -404,7 +404,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
             screening_data = context.get("screening_data")
             if screening_data is not None and not screening_data.empty:
                 prefetched.sector_stats = self._compute_sector_stats(screening_data)
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[OversoldStrategy] Failed to compute sector stats: %s", e)
 
@@ -461,7 +461,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                                 "trend": trend,
                             }
                         prefetched.market_context = market_context
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[OversoldStrategy] Failed to prefetch market data: %s", e)
 

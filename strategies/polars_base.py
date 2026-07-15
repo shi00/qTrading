@@ -97,7 +97,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
             )
         except QualityGateError:
             raise
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略过滤异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error("[Strategy] %s failed: %s", self.name, e, exc_info=True)
             raise RuntimeError(f"Strategy {self.name} execution failed: {e}") from e

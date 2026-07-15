@@ -402,7 +402,7 @@ class AIStrategyMixin:
                 rm = ReviewManager()
                 as_of = self.compute_learning_as_of(context.get("trade_date"), context.get("is_backtest", False))
                 history_context = await rm.get_learning_context(as_of=as_of)
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning(
                     "[AIStrategyMixin] Failed to pre-fetch learning context: %s",
@@ -413,7 +413,7 @@ class AIStrategyMixin:
         if self.should_include_global_context():
             try:
                 global_context = await NewsFetcher.get_us_major_moves(as_of=news_as_of)
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to fetch global context: %s", DataSanitizer.sanitize_error(e))
 
@@ -422,7 +422,7 @@ class AIStrategyMixin:
         all_ts_codes = candidates_df["ts_code"].tolist()
         try:
             concepts_map = await dp.cache.get_concepts(all_ts_codes)  # type: ignore[union-attr]
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to pre-fetch concepts: %s", DataSanitizer.sanitize_error(e))
 
@@ -466,7 +466,7 @@ class AIStrategyMixin:
                         return []
 
             news_tasks = {code: asyncio.create_task(bg_fetch_news(code)) for code in all_ts_codes}
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Ultimate Pipeline init failed: %s", DataSanitizer.sanitize_error(e))
 
@@ -476,7 +476,7 @@ class AIStrategyMixin:
         try:
             if trade_date is None:
                 trade_date = self._normalize_trade_date_for_cache(await dp.get_latest_trade_date())  # type: ignore[union-attr]
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to get latest trade date: %s", DataSanitizer.sanitize_error(e))
 
@@ -488,26 +488,26 @@ class AIStrategyMixin:
         if trade_date:
             try:
                 moneyflow_df = await dp.cache.get_moneyflow(trade_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch moneyflow: %s", DataSanitizer.sanitize_error(e))
 
             try:
                 top_list_df = await dp.cache.get_top_list(trade_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch top_list: %s", DataSanitizer.sanitize_error(e))
 
             try:
                 northbound_df = await dp.cache.get_northbound(trade_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch northbound: %s", DataSanitizer.sanitize_error(e))
 
             # Phase 3C：top_inst 龙虎榜机构席位预取（auxiliary 数据，权限不足时由 _build_stale_section 标注）
             try:
                 top_inst_df = await dp.cache.get_top_inst_batch(all_ts_codes, as_of_date=trade_date)  # type: ignore[union-attr]
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.warning("[AIStrategyMixin] Failed to pre-fetch top_inst: %s", DataSanitizer.sanitize_error(e))
 
@@ -524,7 +524,7 @@ class AIStrategyMixin:
         try:
             auxiliary_data = await dp.cache.prefetch_auxiliary_data(all_ts_codes, as_of_date=trade_date)
             logger.info("[AIStrategyMixin] Pre-fetched auxiliary data for %d stocks", len(auxiliary_data))
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to pre-fetch auxiliary data: %s", DataSanitizer.sanitize_error(e))
 
@@ -554,7 +554,7 @@ class AIStrategyMixin:
         # D7: Prefetch macro_context once before concurrent loop to avoid thundering herd
         try:
             prefetched.macro_context = await self._build_macro_context(dp.cache, as_of_date=prefetched.trade_date)
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 数据预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to prefetch macro context: %s", DataSanitizer.sanitize_error(e))
 
@@ -794,7 +794,7 @@ class AIStrategyMixin:
                     block_text, block_valid = builder(row, prefetched)
                     if block_valid and block_text:
                         custom_context_blocks.append(f"### {name}\n{block_text}")
-                # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+                # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出 AI 上下文构建异常. upgrade: 策略层重构时统一走 classify_error.
                 except Exception as e:
                     logger.warning(
                         "[AIStrategyMixin] Context builder '%s' failed: %s", name, DataSanitizer.sanitize_error(e)
@@ -905,7 +905,7 @@ class AIStrategyMixin:
                 DataSanitizer.sanitize_error(e),
             )
             raise
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出单股 AI 分析异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error(
                 "[AIStrategyMixin] Analysis failed for %s: %s",
@@ -1220,7 +1220,7 @@ class AIStrategyMixin:
 
             return "\n".join(lines)
 
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出历史文本构建异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIStrategyMixin] Failed to build history text: %s", DataSanitizer.sanitize_error(e))
             if labels_out is not None:
@@ -1334,7 +1334,7 @@ class AIStrategyMixin:
 
             return "\n".join(parts)
 
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出资金流文本构建异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
                 "[AIStrategyMixin] Failed to build capital flow text for %s: %s",
@@ -1462,7 +1462,7 @@ class AIStrategyMixin:
 
             return ("\n".join(parts), True) if parts else ("", False)
 
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出多周期财务构建异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build multi-period financials for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -1937,7 +1937,7 @@ class AIStrategyMixin:
                     if labels_out is not None:
                         labels_out.append("ai_label_express")
 
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出辅助数据文本构建异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning(
                 "[AIMixin] Failed to build auxiliary data for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -2114,7 +2114,7 @@ class AIStrategyMixin:
                         lines.append(lpr_section)
                         has_data = True
 
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出宏观上下文构建异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIMixin] Failed to build macro context: %s", DataSanitizer.sanitize_error(e))
 
@@ -2165,7 +2165,7 @@ class AIStrategyMixin:
 
             return "\n".join(parts)
 
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出财务文本构建异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[AIMixin] Failed to build financials text: %s", DataSanitizer.sanitize_error(e))
             if labels_out is not None:

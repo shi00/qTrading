@@ -1,9 +1,9 @@
 """P1-2 污染探测测试：随机打乱顺序跑核心子集，检测跨测试状态污染。
 
-背景：pyproject.toml 配置 asyncio_default_test_loop_scope = "session"，
-所有测试共享一个事件循环。loop-local 缓存（asyncio.Event/Lock/Semaphore）
-会跨测试泄漏，由 tests/conftest.py 的 reset_loop_local_cache autouse fixture
-负责清理。本测试通过随机打乱核心子集的执行顺序，检测是否有因顺序导致的失败，
+背景：pyproject.toml 配置 asyncio_default_test_loop_scope = "function"，
+每个测试有独立的事件循环。loop-local 缓存（asyncio.Event/Lock/Semaphore）
+通过 WeakKeyDictionary 绑定到当前循环，循环关闭后自动 GC，不跨测试残留。
+本测试通过随机打乱核心子集的执行顺序，检测是否有因顺序导致的失败，
 从而发现跨测试状态污染。
 
 探测策略：
@@ -15,10 +15,11 @@
 标注 @pytest.mark.slow 因为多次跑耗时。
 
 技术债说明（§7.2）：
-session 级事件循环是已知技术债，中期应降为 function 作用域以从根因消除泄漏。
-降级前，本测试作为污染探测的守护者，与 test_infra_loop_isolation.py 互补：
-- test_infra_loop_isolation.py 验证 reset_loop_local_cache fixture 的清理有效性
-- 本测试验证清理有效性在实际多测试场景下是否足够
+function scope 已消除 loop-local 缓存跨测试泄漏的根因。
+本测试仍保留作为污染探测的守护者，检测其他类型的跨测试状态污染
+（如单例未隔离、模块级状态泄漏等），与 test_function_scope_loop_isolation.py 互补：
+- test_function_scope_loop_isolation.py 验证 function scope 下 loop-local 自动隔离
+- 本测试验证实际多测试场景下无其他类型的状态污染
 """
 
 import random
@@ -163,7 +164,7 @@ def test_no_cross_test_pollution_in_core_subset():
             "",
             "可能的污染源：",
             "  1. 单例未隔离（检查 _reset_all_singletons autouse fixture）",
-            "  2. loop-local 缓存泄漏（检查 reset_loop_local_cache autouse fixture）",
+            "  2. loop-local 缓存泄漏（检查 get_loop_local 使用是否正确绑定到当前循环）",
             "  3. 事件循环绑定对象跨测试复用（检查 get_loop_local 使用）",
             "  4. 模块级状态泄漏（检查 ConfigHandler._config_cache 等）",
             "",

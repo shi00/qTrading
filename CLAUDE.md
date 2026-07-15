@@ -3,7 +3,7 @@
 > 本文件为 AI 编程项目宪法，每次与 LLM 对话时自动加载，仅包含不可逾越的红线、架构边界与交互准则。
 > 具体实现规范、代码模板、工作流步骤请查阅 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 >
-> **对应版本**：0.9.0，最后校对：2026-07-13
+> **对应版本**：0.9.0，最后校对：2026-07-15
 > **阅读顺序建议**：§3 (红线，先读后写) → §1.8 (决策树，定位必读文件) → §4 (架构边界) → 其他章节按需查阅。
 
 ---
@@ -171,7 +171,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-- **Windows 测试泄漏 (P1-2)**: 测试环境下由于 Windows 使用 `WindowsSelectorEventLoopPolicy`，loop scope 被妥协为 `session` 级（见 `pyproject.toml` 中 `asyncio_default_fixture_loop_scope = "session"` 与 `asyncio_default_test_loop_scope = "session"`），会导致 loop-local 缓存（如 `asyncio.Event`）跨测试泄漏。目前通过 autouse fixture 维持隔离，排查多线程并发测试问题时需格外关注。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
+- **Windows 测试泄漏 (P1-2)**: 已解决。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由 `_reset_loop_local_fallback` fixture 清理。integration/e2e fixture 保留 `loop_scope="session"` override。性能基准对比见 `docs/loop-scope-perf-baseline.md`（回归 1.97%）。剩余 20 个测试失败为独立的测试顺序污染（日志配置），登记为独立技术债。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 

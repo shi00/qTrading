@@ -58,6 +58,7 @@ charset-normalizer==3.4.7
 click==8.4.1
     # via
     #   huggingface-hub
+    #   import-linter
     #   litellm
     #   typer
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -118,6 +119,8 @@ fsspec==2026.4.0
     # via huggingface-hub
 greenlet==3.5.1 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
+grimp==3.15
+    # via import-linter
 h11==0.16.0
     # via httpcore
 hf-xet==1.5.1 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
@@ -143,6 +146,8 @@ idna==3.18
     #   httpx
     #   requests
     #   yarl
+import-linter==2.13
+    # via astockscreener (pyproject.toml)
 importlib-metadata==8.9.0
     # via litellm
 iniconfig==2.3.0
@@ -364,6 +369,7 @@ requests==2.34.2
 rich==15.0.0
     # via
     #   curl-cffi
+    #   import-linter
     #   pip-audit
     #   typer
 rpds-py==2026.5.1
@@ -426,6 +432,7 @@ typing-extensions==4.15.0
     #   alembic
     #   beautifulsoup4
     #   huggingface-hub
+    #   import-linter
     #   llama-cpp-python
     #   openai
     #   pydantic

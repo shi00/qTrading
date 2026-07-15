@@ -72,6 +72,7 @@ dev = [
     "hypothesis>=6.0",
     "syrupy>=4.0",
     "msgpack>=1.2.1",  # Security: GHSA-6v7p-g79w-8964 (Use After Free in Unpacker reuse)
+    "import-linter>=2.13",  # Architecture guard: enforce R1 layered dependencies (CLAUDE.md §4.1)
 ]
 optional = [
     "brotlicffi>=1.2.0.1",
@@ -101,7 +102,7 @@ asyncio_mode = "auto"
 log_cli = true
 log_cli_level = "INFO"
 asyncio_default_fixture_loop_scope = "session"
-asyncio_default_test_loop_scope = "session"
+asyncio_default_test_loop_scope = "function"
 filterwarnings = [
     "ignore::DeprecationWarning:pytest_asyncio.plugin",
 ]
@@ -144,4 +145,47 @@ exclude_lines = [
 [tool.custom_coverage]
 # 单个文件覆盖率阈值，由 scripts/check_per_file_coverage.py 读取，不属于 coverage.py 的原生选项
 per_file_minimum = 80
+
+[tool.importlinter]
+# R1 架构越界守护 (CLAUDE.md §3.1 R1 / §4.1)
+root_packages = [
+    "core",
+    "data",
+    "services",
+    "strategies",
+    "ui",
+    "app",
+    "utils",
+]
+# 排除 `if TYPE_CHECKING:` 块内的导入。
+# services/backtest_service.py 合法地在 TYPE_CHECKING 块中导入 strategies 层仅用于类型注解。
+exclude_type_checking_imports = true
+
+# 契约 1: R1 — core 不可导入任何其他层 (§3.1 R1 / §4.2)
+[[tool.importlinter.contracts]]
+name = "R1: core must not import any other layer"
+type = "forbidden"
+source_modules = ["core"]
+forbidden_modules = ["data", "services", "strategies", "ui", "utils", "app"]
+
+# 契约 2: R1 — data 不可导入 services/strategies/ui (§3.1 R1 / §4.1)
+[[tool.importlinter.contracts]]
+name = "R1: data must not import services/strategies/ui"
+type = "forbidden"
+source_modules = ["data"]
+forbidden_modules = ["services", "strategies", "ui"]
+
+# 契约 3: R1 — services 不可导入 strategies/ui (§3.1 R1 / §4.1)
+[[tool.importlinter.contracts]]
+name = "R1: services must not import strategies/ui"
+type = "forbidden"
+source_modules = ["services"]
+forbidden_modules = ["strategies", "ui"]
+
+# 契约 4: R1 — strategies 不可导入 ui (§3.1 R1 / §4.1)
+[[tool.importlinter.contracts]]
+name = "R1: strategies must not import ui"
+type = "forbidden"
+source_modules = ["strategies"]
+forbidden_modules = ["ui"]
 
