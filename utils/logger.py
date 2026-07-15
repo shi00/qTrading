@@ -61,6 +61,7 @@ def setup_logging(name="astock_screener"):
     if not os.path.exists(LOG_DIR):
         try:
             os.makedirs(LOG_DIR)
+        # NOTE(lazy): 日志目录创建失败兜底(权限/磁盘满). ceiling: 系统级磁盘故障无法恢复. upgrade: 引入启动预检或告警上报.
         except Exception as e:
             sys.stderr.write(f"Failed to create log directory {LOG_DIR}: {e}\n")
 
@@ -142,6 +143,7 @@ def setup_logging(name="astock_screener"):
             file_handler.setFormatter(formatter)
             file_handler.addFilter(correlation_filter)
             logger.addHandler(file_handler)
+        # NOTE(lazy): app.log 文件 handler 创建失败兜底(权限/磁盘满). ceiling: 系统级磁盘故障无法恢复. upgrade: 引入启动预检或降级到仅控制台输出.
         except Exception as e:
             sys.stderr.write(f"Failed to setup file logging: {e}\n")
 
@@ -175,6 +177,7 @@ def setup_logging(name="astock_screener"):
             latest_handler.setFormatter(formatter)
             latest_handler.addFilter(correlation_filter)
             logger.addHandler(latest_handler)
+        # NOTE(lazy): latest.log 文件 handler 创建失败兜底(权限/磁盘满). ceiling: 系统级磁盘故障无法恢复. upgrade: 引入启动预检或降级到仅控制台输出.
         except Exception as e:
             sys.stderr.write(f"Failed to setup latest file logging: {e}\n")
 

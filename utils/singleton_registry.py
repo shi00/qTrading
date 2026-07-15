@@ -40,6 +40,7 @@ def _atexit_cleanup_all() -> None:
             if hasattr(cls, "_atexit_cleanup"):
                 try:
                     cls._atexit_cleanup()  # type: ignore[attr-defined]
+                # NOTE(lazy): atexit 钩子内兜底避免单实例清理失败阻塞其他清理. ceiling: 单例 _atexit_cleanup 内逻辑不应抛异常. upgrade: 单例 _atexit_cleanup 内部分类处理或移除兜底.
                 except Exception as e:
                     logger.warning(
                         "[SingletonRegistry] atexit cleanup failed for %s: %s", cls.__name__, e, exc_info=True
@@ -73,6 +74,7 @@ def reset_all_singletons() -> None:
             if hasattr(cls, "_reset_singleton"):
                 try:
                     cls._reset_singleton()  # type: ignore[attr-defined]
+                # NOTE(lazy): 测试清理兜底避免单个单例重置失败阻塞其他单例. ceiling: 单例 _reset_singleton 内逻辑不应抛异常. upgrade: 单例 _reset_singleton 内部分类处理或移除兜底.
                 except Exception as e:
                     logger.warning("[SingletonRegistry] Failed to reset %s: %s", cls.__name__, e, exc_info=True)
             elif hasattr(cls, "_instance"):
@@ -86,6 +88,7 @@ def reset_all_singletons() -> None:
                 if instance is not None and hasattr(instance, "close"):
                     try:
                         instance.close()
+                    # NOTE(lazy): fallback close 兜底避免单例 close 失败阻塞 _instance=None. ceiling: 单例 close 不应抛异常. upgrade: 单例 close 内部分类处理或移除兜底.
                     except Exception as e:
                         logger.warning("[SingletonRegistry] %s.close() failed: %s", cls.__name__, e, exc_info=True)
                 cls._instance = None  # type: ignore[attr-defined]

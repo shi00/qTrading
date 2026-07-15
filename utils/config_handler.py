@@ -131,6 +131,7 @@ class ConfigHandler:
                 if "api_key" in value and value["api_key"]:
                     try:
                         keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", str(value["api_key"]))
+                    # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                     except Exception as e:
                         logger.debug("[ConfigHandler] Config encrypt fallback triggered: %s", e, exc_info=True)
                         encrypted = SecurityManager.encrypt_data(str(value["api_key"]))
@@ -228,6 +229,7 @@ class ConfigHandler:
                         set(existing_keys) - valid_keys,
                     )
 
+        # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
         except Exception as e:
             logger.error("Failed to ensure default config: %s", DataSanitizer.sanitize_error(e))
 
@@ -243,6 +245,7 @@ class ConfigHandler:
 
             os.replace(tmp_file, path)
             return True
+        # NOTE(lazy): 配置文件 IO 失败兜底. ceiling: 系统级磁盘故障/权限拒绝. upgrade: 引入文件可读性预检或重试.
         except Exception as e:
             logger.error("Atomic save failed for %s: %s", path, DataSanitizer.sanitize_error(e))
             if os.path.exists(tmp_file):
@@ -264,6 +267,7 @@ class ConfigHandler:
                 "Failed to decrypt config value. It might be invalid or legacy plaintext.",
             )
             return ""
+        # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
         except Exception as e:
             logger.error("Decryption error: %s", DataSanitizer.sanitize_error(e))
             return ""
@@ -286,6 +290,7 @@ class ConfigHandler:
                     logger.warning("[ConfigHandler] Config validation failed: %s", DataSanitizer.sanitize_error(e))
                     ConfigHandler._config_cache = get_default_config()
                     return ConfigHandler._config_cache.copy()
+                # NOTE(lazy): 配置文件 IO 失败兜底. ceiling: 系统级磁盘故障/权限拒绝. upgrade: 引入文件可读性预检或重试.
                 except Exception as e:
                     logger.warning("[ConfigHandler] Failed to load config file: %s", DataSanitizer.sanitize_error(e))
                     return {}
@@ -319,6 +324,7 @@ class ConfigHandler:
                         errors=errors,
                         used_defaults=True,
                     )
+                # NOTE(lazy): 配置验证失败降级返回错误详情不阻断 UI. ceiling: 配置验证逻辑异常. upgrade: 配置验证统一走 classify_error.
                 except Exception as e:
                     return ConfigValidationResult(
                         is_valid=False,
@@ -372,6 +378,7 @@ class ConfigHandler:
                     ConfigHandler._config_cache = current_config
                     return True
                 return False
+        # NOTE(lazy): 配置管理整体兜底避免单点失败阻断流程. ceiling: 配置管理内部逻辑不应抛异常. upgrade: 配置管理内部统一走 classify_error.
         except Exception as e:
             logger.error("Error saving config: %s", DataSanitizer.sanitize_error(e))
             return False
@@ -388,6 +395,7 @@ class ConfigHandler:
         kr_token = None
         try:
             kr_token = keyring.get_password(KEYRING_SERVICE_NAME, "ts_token")
+        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.debug("Keyring get_password for ts_token failed: %s", DataSanitizer.sanitize_error(e))
         if kr_token:
@@ -403,6 +411,7 @@ class ConfigHandler:
                 keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", decrypted)
                 ConfigHandler.save_config({"ts_token": ""})
                 logger.info("Migrated ts_token from config to keyring and cleared legacy value")
+            # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
                 logger.debug("Keyring migration failed: %s", DataSanitizer.sanitize_error(e))
         DataSanitizer.register_secret(decrypted)
@@ -417,6 +426,7 @@ class ConfigHandler:
         if not token:
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "ts_token")
+            # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
                 logger.debug(
                     "Keyring ts_token deletion skipped (not stored or keyring unavailable): %s",
@@ -429,6 +439,7 @@ class ConfigHandler:
             keyring.set_password(KEYRING_SERVICE_NAME, "ts_token", token)
             # Clear legacy setting from JSON
             return ConfigHandler.save_config({"ts_token": ""})
+        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.warning(
                 "Failed to use keyring for ts_token: %s. Falling back to SecurityManager.",
@@ -443,6 +454,7 @@ class ConfigHandler:
                     DataSanitizer.sanitize_error(se),
                 )
                 return False
+            # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
             except Exception as enc_err:
                 logger.error("Failed to encrypt ts_token: %s", DataSanitizer.sanitize_error(enc_err))
                 return False
@@ -590,6 +602,7 @@ class ConfigHandler:
             password = keyring.get_password(KEYRING_SERVICE_NAME, "db_password")
             if password:
                 return password
+        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.debug("Failed to get db_password from keyring: %s", DataSanitizer.sanitize_error(e), exc_info=True)
 
@@ -612,10 +625,12 @@ class ConfigHandler:
             keyring.set_password(KEYRING_SERVICE_NAME, "db_password", password)
             ConfigHandler.save_config({"db_password_encrypted": ""})
             return True
+        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.warning("Failed to save db_password to keyring: %s", DataSanitizer.sanitize_error(e), exc_info=True)
             try:
                 keyring.delete_password(KEYRING_SERVICE_NAME, "db_password")
+            # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
                 logger.debug(
                     "Keyring db_password deletion skipped: %s",
@@ -632,6 +647,7 @@ class ConfigHandler:
                     DataSanitizer.sanitize_error(se),
                 )
                 return False
+            # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
             except Exception as e2:
                 logger.error("Failed to encrypt db_password: %s", DataSanitizer.sanitize_error(e2))
                 return False
@@ -824,6 +840,7 @@ class ConfigHandler:
             if api_key and not os.environ.get(ENV_FALLBACK_MAP["ai_api_key"]):
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
+                # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as e:
                     logger.warning(
                         "Keyring save failed: %s. Falling back to SecurityManager.", DataSanitizer.sanitize_error(e)
@@ -837,12 +854,14 @@ class ConfigHandler:
                             DataSanitizer.sanitize_error(se),
                         )
                         return False
+                    # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
                     except Exception as enc_err:
                         logger.error("Failed to encrypt ai_api_key: %s", DataSanitizer.sanitize_error(enc_err))
                         return False
             elif not api_key and not os.environ.get(ENV_FALLBACK_MAP["ai_api_key"]):
                 try:
                     keyring.delete_password(KEYRING_SERVICE_NAME, "ai_api_key")
+                # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as e:
                     logger.debug(
                         "Keyring ai_api_key deletion skipped: %s",
@@ -879,6 +898,7 @@ class ConfigHandler:
         if not api_key:
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+            # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as exc:
                 logger.debug("Keyring get_password for ai_api_key failed: %s", DataSanitizer.sanitize_error(exc))
 
@@ -891,6 +911,7 @@ class ConfigHandler:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                     ConfigHandler.save_config({"ai_api_key": ""})
                     logger.info("Migrated ai_api_key from config to keyring and cleared legacy value")
+                # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as exc:
                     logger.debug(
                         "[ConfigHandler] Keyring migration for ai_api_key skipped: %s",
@@ -1025,6 +1046,7 @@ class ConfigHandler:
             if api_key:
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}", api_key)
+                # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as e:
                     logger.warning(
                         "[ConfigHandler] Keyring save failed for %s: %s. Falling back to encrypted storage.",
@@ -1036,6 +1058,7 @@ class ConfigHandler:
                         cred["api_key_encrypted"] = encrypted_key
                         provider_credentials[provider] = cred
                         config_update["llm_provider_credentials"] = provider_credentials
+                    # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
                     except Exception as enc_err:
                         logger.error(
                             "[ConfigHandler] Failed to encrypt api_key for %s: %s",
@@ -1049,6 +1072,7 @@ class ConfigHandler:
                     keyring.delete_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
                 except keyring.errors.PasswordDeleteError:  # type: ignore[reportAttributeAccessIssue]  # keyring.errors is available at runtime
                     pass
+                # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
                 except Exception as e:
                     logger.debug(
                         "keyring operation failed: %s",
@@ -1090,6 +1114,7 @@ class ConfigHandler:
 
         try:
             api_key = keyring.get_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
+        # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.debug(
                 "keyring operation failed: %s",
@@ -1100,6 +1125,7 @@ class ConfigHandler:
         if not api_key and cred.get("api_key_encrypted"):
             try:
                 api_key = SecurityManager.decrypt_data(cred["api_key_encrypted"])
+            # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
             except Exception as e:
                 logger.debug(
                     "keyring operation failed: %s",
@@ -1112,6 +1138,7 @@ class ConfigHandler:
             # Try keyring global key first
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+            # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
                 logger.debug(
                     "keyring operation failed: %s",
@@ -1125,6 +1152,7 @@ class ConfigHandler:
                 if global_encrypted:
                     try:
                         api_key = SecurityManager.decrypt_data(global_encrypted)
+                    # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
                     except Exception as e:
                         logger.debug(
                             "keyring operation failed: %s",
