@@ -531,7 +531,7 @@ class TestScreenerViewModelRunStrategy:
         await submitted_coro[0]
 
         # At some point, degraded status (orange) was set
-        degraded = [s for s in snapshots if s.status_color == "orange" and s.status_message]
+        degraded = [s for s in snapshots if s.status_color == "warning" and s.status_message]
         assert len(degraded) >= 1
 
     @pytest.mark.asyncio
@@ -574,7 +574,7 @@ class TestScreenerViewModelRunStrategy:
 
         # Final state: loading reverted, error status set
         assert vm.state.loading is False
-        assert vm.state.status_color == "red"
+        assert vm.state.status_color == "error"
 
     @pytest.mark.asyncio
     async def test_run_strategy_cancellation_cleans_up_state(self, vm):
@@ -616,7 +616,7 @@ class TestScreenerViewModelRunStrategy:
 
         # Final state: loading reverted, cancellation status set
         assert vm.state.loading is False
-        assert vm.state.status_color == "orange"
+        assert vm.state.status_color == "warning"
 
 
 class TestSortHelper:
@@ -1086,7 +1086,7 @@ class TestScreenerViewModelLoadStrategies:
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_load_strategies_failure_sets_error_status(self, mock_dp, mock_sm, mock_rm):
-        """load_strategies() 失败时设置 status_message=Message('screener_load_failed') + status_color='red'."""
+        """load_strategies() 失败时设置 status_message=Message('screener_load_failed') + status_color='error'."""
         vm = ScreenerViewModel()
         vm.strategy_mgr.get_all_with_dependencies = MagicMock(side_effect=RuntimeError("DB error"))
 
@@ -1095,7 +1095,7 @@ class TestScreenerViewModelLoadStrategies:
         assert vm.state.strategies_loaded is False
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "screener_load_failed"
-        assert vm.state.status_color == "red"
+        assert vm.state.status_color == "error"
 
 
 class TestScreenerViewModelUpdateStrategyDesc:
@@ -1223,13 +1223,13 @@ class TestScreenerViewModelSetHistoryViewingStatus:
     @patch("ui.viewmodels.screener_view_model.StrategyManager")
     @patch("ui.viewmodels.screener_view_model.DataProcessor")
     def test_set_history_viewing_status_updates_state(self, mock_dp, mock_sm, mock_rm):
-        """set_history_viewing_status() 设置 status_message=Message('screener_history_viewing') + color='blue'."""
+        """set_history_viewing_status() 设置 status_message=Message('screener_history_viewing') + color='info'."""
         vm = ScreenerViewModel()
         vm.set_history_viewing_status("2024-12-27", "#abc12345")
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "screener_history_viewing"
         assert vm.state.status_message.params == {"date": "2024-12-27", "label": "#abc12345"}
-        assert vm.state.status_color == "blue"
+        assert vm.state.status_color == "info"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")
     @patch("ui.viewmodels.screener_view_model.StrategyManager")

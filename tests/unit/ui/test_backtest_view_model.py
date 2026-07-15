@@ -42,10 +42,10 @@ class TestBacktestViewModel:
         vm = BacktestViewModel()
         snapshots: list = []
         vm.subscribe(lambda s: snapshots.append(s))
-        vm._set_state(is_running=True, status_color="blue")
+        vm._set_state(is_running=True, status_color="info")
         assert len(snapshots) >= 1
         assert snapshots[-1].is_running is True
-        assert snapshots[-1].status_color == "blue"
+        assert snapshots[-1].status_color == "info"
 
     def test_init_assembles_default_engine_factory_and_strategy_lookup(self):
         """未显式注入 service 时，viewmodel 应装配默认 engine_factory 和 strategy_lookup。
@@ -68,7 +68,7 @@ class TestBacktestViewModel:
     def test_dispose(self):
         """测试资源清理。"""
         vm = BacktestViewModel()
-        vm._set_state(is_running=True, status_color="blue", progress=0.5)
+        vm._set_state(is_running=True, status_color="info", progress=0.5)
         vm.dispose()
 
         assert vm.state.result is None
@@ -80,7 +80,7 @@ class TestBacktestViewModel:
         """dispose() 必须先取消运行中任务再清引用，防止孤儿任务（R.1.1）。"""
         vm = BacktestViewModel()
         vm._task_id = "running_task_001"
-        vm._set_state(is_running=True, progress=0.5, status_color="blue")
+        vm._set_state(is_running=True, progress=0.5, status_color="info")
 
         with patch("ui.viewmodels.backtest_view_model.TaskManager") as mock_tm_cls:
             mock_tm = MagicMock(spec=TaskManager)
@@ -250,7 +250,7 @@ class TestBacktestViewModel:
 
         await vm.run_backtest("test_strategy", config)
 
-        assert vm.state.status_color == "orange"
+        assert vm.state.status_color == "warning"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "backtest_already_running"
 
@@ -358,7 +358,7 @@ class TestBacktestViewModelRunBacktest:
 
         assert vm.state.result is mock_result
         assert vm.state.is_running is False
-        assert vm.state.status_color == "green"
+        assert vm.state.status_color == "success"
         assert execution_result is not None
 
     @pytest.mark.asyncio
@@ -441,11 +441,11 @@ class TestBacktestViewModelRunBacktest:
             await captured_factory(task_id="task_789")
 
         assert vm.state.is_running is False
-        assert vm.state.status_color == "red"
+        assert vm.state.status_color == "error"
         assert vm.state.progress == 1.0
-        # Both starting (blue) and failed (red) states were observed
-        assert any(s.status_color == "blue" for s in snapshots)
-        assert any(s.status_color == "red" for s in snapshots)
+        # Both starting (info) and failed (error) states were observed
+        assert any(s.status_color == "info" for s in snapshots)
+        assert any(s.status_color == "error" for s in snapshots)
 
     @pytest.mark.asyncio
     async def test_run_backtest_task_rejected(self):
@@ -466,7 +466,7 @@ class TestBacktestViewModelRunBacktest:
             await vm.run_backtest("test_strategy", config)
 
         assert vm.state.is_running is False
-        assert vm.state.status_color == "orange"
+        assert vm.state.status_color == "warning"
 
     @pytest.mark.asyncio
     async def test_run_backtest_sets_running_state(self):
@@ -488,7 +488,7 @@ class TestBacktestViewModelRunBacktest:
 
         assert vm.state.is_running is True
         assert vm.state.result is None
-        assert vm.state.status_color == "blue"
+        assert vm.state.status_color == "info"
         assert vm.state.progress == 0.0
 
     @pytest.mark.asyncio
@@ -642,8 +642,8 @@ class TestBacktestViewModelRunBacktest:
         # Verify state reverts properly
         assert vm.state.is_running is False
         assert vm.state.result is None
-        # Verify status was set to error (red)
-        assert vm.state.status_color == "red"
+        # Verify status was set to error
+        assert vm.state.status_color == "error"
         assert vm.state.status_message is not None
         assert vm.state.status_message.key == "backtest_failed"
         # Verify progress was set to 1.0 (final state from finally block)

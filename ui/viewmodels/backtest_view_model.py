@@ -197,7 +197,7 @@ class BacktestViewModel:
         if self.state.is_running:
             self._set_state(
                 status_message=Message("backtest_already_running"),
-                status_color="orange",
+                status_color="warning",
             )
             return
 
@@ -207,7 +207,7 @@ class BacktestViewModel:
             progress=0.0,
             progress_message=Message("backtest_initializing"),
             status_message=Message("backtest_starting"),
-            status_color="blue",
+            status_color="info",
             result=None,
         )
 
@@ -246,7 +246,7 @@ class BacktestViewModel:
                         "backtest_completed",
                         {"duration": result.duration_ms},
                     ),
-                    status_color="green",
+                    status_color="success",
                 )
 
                 return I18n.get("backtest_success").format(sharpe=f"{result.metrics['sharpe_ratio']:.2f}")
@@ -257,7 +257,7 @@ class BacktestViewModel:
                 logger.error("[BacktestVM] Backtest failed: %s", e, exc_info=True)
                 self._set_state(
                     status_message=Message("backtest_failed"),
-                    status_color="red",
+                    status_color="error",
                 )
                 raise
             finally:
@@ -283,7 +283,7 @@ class BacktestViewModel:
             self._set_state(
                 is_running=False,
                 status_message=Message("backtest_task_rejected"),
-                status_color="orange",
+                status_color="warning",
             )
 
     def cancel_backtest(self) -> None:

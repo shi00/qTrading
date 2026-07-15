@@ -268,7 +268,7 @@ class ScreenerViewModel:
             logger.error("[ScreenerVM] Failed to load strategies: %s", e, exc_info=True)
             self._set_state(
                 status_message=Message("screener_load_failed", {}),
-                status_color="red",
+                status_color="error",
             )
 
     def update_strategy_desc(self, selected_strategy: str | None, params: dict | None = None) -> None:
@@ -334,7 +334,7 @@ class ScreenerViewModel:
                 "screener_history_viewing",
                 {"date": date_str, "label": label},
             ),
-            status_color="blue",
+            status_color="info",
         )
 
     @staticmethod
@@ -377,7 +377,7 @@ class ScreenerViewModel:
             logger.error("[ScreenerVM] Strategy not found: %s", strategy_key)
             self._set_state(
                 status_message=Message("screener_strategy_not_found"),
-                status_color="red",
+                status_color="error",
             )
             return
 
@@ -417,12 +417,12 @@ class ScreenerViewModel:
                                 "strategy_dep_degraded_detail",
                                 {"tables": ", ".join(not_ready)},
                             ),
-                            status_color="orange",
+                            status_color="warning",
                         )
                     else:
                         self._set_state(
                             status_message=Message("strategy_dep_degraded"),
-                            status_color="orange",
+                            status_color="warning",
                         )
 
                 context["data_processor"] = self.data_processor
@@ -499,7 +499,7 @@ class ScreenerViewModel:
                             "screener_done_saved",
                             {"count": len(result_df)},
                         ),
-                        status_color="green",
+                        status_color="success",
                         data_version=self._state.data_version + 1,
                     )
                     return I18n.get("task_screening_success", count=len(result_df))
@@ -510,7 +510,7 @@ class ScreenerViewModel:
                     page_no=1,
                     loading=False,
                     status_message=Message("screener_no_results"),
-                    status_color="orange",
+                    status_color="warning",
                     data_version=self._state.data_version + 1,
                 )
                 return I18n.get("screener_no_results")
@@ -519,7 +519,7 @@ class ScreenerViewModel:
                 self._set_state(
                     loading=False,
                     status_message=Message("screener_cancelled"),
-                    status_color="orange",
+                    status_color="warning",
                 )
                 raise
             except QualityGateError as e:
@@ -531,7 +531,7 @@ class ScreenerViewModel:
                 self._set_state(
                     loading=False,
                     status_message=Message("screener_blocked", {"reason": str(e)}),
-                    status_color="orange",
+                    status_color="warning",
                 )
                 return I18n.get("screener_blocked", reason=str(e))
             except Exception as e:
@@ -544,7 +544,7 @@ class ScreenerViewModel:
                 self._set_state(
                     loading=False,
                     status_message=Message("screener_exec_error"),
-                    status_color="red",
+                    status_color="error",
                 )
                 raise RuntimeError(f"Strategy execution crashed: {e}") from e
 
@@ -560,7 +560,7 @@ class ScreenerViewModel:
                 "screener_running_strategy",
                 {"name_key": strategy.name_key},
             ),
-            status_color="blue",
+            status_color="info",
         )
 
         # Dispatch to TaskManager!
@@ -575,7 +575,7 @@ class ScreenerViewModel:
             self._set_state(
                 loading=False,
                 status_message=Message("screener_task_rejected"),
-                status_color="orange",
+                status_color="warning",
             )
         else:
             self._strategy_submitted = True
@@ -726,7 +726,7 @@ class ScreenerViewModel:
                 "screener_ai_analyzing",
                 {"done": current, "total": total, "msg": msg},
             ),
-            status_color="blue",
+            status_color="info",
         )
 
     def _on_ai_result_stream(self, row_data):
