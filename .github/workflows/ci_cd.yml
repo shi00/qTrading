@@ -89,11 +89,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.13', '3.14']
-        include:
-          - python-version: '3.14'
-            experimental: true
-    continue-on-error: ${{ matrix.experimental || false }}
+        python-version: ['3.13']
 
     services:
       postgres:
