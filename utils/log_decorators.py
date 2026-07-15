@@ -264,14 +264,56 @@ def track_performance(
             @functools.wraps(func)
             async def async_wrapper(*args, **kwargs):
                 start_time = time.perf_counter()
-                result = await func(*args, **kwargs)
+                try:
+                    result = await func(*args, **kwargs)
+                except Exception as e:
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000
+                    from utils.error_classifier import classify_severity
+                    from utils.sanitizers import DataSanitizer
+
+                    severity = classify_severity(e)
+                    error_msg = DataSanitizer.sanitize_error(e)
+                    if severity == "system":
+                        target_logger.critical(
+                            "[%s] system failure after %.1fms: %s - %s",
+                            op_name,
+                            elapsed_ms,
+                            type(e).__name__,
+                            error_msg,
+                            exc_info=True,
+                            stacklevel=2,
+                        )
+                    elif severity == "recoverable":
+                        target_logger.warning(
+                            "[%s] recoverable failure after %.1fms: %s - %s",
+                            op_name,
+                            elapsed_ms,
+                            type(e).__name__,
+                            error_msg,
+                            stacklevel=2,
+                        )
+                    else:
+                        target_logger.error(
+                            "[%s] failed after %.1fms: %s - %s",
+                            op_name,
+                            elapsed_ms,
+                            type(e).__name__,
+                            error_msg,
+                            exc_info=True,
+                            stacklevel=2,
+                        )
+                    raise
+
                 elapsed = time.perf_counter() - start_time
                 elapsed_ms = elapsed * 1000
 
                 if elapsed_ms > threshold_ms:
                     target_logger.log(
                         level,
-                        f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)",
+                        "[%s] took %.2fs (threshold: %dms)",
+                        op_name,
+                        elapsed,
+                        threshold_ms,
                         stacklevel=2,
                     )
 
@@ -282,14 +324,56 @@ def track_performance(
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
             start_time = time.perf_counter()
-            result = func(*args, **kwargs)
+            try:
+                result = func(*args, **kwargs)
+            except Exception as e:
+                elapsed_ms = (time.perf_counter() - start_time) * 1000
+                from utils.error_classifier import classify_severity
+                from utils.sanitizers import DataSanitizer
+
+                severity = classify_severity(e)
+                error_msg = DataSanitizer.sanitize_error(e)
+                if severity == "system":
+                    target_logger.critical(
+                        "[%s] system failure after %.1fms: %s - %s",
+                        op_name,
+                        elapsed_ms,
+                        type(e).__name__,
+                        error_msg,
+                        exc_info=True,
+                        stacklevel=2,
+                    )
+                elif severity == "recoverable":
+                    target_logger.warning(
+                        "[%s] recoverable failure after %.1fms: %s - %s",
+                        op_name,
+                        elapsed_ms,
+                        type(e).__name__,
+                        error_msg,
+                        stacklevel=2,
+                    )
+                else:
+                    target_logger.error(
+                        "[%s] failed after %.1fms: %s - %s",
+                        op_name,
+                        elapsed_ms,
+                        type(e).__name__,
+                        error_msg,
+                        exc_info=True,
+                        stacklevel=2,
+                    )
+                raise
+
             elapsed = time.perf_counter() - start_time
             elapsed_ms = elapsed * 1000
 
             if elapsed_ms > threshold_ms:
                 target_logger.log(
                     level,
-                    f"[{op_name}] took {elapsed:.2f}s (threshold: {threshold_ms}ms)",
+                    "[%s] took %.2fs (threshold: %dms)",
+                    op_name,
+                    elapsed,
+                    threshold_ms,
                     stacklevel=2,
                 )
 
@@ -341,7 +425,7 @@ class AsyncOperationLogger:
         # 记录开始
         context_str = ", ".join(f"{k}={v}" for k, v in self.context.items())
         params_str = f" | {context_str}" if context_str else ""
-        self.logger.log(self.log_level, f"[{self.operation}] started{params_str}", stacklevel=2)
+        self.logger.log(self.log_level, "[%s] started%s", self.operation, params_str, stacklevel=2)
 
         return self
 
