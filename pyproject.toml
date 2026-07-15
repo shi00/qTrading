@@ -21,9 +21,9 @@ classifiers = [
 #   * flet / flet-desktop / flet-charts: UI framework with breaking layout/behavior changes across minor versions; flet-charts is the chart control package split out since V1.
 #   * tushare: API methods and data formats vary between versions; client code is tightly coupled.
 dependencies = [
-    "flet==0.85.3",
-    "flet-desktop==0.85.3",
-    "flet-charts==0.85.3",
+    "flet==0.86.0",
+    "flet-desktop==0.86.0",
+    "flet-charts==0.86.0",
     "tushare==1.4.29",
     "akshare>=1.18.60",
     "requests>=2.34.0",

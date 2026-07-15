@@ -2,6 +2,8 @@
 import os
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, get_package_paths
+
 project_root = Path(SPECPATH)
 
 datas = [
@@ -11,6 +13,16 @@ datas = [
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "data" / "tiktoken_cache"), os.path.join("data", "tiktoken_cache")),
 ]
+# flet 包内 icons.json（material/cupertino）通过 PEP 562 __getattr__ 懒加载，
+# PyInstaller 静态分析无法发现，需显式收集。flet 包数据文件仅 5 个（2 json + 2 pyi + 1 typed），全收集无副作用。
+datas += collect_data_files("flet")
+# akshare 包内数据文件（calendar.json 交易日历 + 5 个加密/解密 .js + 1 个 .zip + 1 个 .json），
+# 运行时通过 cons.get_calendar() 等函数读取，PyInstaller 静态分析无法发现，全收集（8 文件）。
+datas += collect_data_files("akshare")
+# litellm 启动时读取包根目录 JSON 数据文件（model_prices_and_context_window_backup.json 等）。
+# NOTE(lazy): 只收集根目录 .json，不收集 proxy/llms 等子目录资源. ceiling: litellm 根目录 .json 文件. upgrade: litellm 升级后若运行时报 FileNotFoundError，需扩展收集范围（rglob 或 collect_data_files）.
+_litellm_pkg_path = Path(get_package_paths("litellm")[1])
+datas += [(str(f), "litellm") for f in _litellm_pkg_path.iterdir() if f.is_file() and f.suffix == ".json"]
 
 hiddenimports = [
     "flet",
@@ -43,34 +55,9 @@ hiddenimports = [
     "llama_cpp",
 ]
 
-
-_CUDA_DLL_KEYWORDS = ("cuda", "cublas", "cudart", "cufft", "curand", "cusolver", "cusparse", "nvrtc", "llama")
-
-
-def collect_cuda_dlls():
-    """Collect llama-cpp-python CUDA DLLs for packaging."""
-    binaries = []
-    try:
-        import llama_cpp
-
-        llama_dir = Path(llama_cpp.__file__).parent
-        for dll_pattern in ["*.dll", "**/*.dll"]:
-            for dll in llama_dir.glob(dll_pattern):
-                if dll.is_file():
-                    dll_lower = dll.name.lower()
-                    if any(kw in dll_lower for kw in _CUDA_DLL_KEYWORDS):
-                        binaries.append((str(dll), "."))
-                        print(f"[CUDA Hook] Collected DLL: {dll.name}")
-                    else:
-                        print(f"[CUDA Hook] Skipped non-CUDA DLL: {dll.name}")
-    except ImportError:
-        print("[CUDA Hook] llama_cpp not installed, skipping CUDA DLL collection")
-    except Exception as e:
-        print(f"[CUDA Hook] Warning: Failed to collect CUDA DLLs: {e}")
-    return binaries
-
-
-cuda_binaries = collect_cuda_dlls()
+# llama_cpp 通过 ctypes.CDLL 在 llama_cpp/lib/ 目录加载 llama.dll + ggml*.dll + mtmd.dll，
+# PyInstaller 静态分析无法发现，需 collect_dynamic_libs 收集到 _internal/llama_cpp/lib/（保持原相对路径）。
+binaries = collect_dynamic_libs("llama_cpp")
 
 excludes = [
     "tkinter",
@@ -116,7 +103,7 @@ if not icon_path.exists():
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=cuda_binaries,
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

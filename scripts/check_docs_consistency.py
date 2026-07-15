@@ -266,12 +266,14 @@ def check_note_lazy_format() -> list[str]:
     """
     errors: list[str] = []
     self_path = Path(__file__).resolve()
+    # 显式跳过专门测试 NOTE(lazy) 校验规则的测试文件，防止其单元测试用例中的演示文本被误判
+    test_consistency_path = ROOT / "tests" / "unit" / "test_docs_consistency.py"
 
     for p in ROOT.rglob("*.py"):
         if any(part in _NOTE_LAZY_SKIP_DIRS for part in p.parts):
             continue
-        if p == self_path:
-            # 跳过脚本自身：脚本内对 NOTE(lazy) 的描述性引用不应被检查
+        if p == self_path or p == test_consistency_path:
+            # 跳过脚本自身以及专门的规则测试脚本
             continue
         try:
             content = p.read_text(encoding="utf-8")

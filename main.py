@@ -332,7 +332,7 @@ async def main(page: ft.Page):
 
     masked_token = mask_sensitive(token)
     masked_llm_key = mask_sensitive(llm_api_key)
-    logger.debug(
+    logger.info(
         "DB_URL configured: %s, Token='%s', API_Key='%s', Onboarding='%s'",
         bool(db_url),
         masked_token,
