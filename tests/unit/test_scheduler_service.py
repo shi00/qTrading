@@ -22,7 +22,7 @@ def _make_svc():
 def _get_patches(mock_dp, mock_tm, now_val):
     return (
         patch("utils.scheduler_service.ConfigHandler"),
-        patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+        patch("data.data_processor.DataProcessor", return_value=mock_dp),
         patch("utils.scheduler_service.get_now", return_value=now_val),
         patch("services.task_manager.TaskManager", return_value=mock_tm),
     )
@@ -368,7 +368,7 @@ class TestRunDailyUpdate:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
@@ -384,7 +384,7 @@ class TestRunDailyUpdate:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
@@ -403,7 +403,7 @@ class TestRunDailyUpdate:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
             patch("services.task_manager.TaskManager") as mock_tm,
         ):
@@ -426,7 +426,7 @@ class TestRunDailyUpdate:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
             patch("services.task_manager.TaskManager") as mock_tm,
         ):
@@ -506,7 +506,7 @@ class TestRunNightlyPrediction:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
@@ -522,7 +522,7 @@ class TestRunNightlyPrediction:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
         ):
             mock_ch.is_auto_update_enabled.return_value = True
@@ -541,7 +541,7 @@ class TestRunNightlyPrediction:
         svc = _make_svc()
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor") as mock_dp,
+            patch("data.data_processor.DataProcessor") as mock_dp,
             patch("utils.scheduler_service.get_now") as mock_now,
             patch("services.task_manager.TaskManager") as mock_tm,
         ):
@@ -914,7 +914,7 @@ class TestAiConceptLogicClosure:
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
             patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):
             mock_ch.is_ai_concept_schedule_enabled.return_value = True
@@ -947,7 +947,7 @@ class TestAiConceptLogicClosure:
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
             patch("utils.scheduler_service.get_now", return_value=now_val),
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):
             mock_ch.is_ai_concept_schedule_enabled.return_value = True
@@ -977,11 +977,11 @@ class TestNightlyPredictionLogicClosure:
 
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("utils.scheduler_service.get_now", return_value=now_val),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
             patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("utils.scheduler_service.ReviewManager", return_value=mock_rm),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
         ):
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_nightly_prediction()
@@ -1008,11 +1008,11 @@ class TestNightlyPredictionLogicClosure:
 
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("utils.scheduler_service.get_now", return_value=now_val),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
             patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("utils.scheduler_service.ReviewManager", return_value=mock_rm),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
         ):
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_nightly_prediction()
@@ -1040,11 +1040,11 @@ class TestNightlyPredictionLogicClosure:
 
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("utils.scheduler_service.get_now", return_value=now_val),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
             patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("utils.scheduler_service.ReviewManager", return_value=mock_rm),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
         ):
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_nightly_prediction()
@@ -1071,7 +1071,7 @@ class TestNightlyPredictionLogicClosure:
 
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("utils.scheduler_service.get_now", return_value=now_val),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):
@@ -1099,11 +1099,11 @@ class TestNightlyPredictionLogicClosure:
 
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("utils.scheduler_service.get_now", return_value=now_val),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
             patch("strategies.ai_strategy.AISelectionStrategy", return_value=mock_strategy),
-            patch("utils.scheduler_service.ReviewManager", return_value=mock_rm),
+            patch("data.persistence.review_manager.ReviewManager", return_value=mock_rm),
         ):
             mock_ch.is_auto_update_enabled.return_value = True
             await svc._run_nightly_prediction()
@@ -1122,7 +1122,7 @@ class TestNightlyPredictionLogicClosure:
 
         with (
             patch("utils.scheduler_service.ConfigHandler") as mock_ch,
-            patch("utils.scheduler_service.DataProcessor", return_value=mock_dp),
+            patch("data.data_processor.DataProcessor", return_value=mock_dp),
             patch("utils.scheduler_service.get_now", return_value=now_val),
             patch("services.task_manager.TaskManager", return_value=mock_tm),
         ):

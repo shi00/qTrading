@@ -27,7 +27,7 @@ FORBIDDEN_IMPORTS: dict[str, list[str]] = {
     # ui 不应导入 app（§4.1: app 仅被 main.py 调用）
     "ui": ["app"],
     # utils 是横切关注点，不应反向依赖业务层（§4.2 类比 core 隔离原则）
-    "utils": ["ui", "strategies", "services", "app"],
+    "utils": ["ui", "strategies", "services", "app", "data"],
 }
 
 # 已知例外：main.py 入口流程的特殊装配
