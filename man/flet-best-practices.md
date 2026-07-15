@@ -16,14 +16,14 @@
 >
 > | 维度 | 本手册（通用） | 项目规范（优先） |
 > |------|--------------|----------------|
-> | 适用范围 | Web/移动/桌面通用 | **仅桌面端**（`page.window.min_width=1280`，见 CONTRIBUTING.md「响应式布局规范」） |
-> | UI 模型 | 裸 `use_state`/`use_effect` 组件（§4~5） | **MVVM + `use_viewmodel` hook**（CLAUDE.md §3.2 强制；`use_viewmodel` 待建，见 §3.3） |
+> | 适用范围 | Web/移动/桌面通用 | **仅桌面端**（`page.window.min_width=1280`，见 CONTRIBUTING.md「V1 声明式 UI 开发规范」响应式小节） |
+> | UI 模型 | 裸 `use_state`/`use_effect` 组件（§4~5） | **MVVM + `use_viewmodel` hook**（CLAUDE.md §3.2 强制；`use_viewmodel` 已实现，见 [ui/hooks.py](./ui/hooks.py)） |
 > | 异步线程 | `asyncio.to_thread` / `page.run_thread`（§6.3） | **`ThreadPoolManager.run_async(TaskType.IO/CPU)`**（R16 红线，禁止在事件处理器同步阻塞） |
 > | API 约束 | §17 迁移表（通用） | **21 行 breaking changes 表**（CONTRIBUTING.md，含检测方式，实测对齐 0.85.3） |
 > | 版本锁定 | `flet==0.85.3` + charts 解析版本（§1.1） | **flet / flet-desktop / flet-charts 三包全锁 `==0.85.3`**（pyproject.toml） |
-> | 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400（§11.1） | **compact/standard/wide/ultra_wide 1200/1600/2400**（桌面端，CONTRIBUTING.md「响应式布局规范」） |
+> | 响应式断点 | xs/sm/md/lg/xl/xxl 576~1400（§11.1） | **compact/standard/ultra_wide 1200/1600/2400**（桌面端，CONTRIBUTING.md「V1 声明式 UI 开发规范」响应式断点小节） |
 > | 桌面打包 | `flet pack`（§13.5） | **PyInstaller**（`AStockScreener.spec`，见 CONTRIBUTING.md「PyInstaller 打包」） |
-> | Dialog 管理 | `ft.use_dialog()` Hook（§10.1，声明式唯一推荐） | **`page.show_dialog()`/`page.pop_dialog()`**（V0→V1 迁移完成态；声明式重写进行中，见 CLAUDE.md §3.3 技术债） |
+> | Dialog 管理 | `ft.use_dialog()` Hook（§10.1，声明式唯一推荐） | **`ft.use_dialog()` Hook**（声明式重写已收官） |
 >
 > 本手册中 Web/移动专属内容（WASM/CDN、APK/IPA 构建、SafeArea、Cupertino `adaptive`、移动端 NavigationBar 等）**项目桌面端不适用**，仅作背景知识。本手册 API 声明已对 `flet==0.85.3` 实测核实（核实方法：`python -c "import flet as ft; hasattr(ft, '...')"` + `inspect.getsource()` + 官方发布公告交叉验证）。
 
@@ -792,7 +792,6 @@ def DateRangePicker():
 - `ft.DatePicker` 是 `DialogControl` 子类（源码核验 MRO：`DatePicker → DialogControl`），**完全支持 `ft.use_dialog()` 声明式管理**
 - 声明式中 `show` 状态驱动 `use_dialog(date_picker if show else None)`，`on_dismiss` 调 `set_show(False)` 关闭
 - 全局样式用 `ft.Theme.date_picker_theme`（`DatePickerTheme`）配置
-- **项目技术债**：`backtest_config_panel.py` 当前用 `page.show_dialog(date_picker)` 命令式打开，应改造为 `use_dialog()` 范式（见 §10.1）
 
 #### SegmentedButton
 
