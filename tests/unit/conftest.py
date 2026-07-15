@@ -42,6 +42,52 @@ def _reset_data_explorer_shared_engine():
 
 
 @pytest.fixture(autouse=True)
+def _reset_logging_state():
+    """Reset logging state before and after each unit test to prevent cross-test pollution.
+
+    Tests that call setup_logging() can leave residual state (modified named
+    logger levels, non-zero logging.disable, or Logger.disabled=True) that
+    causes caplog-based assertions to fail intermittently under random test
+    ordering.
+
+    Root logger level is reset to WARNING (pytest default) — catching_logs
+    (configured via log_level=DEBUG in pyproject.toml) will override to DEBUG
+    for tests that need it. logging.disable and named logger levels are also
+    reset to prevent filter-level pollution.
+
+    Logger.disabled (instance-level boolean) is reset because some code paths
+    (including third-party libraries) may set it to True, which makes
+    isEnabledFor() return False and silently drops log records — leaving
+    caplog.records empty. The original _reset_logging_state only reset
+    manager.disable, missing this attribute.
+    """
+    import logging
+
+    root = logging.getLogger()
+    saved_level = root.level
+    saved_disable = root.manager.disable
+    saved_named_levels: dict[str, int] = {}
+    saved_named_disabled: dict[str, bool] = {}
+    for name, logger in root.manager.loggerDict.items():
+        if isinstance(logger, logging.Logger):
+            if logger.level != logging.NOTSET:
+                saved_named_levels[name] = logger.level
+                logger.setLevel(logging.NOTSET)
+            if logger.disabled:
+                saved_named_disabled[name] = logger.disabled
+                logger.disabled = False
+    logging.disable(logging.NOTSET)
+    root.setLevel(logging.WARNING)
+    yield
+    logging.disable(saved_disable)
+    root.setLevel(saved_level)
+    for name, level in saved_named_levels.items():
+        logging.getLogger(name).setLevel(level)
+    for name in saved_named_disabled:
+        logging.getLogger(name).disabled = False
+
+
+@pytest.fixture(autouse=True)
 def _reset_i18n_state():
     """Reset I18n class-level state before and after each unit test.
 
