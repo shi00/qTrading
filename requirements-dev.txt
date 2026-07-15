@@ -99,14 +99,14 @@ filelock==3.29.1
     # via
     #   cachecontrol
     #   huggingface-hub
-flet==0.85.3
+flet==0.86.0
     # via
     #   astockscreener (pyproject.toml)
     #   flet-charts
     #   flet-desktop
-flet-charts==0.85.3
+flet-charts==0.86.0
     # via astockscreener (pyproject.toml)
-flet-desktop==0.85.3
+flet-desktop==0.86.0
     # via astockscreener (pyproject.toml)
 fonttools==4.63.0
     # via matplotlib
@@ -364,6 +364,7 @@ requests==2.34.2
 rich==15.0.0
     # via
     #   curl-cffi
+    #   flet-desktop
     #   pip-audit
     #   typer
 rpds-py==2026.5.1
