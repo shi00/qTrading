@@ -527,6 +527,41 @@ class TestSlippageWithAvgDailyVolume:
         assert "avg_daily_volume" in result.columns
         assert result["avg_daily_volume"].is_null().sum() < len(result)
 
+    def test_avg_daily_volume_excludes_current_bar(self):
+        """验证 avg_daily_volume 不包含当前 bar 的 vol（无前视偏差）。
+
+        shift(1) 后，第 N 行的 avg_daily_volume = mean(vol[max(0, N-20)..N])
+        其中 vol 序列已 shift，即原 vol[0..N-1]。前 5 行因 min_samples=5 不足为 null。
+        """
+        from strategies.backtest.engine import VectorBacktestEngine
+
+        # vol = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        quotes_df = pl.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 10,
+                "trade_date": [date(2024, 1, i) for i in range(1, 11)],
+                "open": [10.0] * 10,
+                "high": [10.5] * 10,
+                "low": [9.5] * 10,
+                "close": [10.2] * 10,
+                "vol": list(range(1, 11)),
+                "adj_factor": [1.0] * 10,
+            }
+        )
+
+        engine = VectorBacktestEngine.__new__(VectorBacktestEngine)
+        result = engine._compute_avg_daily_volume(quotes_df)
+
+        avg = result["avg_daily_volume"].to_list()
+        vol = result["vol"].to_list()
+        # 前 5 行（index 0-4）为 null：shift(1) 后 min_samples=5 无法满足
+        assert avg[:5] == [None] * 5
+        # index 5（第 6 行）的 avg = mean(vol[0:5]) = mean(1,2,3,4,5) = 3.0，不含当前 bar 的 vol=6
+        assert avg[5] == 3.0
+        # 关键断言：每个非 null 行的 avg_daily_volume 不等于当前 bar 的 vol（无前视偏差）
+        for i in range(5, 10):
+            assert avg[i] != vol[i]
+
     def test_slippage_uses_avg_daily_volume(self):
         """测试滑点计算使用平均成交量"""
         from data.domain_services.transaction_cost import (
