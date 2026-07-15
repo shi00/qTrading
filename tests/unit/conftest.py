@@ -13,7 +13,7 @@ def _reset_all_singletons():
 
     Uses singleton_registry.reset_all_singletons() to ensure clean state.
     Also resets ProxyManager (non-registered singleton per CLAUDE.md §4.3).
-    Complements reset_config_cache and reset_loop_local_cache in the
+    Complements reset_config_cache and _reset_loop_local_fallback in the
     root conftest.py (which handle non-singleton state).
     """
     from utils.proxy_manager import ProxyManager
