@@ -87,7 +87,7 @@ class BacktestDataProvider:
         try:
             start_date_obj = to_date_obj(start_date)
             end_date_obj = to_date_obj(end_date)
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数据预加载异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error("[BacktestDataProvider] Invalid date format for preloading: %s", e)
             self._preloaded = None
@@ -165,7 +165,7 @@ class BacktestDataProvider:
                     self._preloaded[key] = {}
         except asyncio.CancelledError:
             raise
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数据预加载异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error("[BacktestDataProvider] Failed to preload range: %s", e, exc_info=True)
             self._preloaded = None
@@ -305,7 +305,7 @@ class BacktestDataProvider:
                 else:
                     diagnostics["table_status"][key] = {"ready": False, "rows": 0}
                     all_aux_ready = False
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出历史筛选上下文构建异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 sanitized_msg = DataSanitizer.sanitize_error(e)
                 logger.warning("[BacktestDataProvider] Failed to fetch %s: %s", key, sanitized_msg)
@@ -335,7 +335,7 @@ class BacktestDataProvider:
             if self.data_processor is not None:
                 return await self.data_processor.get_screening_data(trade_date)
             return await self.cache.get_screening_data(trade_date)
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[BacktestDataProvider] Failed to get screening_data for %s: %s", trade_date, e)
             return None
@@ -356,7 +356,7 @@ class BacktestDataProvider:
             if self.data_processor is not None:
                 return await self.data_processor.get_fundamental_screening_data(trade_date)
             return await self.cache.get_fundamental_screening_data(trade_date)
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出基本面筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[BacktestDataProvider] Failed to get fundamental_data for %s: %s", trade_date, e)
             return None
@@ -382,7 +382,7 @@ class BacktestDataProvider:
         """
         try:
             stock_basic_df = await self.cache.get_stock_basic()
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出股票元数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.warning("[BacktestDataProvider] Failed to load stock_basic for stock_meta: %s", e)
             return {}

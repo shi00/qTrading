@@ -98,7 +98,7 @@ async def check_multi_period_data(field: str) -> bool:
                 if df is not None and not df.empty:
                     if field in df.columns and not df[field].isna().all():  # type: ignore[union-attr]
                         passed += 1
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段 populous 校验异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.debug("[PromptValidator] check_field_populous sample %s failed: %s", ts_code, e)
                 continue
@@ -106,7 +106,7 @@ async def check_multi_period_data(field: str) -> bool:
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
-    # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+    # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段 populous 校验异常. upgrade: 策略层重构时统一走 classify_error.
     except Exception as e:
         logger.debug("[PromptValidator] check_field_populous failed: %s", e)
         return False
@@ -136,7 +136,7 @@ async def check_field_exists(field: str) -> bool:
                 df = await cache.get_financial_reports_history(ts_code, periods=1)
                 if df is not None and not df.empty and field in df.columns:
                     passed += 1
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段存在性校验异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 logger.debug("[PromptValidator] check_field_exists sample %s failed: %s", ts_code, e)
                 continue
@@ -144,7 +144,7 @@ async def check_field_exists(field: str) -> bool:
         threshold = (len(sample_codes) + 1) // 2
         return passed >= threshold
 
-    # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+    # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段存在性校验异常. upgrade: 策略层重构时统一走 classify_error.
     except Exception as e:
         logger.debug("[PromptValidator] check_field_exists failed: %s", e)
         return False

@@ -266,7 +266,7 @@ class VectorBacktestEngine:
             quotes_df = quotes_df.join(suspend_df, on=["ts_code", "trade_date"], how="left")
 
             return quotes_df.with_columns(pl.col("is_tradable").fill_null(True)), None
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出停牌状态补充异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             sanitized_msg = DataSanitizer.sanitize_error(e)
             logger.warning("[VectorBacktestEngine] Failed to enrich suspend_status: %s", sanitized_msg)
@@ -327,7 +327,7 @@ class VectorBacktestEngine:
 
             quotes_df = quotes_df.join(limit_df, on=["ts_code", "trade_date"], how="left")
             return quotes_df, None
-        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+        # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出涨跌停状态补充异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             sanitized_msg = DataSanitizer.sanitize_error(e)
             logger.warning("[VectorBacktestEngine] Failed to enrich limit_status: %s", sanitized_msg)
@@ -472,7 +472,7 @@ class VectorBacktestEngine:
                     signals_list.append(signal_df)
             except asyncio.CancelledError:
                 raise
-            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 38处策略层异常. upgrade: 策略层重构时统一走 classify_error.
+            # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出信号生成异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
                 sanitized_msg = DataSanitizer.sanitize_error(e)
                 logger.warning("[Backtest] Strategy failed on %s: %s", signal_date, sanitized_msg)
