@@ -100,7 +100,11 @@ async def check_multi_period_data(field: str) -> bool:
                         passed += 1
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段 populous 校验异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.debug("[PromptValidator] check_field_populous sample %s failed: %s", ts_code, e)
+                logger.debug(
+                    "[PromptValidator] check_field_populous sample %s failed: %s",
+                    ts_code,
+                    DataSanitizer.sanitize_error(e),
+                )
                 continue
 
         threshold = (len(sample_codes) + 1) // 2
@@ -108,7 +112,7 @@ async def check_multi_period_data(field: str) -> bool:
 
     # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段 populous 校验异常. upgrade: 策略层重构时统一走 classify_error.
     except Exception as e:
-        logger.debug("[PromptValidator] check_field_populous failed: %s", e)
+        logger.debug("[PromptValidator] check_field_populous failed: %s", DataSanitizer.sanitize_error(e))
         return False
 
 
@@ -138,7 +142,11 @@ async def check_field_exists(field: str) -> bool:
                     passed += 1
             # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段存在性校验异常. upgrade: 策略层重构时统一走 classify_error.
             except Exception as e:
-                logger.debug("[PromptValidator] check_field_exists sample %s failed: %s", ts_code, e)
+                logger.debug(
+                    "[PromptValidator] check_field_exists sample %s failed: %s",
+                    ts_code,
+                    DataSanitizer.sanitize_error(e),
+                )
                 continue
 
         threshold = (len(sample_codes) + 1) // 2
@@ -146,7 +154,7 @@ async def check_field_exists(field: str) -> bool:
 
     # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出字段存在性校验异常. upgrade: 策略层重构时统一走 classify_error.
     except Exception as e:
-        logger.debug("[PromptValidator] check_field_exists failed: %s", e)
+        logger.debug("[PromptValidator] check_field_exists failed: %s", DataSanitizer.sanitize_error(e))
         return False
 
 

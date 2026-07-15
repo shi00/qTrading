@@ -89,7 +89,9 @@ class BacktestDataProvider:
             end_date_obj = to_date_obj(end_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数据预加载异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.error("[BacktestDataProvider] Invalid date format for preloading: %s", e)
+            logger.error(
+                "[BacktestDataProvider] Invalid date format for preloading: %s", DataSanitizer.sanitize_error(e)
+            )
             self._preloaded = None
             return
 
@@ -167,7 +169,9 @@ class BacktestDataProvider:
             raise
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出数据预加载异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.error("[BacktestDataProvider] Failed to preload range: %s", e, exc_info=True)
+            logger.error(
+                "[BacktestDataProvider] Failed to preload range: %s", DataSanitizer.sanitize_error(e), exc_info=True
+            )
             self._preloaded = None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -337,7 +341,11 @@ class BacktestDataProvider:
             return await self.cache.get_screening_data(trade_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[BacktestDataProvider] Failed to get screening_data for %s: %s", trade_date, e)
+            logger.warning(
+                "[BacktestDataProvider] Failed to get screening_data for %s: %s",
+                trade_date,
+                DataSanitizer.sanitize_error(e),
+            )
             return None
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)
@@ -358,7 +366,11 @@ class BacktestDataProvider:
             return await self.cache.get_fundamental_screening_data(trade_date)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出基本面筛选数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[BacktestDataProvider] Failed to get fundamental_data for %s: %s", trade_date, e)
+            logger.warning(
+                "[BacktestDataProvider] Failed to get fundamental_data for %s: %s",
+                trade_date,
+                DataSanitizer.sanitize_error(e),
+            )
             return None
 
     @staticmethod
@@ -384,7 +396,9 @@ class BacktestDataProvider:
             stock_basic_df = await self.cache.get_stock_basic()
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出股票元数据获取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[BacktestDataProvider] Failed to load stock_basic for stock_meta: %s", e)
+            logger.warning(
+                "[BacktestDataProvider] Failed to load stock_basic for stock_meta: %s", DataSanitizer.sanitize_error(e)
+            )
             return {}
 
         if stock_basic_df is None or stock_basic_df.empty:

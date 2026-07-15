@@ -12,6 +12,7 @@ from strategies.base_strategy import BaseStrategy, register_strategy
 from core.i18n import I18n
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.qfq import qfq_ratio_expr, qfq_ratio_series
+from utils.sanitizers import DataSanitizer
 from utils.technical_analysis import TechnicalAnalysis
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -360,7 +361,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 e,
                 exc_info=True,
             )
-            raise RuntimeError(f"Strategy internal error: {e}") from e
+            raise RuntimeError(f"Strategy internal error: {DataSanitizer.sanitize_error(e)}") from e
 
     # ============================================================
     # Context Builders — Strategy-specific enhancements
@@ -398,7 +399,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                     )
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[OversoldStrategy] Failed to prefetch indicators: %s", e)
+            logger.warning("[OversoldStrategy] Failed to prefetch indicators: %s", DataSanitizer.sanitize_error(e))
 
         try:
             screening_data = context.get("screening_data")
@@ -406,7 +407,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 prefetched.sector_stats = self._compute_sector_stats(screening_data)
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[OversoldStrategy] Failed to compute sector stats: %s", e)
+            logger.warning("[OversoldStrategy] Failed to compute sector stats: %s", DataSanitizer.sanitize_error(e))
 
         try:
             if hasattr(dp.cache, "get_index_daily_range"):
@@ -463,7 +464,7 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                         prefetched.market_context = market_context
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略预取异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[OversoldStrategy] Failed to prefetch market data: %s", e)
+            logger.warning("[OversoldStrategy] Failed to prefetch market data: %s", DataSanitizer.sanitize_error(e))
 
         return prefetched
 

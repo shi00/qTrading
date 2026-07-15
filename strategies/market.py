@@ -7,6 +7,7 @@ from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
 from utils.error_classifier import classify_severity
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -214,7 +215,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
                 return pd.DataFrame()
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出北向资金过滤异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
-            logger.warning("[%s] Gating check failed: %s", self.name, e, exc_info=True)
+            logger.warning("[%s] Gating check failed: %s", self.name, DataSanitizer.sanitize_error(e), exc_info=True)
             return pd.DataFrame()
 
         return await super().filter(context)
