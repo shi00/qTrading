@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from data.constants import TUSHARE_POINT_TIERS
+from utils.constants import TUSHARE_POINT_TIERS
 from utils.llm_providers import AZURE_DEFAULT_API_VERSION
 
 DEFAULT_AI_PROMPT = """# A股智能分析系统提示词 (System Prompt)

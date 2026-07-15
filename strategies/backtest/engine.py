@@ -407,7 +407,7 @@ class VectorBacktestEngine:
             return quotes_df
 
         avg_vol_expr = (
-            pl.col("vol").rolling_mean(window_size=20, min_samples=5).over("ts_code").alias("avg_daily_volume")
+            pl.col("vol").shift(1).rolling_mean(window_size=20, min_samples=5).over("ts_code").alias("avg_daily_volume")
         )
 
         return quotes_df.with_columns(avg_vol_expr)

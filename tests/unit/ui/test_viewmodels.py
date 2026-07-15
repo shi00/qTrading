@@ -528,11 +528,11 @@ class TestScreenerViewModelOnAiResultStream:
 
 class TestScreenerViewModelRunStrategy:
     async def test_with_not_found_strategy(self, screener_vm, mock_sm):
-        """策略不存在时，state.status_color 设为 red（替代 on_status 回调）。"""
+        """策略不存在时，state.status_color 设为 error（替代 on_status 回调）。"""
         mock_sm.get_strategy.return_value = None
         await screener_vm.run_strategy("nonexistent")
         mock_sm.get_strategy.assert_called_once_with("nonexistent")
-        assert screener_vm.state.status_color == "red"
+        assert screener_vm.state.status_color == "error"
         assert screener_vm.state.status_message is not None
         assert screener_vm.state.status_message.key == "screener_strategy_not_found"
 
@@ -811,7 +811,7 @@ class TestScreenerViewModelRunStrategyExecution:
         self.mock_dp.init_data.assert_awaited_once()
 
     async def test_run_strategy_task_rejected(self):
-        """TaskManager 拒绝任务时，state.loading 为 False 且 status_color 为 orange。"""
+        """TaskManager 拒绝任务时，state.loading 为 False 且 status_color 为 warning。"""
         strategy = self._make_strategy()
         self.mock_sm.get_strategy.return_value = strategy
         self.mock_tm.submit_task.return_value = None
@@ -821,7 +821,7 @@ class TestScreenerViewModelRunStrategyExecution:
             await self.vm.run_strategy("momentum")
 
         assert self.vm.state.loading is False
-        assert self.vm.state.status_color == "orange"
+        assert self.vm.state.status_color == "warning"
 
     async def test_run_strategy_resets_state(self):
         strategy = self._make_strategy()
@@ -1093,7 +1093,7 @@ class TestScreenerViewModelOnAiProgress:
         """_on_ai_progress 更新 state.status_message/status_color（替代 on_status 回调）。"""
         screener_vm._on_ai_progress(5, 10, "analyzing")
 
-        assert screener_vm.state.status_color == "blue"
+        assert screener_vm.state.status_color == "info"
         assert screener_vm.state.status_message is not None
         assert screener_vm.state.status_message.key == "screener_ai_analyzing"
         assert screener_vm.state.status_message.params == {"done": 5, "total": 10, "msg": "analyzing"}

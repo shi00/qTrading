@@ -59,15 +59,24 @@ def _reset_i18n_state():
 
     _initialized is set to True to avoid auto-init warning log noise in
     tests that don't explicitly call I18n.initialize().
+
+    _listeners uses save-restore pattern (NOT clear-to-None) to preserve the
+    ui/i18n.py _sync_i18n_state global subscription registered at module
+    load time. Clearing _listeners would break set_locale/initialize → state
+    sync → MetaDataManager.invalidate_cache chain, causing test_ui_i18n /
+    test_ui_i18n_observable failures. The real pollution source is _locale
+    (modified by set_locale), not _listeners (just a callback list, not
+    modified by set_locale). Save-restore also cleans up leaky callbacks
+    subscribed during test execution.
     """
     from core.i18n import DEFAULT_LOCALE, I18n
 
+    saved_listeners = list(I18n._listeners) if I18n._listeners else None
     I18n._locale = DEFAULT_LOCALE
     I18n._initialized = True
-    I18n._listeners = None
     I18n._missing_keys = set()
     yield
     I18n._locale = DEFAULT_LOCALE
     I18n._initialized = True
-    I18n._listeners = None
+    I18n._listeners = saved_listeners
     I18n._missing_keys = set()

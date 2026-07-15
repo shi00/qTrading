@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -9,7 +9,6 @@ pytestmark = pytest.mark.unit
 
 @pytest.fixture(autouse=True)
 def _save_restore_appcolors():
-    saved_listeners = AppColors._listeners[:]
     saved_attrs = {key: getattr(AppColors, key) for key in CUSTOM_COLOR_PRESETS[ThemeName.DARK]}
     saved_attrs["RISE"] = AppColors.RISE
     saved_attrs["FALL"] = AppColors.FALL
@@ -19,35 +18,9 @@ def _save_restore_appcolors():
     saved_attrs["_CURRENT_THEME_MODE"] = AppColors._CURRENT_THEME_MODE
     saved_state = AppColors._state
     yield
-    AppColors._listeners = saved_listeners
     for key, value in saved_attrs.items():
         setattr(AppColors, key, value)
     AppColors._state = saved_state
-
-
-class TestAppColorsSubscribe:
-    def test_adds_listener(self):
-        listener = MagicMock()
-        AppColors.subscribe(listener)
-        assert listener in AppColors._listeners
-
-    def test_prevents_duplicate(self):
-        listener = MagicMock()
-        AppColors.subscribe(listener)
-        AppColors.subscribe(listener)
-        assert AppColors._listeners.count(listener) == 1
-
-
-class TestAppColorsUnsubscribe:
-    def test_removes_listener(self):
-        listener = MagicMock()
-        AppColors.subscribe(listener)
-        AppColors.unsubscribe(listener)
-        assert listener not in AppColors._listeners
-
-    def test_no_error_if_not_found(self):
-        listener = MagicMock()
-        AppColors.unsubscribe(listener)
 
 
 class TestAppColorsLoadTheme:
@@ -157,44 +130,9 @@ class TestAppColorsLoadTheme:
         AppColors.load_theme(ThemeName.NAVY)
         assert AppColors.TABLE_GRID_H == AppColors.TABLE_GRID
 
-    @patch(
-        "ui.theme.THEME_MODE_MAP",
-        {
-            ThemeName.DARK: "DARK",
-            ThemeName.LIGHT: "LIGHT",
-            ThemeName.NAVY: "DARK",
-            ThemeName.DRACULA: "DARK",
-        },
-    )
-    def test_notifies_listeners(self):
-        listener = MagicMock()
-        AppColors.subscribe(listener)
-        AppColors.load_theme(ThemeName.LIGHT)
-        listener.assert_called_once()
-
-    @patch(
-        "ui.theme.THEME_MODE_MAP",
-        {
-            ThemeName.DARK: "DARK",
-            ThemeName.LIGHT: "LIGHT",
-            ThemeName.NAVY: "DARK",
-            ThemeName.DRACULA: "DARK",
-        },
-    )
-    def test_listener_exception_does_not_stop_others(self):
-        bad_listener = MagicMock(side_effect=RuntimeError("boom"))
-        good_listener = MagicMock()
-        AppColors.subscribe(bad_listener)
-        AppColors.subscribe(good_listener)
-        AppColors.load_theme(ThemeName.LIGHT)
-        good_listener.assert_called_once()
-
 
 class TestAppColorsObservable:
-    """AppColorsState Observable 状态源断言（声明式组件自动重渲染基础）。
-
-    旧接口兼容性测试见 TestAppColorsSubscribe/TestAppColorsLoadTheme（阶段 4 删除）。
-    """
+    """AppColorsState Observable 状态源断言（声明式组件自动重渲染基础）。"""
 
     def test_get_observable_state_returns_singleton(self):
         """多次调用 get_observable_state 返回同一实例（单例）。"""

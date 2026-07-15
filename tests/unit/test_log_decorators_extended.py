@@ -268,6 +268,57 @@ class TestTrackPerformance:
 
         assert "took" in log_capture.text
 
+    @pytest.mark.asyncio
+    async def test_track_performance_async_exception_logs_elapsed(self, log_capture):
+        """async 异常路径应记录 ERROR 级别日志，消息含耗时（after 关键字）与异常类型，并重新抛出。"""
+
+        @track_performance(threshold_ms=1000, operation_name="async_fail")
+        async def failing_async():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError):
+            await failing_async()
+
+        error_records = [r for r in log_capture.records if r.levelno >= logging.ERROR]
+        assert len(error_records) >= 1
+        text = "\n".join(logging.Formatter().format(r) for r in error_records)
+        assert "[async_fail]" in text
+        assert "after" in text
+        assert "ValueError" in text
+
+    def test_track_performance_sync_exception_logs_elapsed(self, log_capture):
+        """sync 异常路径应记录 ERROR 级别日志，消息含耗时（after 关键字）与异常类型，并重新抛出。"""
+
+        @track_performance(threshold_ms=1000, operation_name="sync_fail")
+        def failing_sync():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError):
+            failing_sync()
+
+        error_records = [r for r in log_capture.records if r.levelno >= logging.ERROR]
+        assert len(error_records) >= 1
+        text = "\n".join(logging.Formatter().format(r) for r in error_records)
+        assert "[sync_fail]" in text
+        assert "after" in text
+        assert "ValueError" in text
+
+    @pytest.mark.asyncio
+    async def test_track_performance_slow_operation_logs_warning(self, log_capture):
+        """慢操作应记录 WARNING 级别日志，消息含耗时（took 关键字）。"""
+
+        @track_performance(threshold_ms=10, operation_name="slow_warn")
+        async def slow_func():
+            await asyncio.sleep(0.02)
+
+        await slow_func()
+
+        warning_records = [r for r in log_capture.records if r.levelno == logging.WARNING]
+        assert len(warning_records) >= 1
+        text = "\n".join(logging.Formatter().format(r) for r in warning_records)
+        assert "[slow_warn]" in text
+        assert "took" in text
+
 
 class TestAsyncOperationLogger:
     """测试异步操作上下文管理器"""

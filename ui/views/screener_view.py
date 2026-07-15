@@ -41,6 +41,14 @@ from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
 
+# R.2.6.3: VM 产出语义键 (error/warning/success/info), View 映射为 AppColors 实际颜色值 (§3.2 VM 不感知 UI 颜色).
+_STATUS_COLOR_MAP = {
+    "error": AppColors.ERROR,
+    "warning": AppColors.WARNING,
+    "success": AppColors.SUCCESS,
+    "info": AppColors.INFO,
+}
+
 _HIDDEN_COLS = frozenset(
     {
         "symbol",
@@ -605,7 +613,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     # 状态栏: 从 VM state.status_message 渲染 (R.2.6.3: 单源真相, §3.2 VM 只产出 i18n key + params)
     status_text_value = _render_status_message(state.status_message)
-    status_text_color = state.status_color or AppColors.TEXT_SECONDARY
+    status_text_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
 
     # 表格数据: 从 VM 读取当前页
     df = vm.get_current_page_data()

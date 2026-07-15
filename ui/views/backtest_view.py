@@ -29,6 +29,14 @@ from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
 
+# VM 产出语义键 (error/warning/success/info), View 映射为 AppColors 实际颜色值 (§3.2 VM 不感知 UI 颜色).
+_STATUS_COLOR_MAP = {
+    "error": AppColors.ERROR,
+    "warning": AppColors.WARNING,
+    "success": AppColors.SUCCESS,
+    "info": AppColors.INFO,
+}
+
 
 @ft.component
 def BacktestView() -> ft.Container:
@@ -89,7 +97,7 @@ def BacktestView() -> ft.Container:
         status_color = AppColors.ERROR
     elif state.status_message is not None:
         status_value = I18n.get(state.status_message.key, **state.status_message.params)
-        status_color = state.status_color or AppColors.TEXT_SECONDARY
+        status_color = _STATUS_COLOR_MAP.get(state.status_color, AppColors.TEXT_SECONDARY)
     else:
         status_value = ""
         status_color = AppColors.TEXT_SECONDARY

@@ -10,7 +10,6 @@ A-Share Quantitative Screener - Unified Theme Configuration
 """
 
 import logging
-import threading
 from dataclasses import dataclass
 from typing import TypedDict
 
@@ -303,9 +302,6 @@ class AppColorsState(ft.Observable):
 
     显式继承 ``ft.Observable`` 使 pyright 能识别 ``subscribe`` 等方法；
     ``@ft.observable`` 装饰器检测到 ``Observable in __mro__`` 后直接返回原类（no-op）。
-
-    旧接口 ``AppColors._listeners``/``subscribe``/``unsubscribe`` 保留供命令式 View
-    使用（阶段 4 删除）。
     """
 
     theme_name: str = ThemeName.DARK
@@ -328,8 +324,6 @@ class AppColors:
         ``load_theme`` 同步更新 ``state.theme_name`` 触发 Observable 通知，
         框架自动重渲染订阅该 state 的组件。组件重渲染时通过 ``AppColors.UP_RED``
         等类变量读取最新颜色（``load_theme`` 已先行更新类变量）。
-
-    旧接口 ``_listeners``/``subscribe``/``unsubscribe`` 保留供命令式 View 使用（阶段 4 删除）。
     """
 
     # ====================================================================
@@ -384,8 +378,6 @@ class AppColors:
     # 内部状态
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
     _CURRENT_THEME_NAME = ThemeName.DARK
-    _listeners = []
-    _listeners_lock = threading.Lock()  # Thread-safe lock for _listeners list
     _state: AppColorsState | None = None
 
     @classmethod
@@ -398,20 +390,6 @@ class AppColors:
         if cls._state is None:
             cls._state = AppColorsState()
         return cls._state
-
-    @classmethod
-    def subscribe(cls, listener):
-        """订阅主题变更事件"""
-        with cls._listeners_lock:
-            if listener not in cls._listeners:
-                cls._listeners.append(listener)
-
-    @classmethod
-    def unsubscribe(cls, listener):
-        """取消订阅"""
-        with cls._listeners_lock:
-            if listener in cls._listeners:
-                cls._listeners.remove(listener)
 
     @classmethod
     def load_theme(cls, theme_name: str = ThemeName.DARK):
@@ -444,16 +422,6 @@ class AppColors:
         cls.FALL = cls.DOWN
         cls.TABLE_GRID_V = cls.TABLE_GRID
         cls.TABLE_GRID_H = cls.TABLE_GRID
-
-        # 通知监听器 (复制列表避免迭代期间修改)
-        logger.debug("Notifying %s theme listeners", len(cls._listeners))
-        with cls._listeners_lock:
-            listeners_snapshot = list(cls._listeners)
-        for listener in listeners_snapshot:
-            try:
-                listener()
-            except Exception as e:
-                logger.error("Error notifying theme listener: %s", e, exc_info=True)
 
         # 同步 Observable state：state.theme_name 赋值触发 __setattr__ → _notify
         # → 订阅该 state 的声明式组件自动重渲染。

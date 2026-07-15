@@ -1420,7 +1420,7 @@ class ConfigHandler:
 
     @staticmethod
     def set_tushare_point_tier(tier):
-        from data.constants import TUSHARE_POINT_TIERS  # lazy import 延迟 utils→data 反向依赖到调用时
+        from utils.constants import TUSHARE_POINT_TIERS
 
         valid_tiers = set(TUSHARE_POINT_TIERS)
         if tier not in valid_tiers:

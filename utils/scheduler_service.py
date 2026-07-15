@@ -14,8 +14,6 @@ import threading
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from data.data_processor import DataProcessor
-from data.persistence.review_manager import ReviewManager
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, classify_severity
@@ -442,6 +440,8 @@ class SchedulerService:
 
         # Check Trading Day
         try:
+            from data.data_processor import DataProcessor
+
             processor = DataProcessor()
             is_trading = await processor.trade_calendar.is_trading_day(today)
             if not is_trading:
@@ -473,6 +473,8 @@ class SchedulerService:
 
         async def _daily_update_logic(task_id: str, **kwargs):
             tm = TaskManager()
+            from data.data_processor import DataProcessor
+
             processor = DataProcessor()
 
             def _progress(current, total, msg):
@@ -526,6 +528,8 @@ class SchedulerService:
         async def _ai_concept_logic(task_id: str, **kwargs):
             tm = TaskManager()
             cancel_event = tm.get_cancel_event(task_id)
+            from data.data_processor import DataProcessor
+
             processor = DataProcessor()
             # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
             # M3 fix: CancelledError 带消息，便于日志区分"调度取消"与"框架取消"
@@ -564,6 +568,8 @@ class SchedulerService:
             return
 
         try:
+            from data.data_processor import DataProcessor
+
             processor = DataProcessor()
             is_trading = await processor.trade_calendar.is_trading_day(today)
             if not is_trading:
@@ -594,6 +600,8 @@ class SchedulerService:
 
         async def _prediction_logic(task_id: str, **kwargs):
             tm = TaskManager()
+            from data.data_processor import DataProcessor
+            from data.persistence.review_manager import ReviewManager
             from strategies.ai_strategy import AISelectionStrategy
 
             tm.update_progress(task_id, 0.1, I18n.get("sched_pred_init"))

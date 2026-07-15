@@ -649,7 +649,7 @@ class MyPolarsStrategy(PolarsBaseStrategy):
 
 - `_read_db()` — 原生 SQL 读取，返回 DataFrame
 - `_read_db_select()` — SQLAlchemy Core 查询 (**推荐**，防注入)
-- `_write_db()` — 单条写入 (⚠️ `is_many=True` 已废弃，使用会触发 `DeprecationWarning`)
+- `_write_db()` — 单条写入 (批量写入请使用 `_save_upsert()`，`CacheManager.write_db` 已移除 `is_many` 参数)
 - `_save_upsert()` — 批量 UPSERT (**推荐**，基于 `pg_insert` + `ON CONFLICT`)
 - `chunked_in_query()` — 分块 IN 查询 (避免参数上限)
 
