@@ -101,36 +101,34 @@ class DataExplorerQueryClient:
         Get a list of all tables in the database.
         Returns:
             list[str]: List of table names.
+
+        Task 2.2: 异常自然抛出,由 VM 层 classify_error + sanitize_error 处理,
+        不再折叠为空列表(区分 error/empty)。
         """
         self._ensure_engine()
-        try:
-            assert self._engine is not None
-            insp = sa.inspect(self._engine)
-            return sorted(insp.get_table_names())
-        except Exception as e:
-            logger.error("Error fetching tables: %s", e)
-            return []
+        assert self._engine is not None
+        insp = sa.inspect(self._engine)
+        return sorted(insp.get_table_names())
 
     def get_table_schema(self, table_name: str):
         """
         Get the schema (column names and types) for a specific table.
         Returns:
             list[dict]: List of column info {'name': 'col_name', 'type': 'TEXT'}
+
+        Task 2.2: 异常自然抛出,由 VM 层 classify_error + sanitize_error 处理,
+        不再折叠为空列表(区分 error/empty)。
         """
         self._ensure_engine()
-        try:
-            self._validate_table_name(table_name)
-            assert self._engine is not None
-            insp = sa.inspect(self._engine)
-            columns = []
-            for col_info in insp.get_columns(table_name):
-                columns.append(
-                    {"name": col_info["name"], "type": str(col_info["type"])},
-                )
-            return columns
-        except Exception as e:
-            logger.error("Error fetching schema for %s: %s", table_name, e)
-            return []
+        self._validate_table_name(table_name)
+        assert self._engine is not None
+        insp = sa.inspect(self._engine)
+        columns = []
+        for col_info in insp.get_columns(table_name):
+            columns.append(
+                {"name": col_info["name"], "type": str(col_info["type"])},
+            )
+        return columns
 
     def get_table_count(self, table_name: str, filters: list | None = None):
         """
@@ -140,23 +138,22 @@ class DataExplorerQueryClient:
             table_name (str): Name of the table.
             filters (list): List of filter tuples (column, operator, value).
                             Example: [('ts_code', '=', '000001.SZ')]
+
+        Task 2.2: 异常自然抛出,由 VM 层 classify_error + sanitize_error 处理,
+        不再折叠为 0(区分 error/empty)。
         """
         self._ensure_engine()
-        try:
-            self._validate_table_name(table_name)
-            tbl = sa.table(table_name)
-            stmt = sa.select(sa.func.count()).select_from(tbl)
+        self._validate_table_name(table_name)
+        tbl = sa.table(table_name)
+        stmt = sa.select(sa.func.count()).select_from(tbl)
 
-            if filters:
-                schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-                stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
+        if filters:
+            schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
+            stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
 
-            with self._engine.connect() as conn:  # type: ignore[union-attr]
-                result = conn.execute(stmt)
-                return result.scalar() or 0
-        except Exception as e:
-            logger.error("Error counting rows for %s: %s", table_name, e)
-            return 0
+        with self._engine.connect() as conn:  # type: ignore[union-attr]
+            result = conn.execute(stmt)
+            return result.scalar() or 0
 
     def _validate_table_name(self, table_name: str):
         """Ensure table name is valid and exists to prevent injection."""
@@ -203,50 +200,48 @@ class DataExplorerQueryClient:
 
         Returns:
             pd.DataFrame: DataFrame containing the result rows.
+
+        Task 2.2: 异常自然抛出,由 VM 层 classify_error + sanitize_error 处理,
+        不再折叠为空 DataFrame(区分 error/empty)。成功空查询返回空 DataFrame。
         """
         self._ensure_engine()
-        try:
-            self._validate_table_name(table_name)
+        self._validate_table_name(table_name)
 
-            offset = (page - 1) * page_size
-            tbl = sa.table(table_name)
-            stmt = sa.select(sa.text("*")).select_from(tbl)
+        offset = (page - 1) * page_size
+        tbl = sa.table(table_name)
+        stmt = sa.select(sa.text("*")).select_from(tbl)
 
-            # 1. Apply Filters
+        # 1. Apply Filters
+        schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
+        if filters:
+            stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
+
+        # 2. Apply Sorting
+        if sort_col:
+            # Validate sort_col exists in the table schema
             schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-            if filters:
-                stmt = self._apply_filters(stmt, filters, schema_cols=schema_cols)
-
-            # 2. Apply Sorting
-            if sort_col:
-                # Validate sort_col exists in the table schema
-                schema_cols = {c["name"] for c in self.get_table_schema(table_name)}
-                if sort_col in schema_cols:
-                    col_obj = sa.column(sort_col)
-                    stmt = stmt.order_by(
-                        sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
-                    )
-            elif table_name == "daily_quotes":
-                # Default sort for common tables
+            if sort_col in schema_cols:
+                col_obj = sa.column(sort_col)
                 stmt = stmt.order_by(
-                    sa.desc(sa.column("trade_date")),
-                    sa.asc(sa.column("ts_code")),
+                    sa.asc(col_obj) if sort_asc else sa.desc(col_obj),
                 )
+        elif table_name == "daily_quotes":
+            # Default sort for common tables
+            stmt = stmt.order_by(
+                sa.desc(sa.column("trade_date")),
+                sa.asc(sa.column("ts_code")),
+            )
 
-            # 3. Apply Pagination
-            stmt = stmt.limit(page_size).offset(offset)
+        # 3. Apply Pagination
+        stmt = stmt.limit(page_size).offset(offset)
 
-            with self._engine.connect() as conn:  # type: ignore[union-attr]
-                result = conn.execute(stmt)
-                rows = result.fetchall()
-                if not rows:
-                    return pd.DataFrame()
-                cols = list(result.keys())
-                return pd.DataFrame(rows, columns=cols)
-
-        except Exception as e:
-            logger.error("Error querying table %s: %s", table_name, e)
-            return pd.DataFrame()
+        with self._engine.connect() as conn:  # type: ignore[union-attr]
+            result = conn.execute(stmt)
+            rows = result.fetchall()
+            if not rows:
+                return pd.DataFrame()
+            cols = list(result.keys())
+            return pd.DataFrame(rows, columns=cols)
 
     def execute_sql(self, sql_query: typing.Any):
         """

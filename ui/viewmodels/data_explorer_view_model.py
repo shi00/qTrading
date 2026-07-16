@@ -11,6 +11,7 @@ import pandas as pd
 from utils.correlation import ensure_correlation_id
 from utils.error_classifier import classify_error, classify_severity, get_error_message
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
@@ -189,7 +190,7 @@ class DataExplorerViewModel:
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+                    _sanitize_format_args(error_info.get("format_args")),
                 )
             )
             return []
@@ -230,7 +231,7 @@ class DataExplorerViewModel:
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+                    _sanitize_format_args(error_info.get("format_args")),
                 )
             )
             return []
@@ -304,7 +305,7 @@ class DataExplorerViewModel:
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+                    _sanitize_format_args(error_info.get("format_args")),
                 )
             )
             return pd.DataFrame()
@@ -351,7 +352,7 @@ class DataExplorerViewModel:
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+                    _sanitize_format_args(error_info.get("format_args")),
                 )
             )
             return 0
@@ -400,7 +401,7 @@ class DataExplorerViewModel:
             self._set_state(
                 error_message=Message(
                     error_info.get("message_key", "common_err_unknown"),
-                    error_info.get("format_args") or {},
+                    _sanitize_format_args(error_info.get("format_args")),
                 )
             )
             return pd.DataFrame()
@@ -444,7 +445,7 @@ class DataExplorerViewModel:
             else:
                 logger.error("[DataExplorerVM] Operational error in execute_sql: %s", e, exc_info=True)
             # NOTE(lazy): sql_error 为已翻译字符串(VM 间接感知 locale). ceiling: Phase 2 locale 修复仅覆盖 state 字段. upgrade: sql_error 改为 Message 或 i18n key + format_args 透传待 Phase R.2.3 执行.
-            error_msg = get_error_message(error_info)
+            error_msg = DataSanitizer.sanitize_error(get_error_message(error_info))
             error_result = {"success": False, "data": None, "error": error_msg}
             self._set_state(**_sql_result_to_state_fields(error_result))
             return error_result
@@ -520,6 +521,16 @@ class DataExplorerViewModel:
 # ============================================================================
 # Module-level pure conversion functions (L771 合规: DataFrame/dict → tuple[Row, ...])
 # ============================================================================
+
+
+def _sanitize_format_args(format_args: dict | None) -> dict[str, Any]:
+    """对 classify_error 返回的 format_args 中的字符串值应用 DataSanitizer.sanitize_error。
+
+    Task 2.2: 错误消息经脱敏后再写入 state.error_message,避免泄露 URL 凭证/路径等敏感信息。
+    """
+    if not format_args:
+        return {}
+    return {k: DataSanitizer.sanitize_error(v) if isinstance(v, str) else v for k, v in format_args.items()}
 
 
 def _df_to_table_rows(df: pd.DataFrame, columns: tuple[str, ...]) -> tuple[TableRow, ...]:

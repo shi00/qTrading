@@ -109,6 +109,12 @@ def classify_severity(e: Exception, context: str = "general") -> str:
     if error_type == "TushareAPIPermissionError":
         return "recoverable"
 
+    # 识别 EngineDisposedError（引擎已释放后继续访问 DB）：
+    # 系统级错误，调用方应传播或优雅降级，不应被吞为 operational。
+    # 用类名字符串匹配而非 isinstance，避免 utils 反向依赖 data 层（R1 架构边界）。
+    if error_type == "EngineDisposedError":
+        return "system"
+
     classified = classify_error(e, context)
     code = classified.get("code", "unknown")
 

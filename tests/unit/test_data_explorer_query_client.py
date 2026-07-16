@@ -121,14 +121,18 @@ class TestGetAllTables:
             result = dm.get_all_tables()
             assert result == ["daily_quotes", "stock_basic"]
 
-    def test_exception(self):
+    def test_exception_propagates(self):
+        """Task 2.2: DB 异常必须抛出,不再折叠为空列表。
+
+        区分 error/empty:异常分支由 VM 写入 error_message,成功空结果才表示 empty。
+        """
         dm = _make_dm()
         with patch(
             "data.persistence.data_explorer_query_client.sa.inspect",
             side_effect=Exception("error"),
         ):
-            result = dm.get_all_tables()
-            assert result == []
+            with pytest.raises(Exception, match="error"):
+                dm.get_all_tables()
 
 
 class TestGetTableSchema:
@@ -147,13 +151,15 @@ class TestGetTableSchema:
             assert len(result) == 2
             assert result[0]["name"] == "ts_code"
 
-    def test_invalid_table(self):
+    def test_invalid_table_raises(self):
+        """Task 2.2: 无效表名抛出 ValueError,不再折叠为空列表。"""
         dm = _make_dm()
         with patch.object(dm, "_validate_table_name", side_effect=ValueError("Invalid")):
-            result = dm.get_table_schema("invalid")
-            assert result == []
+            with pytest.raises(ValueError, match="Invalid"):
+                dm.get_table_schema("invalid")
 
-    def test_exception(self):
+    def test_exception_propagates(self):
+        """Task 2.2: DB 异常必须抛出,不再折叠为空列表。"""
         dm = _make_dm()
         with (
             patch.object(dm, "_validate_table_name"),
@@ -162,8 +168,8 @@ class TestGetTableSchema:
                 side_effect=Exception("error"),
             ),
         ):
-            result = dm.get_table_schema("stock_basic")
-            assert result == []
+            with pytest.raises(Exception, match="error"):
+                dm.get_table_schema("stock_basic")
 
 
 class TestGetTableCount:
@@ -197,11 +203,15 @@ class TestGetTableCount:
             result = dm.get_table_count("stock_basic", filters=[("ts_code", "=", "000001.SZ")])
             assert result == 50
 
-    def test_exception(self):
+    def test_exception_propagates(self):
+        """Task 2.2: DB 异常必须抛出,不再折叠为 0。
+
+        区分 error/empty:异常分支由 VM 写入 error_message,成功空结果(0 行)才表示 empty。
+        """
         dm = _make_dm()
         with patch.object(dm, "_validate_table_name", side_effect=Exception("error")):
-            result = dm.get_table_count("invalid")
-            assert result == 0
+            with pytest.raises(Exception, match="error"):
+                dm.get_table_count("invalid")
 
 
 class TestValidateTableName:
@@ -404,11 +414,15 @@ class TestQueryTable:
             result = dm.query_table("stock_basic", filters=[("ts_code", "=", "000001.SZ")])
             assert isinstance(result, pd.DataFrame)
 
-    def test_exception(self):
+    def test_exception_propagates(self):
+        """Task 2.2: DB 异常必须抛出,不再折叠为空 DataFrame。
+
+        区分 error/empty:异常分支由 VM 写入 error_message,成功空结果才表示 empty。
+        """
         dm = _make_dm()
         with patch.object(dm, "_validate_table_name", side_effect=Exception("error")):
-            result = dm.query_table("invalid")
-            assert result.empty
+            with pytest.raises(Exception, match="error"):
+                dm.query_table("invalid")
 
 
 class TestExecuteSql:

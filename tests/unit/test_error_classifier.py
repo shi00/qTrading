@@ -375,6 +375,31 @@ class TestClassifySeverity:
         assert classify_severity(OSError("No space left on device")) == "system"
         assert classify_severity(OSError("disk full")) == "system"
 
+    def test_engine_disposed_error_is_system(self):
+        """EngineDisposedError 必须归为 system severity,在 VM 侧继续抛出不降级。
+
+        Task 2.2: Data Explorer 需区分 error/empty/unknown,EngineDisposedError
+        表示引擎已释放(关机/释放后继续访问),属于系统级错误,不应被降级为
+        error_message,而应继续传播。
+        """
+        from data.persistence.daos.base_dao import EngineDisposedError
+
+        result = classify_severity(EngineDisposedError("Engine disposed during read"))
+        assert result == "system"
+
+    def test_engine_disposed_error_class_name_matching(self):
+        """通过类名字符串匹配识别 EngineDisposedError,避免 utils 反向依赖 data 层 (R1)。
+
+        使用同名的自定义异常验证类名匹配逻辑(不依赖 data 层导入)。
+        """
+
+        # 创建一个同名异常类,模拟 EngineDisposedError 的类名匹配
+        class EngineDisposedError(RuntimeError):
+            pass
+
+        result = classify_severity(EngineDisposedError("simulated"))
+        assert result == "system"
+
 
 class TestClassifySeverityIntegration:
     def test_task_manager_imports_classify_severity(self):
