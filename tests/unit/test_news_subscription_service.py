@@ -178,7 +178,12 @@ class TestSafeQueuePut:
         svc.processing_queue = asyncio.Queue(maxsize=1)
         svc.processing_queue.put_nowait({"old": True})
 
-        with patch("services.news_subscription_service.asyncio.wait_for", side_effect=TimeoutError):
+        async def fake_wait_for(coro, timeout):
+            if hasattr(coro, "close"):
+                coro.close()
+            raise TimeoutError()
+
+        with patch("services.news_subscription_service.asyncio.wait_for", side_effect=fake_wait_for):
             await svc._safe_queue_put({"new": True})
 
         assert svc.processing_queue.qsize() == 1
@@ -191,8 +196,13 @@ class TestSafeQueuePut:
         svc.processing_queue = asyncio.Queue(maxsize=1)
         svc.processing_queue.put_nowait({"old": True})
 
+        async def fake_wait_for(coro, timeout):
+            if hasattr(coro, "close"):
+                coro.close()
+            raise TimeoutError()
+
         with (
-            patch("services.news_subscription_service.asyncio.wait_for", side_effect=TimeoutError),
+            patch("services.news_subscription_service.asyncio.wait_for", side_effect=fake_wait_for),
             patch.object(svc.processing_queue, "full", return_value=True),
             patch.object(svc.processing_queue, "get_nowait", side_effect=asyncio.QueueEmpty),
         ):

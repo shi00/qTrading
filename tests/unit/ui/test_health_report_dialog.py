@@ -1010,6 +1010,10 @@ class TestHealthScanDialogComponent:
         with patch("asyncio.run_coroutine_threadsafe") as mock_rct:
             mock_rct.return_value = MagicMock()
             component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
+            if mock_rct.called:
+                coro = mock_rct.call_args.args[0]
+                if hasattr(coro, "close"):
+                    coro.close()
 
         # R11 守卫：验证 run_coroutine_threadsafe 被调用
         assert mock_rct.called, "on_progress 必须通过 run_coroutine_threadsafe 调度回主 loop"
@@ -1048,13 +1052,17 @@ class TestHealthScanDialogComponent:
         data_processor = MagicMock()
         data_processor.run_quality_scan = fake_scan
 
-        with patch("asyncio.run_coroutine_threadsafe", return_value=mock_future):
+        with patch("asyncio.run_coroutine_threadsafe", return_value=mock_future) as mock_rct:
             component, page, _ = health_scan_dialog_factory(data_processor=data_processor, open_state=True)
             # future 已通过 on_progress 添加到 futures_ref
             # 卸载触发 _cleanup_scan
             run_unmount_effects(component)
             # R2 兼容：cancel 被调用，但不重新抛出 CancelledError
             mock_future.cancel.assert_called_once()
+            if mock_rct.called:
+                coro = mock_rct.call_args.args[0]
+                if hasattr(coro, "close"):
+                    coro.close()
 
     def test_cleanup_with_no_futures_no_error(self, health_scan_dialog_factory):
         """_cleanup_scan: 无 pending futures 时不抛异常。"""

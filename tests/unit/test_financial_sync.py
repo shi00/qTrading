@@ -1662,9 +1662,16 @@ class TestFinancialSyncEngineDisposedExtended:
         """R5: gather 直接抛 EngineDisposedError 时 _fetch 应传播。"""
         ctx = make_ctx()
         strategy = FinancialSyncStrategy(ctx)
+
+        async def fake_gather(*coros):
+            for coro in coros:
+                if hasattr(coro, "close"):
+                    coro.close()
+            raise EngineDisposedError("disposed")
+
         with patch(
             "data.sync.financial.gather_return_exceptions_propagating_cancel",
-            new=AsyncMock(side_effect=EngineDisposedError("disposed")),
+            new=fake_gather,
         ):
             with pytest.raises(EngineDisposedError):
                 await strategy._fetch_comprehensive_financial_data("000001.SZ", period="20240331")
