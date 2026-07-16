@@ -133,6 +133,8 @@ class ScreenerViewModel:
         self._main_loop = None
         self._background_tasks: set = set()
         self._threadsafe_futures: set = set()
+        # Task 4.2: dispose 后阻止延迟完成的任务更新 state/subscriber
+        self._disposed = False
 
         # TaskManager subscription state
         self._strategy_submitted = False
@@ -166,6 +168,8 @@ class ScreenerViewModel:
 
     def _set_state(self, **changes) -> None:
         """Update state fields and notify subscribers."""
+        if self._disposed:
+            return
         self._state = replace(self._state, **changes)
         self._notify()
 
@@ -193,6 +197,9 @@ class ScreenerViewModel:
 
     def dispose(self):
         """Cleanup resources and ensure aggressive GC of large dataframes"""
+        # Task 4.2: 先标记 disposed, 使后续延迟完成的任务 _set_state/_notify 不再
+        # 更新 state/subscriber (取消是协作式的, 任务可能仍执行到下一个 await)
+        self._disposed = True
         self.unsubscribe_task_manager()
         self._subscribers.clear()
         self._stream_buffers.clear()
@@ -205,12 +212,31 @@ class ScreenerViewModel:
         for t in list(self._background_tasks):
             if not t.done():
                 t.cancel()
-        self._background_tasks.clear()
+        # NOTE(lazy): 不立即 clear _background_tasks — done_callback (_on_background_task_done)
+        # 会在任务完成时移除并读取 exception(), 避免 'Task exception was never retrieved'.
+        # ceiling: 事件循环关闭导致 callback 不触发时, 任务随 VM 一起被 GC.
+        # upgrade: 引入 async_dispose() 显式 await drain (Flet use_effect cleanup 已
+        # 确认支持 async, 本任务范围内不引入以保持微创修改; app-shutdown 由
+        # ShutdownCoordinator._step0_cancel_tasks 的 asyncio.wait 覆盖).
 
         self._full_results = None
         self._ai_buffer = []
         self._realtime_snapshot = None
         self._state = ScreenerState()
+
+    def _on_background_task_done(self, task: asyncio.Task) -> None:
+        """Done callback: 移除已完成任务并记录非取消异常.
+
+        - 丢弃任务引用前读取 task.exception() 标记异常已 retrieved,
+          避免 'Task exception was never retrieved' 警告 (DoD #3).
+        - CancelledError 不记录为 error, 取消正常传播 (R2/DoD #4).
+        """
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[ScreenerVM] Background task failed: %s", exc, exc_info=exc)
 
     # --- Data Actions ---
 
@@ -763,7 +789,7 @@ class ScreenerViewModel:
                         self._main_loop = loop
                     task = loop.create_task(self._flush_ai_buffer())
                     self._background_tasks.add(task)
-                    task.add_done_callback(self._background_tasks.discard)
+                    task.add_done_callback(self._on_background_task_done)
                 except RuntimeError:
                     if self._main_loop and self._main_loop.is_running():
                         future = asyncio.run_coroutine_threadsafe(
