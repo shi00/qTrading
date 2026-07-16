@@ -65,6 +65,7 @@ dev = [
     "pytest-xdist>=3.5.0",
     "pytest-rerunfailures>=14.0",
     "pytest-randomly>=3.15.0",
+    "pytest-timeout>=2.3.0",  # Diagnose CI integration test hang (xdist worker deadlock)
     "ruff>=0.15.20",
     "pyright>=1.1.411",
     "pandas-stubs>=3.0.0.250204",
