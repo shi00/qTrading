@@ -127,6 +127,8 @@ class HolderDao(BaseDao):
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 "[HolderDao] Failed to get top10 holders for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -161,6 +163,8 @@ class HolderDao(BaseDao):
                 )
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(
@@ -205,6 +209,8 @@ class HolderDao(BaseDao):
                     ts_codes,
                 )
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[HolderDao] Failed to get top10 holders batch: %s", DataSanitizer.sanitize_error(e))
@@ -261,6 +267,8 @@ class HolderDao(BaseDao):
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning("[HolderDao] Failed to get holder number batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -290,6 +298,8 @@ class HolderDao(BaseDao):
                 return set(df["ts_code"].tolist())
             return set()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(

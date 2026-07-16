@@ -16,7 +16,7 @@ from data.persistence.models import (
 )
 from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +181,8 @@ class FinancialDao(BaseDao):
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning(
                 "[FinancialDao] Failed to get financial history for %s: %s", ts_code, DataSanitizer.sanitize_error(e)
@@ -255,6 +257,8 @@ class FinancialDao(BaseDao):
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get financial history batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -296,6 +300,8 @@ class FinancialDao(BaseDao):
                 )
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get audit batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -332,6 +338,8 @@ class FinancialDao(BaseDao):
                     ts_codes,
                 )
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get dividend batch: %s", DataSanitizer.sanitize_error(e))
@@ -371,6 +379,8 @@ class FinancialDao(BaseDao):
                     ts_codes,
                 )
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get pledge batch: %s", DataSanitizer.sanitize_error(e))
@@ -415,6 +425,8 @@ class FinancialDao(BaseDao):
                 )
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get forecast batch: %s", DataSanitizer.sanitize_error(e))
             return pd.DataFrame()
@@ -445,6 +457,8 @@ class FinancialDao(BaseDao):
                 )
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(
@@ -495,6 +509,8 @@ class FinancialDao(BaseDao):
                     df = df.drop(columns=["dr"])
             return df if df is not None else pd.DataFrame()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[FinancialDao] Failed to get fina_mainbz batch: %s", DataSanitizer.sanitize_error(e))
@@ -550,11 +566,15 @@ class FinancialDao(BaseDao):
                 result["tables"]["fina_audit"] = count
             except asyncio.CancelledError:
                 raise
+            except EngineDisposedError:
+                raise
             except Exception as exc:
                 logger.debug("[FinancialDao] fina_audit count query failed: %s", exc)
                 result["tables"]["fina_audit"] = 0
 
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             result["valid"] = False
@@ -599,6 +619,8 @@ class FinancialDao(BaseDao):
                 return set(df["ts_code"])
             return set()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(

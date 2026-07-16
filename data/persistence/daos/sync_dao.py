@@ -15,7 +15,7 @@ from data.constants import (
 from data.persistence.models import StockSyncStatus, get_model_columns, get_model_pk_columns
 from utils.time_utils import get_now, parse_date, to_utc_for_db
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,8 @@ class SyncDao(BaseDao):
                 return set(df["ts_code"])
             return set()
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as exc:
             if raise_on_error:

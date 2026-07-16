@@ -192,7 +192,7 @@ class BacktestDAO(BaseDao):
             self._check_engine()
         except EngineDisposedError:
             logger.warning("[BacktestDAO] Engine disposed, skipping delete for %s", run_id)
-            return False
+            raise
 
         stmt = sa.delete(BacktestResultModel).where(BacktestResultModel.run_id == run_id)
         try:
@@ -201,7 +201,7 @@ class BacktestDAO(BaseDao):
                 return True
         except EngineDisposedError:
             logger.warning("[BacktestDAO] Engine disposed during delete_result for %s", run_id)
-            return False
+            raise
         except Exception as e:
             logger.error("[BacktestDAO] delete_result failed for %s: %s", run_id, e)
             return False
