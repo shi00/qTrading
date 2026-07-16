@@ -8,6 +8,8 @@ Checks:
 5. SECURITY.md supported version matches pyproject.toml major.minor
 6. No empty markdown links ]() in README.md
 7. CLAUDE.md reference-style pointers (见 `xxx.py`) target existing files
+8. Flet three-package (flet/flet-desktop/flet-charts) version consistency in pyproject.toml
+9. Doc current-version Flet declarations match pyproject.toml flet version
 
 Usage: python scripts/verify_versions.py
 """
@@ -30,9 +32,14 @@ README_PATH = ROOT / "README.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
 SECURITY_PATH = ROOT / "SECURITY.md"
 CLAUDE_PATH = ROOT / "CLAUDE.md"
+MAN_FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"
 
 STALE_REPO_URL = "louis2sin/AStockScreener"
 EXPECTED_REPO_URL = "shi00/qTrading"
+
+FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts")
+HISTORICAL_FLET_VERSIONS = {"0.28.3"}
+DOC_PATHS_FOR_FLET_CHECK = [CLAUDE_PATH, CONTRIBUTING_PATH, README_PATH, MAN_FLET_BEST_PRACTICES_PATH]
 
 
 def get_pyproject_version() -> str:
@@ -172,6 +179,62 @@ def check_claude_references() -> list[str]:
     return errors
 
 
+def get_pyproject_flet_versions() -> dict[str, str]:
+    """Extract Flet package versions from pyproject.toml dependencies."""
+    with open(PYPROJECT_PATH, "rb") as f:
+        cfg = tomllib.load(f)
+    deps = cfg.get("project", {}).get("dependencies", [])
+    versions: dict[str, str] = {}
+    for entry in deps:
+        for pkg in FLET_PACKAGES:
+            if entry.startswith(pkg + "=="):
+                versions[pkg] = entry.split("==", 1)[1].strip()
+    return versions
+
+
+def check_flet_package_consistency() -> tuple[list[str], str | None]:
+    """Check 8: Flet three-package version consistency in pyproject.toml.
+
+    Returns (errors, common_version). If no Flet packages found, returns ([], None).
+    """
+    errors: list[str] = []
+    versions = get_pyproject_flet_versions()
+    if not versions:
+        return errors, None
+    unique_versions = set(versions.values())
+    if len(unique_versions) > 1:
+        details = ", ".join(f"{pkg}={ver}" for pkg, ver in sorted(versions.items()))
+        errors.append(f"Flet package version mismatch in pyproject.toml: {details}")
+    return errors, next(iter(unique_versions)) if len(unique_versions) == 1 else None
+
+
+def check_doc_flet_version_consistency(expected_ver: str | None) -> list[str]:
+    """Check 9: Doc current-version Flet declarations match pyproject.toml.
+
+    Scans doc files for Flet-related version patterns. Historical versions
+    (e.g. 0.28.3 referencing v0) are whitelisted.
+    """
+    if expected_ver is None:
+        return []
+    errors: list[str] = []
+    version_pattern = re.compile(r"0\.\d+\.\d+")
+    for doc_path in DOC_PATHS_FOR_FLET_CHECK:
+        if not doc_path.exists():
+            continue
+        content = doc_path.read_text(encoding="utf-8")
+        for i, line in enumerate(content.splitlines(), 1):
+            if "flet" not in line.lower():
+                continue
+            for m in version_pattern.finditer(line):
+                ver = m.group(0)
+                if ver == expected_ver or ver in HISTORICAL_FLET_VERSIONS:
+                    continue
+                errors.append(
+                    f"{doc_path.name}:{i} Flet version '{ver}' != pyproject.toml flet version '{expected_ver}'"
+                )
+    return errors
+
+
 def main() -> None:
     errors: list[str] = []
     fixed_any = False
@@ -243,6 +306,13 @@ def main() -> None:
     # Check 7: CLAUDE.md reference validity
     errors.extend(check_claude_references())
 
+    # Check 8: Flet three-package version consistency
+    flet_errors, flet_ver = check_flet_package_consistency()
+    errors.extend(flet_errors)
+
+    # Check 9: Doc Flet version consistency
+    errors.extend(check_doc_flet_version_consistency(flet_ver))
+
     if fixed_any:
         print("Auto-fixed version mismatches. Please stage the changes and try committing again.")
         sys.exit(1)
@@ -262,6 +332,8 @@ def main() -> None:
             f"{ci_pyright_ver} (CI) = {pkg_pyright_ver} (package.json)"
         )
         print(f"  release-please: {get_release_manifest_version()}")
+        if flet_ver:
+            print(f"  flet:           {flet_ver} (flet + flet-desktop + flet-charts)")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,10 @@
   * 删除 _schedule_async/_scheduled_tasks/_run_task 兼容垫片
   * §8.2 spike 结论：V1 Prop.__set__ 值相等短路仍存在，但声明式 UI 改造后 refresh_dropdown_options() 生产零调用，已在 Phase R.4.1 删除（声明式下 options 由 state 派生，use_state 触发重建自动绕过值相等优化）
 
+### Miscellaneous
+
+* **docs:** sync Flet version declarations 0.85.3 → 0.86.0 across CLAUDE.md/CONTRIBUTING.md/README.md/man (pyproject.toml as SSOT); enhance verify_versions.py with Flet three-package consistency check + doc version drift check
+
 ## [0.7.0](https://github.com/shi00/qTrading/compare/v0.6.10...v0.7.0) (2026-06-15)
 
 

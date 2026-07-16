@@ -124,7 +124,7 @@
 
 ## 2. 项目概览
 
-**AStockScreener** 是一个本地化智能 A 股量化选股桌面应用，基于 Python 3.13+，采用 Flet 0.85.3 (V1) + Polars + PostgreSQL 16 + asyncio 单线程 UI 模型。完整技术栈表见 CONTRIBUTING.md「项目完整技术栈」。**高风险领域**：UI 阻塞主循环（R16）、asyncio 取消传播（R2）、单例测试隔离（R7）、loop-local 同步原语（R11）、SQL 注入（R4）。
+**AStockScreener** 是一个本地化智能 A 股量化选股桌面应用，基于 Python 3.13+，采用 Flet 0.86.0 (V1) + Polars + PostgreSQL 16 + asyncio 单线程 UI 模型。完整技术栈表见 CONTRIBUTING.md「项目完整技术栈」。**高风险领域**：UI 阻塞主循环（R16）、asyncio 取消传播（R2）、单例测试隔离（R7）、loop-local 同步原语（R11）、SQL 注入（R4）。
 
 ---
 
@@ -223,5 +223,5 @@ app → 编排所有层，仅被 main.py 调用
 | Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | 「Git 工作流与分支策略」 |
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
-| 已知架构技术债 / Flet 0.85.3 (V1) API 约束 / 升级协同机制 | 对应小节 |
+| 已知架构技术债 / Flet 0.86.0 (V1) API 约束 / 升级协同机制 | 对应小节 |
 | 通用 Flet v1 开发参考（man/flet-best-practices.md） | 「通用 Flet v1 开发参考」 |
