@@ -636,3 +636,264 @@ class TestHomeViewRuntime:
         run_mount_effects(component, page=page)
         # 恢复以避免影响其他测试
         mock_home_vm.load_market_data = original_load
+
+
+# ============================================================================
+# 异常路径测试 (Task 4.4): 覆盖 17 miss 到 80%+
+# ============================================================================
+
+
+class TestHomeViewExceptionPaths:
+    """HomeView 异常路径测试 (Task 4.4): 覆盖 17 miss.
+
+    覆盖路径:
+    - _on_load_more_click 异常路径 (Exception + CancelledError + R9 守卫)
+    - _init_and_load 异常路径 (vm.init/init_data 抛 Exception + CancelledError)
+    - _load_data CancelledError 传播
+    - _refresh_clicked page=None 路径
+    - _setup_pubsub/_cleanup_pubsub page=None 路径
+    """
+
+    @staticmethod
+    def _get_on_load_more_click(result: Any) -> Any:
+        """从 HomeView 渲染结果中找到 NewsFeed 的 on_load_more_click 回调.
+
+        NewsFeed 是 @ft.component, render_once 后作为 Component 对象存在 col.controls 中.
+        """
+        from flet.components.component import Component
+
+        col = result.content
+        for ctrl in col.controls:
+            if isinstance(ctrl, Component) and "on_load_more_click" in ctrl.kwargs:
+                return ctrl.kwargs["on_load_more_click"]
+        raise AssertionError("NewsFeed on_load_more_click not found")
+
+    def test_on_load_more_click_handles_exception(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """_on_load_more_click 中 vm.load_next_page 抛 Exception → logger.error + R9 守卫.
+
+        覆盖 lines 81-86 (try/except Exception/sanitize_error/logger.error).
+        R9 守卫: 验证 DataSanitizer.sanitize_error 被调用且参数为原始异常.
+        """
+        import asyncio
+        from unittest.mock import patch
+
+        from ui.views.home_view import HomeView
+
+        async def raise_exc() -> None:
+            raise RuntimeError("load more failed with token=secret")
+
+        mock_home_vm.load_next_page = raise_exc
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        on_load_more = self._get_on_load_more_click(result)
+
+        # R9 守卫: mock DataSanitizer.sanitize_error 返回脱敏字符串
+        with patch("ui.views.home_view.DataSanitizer") as mock_sanitizer:
+            mock_sanitizer.sanitize_error.return_value = "sanitized error"
+            asyncio.run(on_load_more(MagicMock()))
+
+            # 验证 sanitize_error 被调用, 参数为原始异常 (R9 守卫)
+            mock_sanitizer.sanitize_error.assert_called_once()
+            exc_arg = mock_sanitizer.sanitize_error.call_args.args[0]
+            assert isinstance(exc_arg, RuntimeError)
+
+    def test_on_load_more_click_cancelled_error_propagates(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """R2: _on_load_more_click 中 CancelledError 必须传播.
+
+        覆盖 lines 83-84 (except asyncio.CancelledError: raise).
+        """
+        import asyncio
+
+        from ui.views.home_view import HomeView
+
+        async def raise_cancelled() -> None:
+            raise asyncio.CancelledError()
+
+        mock_home_vm.load_next_page = raise_cancelled
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        on_load_more = self._get_on_load_more_click(result)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(on_load_more(MagicMock()))
+
+    def test_init_and_load_handles_init_exception(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """_init_and_load 中 vm.init 抛 Exception → 不传播 (logger.error).
+
+        覆盖 lines 106-107 (except Exception: logger.error).
+        """
+        from ui.views.home_view import HomeView
+
+        def raise_init() -> None:
+            raise RuntimeError("init failed")
+
+        mock_home_vm.init = raise_init
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        # mount effect 调 _init_and_load, vm.init 抛 Exception 被 except 捕获
+        run_mount_effects(component, page=page)
+        # 不抛异常即通过
+
+    def test_init_and_load_handles_init_data_exception(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """_init_and_load 中 vm.init_data 抛 Exception → 不传播 (logger.error).
+
+        覆盖 lines 106-107 (except Exception: logger.error).
+        """
+        from ui.views.home_view import HomeView
+
+        async def raise_init_data() -> None:
+            raise RuntimeError("init_data failed")
+
+        mock_home_vm.init_data = raise_init_data
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        # 不抛异常即通过
+
+    def test_load_data_cancelled_error_propagates(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """R2: _load_data 中 CancelledError 必须传播 (经由 _init_and_load).
+
+        覆盖 line 95 (raise in _load_data) + line 105 (raise in _init_and_load).
+        """
+        import asyncio
+
+        from ui.views.home_view import HomeView
+
+        async def raise_cancelled() -> None:
+            raise asyncio.CancelledError()
+
+        mock_home_vm.load_market_data = raise_cancelled
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        with pytest.raises(asyncio.CancelledError):
+            run_mount_effects(component, page=page)
+
+    def test_init_and_load_cancelled_error_propagates(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """R2: _init_and_load 中 vm.init_data 抛 CancelledError 必须传播.
+
+        覆盖 lines 104-105 (except asyncio.CancelledError: raise).
+        """
+        import asyncio
+
+        from ui.views.home_view import HomeView
+
+        async def raise_cancelled() -> None:
+            raise asyncio.CancelledError()
+
+        mock_home_vm.init_data = raise_cancelled
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        with pytest.raises(asyncio.CancelledError):
+            run_mount_effects(component, page=page)
+
+    def test_refresh_clicked_page_none_logs_debug(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """page 不可用时 _refresh_clicked 进入 except RuntimeError 分支.
+
+        覆盖 lines 75->exit (page is None branch) + 77-78 (except RuntimeError: logger.debug).
+        """
+        from flet.controls.context import _context_page
+
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+        result = render_once(component)
+
+        page.run_task.reset_mock()
+
+        # 模拟 page 不可用 (ft.context.page 抛 RuntimeError)
+        token = _context_page.set(None)
+        try:
+            header = result.content.controls[0]
+            refresh_btn = header.controls[-1]
+            refresh_btn.on_click(MagicMock())
+        finally:
+            _context_page.reset(token)
+
+        # run_task 未被调用 (page 不可用, 早返回)
+        assert not page.run_task.called
+
+    def test_setup_pubsub_page_none_no_throw(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """_setup_pubsub 在 page 不可用时进入 except RuntimeError, 不抛异常.
+
+        覆盖 lines 114->exit (page is None branch) + 116-117 (except RuntimeError: pass).
+
+        实现方式: 包装 FakeSession.schedule_effect, 在执行 effect setup 之前设置
+        _context_page = None. 这样 _schedule_effect (访问 context.page 获取 session)
+        仍能成功, 而 _setup_pubsub 内部 ft.context.page 抛 RuntimeError 被 except 捕获.
+        """
+        from flet.controls.context import _context_page
+
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+
+        # 包装 session.schedule_effect: effect 执行期间 _context_page = None
+        original_schedule = page.session.schedule_effect
+
+        def _schedule_with_no_context(hook: Any, is_cleanup: bool) -> None:
+            token = _context_page.set(None)
+            try:
+                original_schedule(hook, is_cleanup)
+            finally:
+                _context_page.reset(token)
+
+        page.session.schedule_effect = _schedule_with_no_context  # type: ignore[method-assign]
+
+        run_mount_effects(component, page=page)
+
+        # 不抛异常即通过; pubsub.subscribe_topic 未被调用 (page 不可用)
+        assert not page.pubsub.subscribe_topic.called
+
+    def test_cleanup_pubsub_page_none_no_throw(self, mock_i18n_state, mock_app_colors_state, mock_home_vm) -> None:
+        """_cleanup_pubsub 在 page 不可用时进入 except RuntimeError, 不抛异常.
+
+        覆盖 lines 122->exit (page is None branch) + 124-125 (except RuntimeError: pass).
+        """
+        from flet.controls.context import _context_page
+
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView)
+        page = _make_fake_page()
+
+        # 包装 session.schedule_effect: effect 执行期间 _context_page = None
+        original_schedule = page.session.schedule_effect
+
+        def _schedule_with_no_context(hook: Any, is_cleanup: bool) -> None:
+            token = _context_page.set(None)
+            try:
+                original_schedule(hook, is_cleanup)
+            finally:
+                _context_page.reset(token)
+
+        page.session.schedule_effect = _schedule_with_no_context  # type: ignore[method-assign]
+
+        run_mount_effects(component, page=page)
+        # reset 以过滤 mount 时的调用
+        page.pubsub.unsubscribe_topic.reset_mock()
+
+        run_unmount_effects(component)
+
+        # 不抛异常即通过; unsubscribe_topic 未被调用 (page 不可用)
+        assert not page.pubsub.unsubscribe_topic.called

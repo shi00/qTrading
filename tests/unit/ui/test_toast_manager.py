@@ -13,19 +13,32 @@
 
 import asyncio
 import inspect
-from unittest.mock import MagicMock
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
+from flet.components.component import Component
 
+from tests.unit.ui.component_renderer import (
+    FakePage,
+    make_component,
+    render_once,
+    run_mount_effects,
+    run_unmount_effects,
+)
 from ui.components import toast_manager as tm_module
 from ui.components.toast_manager import (
+    COLLAPSED_MAX_LINES,
+    LONG_TEXT_THRESHOLD,
     ToastCard,
     ToastData,
     ToastManager,
     ToastManagerView,
+    _resolve_color_icon,
     get_global_state,
 )
+from ui.theme import AppColors
 
 pytestmark = pytest.mark.unit
 
@@ -405,3 +418,719 @@ class TestRegisterTask:
         await asyncio.sleep(0.01)
 
         assert task not in tm_module._active_tasks
+
+
+# ============================================================================
+# 8. _resolve_color_icon 模块级函数
+# ============================================================================
+
+
+class TestResolveColorIcon:
+    """验证 _resolve_color_icon 4 种 type + 未知 fallback。"""
+
+    def test_info_type(self):
+        """info type → AppColors.INFO + Icons.INFO。"""
+        color, icon = _resolve_color_icon("info")
+        assert color == AppColors.INFO
+        assert icon == ft.Icons.INFO
+
+    def test_success_type(self):
+        """success type → AppColors.SUCCESS + Icons.CHECK_CIRCLE。"""
+        color, icon = _resolve_color_icon("success")
+        assert color == AppColors.SUCCESS
+        assert icon == ft.Icons.CHECK_CIRCLE
+
+    def test_warning_type(self):
+        """warning type → AppColors.WARNING + Icons.WARNING。"""
+        color, icon = _resolve_color_icon("warning")
+        assert color == AppColors.WARNING
+        assert icon == ft.Icons.WARNING
+
+    def test_error_type(self):
+        """error type → AppColors.ERROR + Icons.ERROR。"""
+        color, icon = _resolve_color_icon("error")
+        assert color == AppColors.ERROR
+        assert icon == ft.Icons.ERROR
+
+    def test_unknown_type_falls_back_to_info(self):
+        """未知 type → fallback 到 info。"""
+        color, icon = _resolve_color_icon("unknown")
+        assert color == AppColors.INFO
+        assert icon == ft.Icons.INFO
+
+
+# ============================================================================
+# 9. ToastManager._remove_toast 覆盖 (205-207)
+# ============================================================================
+
+
+class TestToastManagerRemoveToast:
+    """ToastManager._remove_toast 行为测试。"""
+
+    def _make_page(self):
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        return page
+
+    def test_remove_toast_removes_specified(self):
+        """_remove_toast 从 state 中移除指定 id 的 toast。"""
+        page = self._make_page()
+        manager = ToastManager(page)
+        manager.show("toast 1")
+        manager.show("toast 2")
+
+        state = get_global_state()
+        toast_id_to_remove = state.toasts[0].id
+        manager._remove_toast(toast_id_to_remove)
+
+        state = get_global_state()
+        assert len(state.toasts) == 1
+        assert all(t.id != toast_id_to_remove for t in state.toasts)
+
+    def test_remove_toast_nonexistent_id_no_error(self):
+        """_remove_toast 不存在的 id 不报错 (无副作用)。"""
+        page = self._make_page()
+        manager = ToastManager(page)
+        manager.show("toast 1")
+
+        manager._remove_toast(999)  # 不存在的 id
+
+        state = get_global_state()
+        assert len(state.toasts) == 1
+
+
+# ============================================================================
+# 10. ToastCard 组件运行时测试基础设施
+# ============================================================================
+
+
+def _make_fake_page() -> FakePage:
+    """创建带 run_task 的 fake page。"""
+    page = FakePage()
+    page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    return page
+
+
+def _make_toast(message: str = "test", duration: int = 10) -> ToastData:
+    """构造测试用 ToastData。"""
+    return ToastData(id=1, message=message, icon=ft.Icons.INFO, color="#000", duration=duration)
+
+
+def _walk_all_controls(root: Any) -> list[Any]:
+    """递归返回所有 ft.Control (含 Component 子组件内的控件)。"""
+    found: list[Any] = []
+    visited: set[int] = set()
+
+    def _walk(c: Any) -> None:
+        if id(c) in visited:
+            return
+        visited.add(id(c))
+        if isinstance(c, ft.Control):
+            found.append(c)
+            for attr in ("controls", "content"):
+                children = getattr(c, attr, None)
+                if isinstance(children, list):
+                    for x in children:
+                        if x is not None:
+                            _walk(x)
+                elif children is not None:
+                    _walk(children)
+        if isinstance(c, Component):
+            for v in list(c.args) + list(c.kwargs.values()):
+                if v is not None:
+                    _walk(v)
+
+    _walk(root)
+    return found
+
+
+def _get_close_button(container: ft.Container) -> ft.IconButton:
+    """获取 CLOSE 按钮 (_on_dismiss_click 绑定)。"""
+    for ctrl in _walk_all_controls(container):
+        if isinstance(ctrl, ft.IconButton) and ctrl.icon == ft.Icons.CLOSE:
+            return ctrl
+    raise AssertionError("CLOSE IconButton not found")
+
+
+def _get_expand_button(container: ft.Container) -> ft.IconButton | None:
+    """获取展开按钮 (长文本时存在)。"""
+    for ctrl in _walk_all_controls(container):
+        if isinstance(ctrl, ft.IconButton) and ctrl.icon in (
+            ft.Icons.KEYBOARD_ARROW_DOWN,
+            ft.Icons.KEYBOARD_ARROW_UP,
+        ):
+            return ctrl
+    return None
+
+
+def _get_text_control(container: ft.Container) -> ft.Text:
+    """获取 ToastCard 中的 Text 控件。"""
+    for ctrl in _walk_all_controls(container):
+        if isinstance(ctrl, ft.Text):
+            return ctrl
+    raise AssertionError("Text control not found")
+
+
+def _invoke(handler: Any, *args: Any) -> None:
+    """调用 Flet event handler (pyright safe, 绕过 Optional/CallIssue)。"""
+    handler(*args)
+
+
+# ============================================================================
+# 11. ToastCard.setup 生命周期测试
+# ============================================================================
+
+
+class TestToastCardSetup:
+    """ToastCard.setup: page None 早返回 / run_task 启动 / _register_task 调用。"""
+
+    def test_setup_page_none_returns_early_source_guard(self):
+        """page=None (ft.context.page 抛 RuntimeError) 时 setup 早返回 (源码守护)。
+
+        运行时限制: flet 内部 ``_schedule_effect`` 也依赖 ``context.page.session``,
+        无法用 FakeSession 在 page=None 上下文下触发 setup。
+        用源码守护验证 try/except RuntimeError + if page is None: return。
+        """
+        source = inspect.getsource(tm_module)
+        # 验证 setup 有 try/except RuntimeError + if page is None: return
+        assert "try:" in source
+        assert "except RuntimeError:" in source
+        assert "if page is None:" in source
+
+    def test_setup_starts_timer_via_run_task(self):
+        """page 可用时 setup 调用 page.run_task(_run_timer) 启动 timer。"""
+        page = _make_fake_page()
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        assert page.run_task.called
+        handler = page.run_task.call_args.args[0]
+        assert asyncio.iscoroutinefunction(handler)
+
+    def test_setup_registers_task(self):
+        """setup 调用 _register_task 注册 run_task 返回的 task。"""
+        page = _make_fake_page()
+        mock_task = MagicMock()  # run_task 返回的 task 对象
+        page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+
+        with patch("ui.components.toast_manager._register_task") as mock_register:
+            run_mount_effects(component, page=page)
+            mock_register.assert_called_once_with(mock_task)
+
+
+# ============================================================================
+# 12. ToastCard._run_timer 倒计时逻辑测试 (含 R2 守卫)
+# ============================================================================
+
+
+class TestToastCardRunTimer:
+    """ToastCard._run_timer: 倒计时完成 / hover 暂停 / expand 暂停 / R2 CancelledError raise / 异常 logger.debug。"""
+
+    def _get_handler(self, page: FakePage) -> Any:
+        """从 page.run_task 调用中提取 _run_timer 协程函数。"""
+        assert page.run_task.called, "page.run_task 未被调用"
+        return page.run_task.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_run_timer_completes_and_calls_on_dismiss(self):
+        """倒计时完成 → set_is_dismissing(True) → on_dismiss(data.id)。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(duration=1)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = self._get_handler(page)
+
+        async def fake_sleep(_t: float) -> None:
+            pass
+
+        with patch("asyncio.sleep", fake_sleep):
+            await handler()
+
+        on_dismiss.assert_called_once_with(toast.id)
+
+    @pytest.mark.asyncio
+    async def test_run_timer_pauses_on_hover(self):
+        """hover 时倒计时暂停 (remaining 不减少, on_dismiss 未调用)。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(duration=1)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = self._get_handler(page)
+
+        # 在 _run_timer 执行前触发 hover → hovered_ref.current=True
+        container = render_once(component)
+        e = MagicMock()
+        e.data = "true"
+        _invoke(container.on_hover, e)
+        render_once(component)  # 同步 hovered_ref
+
+        # hover 后 remaining 不减少, while 循环无限执行, 用 CancelledError 终止
+        call_count = [0]
+
+        async def fake_sleep(_t: float) -> None:
+            call_count[0] += 1
+            if call_count[0] > 30:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await handler()
+
+        # 倒计时未完成 → on_dismiss 未被调用
+        on_dismiss.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_timer_pauses_on_expand(self):
+        """expand 时倒计时暂停。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(message="x" * (LONG_TEXT_THRESHOLD + 1), duration=1)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = self._get_handler(page)
+
+        # 触发 expand → expanded_ref.current=True
+        container = render_once(component)
+        expand_btn = _get_expand_button(container)
+        assert expand_btn is not None
+        _invoke(expand_btn.on_click, MagicMock())
+        render_once(component)
+
+        call_count = [0]
+
+        async def fake_sleep(_t: float) -> None:
+            call_count[0] += 1
+            if call_count[0] > 30:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await handler()
+
+        on_dismiss.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_timer_raises_cancelled_error(self):
+        """R2: _run_timer 中 CancelledError 必须重新 raise (不被 except Exception 吞没)。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(duration=10)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = self._get_handler(page)
+
+        async def fake_sleep(_t: float) -> None:
+            raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await handler()
+
+        on_dismiss.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_timer_logs_other_exceptions(self):
+        """其他异常被 except 捕获, logger.debug 记录, 不抛出。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(duration=10)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = self._get_handler(page)
+
+        async def fake_sleep(_t: float) -> None:
+            raise RuntimeError("unexpected")
+
+        with (
+            patch("asyncio.sleep", fake_sleep),
+            patch.object(tm_module, "logger") as mock_logger,
+        ):
+            # 不应抛出 (except Exception 捕获)
+            await handler()
+            mock_logger.debug.assert_called_once()
+
+        on_dismiss.assert_not_called()
+
+
+# ============================================================================
+# 13. ToastCard.cleanup 卸载时任务清理测试
+# ============================================================================
+
+
+class TestToastCardCleanup:
+    """ToastCard.cleanup: task None 早返回 / task.done 跳过 cancel / gather 调用。
+
+    注意: cleanup 是 async 函数, FakeSession.schedule_effect 会用新事件循环运行它。
+    因此测试本身不需要 @pytest.mark.asyncio (避免与 FakeSession 事件循环冲突)。
+    """
+
+    def test_cleanup_task_none_returns_early(self):
+        """task=None 时 cleanup 早返回, 不调用 gather_for_shutdown_cleanup。
+
+        通过 page.run_task 返回 None 让 setup 中 task_ref.current=None。
+        """
+        page = _make_fake_page()
+        page.run_task = MagicMock(return_value=None)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", new_callable=AsyncMock) as mock_gather:
+            run_unmount_effects(component)
+            mock_gather.assert_not_called()
+
+    def test_cleanup_task_done_skips_cancel(self):
+        """task.done()=True 时跳过 cancel 调用。"""
+        page = _make_fake_page()
+        mock_task = MagicMock()
+        mock_task.done.return_value = True
+        mock_task.cancel = MagicMock()
+        page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        async def _fake_gather(*_args: Any) -> list[Any]:
+            return []
+
+        with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", _fake_gather):
+            run_unmount_effects(component)
+            mock_task.cancel.assert_not_called()
+
+    def test_cleanup_cancels_active_task(self):
+        """task 未 done 时调用 cancel。"""
+        page = _make_fake_page()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_task.cancel = MagicMock()
+        page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        async def _fake_gather(*_args: Any) -> list[Any]:
+            return []
+
+        with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", _fake_gather):
+            run_unmount_effects(component)
+            mock_task.cancel.assert_called_once()
+
+    def test_cleanup_calls_gather_for_shutdown_cleanup(self):
+        """cleanup 调用 gather_for_shutdown_cleanup 等待 task 清理完成。"""
+        page = _make_fake_page()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        page.run_task = MagicMock(return_value=mock_task)  # type: ignore[method-assign]
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        with patch("ui.components.toast_manager.gather_for_shutdown_cleanup", new_callable=AsyncMock) as mock_gather:
+            run_unmount_effects(component)
+            mock_gather.assert_called_once_with(mock_task)
+
+
+# ============================================================================
+# 14. ToastCard._on_hover hover 状态切换测试
+# ============================================================================
+
+
+class TestToastCardOnHover:
+    """ToastCard._on_hover: e.data=="true" 切换 is_hovered。"""
+
+    @pytest.mark.asyncio
+    async def test_on_hover_true_pauses_countdown(self):
+        """e.data=="true" → is_hovered=True → 倒计时暂停 (on_dismiss 未调用)。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(duration=1)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = page.run_task.call_args.args[0]
+
+        # 触发 hover
+        container = render_once(component)
+        e = MagicMock()
+        e.data = "true"
+        _invoke(container.on_hover, e)
+        render_once(component)
+
+        call_count = [0]
+
+        async def fake_sleep(_t: float) -> None:
+            call_count[0] += 1
+            if call_count[0] > 30:
+                raise asyncio.CancelledError()
+
+        with patch("asyncio.sleep", fake_sleep):
+            with pytest.raises(asyncio.CancelledError):
+                await handler()
+
+        on_dismiss.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_on_hover_false_resumes_countdown(self):
+        """e.data!="true" → is_hovered=False → 倒计时继续完成。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast(duration=1)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        handler = page.run_task.call_args.args[0]
+
+        # 先 hover 再 unhover
+        container = render_once(component)
+        e_true = MagicMock()
+        e_true.data = "true"
+        _invoke(container.on_hover, e_true)
+        render_once(component)
+
+        e_false = MagicMock()
+        e_false.data = "false"
+        container = render_once(component)
+        _invoke(container.on_hover, e_false)
+        render_once(component)
+
+        async def fake_sleep(_t: float) -> None:
+            pass
+
+        with patch("asyncio.sleep", fake_sleep):
+            await handler()
+
+        on_dismiss.assert_called_once_with(toast.id)
+
+
+# ============================================================================
+# 15. ToastCard._on_dismiss_click 手动 dismiss 测试
+# ============================================================================
+
+
+class TestToastCardOnDismissClick:
+    """ToastCard._on_dismiss_click: is_dismissing 早返回 / 否则 set_is_dismissing + on_dismiss。"""
+
+    def test_on_dismiss_click_calls_on_dismiss(self):
+        """点击 CLOSE → set_is_dismissing(True) + on_dismiss(data.id)。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        close_btn = _get_close_button(container)
+        _invoke(close_btn.on_click, MagicMock())
+
+        on_dismiss.assert_called_once_with(toast.id)
+
+    def test_on_dismiss_click_is_dismissing_true_returns_early(self):
+        """is_dismissing=True 时再次点击 CLOSE 早返回 (on_dismiss 只调一次)。"""
+        page = _make_fake_page()
+        on_dismiss = MagicMock()
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+
+        # 第一次点击
+        container = render_once(component)
+        close_btn = _get_close_button(container)
+        _invoke(close_btn.on_click, MagicMock())
+        assert on_dismiss.call_count == 1
+
+        # 重新渲染 (is_dismissing=True) → 再次点击应早返回
+        container = render_once(component)
+        close_btn = _get_close_button(container)
+        _invoke(close_btn.on_click, MagicMock())
+        assert on_dismiss.call_count == 1  # 未再次调用
+
+
+# ============================================================================
+# 16. ToastCard.is_long_text 长文本展开按钮显示测试
+# ============================================================================
+
+
+class TestToastCardLongText:
+    """ToastCard.is_long_text: >80 字符显示展开按钮 / ≤80 不显示。"""
+
+    def test_long_text_shows_expand_button(self):
+        """message > 80 字符 → 显示展开按钮。"""
+        page = _make_fake_page()
+        long_message = "x" * (LONG_TEXT_THRESHOLD + 1)
+        toast = _make_toast(message=long_message)
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        expand_btn = _get_expand_button(container)
+        assert expand_btn is not None
+
+    def test_short_text_hides_expand_button(self):
+        """message ≤ 80 字符 → 不显示展开按钮。"""
+        page = _make_fake_page()
+        short_message = "x" * LONG_TEXT_THRESHOLD
+        toast = _make_toast(message=short_message)
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        expand_btn = _get_expand_button(container)
+        assert expand_btn is None
+
+
+# ============================================================================
+# 17. ToastCard.is_expanded 展开/折叠状态测试
+# ============================================================================
+
+
+class TestToastCardExpanded:
+    """ToastCard.is_expanded: 切换 max_lines / expand_icon / expand_tooltip。"""
+
+    def test_expand_toggles_max_lines_and_icon(self):
+        """点击展开按钮 → max_lines=None / icon=UP / tooltip=collapse; 再点击恢复。"""
+        page = _make_fake_page()
+        long_message = "x" * (LONG_TEXT_THRESHOLD + 1)
+        toast = _make_toast(message=long_message)
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+
+        # 初始状态: 折叠
+        container = render_once(component)
+        text_ctrl = _get_text_control(container)
+        assert text_ctrl.max_lines == COLLAPSED_MAX_LINES
+        expand_btn = _get_expand_button(container)
+        assert expand_btn is not None
+        assert expand_btn.icon == ft.Icons.KEYBOARD_ARROW_DOWN
+
+        # 点击展开
+        _invoke(expand_btn.on_click, MagicMock())
+        container = render_once(component)
+        text_ctrl = _get_text_control(container)
+        assert text_ctrl.max_lines is None  # 展开后无限制
+        expand_btn = _get_expand_button(container)
+        assert expand_btn is not None
+        assert expand_btn.icon == ft.Icons.KEYBOARD_ARROW_UP
+
+        # 再点击折叠
+        _invoke(expand_btn.on_click, MagicMock())
+        container = render_once(component)
+        text_ctrl = _get_text_control(container)
+        assert text_ctrl.max_lines == COLLAPSED_MAX_LINES
+        expand_btn = _get_expand_button(container)
+        assert expand_btn is not None
+        assert expand_btn.icon == ft.Icons.KEYBOARD_ARROW_DOWN
+
+
+# ============================================================================
+# 18. ToastManagerView 声明式渲染测试
+# ============================================================================
+
+
+class TestToastManagerView:
+    """ToastManagerView: 空 state / 多 toast / _on_dismiss 移除。"""
+
+    def test_render_empty_state(self):
+        """空 state 时渲染空 Column。"""
+        component = make_component(ToastManagerView)
+        run_mount_effects(component, page=FakePage())
+        result = render_once(component)
+
+        assert isinstance(result, ft.Container)
+        assert isinstance(result.content, ft.Column)
+        assert len(result.content.controls) == 0
+
+    def test_render_multiple_toasts(self):
+        """多个 toast 时渲染对应数量的 ToastCard Component。"""
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        manager = ToastManager(page)
+        manager.show("toast 1")
+        manager.show("toast 2")
+        manager.show("toast 3")
+
+        component = make_component(ToastManagerView)
+        run_mount_effects(component, page=FakePage())
+        result = render_once(component)
+
+        assert len(result.content.controls) == 3
+        # 验证每个控件是 ToastCard Component
+        for card in result.content.controls:
+            assert isinstance(card, Component)
+
+    def test_on_dismiss_removes_toast(self):
+        """_on_dismiss 回调移除指定 toast (state.toasts 减少)。"""
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        manager = ToastManager(page)
+        manager.show("toast 1")
+        manager.show("toast 2")
+
+        component = make_component(ToastManagerView)
+        run_mount_effects(component, page=FakePage())
+        result = render_once(component)
+
+        # 获取第一个 ToastCard 的 on_dismiss 回调与 toast id
+        first_card = result.content.controls[0]
+        on_dismiss = first_card.kwargs["on_dismiss"]
+        toast_id = first_card.kwargs["data"].id
+
+        # 触发 dismiss
+        on_dismiss(toast_id)
+
+        # 重新渲染
+        render_once(component)
+
+        # 验证 state 中只剩 1 个 toast
+        state = get_global_state()
+        assert len(state.toasts) == 1
+        assert all(t.id != toast_id for t in state.toasts)
+
+
+# ============================================================================
+# 19. R7 守卫: _reset_state_for_test 测试隔离验证
+# ============================================================================
+
+
+class TestR7ResetStateForTest:
+    """R7: _reset_state_for_test 行为 + autouse fixture 调用验证。"""
+
+    def test_reset_state_for_test_clears_state(self):
+        """_reset_state_for_test 清空全局 _state。"""
+        # 先创建 state
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        manager = ToastManager(page)
+        manager.show("test")
+        assert tm_module._state is not None
+
+        # 重置
+        tm_module._reset_state_for_test()
+        assert tm_module._state is None
+
+    def test_reset_state_for_test_clears_active_tasks(self):
+        """_reset_state_for_test 清空 _active_tasks 集合。"""
+        # 直接填充 _active_tasks (绕过 _register_task 的 isinstance 检查)
+        fake_item = object()
+        with tm_module._active_tasks_lock:
+            tm_module._active_tasks.add(fake_item)
+        assert len(tm_module._active_tasks) > 0
+
+        # 重置
+        tm_module._reset_state_for_test()
+        assert len(tm_module._active_tasks) == 0
+
+    def test_autouse_fixture_calls_reset_state_for_test(self):
+        """R7: autouse fixture _reset_toast_state 必须调用 _reset_state_for_test (源码守护)。"""
+        fixture = globals().get("_reset_toast_state")
+        assert fixture is not None, "_reset_toast_state autouse fixture 必须存在"
+        source = inspect.getsource(fixture)
+        assert "_reset_state_for_test" in source, "fixture 必须调用 _reset_state_for_test (R7 测试隔离)"
+
+    def test_state_is_clean_at_test_start(self):
+        """R7: 每个测试开始时 _state 应为 None 或空 (autouse fixture 已清理)。"""
+        # 此测试开始时, autouse fixture 已调用 _reset_state_for_test
+        # _state 应为 None (除非本测试前的代码创建了 state, 但 fixture 已清理)
+        assert tm_module._state is None or len(tm_module._state.toasts) == 0
