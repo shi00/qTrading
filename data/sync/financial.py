@@ -661,13 +661,12 @@ class FinancialSyncStrategy(ISyncStrategy):
 
                 return result
 
-            tasks = [sync_one_target(item) for item in target_list]
-
             day_saved = 0
             # Incremental 半批：使用 sync_batch_size // 2 降低 429 风险（高峰期披露密集，单日 target 量大）。
             _BATCH_SIZE = max(5, ConfigHandler.get_sync_batch_size() // 2)
-            for batch_start in range(0, len(tasks), _BATCH_SIZE):
-                batch = tasks[batch_start : batch_start + _BATCH_SIZE]
+            for batch_start in range(0, len(target_list), _BATCH_SIZE):
+                batch_targets = target_list[batch_start : batch_start + _BATCH_SIZE]
+                batch = [sync_one_target(item) for item in batch_targets]
                 batch_results = await gather_return_exceptions_propagating_cancel(*batch)
                 for r in batch_results:
                     if isinstance(r, Exception):
