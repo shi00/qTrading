@@ -171,7 +171,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-- **Windows 测试泄漏 (P1-2)**: 已解决。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由 `_reset_loop_local_fallback` fixture 清理。integration/e2e fixture 保留 `loop_scope="session"` override。性能基准对比见 `docs/loop-scope-perf-baseline.md`（回归 1.97%）。测试顺序污染（日志配置泄漏）已解决：`_reset_logging_state` autouse fixture 重置 `Logger.disabled` 实例属性、`logging.disable`、named logger level，确保 caplog 跨测试不污染。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
+- **Windows 测试泄漏 (P1-2)**: 已解决。`asyncio_default_test_loop_scope` 从 `session` 降为 `function`，`_stores` 通过 `WeakKeyDictionary` 自动隔离；`_fallback_store` 由 `_reset_loop_local_fallback` fixture 清理。integration/e2e fixture 保留 `loop_scope="session"` override，但创建 loop-bound engine（CacheManager.engine / 独立 AsyncEngine）的 function-scope async fixture 必须显式 `loop_scope="function"` override，避免 session-loop 创建 + function-loop 访问导致的跨 loop dispose hang（修复见 `fix/ci-integration-hang` 分支）。性能基准对比见 `docs/loop-scope-perf-baseline.md`（回归 1.97%）。测试顺序污染（日志配置泄漏）已解决：`_reset_logging_state` autouse fixture 重置 `Logger.disabled` 实例属性、`logging.disable`、named logger level，确保 caplog 跨测试不污染。（更多详细技术债清单及跟进见 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt)）
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [CONTRIBUTING.md](./CONTRIBUTING.md#已知架构技术债-known-technical-debt) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 

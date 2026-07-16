@@ -104,7 +104,7 @@ asyncio_mode = "auto"
 log_cli = true
 log_cli_level = "INFO"
 log_level = "DEBUG"
-asyncio_default_fixture_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
 filterwarnings = [
     "ignore::DeprecationWarning:pytest_asyncio.plugin",

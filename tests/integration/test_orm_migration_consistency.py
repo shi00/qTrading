@@ -282,7 +282,7 @@ class TestOrmMigrationConsistency:
     other integration tests that share the `test_astock` database.
     """
 
-    @pytest_asyncio.fixture(scope="class")
+    @pytest_asyncio.fixture(scope="class", loop_scope="class")
     async def consistency_engine(self, pg_params):
         """Create an isolated database, run migrations, and yield the engine."""
         db_name = f"orm_consistency_{uuid.uuid4().hex[:8]}"
@@ -299,7 +299,7 @@ class TestOrmMigrationConsistency:
         await engine.dispose()
         await _drop_isolated_db(pg_params, db_name)
 
-    @pytest_asyncio.fixture(scope="class")
+    @pytest_asyncio.fixture(scope="class", loop_scope="class")
     async def reflected(self, consistency_engine):
         """Reflect the migrated database schema once for all tests."""
         async with consistency_engine.connect() as conn:

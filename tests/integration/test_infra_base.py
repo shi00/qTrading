@@ -208,9 +208,8 @@ class TestDatabaseBase(_AssertionMixin):
     engine: AsyncEngine
     cache: CacheManager
 
-    @pytest_asyncio.fixture(autouse=True)
-    async def _setup_base(self, test_engine):
-        self._test_engine_ref = test_engine
+    @pytest_asyncio.fixture(autouse=True, loop_scope="function")
+    async def _setup_base(self):
         await self.asyncSetUp()
         yield
         await self.asyncTearDown()
@@ -222,10 +221,10 @@ class TestDatabaseBase(_AssertionMixin):
         CacheManager._instance = None
         CacheManager._initialized = False
 
-        self.engine = self._test_engine_ref
-
         self.cache = CacheManager()
         await self.cache.init_db(auto_migrate=True)
+
+        self.engine = self.cache.engine
 
         await _truncate_all_tables(self.cache.engine)
 

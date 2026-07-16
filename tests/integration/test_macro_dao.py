@@ -25,8 +25,8 @@ class TestMacroDaoIntegrity:
     pytestmark = pytest.mark.usefixtures("mvd_data")
 
     @pytest.fixture
-    def macro_dao(self, test_engine):
-        return MacroDao(test_engine)
+    def macro_dao(self, function_engine):
+        return MacroDao(function_engine)
 
     @pytest.mark.asyncio
     async def test_get_shibor_latest(self, macro_dao):
