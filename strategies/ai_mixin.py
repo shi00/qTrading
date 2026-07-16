@@ -406,7 +406,7 @@ class AIStrategyMixin:
             except Exception as e:
                 logger.warning(
                     "[AIStrategyMixin] Failed to pre-fetch learning context: %s",
-                    e,
+                    DataSanitizer.sanitize_error(e),
                 )
 
         global_context = ""

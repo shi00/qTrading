@@ -34,6 +34,7 @@ def log_capture():
     records = []
 
     def emit(record):
+        handler.format(record)
         records.append(record)
 
     handler.emit = emit

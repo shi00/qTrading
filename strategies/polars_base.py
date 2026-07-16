@@ -8,6 +8,7 @@ from data.persistence.quality_gate import QualityGateError, QualityTier, _check_
 from strategies.ai_mixin import AIStrategyMixin
 from strategies.base_strategy import BaseStrategy
 from strategies.utils import StrategyContext
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -100,7 +101,7 @@ class PolarsBaseStrategy(BaseStrategy, AIStrategyMixin):
         # NOTE(lazy): except Exception 保留(已合理日志). ceiling: 该 try 块抛出策略过滤异常. upgrade: 策略层重构时统一走 classify_error.
         except Exception as e:
             logger.error("[Strategy] %s failed: %s", self.name, e, exc_info=True)
-            raise RuntimeError(f"Strategy {self.name} execution failed: {e}") from e
+            raise RuntimeError(f"Strategy {self.name} execution failed: {DataSanitizer.sanitize_error(e)}") from e
 
         if candidates_df is None or candidates_df.empty:
             return pd.DataFrame()
