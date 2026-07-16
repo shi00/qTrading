@@ -24,6 +24,7 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.viewmodels import Message
+from ui.viewmodels.screener_view_model import HistoryTreeState
 
 pytestmark = pytest.mark.unit
 
@@ -57,6 +58,7 @@ class FakeScreenerState:
     strategies_with_dep: dict = field(default_factory=dict)
     strategy_desc: str = ""
     strategy_desc_color: str = "default"
+    history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
 
 
 class FakeScreenerViewModel:
@@ -124,8 +126,8 @@ class FakeScreenerViewModel:
 
         return pd.DataFrame()
 
-    async def load_history_tree(self, offset: int = 0) -> tuple:
-        return ()
+    async def load_history_tree(self, append: bool = False) -> None:
+        self.method_calls.append(f"load_history_tree:{append}")
 
     async def load_history_data(self, *args: Any, **kwargs: Any) -> tuple:
         return (None, "")

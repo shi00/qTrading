@@ -477,3 +477,119 @@ class TestScreenerViewContract:
 
         # 必须: 从 state.status_color 读取 (VM state 单源真相, 与 state.status_message 对称)
         assert "state.status_color" in code, "必须从 state.status_color 读取 (R.2.6.3)"
+
+    # ========================================================================
+    # Task 3.2: progress_visible/run_disabled/export_disabled 派生状态契约
+    # 消除双轨状态: View 禁止 use_state 持有, 改为从 VM state 派生
+    # ========================================================================
+
+    def test_no_progress_visible_use_state(self):
+        """Task 3.2: View 禁止 use_state 持有 progress_visible, 改为派生 state.loading.
+
+        DoD: grep `progress_visible.*use_state\\|set_progress_visible` ui/views/screener_view.py = 0.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: progress_visible 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(r"progress_visible[^\n]*use_state", code)
+        assert use_state_matches == [], (
+            f"progress_visible 不应使用 use_state (派生 state.loading, Task 3.2): {use_state_matches}"
+        )
+
+        # 禁止: set_progress_visible 任何调用/解构
+        set_matches = re.findall(r"\bset_progress_visible\b", code)
+        assert set_matches == [], f"禁止 set_progress_visible 调用 (派生 state.loading, Task 3.2): {set_matches}"
+
+        # 必须: 从 state.loading 派生 progress_visible
+        assert "progress_visible = state.loading" in code, "必须从 state.loading 派生 progress_visible (Task 3.2)"
+
+    def test_no_run_disabled_use_state(self):
+        """Task 3.2: View 禁止 use_state 持有 run_disabled, 改为派生 state.loading + state.selected_strategy.
+
+        DoD: grep `run_disabled.*use_state\\|set_run_disabled` ui/views/screener_view.py = 0.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: run_disabled 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(r"run_disabled[^\n]*use_state", code)
+        assert use_state_matches == [], (
+            f"run_disabled 不应使用 use_state (派生 state.loading+selected_strategy, Task 3.2): {use_state_matches}"
+        )
+
+        # 禁止: set_run_disabled 任何调用/解构
+        set_matches = re.findall(r"\bset_run_disabled\b", code)
+        assert set_matches == [], (
+            f"禁止 set_run_disabled 调用 (派生 state.loading+selected_strategy, Task 3.2): {set_matches}"
+        )
+
+        # 必须: 从 state.loading + state.selected_strategy 派生 run_disabled
+        assert "run_disabled = state.loading or not state.selected_strategy" in code, (
+            "必须从 state.loading + state.selected_strategy 派生 run_disabled (Task 3.2)"
+        )
+
+    def test_no_export_disabled_use_state(self):
+        """Task 3.2: View 禁止 use_state 持有 export_disabled, 改为派生 state.total_items == 0.
+
+        DoD: grep `export_disabled.*use_state\\|set_export_disabled` ui/views/screener_view.py = 0.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: export_disabled 通过 use_state 解构持有 (双源真相)
+        use_state_matches = re.findall(r"export_disabled[^\n]*use_state", code)
+        assert use_state_matches == [], (
+            f"export_disabled 不应使用 use_state (派生 state.total_items, Task 3.2): {use_state_matches}"
+        )
+
+        # 禁止: set_export_disabled 任何调用/解构
+        set_matches = re.findall(r"\bset_export_disabled\b", code)
+        assert set_matches == [], f"禁止 set_export_disabled 调用 (派生 state.total_items, Task 3.2): {set_matches}"
+
+        # 必须: 从 state.total_items 派生 export_btn_disabled
+        assert "export_btn_disabled = total_items == 0" in code, (
+            "必须从 state.total_items 派生 export_btn_disabled (Task 3.2)"
+        )
+
+    def test_no_history_tree_use_state(self):
+        """Task 3.2: View 禁止 use_state 持有历史树状态, 改为从 state.history_tree 派生.
+
+        DoD: grep `history_tree_items.*use_state\\|set_history_tree_items\\|
+        history_tree_offset.*use_state\\|set_history_tree_offset\\|
+        history_load_more_visible.*use_state\\|set_history_load_more_visible`
+        ui/views/screener_view.py = 0.
+        """
+        import re
+
+        code = _code_source()
+
+        # 禁止: history_tree_items 通过 use_state 解构持有
+        items_use_state = re.findall(r"history_tree_items[^\n]*use_state", code)
+        assert items_use_state == [], (
+            f"history_tree_items 不应使用 use_state (派生 state.history_tree.rows, Task 3.2): {items_use_state}"
+        )
+
+        # 禁止: history_tree_offset 通过 use_state 解构持有
+        offset_use_state = re.findall(r"history_tree_offset[^\n]*use_state", code)
+        assert offset_use_state == [], (
+            f"history_tree_offset 不应使用 use_state (派生 state.history_tree.offset, Task 3.2): {offset_use_state}"
+        )
+
+        # 禁止: history_load_more_visible 通过 use_state 解构持有
+        load_more_use_state = re.findall(r"history_load_more_visible[^\n]*use_state", code)
+        assert load_more_use_state == [], (
+            f"history_load_more_visible 不应使用 use_state (派生 state.history_tree.has_more, Task 3.2): "
+            f"{load_more_use_state}"
+        )
+
+        # 禁止: set_history_tree_items / set_history_tree_offset / set_history_load_more_visible 调用
+        for setter in ("set_history_tree_items", "set_history_tree_offset", "set_history_load_more_visible"):
+            set_matches = re.findall(rf"\b{setter}\b", code)
+            assert set_matches == [], f"禁止 {setter} 调用 (派生 state.history_tree, Task 3.2): {set_matches}"
+
+        # 必须: 从 state.history_tree 派生历史树控件
+        assert "state.history_tree" in code, "必须从 state.history_tree 派生历史树控件 (Task 3.2)"
