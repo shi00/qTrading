@@ -229,6 +229,28 @@ def pytest_runtest_makereport(item, call):
     setattr(item, f"rep_{rep.when}", rep)
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """E2E 测试强制 session loop scope，避免跨 loop 访问 session fixtures。
+
+    根因：``asyncio_default_test_loop_scope=function``（为 unit/integration 设置）
+    导致 E2E 测试在 function loop 上执行。但 ``e2e_playwright``/``e2e_browser``
+    是 session-scope async fixtures，在 session loop 上创建 Playwright 资源。
+    function loop 上的 ``e2e_page`` 访问 session-loop-bound 的 browser 对象时，
+    因 session loop idle 而永久 hang。
+
+    修复：强制 E2E 测试用 session loop，与 session-scope async fixtures 共享 loop。
+    """
+    asyncio_marker = pytest.mark.asyncio(loop_scope="session")
+    e2e_root = (config.rootpath / "tests" / "e2e").resolve()
+    for item in items:
+        try:
+            Path(str(item.fspath)).resolve().relative_to(e2e_root)
+        except ValueError:
+            continue
+        item.add_marker(asyncio_marker)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def mock_keyring():
     """Session 级 keyring mock：隔离 E2E 测试对宿主机 keyring 的污染。
