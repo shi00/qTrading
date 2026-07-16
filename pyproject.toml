@@ -20,12 +20,13 @@ classifiers = [
 # - Exceptions pinned with == (breaking changes / tight coupling):
 #   * flet / flet-desktop / flet-charts: UI framework with breaking layout/behavior changes across minor versions; flet-charts is the chart control package split out since V1.
 #   * tushare: API methods and data formats vary between versions; client code is tightly coupled.
+#   * akshare: API methods, return types, and column names vary between versions; client code calls 5+ ak.stock_* methods and imports internal module stock_disclosure_cninfo.
 dependencies = [
     "flet==0.86.0",
     "flet-desktop==0.86.0",
     "flet-charts==0.86.0",
     "tushare==1.4.29",
-    "akshare>=1.18.60",
+    "akshare==1.18.64",
     "requests>=2.34.0",
     "httpx>=0.28.0",
     "urllib3>=2.7.0",
