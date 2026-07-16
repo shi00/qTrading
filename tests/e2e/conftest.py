@@ -248,7 +248,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             Path(str(item.fspath)).resolve().relative_to(e2e_root)
         except ValueError:
             continue
-        item.add_marker(asyncio_marker)
+        # append=False 将 marker 插入到 own_markers 列表开头，
+        # 确保 get_closest_marker("asyncio") 返回此 marker（带 loop_scope=session），
+        # 而非 pytest-asyncio AUTO 模式添加的无 loop_scope marker。
+        item.add_marker(asyncio_marker, append=False)
 
 
 @pytest.fixture(autouse=True, scope="session")
