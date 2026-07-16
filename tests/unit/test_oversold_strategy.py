@@ -1,13 +1,16 @@
+import asyncio
 import datetime
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
+import polars as pl
 import pytest
 
 from data.persistence.quality_gate import QualityGateError, QualityTier
 from strategies.ai_mixin import PreFetchedContext
 from strategies.oversold_strategy import OversoldStrategy
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 pytestmark = pytest.mark.unit
 
@@ -840,6 +843,206 @@ class TestOversoldGetAiContext(unittest.TestCase):
         }
         result = s.get_ai_context(row)
         self.assertNotIn("形态反馈", result)
+
+
+# --- TestOversoldMathFilterCPUOffload (R16: offload CPU ops to thread pool) ---
+
+
+def _make_history_pdf_for_rsi():
+    """Build 60-day descending-price history so RSI(14) < 30 is satisfied for one ts_code."""
+    n_days = 60
+    dates = [datetime.date(2024, 6, 14) - datetime.timedelta(days=i) for i in range(n_days)]
+    dates.reverse()
+    return pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"] * n_days,
+            "trade_date": [d.strftime("%Y%m%d") for d in dates],
+            "open": [10.0] * n_days,
+            "high": [10.5] * n_days,
+            "low": [9.5] * n_days,
+            "close": [10.0 - i * 0.05 for i in range(n_days)],
+            "vol": [1000.0 + i * 50 for i in range(n_days)],
+            "amount": [10000.0 + i * 500 for i in range(n_days)],
+            "pct_chg": [-0.5] * n_days,
+        }
+    )
+
+
+def _make_context_for_math_filter(dp, snapshot, trade_date=None):
+    ctx = {
+        "screening_data": snapshot,
+        "data_processor": dp,
+        "params": {},
+    }
+    if trade_date is not None:
+        ctx["trade_date"] = trade_date
+    return ctx
+
+
+async def test_math_filter_run_async_called_with_cpu_task_type():
+    """_math_filter should call run_async(TaskType.CPU, ...) for the CPU pipeline."""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run_async:
+        mock_run_async.return_value = pd.DataFrame()
+        await s._math_filter(context, 14, 30, 0.5)
+
+        mock_run_async.assert_called_once()
+        call_args = mock_run_async.call_args
+        assert call_args[0][0] == TaskType.CPU
+
+
+async def test_math_filter_from_pandas_offloaded_to_thread_pool():
+    """pl.from_pandas must run inside the run_async callable, not in the event loop (R16)."""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    called_before_run_async = [False]
+    run_async_called = [False]
+    real_from_pandas = pl.from_pandas
+
+    def tracking_from_pandas(*args, **kwargs):
+        if not run_async_called[0]:
+            called_before_run_async[0] = True
+        return real_from_pandas(*args, **kwargs)
+
+    async def mock_run_async(task_type, func, *args, **kwargs):
+        run_async_called[0] = True
+        try:
+            return func()
+        except Exception:
+            return pd.DataFrame()
+
+    with patch("strategies.oversold_strategy.pl.from_pandas", side_effect=tracking_from_pandas):
+        with patch.object(ThreadPoolManager, "run_async", side_effect=mock_run_async):
+            await s._math_filter(context, 14, 30, 0.5)
+
+    assert not called_before_run_async[0], (
+        "pl.from_pandas must be offloaded to thread pool (called inside run_async callable), not in the event loop"
+    )
+
+
+async def test_math_filter_merge_offloaded_to_thread_pool():
+    """pd.merge must run inside the run_async callable, not in the event loop (R16)."""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    captured_callable = None
+    captured_args: tuple = ()
+    merge_called = [False]
+    real_merge = pd.merge
+
+    def tracking_merge(*args, **kwargs):
+        merge_called[0] = True
+        return real_merge(*args, **kwargs)
+
+    async def mock_run_async(task_type, func, *args, **kwargs):
+        nonlocal captured_callable, captured_args
+        captured_callable = func
+        captured_args = args
+        # Do NOT execute func here; return empty pandas DataFrame to short-circuit
+        return pd.DataFrame()
+
+    with patch("pandas.merge", side_effect=tracking_merge):
+        with patch.object(ThreadPoolManager, "run_async", side_effect=mock_run_async):
+            await s._math_filter(context, 14, 30, 0.5)
+
+        assert captured_callable is not None, "run_async should have been called with a callable"
+        # Before invoking the callable, merge must not have been called in event loop
+        assert not merge_called[0], "pd.merge must not be called in event loop before run_async callable executes"
+        # Invoke the callable with its captured args (simulating thread pool execution).
+        # Must run inside the pandas.merge patch so tracking_merge can observe the call.
+        captured_callable(*captured_args)
+        # After invoking, merge must have been called (proves it's inside the callable)
+        assert merge_called[0], "pd.merge must be called inside the run_async callable"
+
+
+async def test_math_filter_sort_values_offloaded_to_thread_pool():
+    """DataFrame.sort_values must run inside the run_async callable, not in the event loop (R16)."""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    captured_callable = None
+    captured_args: tuple = ()
+    sort_values_called = [False]
+    real_sort_values = pd.DataFrame.sort_values
+
+    def tracking_sort_values(self, *args, **kwargs):
+        sort_values_called[0] = True
+        return real_sort_values(self, *args, **kwargs)
+
+    async def mock_run_async(task_type, func, *args, **kwargs):
+        nonlocal captured_callable, captured_args
+        captured_callable = func
+        captured_args = args
+        return pd.DataFrame()
+
+    with patch("pandas.DataFrame.sort_values", tracking_sort_values):
+        with patch.object(ThreadPoolManager, "run_async", side_effect=mock_run_async):
+            await s._math_filter(context, 14, 30, 0.5)
+
+        assert captured_callable is not None, "run_async should have been called with a callable"
+        assert not sort_values_called[0], (
+            "sort_values must not be called in event loop before run_async callable executes"
+        )
+        # Invoke inside the sort_values patch so tracking_sort_values can observe the call.
+        captured_callable(*captured_args)
+        assert sort_values_called[0], "sort_values must be called inside the run_async callable"
+
+
+async def test_math_filter_cancelled_error_propagates():
+    """CancelledError raised by run_async must propagate, not be swallowed by except Exception (R2)."""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    snapshot = pd.DataFrame({"ts_code": ["000001.SZ"], "name": ["Test"], "close": [7.0]})
+    context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    async def raise_cancelled(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    with patch.object(ThreadPoolManager, "run_async", side_effect=raise_cancelled):
+        with pytest.raises(asyncio.CancelledError):
+            await s._math_filter(context, 14, 30, 0.5)
+
+
+async def test_math_filter_result_columns_and_sort_preserved():
+    """After offload, result must keep expected columns and remain sorted by RSI ascending."""
+    s = OversoldStrategy()
+    dp = _make_dp_for_math_filter()
+    dp.cache.get_daily_quotes = AsyncMock(return_value=_make_history_pdf_for_rsi())
+    snapshot = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "name": ["Test"],
+            "close": [7.0],
+            "industry": ["电子"],
+        }
+    )
+    context = _make_context_for_math_filter(dp, snapshot, datetime.date(2024, 6, 14))
+
+    result = await s._math_filter(context, 14, 30, 0.5)
+    assert isinstance(result, pd.DataFrame)
+    assert not result.empty
+    # Required columns from snapshot + RSI computation
+    for col in ("ts_code", "rsi_14", "vol_ratio_5d"):
+        assert col in result.columns, f"Missing expected column: {col}"
+    # Sorted by rsi_14 ascending
+    rsi_values = result["rsi_14"].tolist()
+    assert rsi_values == sorted(rsi_values), "Result must be sorted by rsi_14 ascending"
 
 
 if __name__ == "__main__":
