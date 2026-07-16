@@ -123,7 +123,7 @@
 |------|------|-----|---------|--------|
 | 6.1 | [lane:gate] [tdd:skip:test-only] 运行完整覆盖率检查: `python -m pytest tests/ --cov --cov-report=term-missing --cov-report=json` + `python scripts/check_per_file_coverage.py`。验证所有 18 个源文件覆盖率 ≥80% 且整体 ≥85%。若有未达标文件，回填测试直到达标 | `coverage.json` 生成；`check_per_file_coverage.py` 退出码 0；`fail_under=85` 通过 | 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 4.4, 5.1, 5.2, 5.3, 5.4 | cc:完了 |
 | 6.2 | [lane:gate] [tdd:skip:test-only] 运行完整门禁: `ruff check .` → `ruff format --check .` → `pyright` → `python -m pytest tests/unit/ -v -m "not slow"` → `pre-commit run --all-files`。修复 lint/type 错误（仅测试代码） | 所有命令退出码 0；无新增 pyright error；无裸 `# type: ignore` | 6.1 | cc:完了 |
-| 6.3 | [lane:release] [tdd:skip:test-only] PR closeout: 整理 evidence pack（基线覆盖率 vs 最终覆盖率对比表 + 18 文件覆盖率提升明细）→ 填写 PR body（遵循项目 PR 模板）→ `git push origin test/coverage-boost` → `gh pr create`。PR body 包含: 背景/变更范围/覆盖率对比/测试范式说明/R2/R7/R9 守卫验证/无源码变更声明 | PR 创建成功；CI 全绿；PR body 含覆盖率对比表 | 6.2 | cc:WIP |
+| 6.3 | [lane:release] [tdd:skip:test-only] PR closeout: 整理 evidence pack（基线覆盖率 vs 最终覆盖率对比表 + 18 文件覆盖率提升明细）→ 填写 PR body（遵循项目 PR 模板）→ `git push origin test/coverage-boost` → `gh pr create`。PR body 包含: 背景/变更范围/覆盖率对比/测试范式说明/R2/R7/R9 守卫验证/无源码变更声明 | PR 创建成功；CI 全绿；PR body 含覆盖率对比表 | 6.2 | cc:完了 |
 
 ---
 
