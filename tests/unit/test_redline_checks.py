@@ -6,6 +6,8 @@
 """
 
 import ast
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -419,3 +421,39 @@ class TestRedlineIntegrationOnCurrentCodebase:
     def test_main_returns_zero(self):
         """脚本 main() 在当前代码库状态下应返回 0（全部通过）。"""
         assert main() == 0, "check_redlines.py main() should return 0 when all checks pass"
+
+
+# ============================================================================
+# GBK 编码兼容性测试（Windows PYTHONIOENCODING=gbk 兜底）
+# ============================================================================
+
+
+class TestGBKEncodingCompatibility:
+    """验证脚本在 GBK 编码环境下不会触发 UnicodeEncodeError。
+
+    Windows 环境下 PYTHONIOENCODING=gbk 时，emoji（❌✅）输出会触发
+    UnicodeEncodeError，导致 pre-commit hook 异常退出。脚本应将输出改为
+    纯 ASCII（如 [PASS]/[FAIL]），并在入口处 reconfigure sys.stdout 兜底。
+    """
+
+    def test_no_unicode_error_under_gbk(self):
+        """PYTHONIOENCODING=gbk 下运行脚本，应无 UnicodeEncodeError 且退出码正确。"""
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "gbk"
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "check_redlines.py")],
+            capture_output=True,
+            env=env,
+            cwd=ROOT,
+            timeout=60,
+            check=False,
+        )
+        # 退出码符合检查结果（当前代码库应通过所有检查，退出码为 0）
+        assert result.returncode == 0, (
+            f"expected exit 0, got {result.returncode}\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
+        # 不应有 UnicodeEncodeError（emoji 输出在 GBK 下会触发）
+        combined = result.stdout + result.stderr
+        assert b"UnicodeEncodeError" not in combined, (
+            f"UnicodeEncodeError detected under GBK encoding\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )

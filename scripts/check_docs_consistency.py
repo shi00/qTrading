@@ -408,17 +408,23 @@ def main() -> int:
     all_errors.extend(check_note_lazy_format())
 
     if all_errors:
-        print("❌ 文档一致性检查失败：", file=sys.stderr)
+        print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
         for err in all_errors:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
     print(
-        "✅ 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
+        "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
         "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素）"
     )
     return 0
 
 
 if __name__ == "__main__":
+    # 兜底：Windows PYTHONIOENCODING=gbk 等非 UTF-8 环境下，emoji/中文输出会触发
+    # UnicodeEncodeError。reconfigure stdout/stderr 为 UTF-8（errors="replace" 容错），
+    # 避免主输出 emoji（已改为 ASCII [PASS]/[FAIL]）之外的非 ASCII 字符崩溃。
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

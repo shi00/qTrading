@@ -411,14 +411,20 @@ def main() -> int:
         all_errors.extend(errs)
 
     if all_errors:
-        print("❌ 红线自动化检查失败：", file=sys.stderr)
+        print("[FAIL] 红线自动化检查失败：", file=sys.stderr)
         for err in all_errors:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print("✅ 红线自动化检查通过（R4/R12/R13/R14/R15）")
+    print("[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15）")
     return 0
 
 
 if __name__ == "__main__":
+    # 兜底：Windows PYTHONIOENCODING=gbk 等非 UTF-8 环境下，emoji/中文输出会触发
+    # UnicodeEncodeError。reconfigure stdout/stderr 为 UTF-8（errors="replace" 容错），
+    # 避免主输出 emoji（已改为 ASCII [PASS]/[FAIL]）之外的非 ASCII 字符崩溃。
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())
