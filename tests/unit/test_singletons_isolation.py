@@ -144,7 +144,6 @@ class TestTaskManagerSingletonIsolation:
         TaskManager._initialized = False
         with (
             patch("services.task_manager.ThreadPoolManager"),
-            patch("services.task_manager.I18n"),
         ):
             TaskManager()
             assert TaskManager._instance is not None
@@ -156,7 +155,6 @@ class TestTaskManagerSingletonIsolation:
         TaskManager._initialized = False
         with (
             patch("services.task_manager.ThreadPoolManager"),
-            patch("services.task_manager.I18n"),
         ):
             TaskManager()
             assert TaskManager._initialized is True
@@ -168,7 +166,6 @@ class TestTaskManagerSingletonIsolation:
         TaskManager._initialized = False
         with (
             patch("services.task_manager.ThreadPoolManager"),
-            patch("services.task_manager.I18n"),
         ):
             mgr1 = TaskManager()
             mgr2 = TaskManager()
@@ -180,7 +177,6 @@ class TestTaskManagerSingletonIsolation:
         TaskManager._initialized = False
         with (
             patch("services.task_manager.ThreadPoolManager"),
-            patch("services.task_manager.I18n"),
         ):
             mgr = TaskManager()
             t = AppTask(name="test", status=TaskStatus.RUNNING)
@@ -193,7 +189,6 @@ class TestTaskManagerSingletonIsolation:
             TaskManager._initialized = False
             with (
                 patch("services.task_manager.ThreadPoolManager"),
-                patch("services.task_manager.I18n"),
             ):
                 mgr2 = TaskManager()
                 assert len(mgr2._tasks) == 0, "New instance should have empty _tasks queue"
@@ -206,7 +201,6 @@ class TestTaskManagerSingletonIsolation:
 
         with (
             patch("services.task_manager.ThreadPoolManager"),
-            patch("services.task_manager.I18n"),
         ):
 
             def create_instance():

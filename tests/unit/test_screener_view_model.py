@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 
+from core.i18n import Message
 from ui.components.virtual_table import next_sort_state
 from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
 
@@ -939,7 +940,7 @@ class TestTaskManagerSubscription:
     def test_on_tasks_updated_no_unlock_when_tasks_running(self, vm):
         vm._strategy_submitted = True
         mock_task = MagicMock()
-        mock_task.name = f"{TASK_NAME_PREFIX}: test"
+        mock_task.task_type = Message("task_type_ai_screening")
         mock_task.status.name = "RUNNING"
         vm._on_tasks_updated([mock_task])
         assert vm.state.task_unlocked is False
@@ -953,7 +954,7 @@ class TestTaskManagerSubscription:
     def test_on_tasks_updated_no_unlock_when_queued(self, vm):
         vm._strategy_submitted = True
         mock_task = MagicMock()
-        mock_task.name = f"{TASK_NAME_PREFIX}: test"
+        mock_task.task_type = Message("task_type_ai_screening")
         mock_task.status.name = "QUEUED"
         vm._on_tasks_updated([mock_task])
         assert vm.state.task_unlocked is False
@@ -961,7 +962,7 @@ class TestTaskManagerSubscription:
     def test_on_tasks_updated_unlocks_when_task_completed(self, vm):
         vm._strategy_submitted = True
         mock_task = MagicMock()
-        mock_task.name = f"{TASK_NAME_PREFIX}: test"
+        mock_task.task_type = Message("task_type_ai_screening")
         mock_task.status.name = "COMPLETED"
         vm._on_tasks_updated([mock_task])
         assert vm.state.task_unlocked is True
@@ -970,7 +971,7 @@ class TestTaskManagerSubscription:
     def test_on_tasks_updated_ignores_non_strategy_tasks(self, vm):
         vm._strategy_submitted = True
         mock_task = MagicMock()
-        mock_task.name = "other_task"
+        mock_task.task_type = Message("task_type_other")
         mock_task.status.name = "RUNNING"
         vm._on_tasks_updated([mock_task])
         # Non-strategy task doesn't block unlock

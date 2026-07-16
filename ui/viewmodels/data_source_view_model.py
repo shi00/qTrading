@@ -15,7 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
 from data.cache.cache_manager import CacheManager
@@ -253,15 +252,15 @@ class DataSourceViewModel:
             try:
                 # T8 fix: 检查 update_progress 返回值，False 表示任务已被取消或不再 RUNNING，应早退。
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
-                if not self._tm.update_progress(task_id, 0.2, I18n.get("task_progress_checking")):
+                if not self._tm.update_progress(task_id, 0.2, Message("task_progress_checking")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
                 result = await self._processor.check_data_health()
-                if not self._tm.update_progress(task_id, 0.9, I18n.get("task_progress_analyzing")):
+                if not self._tm.update_progress(task_id, 0.9, Message("task_progress_analyzing")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
                 self._emit_health_result(_health_dict_to_row(result))
 
-                return I18n.get("task_result_health_done")
+                return Message("task_result_health_done")
 
             except asyncio.CancelledError:
                 self._set_state(health_checking=False)
@@ -277,8 +276,8 @@ class DataSourceViewModel:
                 self._set_state(health_checking=False)
 
         task_id = self._tm.submit_task(
-            name=I18n.get("task_name_health_check"),
-            task_type=I18n.get("task_type_sys_check"),
+            name=Message("task_name_health_check"),
+            task_type=Message("task_type_sys_check"),
             coroutine_factory=_run_health_check,
             cancellable=True,
             unique_key="sys_health_check",
@@ -306,7 +305,7 @@ class DataSourceViewModel:
                     Message("snack_full_sync_done_simple"),
                     "success",
                 )
-                return I18n.get("ds_daily_update_done")
+                return Message("ds_daily_update_done")
             except asyncio.CancelledError:
                 if self._state.is_syncing:
                     self._emit_snack(
@@ -325,8 +324,8 @@ class DataSourceViewModel:
                 self._set_sync_busy(False)
 
         task_id = self._tm.submit_task(
-            name=I18n.get("task_name_daily_sync"),
-            task_type=I18n.get("sched_task_type_daily"),
+            name=Message("task_name_daily_sync"),
+            task_type=Message("sched_task_type_daily"),
             coroutine_factory=_daily_logic,
             cancellable=True,
             unique_key="daily_sync",
@@ -348,7 +347,7 @@ class DataSourceViewModel:
             try:
                 # T8 fix: 若任务已被取消则 update_progress 返回 False，立即抛 CancelledError 早退
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
-                if not self._tm.update_progress(task_id, 0.05, I18n.get("ds_ai_concept_rebuild_start")):
+                if not self._tm.update_progress(task_id, 0.05, Message("ds_ai_concept_rebuild_start")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
                 # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
@@ -359,7 +358,7 @@ class DataSourceViewModel:
                     ai_service=self._ai_service,
                 )
                 self._emit_snack(Message("snack_ai_concept_done"), "success")
-                return I18n.get("ds_ai_concept_rebuild_done")
+                return Message("ds_ai_concept_rebuild_done")
             except asyncio.CancelledError:
                 if self._state.is_syncing:
                     self._emit_snack(
@@ -378,8 +377,8 @@ class DataSourceViewModel:
                 self._set_sync_busy(False)
 
         task_id = self._tm.submit_task(
-            name=I18n.get("task_name_ai_concept_rebuild"),
-            task_type=I18n.get("ds_task_type_ai_tagging"),
+            name=Message("task_name_ai_concept_rebuild"),
+            task_type=Message("ds_task_type_ai_tagging"),
             coroutine_factory=_ai_concept_logic,
             cancellable=True,
             unique_key="ai_concept_sync",
@@ -408,7 +407,7 @@ class DataSourceViewModel:
                 await self._cache.clear_all_cache()
                 self._emit_snack(Message("ds_cache_cleared"), "success")
                 self._emit_cache_cleared()
-                return I18n.get("ds_cache_clear_done")
+                return Message("ds_cache_clear_done")
             except Exception as ex:
                 classify_error(ex, context="general")
                 self._emit_snack(
@@ -420,8 +419,8 @@ class DataSourceViewModel:
                 self._set_sync_busy(False)
 
         task_id = self._tm.submit_task(
-            name=I18n.get("task_name_clear_cache"),
-            task_type=I18n.get("ds_task_type_system"),
+            name=Message("task_name_clear_cache"),
+            task_type=Message("ds_task_type_system"),
             coroutine_factory=_clear_logic,
             cancellable=False,
             unique_key="cache_clear",
@@ -463,32 +462,34 @@ class DataSourceViewModel:
                     raise asyncio.CancelledError("task cancelled by user (is_cancelled returned True)")
 
                 if report is None:
-                    raise InitSyncError(I18n.get("ds_init_fail_generic"))
+                    raise InitSyncError(Message("ds_init_fail_generic"))
 
                 self._reset_init_sync(TaskStatus.COMPLETED)
                 self._emit_snack(Message("settings_init_done"), "success")
 
-                return I18n.get("sys_init_success")
+                return Message("sys_init_success")
 
             except asyncio.CancelledError:
                 self._reset_init_sync(TaskStatus.CANCELLED)
                 raise
             except InitSyncError as e:
-                msg = str(e)
+                # Task 3.1: InitSyncError 携带 Message (替代翻译字符串), 透传给 RuntimeError.
+                # TaskManager 内部不使用 task.result, 故 RuntimeError 携带 Message 不影响 UI.
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 self._emit_snack(Message("ds_init_fail_generic"), "error")
-                raise RuntimeError(msg) from e
+                raise RuntimeError(e.args[0]) from e
             except Exception as e:
-                msg = I18n.get("ds_init_fail_fmt")
+                # Task 3.1: msg 改为 Message (替代 I18n.get 翻译字符串), 透传给 RuntimeError.
+                msg = Message("ds_init_fail_fmt")
                 logger.error("[DataSourceVM] Init sync failed: %s", e, exc_info=True)
                 self._reset_init_sync(TaskStatus.FAILED)
                 self._emit_snack(Message("ds_init_fail_fmt"), "error")
                 raise RuntimeError(msg) from e
 
         task_id = self._tm.submit_task(
-            name=I18n.get("task_name_init_sync"),
-            task_type=I18n.get("task_type_data_sync"),
+            name=Message("task_name_init_sync"),
+            task_type=Message("task_type_data_sync"),
             coroutine_factory=_run_initial_sync,
             cancellable=True,
             unique_key="system_init_sync",

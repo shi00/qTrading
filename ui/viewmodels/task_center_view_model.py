@@ -18,6 +18,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from core.i18n import Message
 from services.task_manager import AppTask, TaskManager, TaskStatus
 
 logger = logging.getLogger(__name__)
@@ -27,12 +28,16 @@ PAGE_SIZE = 10  # Tasks per page
 
 @dataclass(frozen=True)
 class TaskRow:
-    """不可变任务行数据（从 AppTask 转换，供 View 渲染）。"""
+    """不可变任务行数据（从 AppTask 转换，供 View 渲染）。
+
+    Task 3.1: ``name``/``task_type``/``description`` 字段类型为 ``Message | str``,
+    透传 AppTask 字段 (VM 不调 I18n.get, View 渲染时按 locale 翻译).
+    """
 
     id: str
-    name: str
-    task_type: str
-    description: str
+    name: Message | str
+    task_type: Message | str
+    description: Message | str
     status: TaskStatus
     progress: float
     cancellable: bool

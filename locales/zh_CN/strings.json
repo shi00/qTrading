@@ -36,6 +36,7 @@
     "task_name_init_sync": "全量历史数据补齐",
     "task_name_daily_sync": "完整日更新",
     "task_name_clear_cache": "清空全部缓存",
+    "task_name_backtest": "回测: {name}",
     "task_progress_checking": "检查本地缓存健康度...",
     "task_progress_analyzing": "完成数据质量分析，更新指标卡...",
     "task_result_health_done": "数据体检完毕",

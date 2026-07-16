@@ -16,6 +16,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from core.i18n import Message
 from services.task_manager import TaskStatus
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -73,6 +74,26 @@ def _get_status_color(status: TaskStatus) -> str:
     return _STATUS_COLOR_MAP.get(status, AppColors.TEXT_SECONDARY)
 
 
+def _render_task_field(val: Message | str) -> str:
+    """Render ``Message | str`` task field to display string by current locale.
+
+    Task 3.1: View-side i18n rendering. VM 提交 Message (key+params) 给 TaskManager,
+    View 渲染时调 ``I18n.get(msg.key, **msg.params)`` 翻译为当前 locale 字符串.
+    ``str`` 直接透传 (向后兼容旧持久化字符串, DoD #3).
+
+    嵌套 key 约定 (与 screener_view._render_status_message 一致): params 中以
+    ``_key`` 结尾的字符串参数会先翻译再填入主模板 (去掉 ``_key`` 后缀).
+    """
+    if isinstance(val, str):
+        return val
+    params = dict(val.params)
+    for k in list(params):
+        if k.endswith("_key") and isinstance(params[k], str):
+            params[k[:-4]] = I18n.get(params[k])
+            del params[k]
+    return I18n.get(val.key, **params)
+
+
 def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Container:
     """Build a single task card with status badge, progress, and actions.
 
@@ -104,7 +125,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
 
     # --- Type chip ---
     type_chip = ft.Container(
-        content=ft.Text(row.task_type, size=11, color=AppColors.TEXT_SECONDARY),
+        content=ft.Text(_render_task_field(row.task_type), size=11, color=AppColors.TEXT_SECONDARY),
         bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
         border_radius=4,
         padding=ft.Padding.symmetric(horizontal=8, vertical=2),
@@ -115,7 +136,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
         [
             type_chip,
             ft.Text(
-                row.name,
+                _render_task_field(row.name),
                 weight=ft.FontWeight.W_600,
                 size=14,
                 color=AppColors.TEXT_PRIMARY,
@@ -133,7 +154,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
     if row.status == TaskStatus.FAILED and row.error:
         desc_text = I18n.get(row.error)
     else:
-        desc_text = row.description
+        desc_text = _render_task_field(row.description)
     desc_row = ft.Text(
         desc_text or "",
         size=12,

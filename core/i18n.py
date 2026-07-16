@@ -1,7 +1,9 @@
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -269,3 +271,26 @@ class I18n:
             del cls._strings_cache[cls._locale]
         cls._get_strings(cls._locale)
         logger.info("[I18n] Reloaded locale: %s", cls._locale)
+
+
+@dataclass(frozen=True)
+class Message:
+    """带参数的 i18n 消息 (key + params).
+
+    符合 CLAUDE.md §3.2 MVVM 契约 "VM 只产出 i18n key, 不感知 locale":
+    - VM 通过 Message(key, params) 产出 i18n 消息, 不调 ``I18n.get()``
+    - View 渲染时调 ``I18n.get(msg.key, **msg.params)`` 按当前 locale 翻译
+
+    同时被 services 层 (AppTask) 和 ui 层 (ViewModel/View) 使用,
+    故定义在 core 层避免架构越界 (R1: services 不可导入 ui).
+
+    ``*_key`` 后缀 params 约定 (R.2.3):
+    - VM 通过 ``{"<name>_key": <i18n_key>}`` 传递需翻译的 i18n key (如
+      ``{"name_key": strategy.name_key}``), 避免在 VM 中调 ``I18n.get`` 产生
+      locale-dependent 字符串污染 state.
+    - View 渲染时识别 ``*_key`` 后缀字段, 调 ``I18n.get`` 翻译为当前 locale 字符串,
+      并替换字段名 (如 ``name_key`` → ``name``), 对齐 i18n 模板占位符.
+    """
+
+    key: str
+    params: dict[str, Any] = field(default_factory=dict)

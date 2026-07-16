@@ -218,6 +218,10 @@ class ScreenerViewModel:
         return self.strategy_mgr.get_all_names()
 
     def get_strategy_desc(self, key: str) -> str:
+        # I18N_GET_ALLOWED: 返回翻译字符串供 update_strategy_desc 拼接为 state.strategy_desc (str).
+        # 迁移路径: state.strategy_desc 改为 Message 结构, View 渲染时翻译; 同时重设
+        # strategy_obj.get_dynamic_description(params) 返回值为 i18n key (而非翻译字符串),
+        # 整体与 R.3 strategy_name 标准化一并处理 (Task 3.1 遗留).
         st = self.strategy_mgr.get_strategy(key)
         return I18n.get(st.desc_key) if st else ""
 
@@ -281,6 +285,9 @@ class ScreenerViewModel:
             selected_strategy: 策略 key, None 表示清空
             params: 动态参数 (可选, 用于 get_dynamic_description; None 时用策略默认参数)
         """
+        # I18N_GET_ALLOWED: strategy_desc 是 str 字段, 需拼接 warning_suffix (含翻译字符串)
+        # 形成 desc 字符串. 迁移路径: state.strategy_desc 改为 Message, 嵌套 desc_msg + missing_apis
+        # (与 R.3 strategy_name 标准化一并处理, Task 3.1 遗留).
         if not selected_strategy:
             self._set_state(strategy_desc="", strategy_desc_color="default")
             return
@@ -388,14 +395,14 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.05,
-                    I18n.get("task_loading_data"),
+                    Message("task_loading_data"),
                 )
                 context = await self.data_processor.get_strategy_data()
                 if not context:
                     TaskManager().update_progress(
                         task_id,
                         0.1,
-                        I18n.get("task_cache_empty_init"),
+                        Message("task_cache_empty_init"),
                     )
                     await self.data_processor.init_data()
                     context = await self.data_processor.get_strategy_data()
@@ -449,7 +456,7 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.2,
-                    I18n.get("task_executing_strategy", name=I18n.get(strategy.name_key)),
+                    Message("task_executing_strategy", {"name_key": strategy.name_key}),
                 )
 
                 if inspect.iscoroutinefunction(strategy.filter):
@@ -468,7 +475,7 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.95,
-                    I18n.get("task_aggregating_results"),
+                    Message("task_aggregating_results"),
                 )
 
                 if result_df is not None and not result_df.empty:
@@ -502,7 +509,7 @@ class ScreenerViewModel:
                         status_color="success",
                         data_version=self._state.data_version + 1,
                     )
-                    return I18n.get("task_screening_success", count=len(result_df))
+                    return Message("task_screening_success", {"count": len(result_df)})
 
                 self._full_results = pd.DataFrame()
                 self._update_pagination(page_no=1)
@@ -513,7 +520,7 @@ class ScreenerViewModel:
                     status_color="warning",
                     data_version=self._state.data_version + 1,
                 )
-                return I18n.get("screener_no_results")
+                return Message("screener_no_results")
 
             except asyncio.CancelledError:
                 self._set_state(
@@ -533,7 +540,7 @@ class ScreenerViewModel:
                     status_message=Message("screener_blocked", {"reason": str(e)}),
                     status_color="warning",
                 )
-                return I18n.get("screener_blocked", reason=str(e))
+                return Message("screener_blocked", {"reason": str(e)})
             except Exception as e:
                 logger.error(
                     "[ScreenerVM] Strategy execution failed: %s",
@@ -564,9 +571,12 @@ class ScreenerViewModel:
         )
 
         # Dispatch to TaskManager!
+        # Task 3.1: name 改为 Message (复用 screener_running_strategy key + name_key params),
+        # task_type 也是 Message. _on_tasks_updated 通过 task_type.key 检测策略任务 (替代
+        # 旧 TASK_NAME_PREFIX in t.name 字符串检测, 因 t.name 现为 Message 实例不支持 `in`).
         task_id = TaskManager().submit_task(
-            name=f"{TASK_NAME_PREFIX}: {I18n.get(strategy.name_key)}",
-            task_type=I18n.get("task_type_ai_screening"),
+            name=Message("screener_running_strategy", {"name_key": strategy.name_key}),
+            task_type=Message("task_type_ai_screening"),
             coroutine_factory=_execute_screening,
             cancellable=True,
         )
@@ -987,7 +997,16 @@ class ScreenerViewModel:
 
     def _on_tasks_updated(self, tasks: list):
         """TaskManager subscriber: detect strategy task completion and notify View."""
-        running = [t for t in tasks if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")]
+        # Task 3.1: 改用 task_type.key 检测策略任务 (替代旧 TASK_NAME_PREFIX in t.name).
+        # 因 t.name 现为 Message 实例, 不支持 `in` 操作; task_type 也是 Message,
+        # 其 key 为 "task_type_ai_screening" 标识本 VM 提交的筛选任务.
+        running = [
+            t
+            for t in tasks
+            if isinstance(t.task_type, Message)
+            and t.task_type.key == "task_type_ai_screening"
+            and t.status.name in ("RUNNING", "QUEUED")
+        ]
         if not running and self._strategy_submitted:
             self._strategy_submitted = False
             self._set_state(task_unlocked=True)

@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import datetime
+import json
 import logging
 import threading
 import time as _time
@@ -13,7 +14,7 @@ from enum import Enum
 from typing import Any, cast
 
 
-from core.i18n import I18n
+from core.i18n import Message
 from utils.async_utils import gather_for_shutdown_cleanup
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -27,6 +28,47 @@ from utils.time_utils import from_utc_to_cst, get_now, to_utc_for_db
 logger = logging.getLogger(__name__)
 
 _NOTIFY_THROTTLE_S = 0.2
+
+# Marker for serialized Message in DB string columns (Task 3.1)
+_MSG_MARKER = "__i18n_msg__"
+
+
+def _serialize_msg_field(val: Message | str) -> str:
+    """Serialize ``Message | str`` for DB storage (Task 3.1).
+
+    ``Message`` → JSON string ``{"__i18n_msg__": true, "key": ..., "params": ...}``
+    ``str`` → as-is (backward compatible with legacy persisted strings).
+
+    TaskManager persists only key+params (no ``I18n.get()`` call), View renders
+    by current locale on read.
+    """
+    if isinstance(val, str):
+        return val
+    return json.dumps(
+        {_MSG_MARKER: True, "key": val.key, "params": val.params},
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def _deserialize_msg_field(s: str) -> Message | str:
+    """Deserialize DB string to ``Message | str`` (Task 3.1, DoD #3 backward compat).
+
+    Returns ``Message`` if string matches the serialized format, else ``str``
+    (legacy persisted translated strings display as-is).
+    """
+    if not s or not isinstance(s, str) or not s.startswith('{"' + _MSG_MARKER):
+        return s
+    try:
+        data = json.loads(s)
+        if isinstance(data, dict) and data.get(_MSG_MARKER) is True:
+            key = data.get("key", "")
+            params = data.get("params", {}) or {}
+            if isinstance(key, str) and isinstance(params, dict):
+                return Message(key, params)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return s
 
 
 class TaskStatus(Enum):
@@ -49,12 +91,20 @@ TERMINAL_STATUSES = (
 
 @dataclass
 class AppTask:
-    """Represents a long-running asynchronous operation in the application."""
+    """Represents a long-running asynchronous operation in the application.
+
+    Task 3.1: ``name``/``task_type``/``description`` 字段支持 ``Message | str``:
+    - VM 提交任务时传 ``Message(key, params)`` (i18n key + params, 不调 I18n.get)
+    - TaskManager 内部状态转换也用 ``Message``
+    - 持久化时 ``Message`` 序列化为 JSON 字符串 (``_serialize_msg_field``)
+    - 从 DB 加载历史时反序列化 (``_deserialize_msg_field``), 旧 str 数据向后兼容
+    - View 渲染时按当前 locale 调 ``I18n.get(msg.key, **msg.params)``
+    """
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
-    name: str = "Unknown Task"
-    task_type: str = "System"
-    description: str = "Waiting..."
+    name: Message | str = "Unknown Task"
+    task_type: Message | str = "System"
+    description: Message | str = "Waiting..."
     status: TaskStatus = TaskStatus.QUEUED
     progress: float = 0.0  # 0.0 to 1.0
     cancellable: bool = False
@@ -262,8 +312,8 @@ class TaskManager:
 
     def submit_task(
         self,
-        name: str,
-        task_type: str,
+        name: Message | str,
+        task_type: Message | str,
         coroutine_factory: Callable,
         cancellable: bool = False,
         unique_key: str = None,  # type: ignore[assignment]
@@ -342,7 +392,7 @@ class TaskManager:
         self._background_tasks.add(coro_task)
         coro_task.add_done_callback(self._background_tasks.discard)
 
-    def update_progress(self, task_id: str, progress: float, description: str = None) -> bool:  # type: ignore[assignment]
+    def update_progress(self, task_id: str, progress: float, description: Message | str | None = None) -> bool:  # type: ignore[assignment]
         """Allow the executing coroutine to report its progress (0.0 - 1.0).
         Throttled to avoid flooding subscribers with high-frequency updates.
 
@@ -350,6 +400,9 @@ class TaskManager:
         False if the task is not RUNNING (e.g. CANCELLED, COMPLETED)
         or does not exist. Workers should check the return value and
         exit early when False to avoid wasting resources on a cancelled task.
+
+        Task 3.1: ``description`` 接受 ``Message | str``, 调用方 (VM) 传 Message
+        (i18n key + params), TaskManager 不调 ``I18n.get()``.
         """
         task = self._tasks.get(task_id)
         if not task or task.status != TaskStatus.RUNNING:
@@ -409,7 +462,7 @@ class TaskManager:
 
         logger.info("[TaskManager] Cancelling task: [%s] %s", task.id, task.name)
         task.status = TaskStatus.CANCELLED
-        task.description = I18n.get("task_cancelled_desc")
+        task.description = Message("task_cancelled_desc")
 
         # Release dedup key so same unique_key can be resubmitted
         if task.unique_key:
@@ -467,7 +520,7 @@ class TaskManager:
         for tid in active_ids:
             task = self._tasks[tid]
             task.status = TaskStatus.CANCELLED
-            task.description = I18n.get("task_cancelled_desc")
+            task.description = Message("task_cancelled_desc")
             task.completed_at = get_now()
             # Release dedup key so same unique_key can be resubmitted
             if task.unique_key:
@@ -571,7 +624,14 @@ class TaskManager:
                 if task.status != TaskStatus.CANCELLED:
                     task.status = TaskStatus.COMPLETED
                     task.progress = 1.0
-                    task.description = str(task.result) if task.result else I18n.get("task_status_completed")
+                    # Task 3.1: 若 result 是 Message, 直接作为 description (View 渲染时翻译);
+                    # 否则按旧路径 str() 转换 (向后兼容 str/None result).
+                    if isinstance(task.result, Message):
+                        task.description = task.result
+                    elif task.result:
+                        task.description = str(task.result)
+                    else:
+                        task.description = Message("task_status_completed")
                     logger.info("[TaskManager] Completed: [%s]", task.id)
                 else:
                     logger.info("[TaskManager] Skipping COMPLETED: [%s] already CANCELLED", task.id)
@@ -579,7 +639,7 @@ class TaskManager:
         except asyncio.CancelledError:
             if task.status != TaskStatus.CANCELLED:
                 task.status = TaskStatus.CANCELLED
-            task.description = I18n.get("task_cancelled_desc")
+            task.description = Message("task_cancelled_desc")
             logger.info("[TaskManager] Cancelled processing for: [%s]", task.id)
             raise  # Important to re-raise CancelledError for proper asyncio teardown
         except Exception as e:
@@ -587,7 +647,7 @@ class TaskManager:
             if task.status == TaskStatus.CANCELLED:
                 # M1 fix: 保留 traceback 便于诊断取消过程中伴随的异常（如 DB 断连）
                 # L1 fix: 重置 description 与 CancelledError 分支保持一致
-                task.description = I18n.get("task_cancelled_desc")
+                task.description = Message("task_cancelled_desc")
                 logger.info(
                     "[TaskManager] Suppressed FAILED (already CANCELLED): [%s] %s",
                     task.id,
@@ -599,7 +659,7 @@ class TaskManager:
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
                 task.error = error_info["message_key"]
-                task.description = I18n.get("task_failed_desc")
+                task.description = Message("task_failed_desc")
                 if severity == "system":
                     logger.critical(
                         "[TaskManager] Task %s SYSTEM-LEVEL failure: %s",
@@ -666,7 +726,7 @@ class TaskManager:
             "UPDATE task_history SET status = $1, description = $2 WHERE status IN ('RUNNING', 'QUEUED')",
             (
                 TaskStatus.INTERRUPTED.value,
-                I18n.get("task_interrupted_desc"),
+                _serialize_msg_field(Message("task_interrupted_desc")),
             ),
         )
 
@@ -679,11 +739,11 @@ class TaskManager:
                 try:
                     t = AppTask(
                         id=row.get("id", ""),  # type: ignore[union-attr]
-                        name=row.get("name", ""),  # type: ignore[union-attr]
-                        task_type=row.get("task_type", "System"),  # type: ignore[union-attr]
+                        name=_deserialize_msg_field(str(row.get("name", "") or "")),
+                        task_type=_deserialize_msg_field(str(row.get("task_type", "System") or "System")),
                         status=TaskStatus(row.get("status", "COMPLETED")),
                         progress=float(row.get("progress", 0) or 0),
-                        description=str(row.get("description", "") or ""),
+                        description=_deserialize_msg_field(str(row.get("description", "") or "")),
                         error=str(row.get("error", "") or ""),
                         result=row.get("result"),
                         created_at=self._safe_dt(row.get("created_at")) or get_now(),
@@ -731,11 +791,11 @@ class TaskManager:
             return
         snapshot = (
             task.id,
-            task.name,
-            task.task_type,
+            _serialize_msg_field(task.name),
+            _serialize_msg_field(task.task_type),
             task.status.value,
             task.progress,
-            task.description,
+            _serialize_msg_field(task.description),
             task.error,
             self._truncate_result_for_db(task.result),
             to_utc_for_db(task.created_at),
@@ -863,11 +923,11 @@ class TaskManager:
         """Upsert task record (reads current state — use for await-based callers only)."""
         params = (
             task.id,
-            task.name,
-            task.task_type,
+            _serialize_msg_field(task.name),
+            _serialize_msg_field(task.task_type),
             task.status.value,
             task.progress,
-            task.description,
+            _serialize_msg_field(task.description),
             task.error,
             self._truncate_result_for_db(task.result),
             to_utc_for_db(task.created_at),
