@@ -1,6 +1,7 @@
 import logging
 import re
 import threading
+import time
 import typing
 
 import pandas as pd
@@ -8,7 +9,9 @@ import sqlalchemy as sa
 import sqlparse
 
 from utils.config_handler import ConfigHandler
+from utils.correlation import ensure_correlation_id
 from utils.db_utils import get_db_pool_config
+from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +24,10 @@ _OP_MAP = {
     "!=": lambda c, v: c != v,
     "LIKE": lambda c, v: c.like(v),
 }
+
+# Task 2.3: SQL Console 重查询硬超时(固定常量,仅影响当前事务)。
+# 通过 SET LOCAL 在 read-only 事务内设置,事务结束后自动回滚,不污染连接池。
+_STATEMENT_TIMEOUT = "10s"
 
 
 class DataExplorerQueryClient:
@@ -249,7 +256,8 @@ class DataExplorerQueryClient:
         Includes safety checks to prevent modification queries and memory exhaustion.
 
         NOTE: This method intentionally accepts raw SQL (user's explicit intent).
-        Defense layers: sqlparse SELECT-only check + read-only connection.
+        Defense layers: sqlparse SELECT-only check + read-only connection
+        + statement_timeout (Task 2.3) + DataSanitizer.sanitize_error (Task 2.3).
 
         Returns:
             dict: {
@@ -307,12 +315,20 @@ class DataExplorerQueryClient:
         # AUTOCOMMIT.  AUTOCOMMIT is NOT read-only — it auto-commits every
         # statement, allowing writes to slip through if keyword/sqlparse checks
         # are bypassed (e.g. SELECT ... INTO, COPY ... TO PROGRAM).
+        # Task 2.3: SET LOCAL statement_timeout 仅影响当前事务,事务结束后自动回滚,
+        # 为重查询提供数据库侧硬超时,防止卡死连接池。
+        cid = ensure_correlation_id()
+        start_ts = time.perf_counter()
+        truncated = False
+        success = False
         conn = None
         try:
             with self._engine.connect() as conn:  # type: ignore[union-attr]
                 conn = conn.execution_options(isolation_level="REPEATABLE READ")
                 with conn.begin():
+                    # 顺序: READ ONLY → statement_timeout → 用户 SQL
                     conn.execute(sa.text("SET TRANSACTION READ ONLY"))
+                    conn.execute(sa.text(f"SET LOCAL statement_timeout = '{_STATEMENT_TIMEOUT}'"))
                     result = conn.execute(sa.text(sql_query))
 
                     # Protection: Fetch at most 2000 rows to prevent memory explosion (DoS)
@@ -320,15 +336,35 @@ class DataExplorerQueryClient:
 
                     cols = list(result.keys())
                     rows = result.fetchmany(MAX_FETCH)
+                    truncated = len(rows) >= MAX_FETCH
 
                     df = pd.DataFrame(rows, columns=cols)
+                    success = True
 
                     return {
                         "success": True,
                         "data": df,
                         "error": None
-                        if len(rows) < MAX_FETCH
+                        if not truncated
                         else f"Warning: Result truncated to {MAX_FETCH} rows for performance.",
                     }
         except Exception as e:
-            return {"success": False, "data": None, "error": str(e)}
+            # Task 2.3: 错误消息经 DataSanitizer.sanitize_error 脱敏,避免泄露
+            # URL 凭证/路径/已注册 secret(R9)。返回结构化 dict,非 str(e)。
+            sanitized = DataSanitizer.sanitize_error(e)
+            logger.warning(
+                "[DataExplorerQueryClient] execute_sql failed. cid=%s duration_ms=%.1f",
+                cid,
+                (time.perf_counter() - start_ts) * 1000,
+            )
+            return {"success": False, "data": None, "error": sanitized}
+        finally:
+            # Task 2.3: 日志只记录 correlation id/耗时/成功失败/截断状态,
+            # 不记录 SQL 内容或错误细节(避免泄露查询语义/敏感信息)。
+            if success:
+                logger.info(
+                    "[DataExplorerQueryClient] execute_sql ok. cid=%s duration_ms=%.1f truncated=%s",
+                    cid,
+                    (time.perf_counter() - start_ts) * 1000,
+                    truncated,
+                )
