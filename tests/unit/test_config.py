@@ -13,9 +13,11 @@ def restore_config_after_reload():
 
     original_db_url = config.DB_URL
     original_db_url_sync = config.DB_URL_SYNC
+    original_app_root = config.APP_ROOT
     yield
     config.DB_URL = original_db_url
     config.DB_URL_SYNC = original_db_url_sync
+    config.APP_ROOT = original_app_root
 
 
 class TestConfigModule:
