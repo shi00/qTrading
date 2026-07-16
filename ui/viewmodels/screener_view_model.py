@@ -238,11 +238,31 @@ class ScreenerViewModel:
                     "name": "ai_system_prompt",
                     "label_key": "ai_system_prompt",
                     "type": "textarea",
-                    "default": "",  # UI uses get_base_prompt to map the value dynamically
+                    "default": "",  # UI uses vm.get_base_prompt to map the value dynamically
                 },
             )
 
         return params
+
+    def get_base_prompt(self, strategy_key: str) -> str:
+        """获取策略基础 prompt (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``strategy_prompts.get_base_prompt``，不再直接 import
+        ``strategies`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from strategies.strategy_prompts import get_base_prompt
+
+        return get_base_prompt(strategy_key)
+
+    def get_column_alias(self, table_name: str | None, col: str) -> str:
+        """获取列别名 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``MetaDataManager.get_column_alias``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.persistence.metadata_manager import MetaDataManager
+
+        return MetaDataManager.get_column_alias(table_name, col)
 
     def select_strategy(self, key: str | None) -> None:
         """选中策略 + 计算 tier_hint（R.2.1: 内聚到 VM, 消除 View 双源真相）。

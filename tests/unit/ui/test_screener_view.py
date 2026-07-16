@@ -90,9 +90,15 @@ class TestFormatCellValue:
 
 
 class TestBuildTableData:
+    def _make_vm(self) -> MagicMock:
+        """Task 5.1: _build_table_data 需要 vm.get_column_alias 参数。"""
+        vm = MagicMock()
+        vm.get_column_alias.side_effect = lambda table, col: col
+        return vm
+
     def test_hides_hidden_columns(self):
         df = pd.DataFrame({"symbol": ["s1"], "ts_code": ["000001.SZ"], "name": ["test"]})
-        cols, rows = _build_table_data(df)
+        cols, rows = _build_table_data(df, self._make_vm())
         col_ids = [c["id"] for c in cols]
         assert "symbol" not in col_ids
         assert "ts_code" in col_ids
@@ -100,17 +106,17 @@ class TestBuildTableData:
 
     def test_uses_custom_width(self):
         df = pd.DataFrame({"ts_code": ["000001.SZ"]})
-        cols, _ = _build_table_data(df)
+        cols, _ = _build_table_data(df, self._make_vm())
         assert cols[0]["width"] == _COLUMN_WIDTHS["ts_code"]
 
     def test_default_width_for_unknown_col(self):
         df = pd.DataFrame({"unknown_col": ["val"]})
-        cols, _ = _build_table_data(df)
+        cols, _ = _build_table_data(df, self._make_vm())
         assert cols[0]["width"] == 80
 
     def test_formats_rows(self):
         df = pd.DataFrame({"name": ["test"], "close": [12.34]})
-        _, rows = _build_table_data(df)
+        _, rows = _build_table_data(df, self._make_vm())
         assert len(rows) == 1
         assert rows[0]["name"] == "test"
         assert rows[0]["close"] == "12.34"
