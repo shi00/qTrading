@@ -1,0 +1,54 @@
+name: Docs Consistency Check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'man/**'
+      - 'pyproject.toml'
+      - 'installer.iss'
+      - '.release-please-manifest.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'man/**'
+      - 'pyproject.toml'
+      - 'installer.iss'
+      - '.release-please-manifest.json'
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs-check:
+    name: Docs Consistency Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: '3.13'
+
+      - name: Verify Version Consistency
+        run: python scripts/verify_versions.py
+
+      - name: Check Docs Consistency
+        run: python scripts/check_docs_consistency.py
