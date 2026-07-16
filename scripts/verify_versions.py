@@ -8,6 +8,7 @@ Checks:
 5. SECURITY.md supported version matches pyproject.toml major.minor
 6. No empty markdown links ]() in README.md
 7. CLAUDE.md reference-style pointers (见 `xxx.py`) target existing files
+8. Flet 三包（flet / flet-desktop / flet-charts）版本一致性
 
 Usage: python scripts/verify_versions.py
 """
@@ -172,6 +173,33 @@ def check_claude_references() -> list[str]:
     return errors
 
 
+def check_flet_version_consistency() -> list[str]:
+    """Check 8: flet / flet-desktop / flet-charts 三包版本一致。
+
+    pyproject.toml [project.dependencies] 中三包格式为 "flet==X.Y.Z" 等。
+    三包必须锁定同一版本（flet-charts 自 V1 拆包后需与 flet 主包同步升级）。
+    """
+    errors: list[str] = []
+    with open(PYPROJECT_PATH, "rb") as f:
+        cfg = tomllib.load(f)
+    deps = cfg.get("project", {}).get("dependencies", [])
+    versions: dict[str, str] = {}
+    for entry in deps:
+        for pkg in ("flet", "flet-desktop", "flet-charts"):
+            m = re.match(rf"^{re.escape(pkg)}==(\S+)$", entry.strip())
+            if m:
+                versions[pkg] = m.group(1)
+    missing = [pkg for pkg in ("flet", "flet-desktop", "flet-charts") if pkg not in versions]
+    if missing:
+        errors.append(f"pyproject.toml missing flet packages: {', '.join(missing)}")
+        return errors
+    unique = set(versions.values())
+    if len(unique) > 1:
+        details = ", ".join(f"{pkg}={ver}" for pkg, ver in versions.items())
+        errors.append(f"flet version mismatch: {details}")
+    return errors
+
+
 def main() -> None:
     errors: list[str] = []
     fixed_any = False
@@ -242,6 +270,9 @@ def main() -> None:
 
     # Check 7: CLAUDE.md reference validity
     errors.extend(check_claude_references())
+
+    # Check 8: Flet 三包版本一致性
+    errors.extend(check_flet_version_consistency())
 
     if fixed_any:
         print("Auto-fixed version mismatches. Please stage the changes and try committing again.")

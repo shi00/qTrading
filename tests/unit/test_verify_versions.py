@@ -19,10 +19,11 @@ def setup_test_files(
     manifest_v="0.6.9",
     pkg_pyright="1.1.300",
     ci_pyright="1.1.300",
+    flet_v="0.86.0",
 ):
     pyproject = tmp_path / "pyproject.toml"
     pyproject.write_text(
-        f'[project]\nversion = "{pyproject_v}"\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n',
+        f'[project]\nversion = "{pyproject_v}"\ndependencies = ["flet=={flet_v}", "flet-desktop=={flet_v}", "flet-charts=={flet_v}"]\n\n[project.optional-dependencies]\ndev = ["pyright>={pkg_pyright}"]\n',
         encoding="utf-8",
     )
 
@@ -362,6 +363,86 @@ def test_verify_versions_pyright_mismatch(tmp_path):
         claude,
         requirements_dev,
     ) = setup_test_files(tmp_path, pkg_pyright="1.1.300", ci_pyright="1.1.301")
+    patches = _patch_all_paths(
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+        requirements_dev,
+    )
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        stack.enter_context(patch("sys.argv", ["verify_versions.py"]))
+        with pytest.raises(SystemExit) as exc_info:
+            verify_versions.main()
+    assert exc_info.value.code == 1
+
+
+def test_verify_versions_flet_mismatch(tmp_path):
+    """Check 8: flet 三包版本不一致应报错。"""
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+        requirements_dev,
+    ) = setup_test_files(tmp_path)
+    # Overwrite pyproject with mismatched flet versions
+    pyproject.write_text(
+        '[project]\nversion = "0.6.9"\ndependencies = ["flet==0.86.0", "flet-desktop==0.86.0", "flet-charts==0.85.3"]\n\n[project.optional-dependencies]\ndev = ["pyright>=1.1.300"]\n',
+        encoding="utf-8",
+    )
+    patches = _patch_all_paths(
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+        requirements_dev,
+    )
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        stack.enter_context(patch("sys.argv", ["verify_versions.py"]))
+        with pytest.raises(SystemExit) as exc_info:
+            verify_versions.main()
+    assert exc_info.value.code == 1
+
+
+def test_verify_versions_flet_missing(tmp_path):
+    """Check 8: flet 三包缺失应报错。"""
+    (
+        pyproject,
+        installer,
+        pkg_json,
+        ci_workflow,
+        manifest,
+        readme,
+        contributing,
+        security,
+        claude,
+        requirements_dev,
+    ) = setup_test_files(tmp_path)
+    # Overwrite pyproject without flet packages
+    pyproject.write_text(
+        '[project]\nversion = "0.6.9"\ndependencies = ["polars==1.0.0"]\n\n[project.optional-dependencies]\ndev = ["pyright>=1.1.300"]\n',
+        encoding="utf-8",
+    )
     patches = _patch_all_paths(
         pyproject,
         installer,

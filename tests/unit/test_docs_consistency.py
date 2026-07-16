@@ -454,3 +454,171 @@ class TestNoteLazyFormatDetection:
         assert len(issues) == 1, f"First block should be flagged, second should not. Got: {issues}"
         _, missing = issues[0]
         assert "ceiling:" in missing and "upgrade:" in missing, f"First block should miss both, got {missing}"
+
+
+class TestDocsConsistencyScriptExtensions:
+    """C5 第二阶段扩展：Windows 编码修复 / man/ 受检 / Flet 版本漂移 / 相对链接死链。
+
+    覆盖 r6 检视报告 M4 修复项的契约测试。
+    """
+
+    def test_flet_best_practices_in_checked_docs(self):
+        """man/flet-best-practices.md 应在 CHECKED_DOCS 中。"""
+        from check_docs_consistency import CHECKED_DOCS, FLET_BEST_PRACTICES_PATH
+
+        assert FLET_BEST_PRACTICES_PATH in CHECKED_DOCS, (
+            f"FLET_BEST_PRACTICES_PATH should be in CHECKED_DOCS, got {CHECKED_DOCS}"
+        )
+
+    def test_utf8_reconfigure_no_error_on_import(self):
+        """导入 check_docs_consistency 模块时 reconfigure stdout/stderr 不应抛异常。
+
+        Windows 默认 GBK 终端下，若未 reconfigure，emoji（✅/❌）输出会触发 UnicodeEncodeError。
+        模块加载时已调用 reconfigure(encoding="utf-8")，导入成功即证明不抛异常。
+        """
+        import importlib
+
+        import check_docs_consistency
+
+        # reload 重新执行模块级 reconfigure 代码，验证不抛异常
+        importlib.reload(check_docs_consistency)
+
+    def test_main_emoji_output_no_unicode_error(self):
+        """main() 输出含 emoji（✅/❌）但不应触发 UnicodeEncodeError。
+
+        无论 main() 返回 0 或 1，emoji 输出都不应触发 UnicodeEncodeError。
+        """
+        from check_docs_consistency import main
+
+        try:
+            main()
+        except UnicodeEncodeError:
+            pytest.fail("main() should not raise UnicodeEncodeError on emoji output")
+
+    def test_resolve_target_doc_same_file_anchor(self):
+        """_resolve_target_doc: 同文件锚点（#section）返回 source_doc。"""
+        from check_docs_consistency import CLAUDE_PATH, _resolve_target_doc
+
+        result = _resolve_target_doc("#section", CLAUDE_PATH)
+        assert result == CLAUDE_PATH
+
+    def test_resolve_target_doc_cross_file_from_man(self):
+        """_resolve_target_doc: man/ 下 ../CLAUDE.md 应解析为 ROOT/CLAUDE.md。"""
+        from check_docs_consistency import CLAUDE_PATH, FLET_BEST_PRACTICES_PATH, _resolve_target_doc
+
+        result = _resolve_target_doc("../CLAUDE.md#section", FLET_BEST_PRACTICES_PATH)
+        assert result == CLAUDE_PATH
+
+    def test_resolve_target_doc_non_checked_target(self):
+        """_resolve_target_doc: 非 CHECKED_DOCS 中的目标返回 None。"""
+        from check_docs_consistency import CLAUDE_PATH, _resolve_target_doc
+
+        # ui/hooks.py 不在 CHECKED_DOCS 中
+        result = _resolve_target_doc("ui/hooks.py#section", CLAUDE_PATH)
+        assert result is None
+
+    def test_relative_dead_links_detects_broken(self, tmp_path, monkeypatch):
+        """man/ 目录下含 ./nonexistent.py 的文档应报死链。"""
+        from check_docs_consistency import check_relative_dead_links
+
+        # 构造 man/ 目录下的临时文档
+        man_dir = tmp_path / "man"
+        man_dir.mkdir()
+        tmp_doc = man_dir / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n[link](./nonexistent.py)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [tmp_doc])
+
+        errors = check_relative_dead_links()
+        assert len(errors) == 1, f"Should detect 1 broken link, got {errors}"
+        assert "nonexistent.py" in errors[0]
+
+    def test_relative_dead_links_valid_path(self, tmp_path, monkeypatch):
+        """man/ 目录下含 ../ui/hooks.py 的文档不应报死链（ROOT/ui/hooks.py 存在）。"""
+        from check_docs_consistency import check_relative_dead_links
+
+        # 构造 man/ 目录下的临时文档，引用 ../ui/hooks.py
+        man_dir = tmp_path / "man"
+        man_dir.mkdir()
+        # 创建 ui/hooks.py 文件
+        ui_dir = tmp_path / "ui"
+        ui_dir.mkdir()
+        (ui_dir / "hooks.py").write_text("# stub\n", encoding="utf-8")
+
+        tmp_doc = man_dir / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n[link](../ui/hooks.py)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [tmp_doc])
+
+        errors = check_relative_dead_links()
+        assert errors == [], f"Should not flag valid relative link: {errors}"
+
+    def test_relative_dead_links_skips_anchor_links(self, tmp_path, monkeypatch):
+        """含锚点的链接（./file.md#section）不应被 check_relative_dead_links 检查。"""
+        from check_docs_consistency import check_relative_dead_links
+
+        tmp_doc = tmp_path / "test_doc.md"
+        # 带锚点的链接，目标文件不存在，但应由 check_anchor_dead_links 处理
+        tmp_doc.write_text("# Test\n\n[link](./nonexistent.md#section)\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.CHECKED_DOCS", [tmp_doc])
+
+        errors = check_relative_dead_links()
+        assert errors == [], f"Should not flag anchor links: {errors}"
+
+    def test_flet_version_drift_detects_old_version(self, tmp_path, monkeypatch):
+        """Flet 上下文中含 0.85.3（旧版本）的文档应被检测到。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\nFlet 0.85.3 是当前版本。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert any("0.85.3" in e for e in errors), f"Should detect 0.85.3: {errors}"
+
+    def test_flet_version_drift_detects_current_version(self, tmp_path, monkeypatch):
+        """Flet 上下文中含 0.86.0（pyproject.toml 锁定版本）的文档也应被检测到。
+
+        根据 spec「文档 SHALL NOT 硬编码 Flet 补丁版本号」，任何具体版本号都应报错。
+        """
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\nFlet 0.86.0 是当前版本。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert any("0.86.0" in e for e in errors), f"Should detect 0.86.0: {errors}"
+
+    def test_flet_version_drift_no_version_no_error(self, tmp_path, monkeypatch):
+        """文档中无 Flet 关键词附近版本号时不报错。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n这是一个测试文档，无版本号。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert errors == [], f"Should not flag document without version: {errors}"
+
+    def test_flet_version_drift_version_not_near_flet_keyword(self, tmp_path, monkeypatch):
+        """版本号不在 Flet 关键词附近（前后 50 字符内）时不报错。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        # 版本号与 Flet 关键词距离超过 50 字符
+        content = "# Test\n\n" + "Flet 是一个框架。" + "x" * 60 + " 0.85.3 是某个版本。\n"
+        tmp_doc.write_text(content, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert errors == [], f"Should not flag version far from Flet keyword: {errors}"
+
+    def test_flet_version_drift_lowercase_flet_keyword(self, tmp_path, monkeypatch):
+        """小写 'flet' 关键词附近的版本号也应被检测到。"""
+        from check_docs_consistency import check_flet_version_drift
+
+        tmp_doc = tmp_path / "test_doc.md"
+        tmp_doc.write_text("# Test\n\n使用 flet==0.85.3 进行开发。\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.FLET_VERSION_DOCS", [tmp_doc])
+
+        errors = check_flet_version_drift()
+        assert any("0.85.3" in e for e in errors), f"Should detect 0.85.3 near 'flet': {errors}"

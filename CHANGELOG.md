@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Documentation
+* **governance:** 修复 docs/review716/r6.md 检视报告问题
+  * Flet 版本事实对齐 pyproject.toml（移除 0.85.3 硬编码，改为引用 pyproject.toml）
+  * Dialog/Dropdown/Hooks cleanup 契约统一（ft.use_dialog/on_select/cleanup= 显式参数）
+  * 测试 loop scope 矛盾消除（unit=function, integration/e2e override 另列）
+  * R1/R13 自动化范围与文档声明对齐
+  * check_docs_consistency.py 修复（Windows 编码 + man/ 受检 + Flet 版本漂移检查 + 相对链接死链）
+  * CLAUDE.md 精简为稳定策略层，CONTRIBUTING.md 收敛为贡献者入口
+  * man/flet-best-practices.md 从 1310 行收敛为项目差异指南（193 行）
+  * 已解决事项（Windows 测试泄漏、V0 垫片删除、声明式迁移收官）从活动规范移入本 changelog
+
 ### Features
 * **flet:** upgrade 0.28.3 → 0.85.3 (architecture-level rewrite)
   * R1: ft.app(target=) → ft.run(main=, [web_renderer=])
