@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.financial_dao import FinancialDao
 
 pytestmark = pytest.mark.unit
@@ -833,3 +834,87 @@ class TestGetIncompleteFinancialStocks:
         dao._read_db = AsyncMock(side_effect=Exception("db error"))
         result = await dao.get_incomplete_financial_stocks()
         assert result == set()
+
+
+class TestEngineDisposedErrorPropagation:
+    """R5: EngineDisposedError 必须原样传播，不可被 except Exception 吞为空值返回。"""
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_financial_reports_history("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_get_financial_reports_history_batch_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_financial_reports_history_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_fina_audit_batch_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_fina_audit_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_dividend_batch_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_dividend_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_pledge_stat_batch_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_pledge_stat_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_fina_forecast_batch_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_fina_forecast_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_fina_mainbz("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_get_fina_mainbz_batch_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao.chunked_in_query = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_fina_mainbz_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_verify_stock_financial_integrity_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.verify_stock_financial_integrity("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_get_incomplete_financial_stocks_propagates_engine_disposed(self):
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_incomplete_financial_stocks()
+
+    @pytest.mark.asyncio
+    async def test_database_query_error_still_degrades_to_empty(self):
+        """普通 DatabaseQueryError 仍走降级路径，返回空 DataFrame（不破坏原行为）。"""
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = _make_dao()
+        dao._read_db = AsyncMock(side_effect=DatabaseQueryError("db error"))
+        result = await dao.get_financial_reports_history("000001.SZ")
+        assert result.empty

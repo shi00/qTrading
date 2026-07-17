@@ -6,6 +6,7 @@ import pandas as pd
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.quote_dao import (
     QuoteDao,
     _is_safe_identifier,
@@ -1173,3 +1174,77 @@ class TestQuoteDaoGetCachedTradeDatesNone:
         dao._read_db = AsyncMock(return_value=None)
         result = await dao.get_cached_trade_dates()
         assert result == set()
+
+
+class TestQuoteDaoEngineDisposedErrorPropagation:
+    """R5: EngineDisposedError 必须原样传播，不可被 except Exception 吞为空值返回。"""
+
+    @pytest.mark.asyncio
+    async def test_check_data_exists_propagates_engine_disposed(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.check_data_exists("20240615", tables=["daily_quotes"], raise_on_error=False)
+
+    @pytest.mark.asyncio
+    async def test_get_expected_stock_count_propagates_engine_disposed(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_expected_stock_count("20240615")
+
+    @pytest.mark.asyncio
+    async def test_get_cached_dates_for_table_propagates_engine_disposed(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_cached_dates_for_table("daily_quotes")
+
+    @pytest.mark.asyncio
+    async def test_get_bulk_table_counts_propagates_engine_disposed(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_bulk_table_counts("daily_quotes", "20240101", "20240131")
+
+    @pytest.mark.asyncio
+    async def test_get_bulk_expected_stock_counts_propagates_engine_disposed(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_bulk_expected_stock_counts("20240101", "20240131")
+
+    @pytest.mark.asyncio
+    async def test_get_field_completeness_propagates_engine_disposed(self):
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_field_completeness("20240615")
+
+    @pytest.mark.asyncio
+    async def test_get_bulk_sync_quality_scores_propagates_engine_disposed(self):
+        """get_bulk_sync_quality_scores 内层 field_completeness 也必须传播 EngineDisposedError。"""
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        with patch("data.persistence.daos.quote_dao._get_effective_synced_tables", return_value=[]):
+            with patch("utils.config_handler.ConfigHandler.get_sync_integrity_config") as mock_cfg:
+                mock_cfg.return_value = {
+                    "quotes_tolerance_ratio": 0.9,
+                    "indicators_tolerance_ratio": 0.9,
+                    "moneyflow_tolerance_ratio": 0.9,
+                    "quality_weights": {},
+                }
+                dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 1, 15): 100})
+                dao.get_bulk_table_counts = AsyncMock(return_value={})
+                dao.get_field_completeness = AsyncMock(side_effect=EngineDisposedError("disposed"))
+                with pytest.raises(EngineDisposedError):
+                    await dao.get_bulk_sync_quality_scores("20240115", "20240115")
+
+    @pytest.mark.asyncio
+    async def test_check_data_exists_database_query_error_still_degrades(self):
+        """普通 DatabaseQueryError 在 raise_on_error=False 时仍返回 False（不破坏原行为）。"""
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = QuoteDao(MagicMock(spec=AsyncEngine))
+        dao._read_db_select = AsyncMock(side_effect=DatabaseQueryError("db error"))
+        result = await dao.check_data_exists("20240615", tables=["daily_quotes"], raise_on_error=False)
+        assert result is False

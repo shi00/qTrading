@@ -1,6 +1,7 @@
 """BacktestDAO 单元测试"""
 
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -306,11 +307,26 @@ class TestBacktestDAO:
 
     @pytest.mark.asyncio
     async def test_delete_result_engine_disposed(self, dao: BacktestDAO) -> None:
+        """R5: _check_engine 抛 EngineDisposedError 时必须传播，不再转为 False。"""
         dao._check_engine = MagicMock(side_effect=EngineDisposedError("disposed"))
 
-        success = await dao.delete_result("test_run_001")
+        with pytest.raises(EngineDisposedError):
+            await dao.delete_result("test_run_001")
 
-        assert success is False
+    @pytest.mark.asyncio
+    async def test_delete_result_engine_disposed_during_delete(self, dao: BacktestDAO) -> None:
+        """R5: _guarded_begin 抛 EngineDisposedError 时必须传播，不再转为 False。"""
+        dao._check_engine = MagicMock()
+
+        @asynccontextmanager
+        async def mock_begin_disposed(conn=None):
+            raise EngineDisposedError("disposed")
+            yield  # pragma: no cover - unreachable, required for asynccontextmanager
+
+        dao._guarded_begin = mock_begin_disposed
+
+        with pytest.raises(EngineDisposedError):
+            await dao.delete_result("test_run_001")
 
     @pytest.mark.asyncio
     async def test_delete_result_cancelled_error_propagates(self, dao: BacktestDAO) -> None:
@@ -329,6 +345,7 @@ class TestBacktestDAO:
 
     @pytest.mark.asyncio
     async def test_delete_result_shutdown_connection_error(self, dao: BacktestDAO) -> None:
+        """R5: _guarded_begin 把 'no active connection' 转为 EngineDisposedError，必须传播。"""
         dao._check_engine = MagicMock()
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(side_effect=Exception("no active connection"))
@@ -339,19 +356,18 @@ class TestBacktestDAO:
 
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_cm._instance = None
-            success = await dao.delete_result("test_run_001")
-
-        assert success is False
+            with pytest.raises(EngineDisposedError):
+                await dao.delete_result("test_run_001")
 
     @pytest.mark.asyncio
     async def test_delete_result_cache_manager_disposed(self, dao: BacktestDAO) -> None:
+        """R5: CacheManager 已 disposed 时 _check_engine 抛 EngineDisposedError，必须传播。"""
         with patch("data.cache.cache_manager.CacheManager") as mock_cm:
             mock_instance = MagicMock()
             mock_instance._disposed = True
             mock_cm._instance = mock_instance
-            success = await dao.delete_result("test_run_001")
-
-        assert success is False
+            with pytest.raises(EngineDisposedError):
+                await dao.delete_result("test_run_001")
 
     @pytest.mark.asyncio
     async def test_delete_result_engine_not_initialized(self, dao: BacktestDAO) -> None:

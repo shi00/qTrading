@@ -4,6 +4,7 @@ import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncEngine
 from contextlib import asynccontextmanager
 
+from data.persistence.daos.base_dao import DatabaseQueryError, EngineDisposedError
 from data.persistence.daos.holder_dao import HolderDao
 
 pytestmark = pytest.mark.unit
@@ -416,3 +417,50 @@ class TestSaveTop10HoldersNullFilter:
         result = await dao.save_top10_holders(df)
         assert result == 5
         dao._save_upsert.assert_called_once()
+
+
+class TestHolderDaoEngineDisposedErrorPropagation:
+    """R5: EngineDisposedError 必须原样传播，不可被 except Exception 吞为空值返回。"""
+
+    @pytest.mark.asyncio
+    async def test_get_top10_holders_propagates_engine_disposed(self):
+        dao = HolderDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_top10_holders("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_get_stk_holdernumber_propagates_engine_disposed(self):
+        dao = HolderDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_stk_holdernumber("000001.SZ")
+
+    @pytest.mark.asyncio
+    async def test_get_top10_holders_batch_propagates_engine_disposed(self):
+        dao = HolderDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_top10_holders_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_stk_holdernumber_batch_propagates_engine_disposed(self):
+        dao = HolderDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_stk_holdernumber_batch(["000001.SZ"])
+
+    @pytest.mark.asyncio
+    async def test_get_existing_top10_ts_codes_propagates_engine_disposed(self):
+        dao = HolderDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_existing_top10_ts_codes("20240630")
+
+    @pytest.mark.asyncio
+    async def test_get_top10_holders_database_query_error_still_degrades(self):
+        """普通 DatabaseQueryError 仍降级为空 DataFrame（不破坏原行为）。"""
+        dao = HolderDao(MagicMock(spec=AsyncEngine))
+        dao._read_db = AsyncMock(side_effect=DatabaseQueryError("db error"))
+        result = await dao.get_top10_holders("000001.SZ")
+        assert result.empty

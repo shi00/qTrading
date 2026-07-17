@@ -24,7 +24,7 @@ from data.persistence.models import (
     get_model_pk_columns,
 )
 
-from .base_dao import BaseDao
+from .base_dao import BaseDao, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +217,8 @@ class QuoteDao(BaseDao):
             return found_tables == set(safe_tables)
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as exc:
             if raise_on_error:
                 raise
@@ -277,6 +279,8 @@ class QuoteDao(BaseDao):
                 return int(df["cnt"].iloc[0])
             return 0
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[QuoteDao] Failed to get expected stock count for %s: %s", trade_date, e)
@@ -381,6 +385,8 @@ class QuoteDao(BaseDao):
                 return set()
             return set(df[date_col])
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning(
@@ -761,6 +767,8 @@ class QuoteDao(BaseDao):
             return normalized_results
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.warning("[QuoteDao] Failed to get bulk counts for %s: %s", table_name, e)
             return {}
@@ -829,6 +837,8 @@ class QuoteDao(BaseDao):
 
             return normalized_results
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.warning("[QuoteDao] Failed to get bulk expected counts: %s", e)
@@ -989,6 +999,8 @@ class QuoteDao(BaseDao):
                 field_completeness = await self.get_field_completeness(latest_date)
         except asyncio.CancelledError:
             raise
+        except EngineDisposedError:
+            raise
         except Exception as e:
             logger.debug("[QuoteDao] Field completeness check skipped: %s", e)
 
@@ -1054,6 +1066,8 @@ class QuoteDao(BaseDao):
                             result[col] = None
                     return result
         except asyncio.CancelledError:
+            raise
+        except EngineDisposedError:
             raise
         except Exception as e:
             logger.debug("[QuoteDao] get_field_completeness failed for %s: %s", trade_date, e)

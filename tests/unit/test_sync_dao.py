@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, AsyncMock
 import pandas as pd
 import datetime
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.sync_dao import SyncDao
 from data.constants import SYNC_RESULT_EMPTY, SYNC_RESULT_FETCH_FAILED
 
@@ -155,3 +156,33 @@ class TestSyncDaoClearStep4SyncStatus:
         dao = SyncDao(MagicMock())
         dao._write_db = AsyncMock(return_value=1)
         await dao.clear_step4_sync_status()
+
+
+class TestSyncDaoEngineDisposedErrorPropagation:
+    """R5: EngineDisposedError 必须原样传播，不论 raise_on_error 取值。"""
+
+    @pytest.mark.asyncio
+    async def test_get_completed_step4_stocks_propagates_when_raise_on_error_false(self):
+        """raise_on_error=False 时 EngineDisposedError 仍必须传播（不可降级为 set()）。"""
+        dao = SyncDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_completed_step4_stocks(sync_version=1, raise_on_error=False)
+
+    @pytest.mark.asyncio
+    async def test_get_completed_step4_stocks_propagates_when_raise_on_error_true(self):
+        """raise_on_error=True 时 EngineDisposedError 也必须传播。"""
+        dao = SyncDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
+        with pytest.raises(EngineDisposedError):
+            await dao.get_completed_step4_stocks(sync_version=1, raise_on_error=True)
+
+    @pytest.mark.asyncio
+    async def test_get_completed_step4_stocks_database_query_error_still_degrades(self):
+        """普通 Exception 在 raise_on_error=False 时仍降级为 set()（不破坏原行为）。"""
+        from data.persistence.daos.base_dao import DatabaseQueryError
+
+        dao = SyncDao(MagicMock())
+        dao._read_db = AsyncMock(side_effect=DatabaseQueryError("db error"))
+        result = await dao.get_completed_step4_stocks(sync_version=1, raise_on_error=False)
+        assert result == set()
