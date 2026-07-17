@@ -63,7 +63,7 @@ redlines:
   - id: R8
     title: 废弃 API
     description: "使用 _write_db(is_many=True) 进行批量写入 (会发 DeprecationWarning，必须用 _save_upsert())"
-    enforcement: "CI-test（全量，DeprecationWarning 检测）"
+    enforcement: "CI-test（filterwarnings error::DeprecationWarning）"
     human_review_required: false
 
   - id: R9
@@ -75,7 +75,7 @@ redlines:
   - id: R10
     title: 硬编码密钥
     description: "在代码或测试中硬编码 API Key / DB 密码 (必须从 keyring 或环境变量读取)"
-    enforcement: "安全扫描 + 仅人工评审"
+    enforcement: "CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审"
     human_review_required: true
 
   - id: R11
