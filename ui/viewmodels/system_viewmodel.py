@@ -153,7 +153,7 @@ class SystemViewModel:
         """
         from data.external.tushare_client import TushareClient
 
-        return TushareClient().get_tier_apis(tier)
+        return list(TushareClient().get_tier_apis(tier))
 
     async def on_tier_changed(
         self,
