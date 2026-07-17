@@ -1,4 +1,4 @@
-"""automation_tab — 声明式组件 (Phase D.4).
+"""automation_tab — 声明式组件 (Phase D.4 + Task 5.2 Settings VM 下沉).
 
 从命令式容器子类重写为 ``@ft.component`` 函数组件范式
 (CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
@@ -6,11 +6,14 @@
 变更要点:
 - 2 个命令式容器子类 → 2 个 ``@ft.component`` 函数组件
   (AutomationTab / NotificationsTab)
+- AutomationSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2)
+  收敛 ConfigHandler/ThreadPoolManager 业务编排 (计划任务/AI 概念任务/新闻提醒)
 - 移除命令式生命周期回调 / 手动刷新 / 手动重渲染 / page 引用持有
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
-- 状态驱动: ConfigHandler 读写用 ``use_state`` (纯 UI 状态, YAGNI 不建 VM)
+- 状态驱动: switch/dropdown value 用 ``use_state`` (声明式自动重渲染)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
 - 异步任务: ``page.run_task`` 调度; R2 CancelledError 显式 raise
+- View 不再直接写 ConfigHandler / 编排 ThreadPoolManager (Task 5.2 DoD)
 """
 
 import asyncio
@@ -20,10 +23,10 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.components.settings_widgets import DashboardCard, SettingRow
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
-from utils.config_handler import ConfigHandler
-from utils.thread_pool import TaskType, ThreadPoolManager
+from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +100,13 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     """自动化任务设置标签页 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
-    - ConfigHandler 全局单例, 直接调用 (YAGNI 不建 VM)
+    - AutomationSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
+      收敛 ConfigHandler/ThreadPoolManager 业务编排 (计划任务/AI 概念任务)
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - 状态驱动: switch/dropdown value 用 ``use_state`` (声明式自动重渲染)
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步保存: ``page.run_task`` 调度, 失败时回滚 state
+    - View 不再直接写 ConfigHandler / 编排 ThreadPoolManager (Task 5.2 DoD)
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -110,19 +115,25 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
-    # --- Pure UI state (ConfigHandler 读写) ---
-    auto_enabled, set_auto_enabled = ft.use_state(ConfigHandler.is_auto_update_enabled())
-    auto_time, set_auto_time = ft.use_state(ConfigHandler.get_auto_update_time())
-    ai_enabled, set_ai_enabled = ft.use_state(ConfigHandler.is_ai_concept_schedule_enabled())
-    ai_time, set_ai_time = ft.use_state(ConfigHandler.get_ai_concept_schedule_time())
-    ai_engine, set_ai_engine = ft.use_state(ConfigHandler.get_ai_concept_search_engine())
+    # --- AutomationSettingsViewModel (内部模式: hook 实例化 + dispose on unmount) ---
+    settings_state, settings_vm = use_viewmodel(factory=lambda: AutomationSettingsViewModel())
 
-    # --- Async save handlers (R2: CancelledError 显式 raise) ---
+    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
+    auto_enabled, set_auto_enabled = ft.use_state(settings_state.auto_enabled)
+    auto_time, set_auto_time = ft.use_state(settings_state.auto_time)
+    ai_enabled, set_ai_enabled = ft.use_state(settings_state.ai_enabled)
+    ai_time, set_ai_time = ft.use_state(settings_state.ai_time)
+    ai_engine, set_ai_engine = ft.use_state(settings_state.ai_engine)
+
+    # --- Async save handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_schedule_toggle(new_enabled: bool) -> None:
         try:
-            await ThreadPoolManager().run_async(
-                TaskType.IO, ConfigHandler.save_config, {"auto_update_enabled": new_enabled}
-            )
+            success = await settings_vm.save_auto_update_enabled(new_enabled)
+            if not success:
+                set_auto_enabled(not new_enabled)
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(
                     I18n.get("settings_snack_auto_on") if new_enabled else I18n.get("settings_snack_auto_off"),
@@ -137,7 +148,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_schedule_time_change(new_time: str) -> None:
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"auto_update_time": new_time})
+            success = await settings_vm.save_auto_update_time(new_time)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
         except asyncio.CancelledError:
@@ -149,7 +164,12 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_ai_concept_toggle(new_enabled: bool) -> None:
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_ai_concept_schedule_enabled, new_enabled)
+            success = await settings_vm.save_ai_concept_enabled(new_enabled)
+            if not success:
+                set_ai_enabled(not new_enabled)
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(
                     I18n.get("settings_snack_auto_on") if new_enabled else I18n.get("settings_snack_auto_off"),
@@ -164,11 +184,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_ai_concept_time_change(new_time: str) -> None:
         try:
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                ConfigHandler.set_ai_concept_schedule_time,
-                new_time,
-            )
+            success = await settings_vm.save_ai_concept_time(new_time)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_time_set").format(time=new_time))
         except asyncio.CancelledError:
@@ -180,11 +200,11 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_ai_concept_engine_change(new_engine: str) -> None:
         try:
-            await ThreadPoolManager().run_async(
-                TaskType.IO,
-                ConfigHandler.set_ai_concept_search_engine,
-                new_engine,
-            )
+            success = await settings_vm.save_ai_concept_engine(new_engine)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("common_saved"))
         except asyncio.CancelledError:
@@ -423,11 +443,13 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     """通知设置标签页 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
-    - ConfigHandler 全局单例, 直接调用 (YAGNI 不建 VM)
+    - AutomationSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
+      收敛 ConfigHandler/ThreadPoolManager 业务编排 (新闻提醒)
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - 状态驱动: switch/dropdown value 用 ``use_state``
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步保存: ``page.run_task`` 调度, 失败时回滚 state
+    - View 不再直接写 ConfigHandler / 编排 ThreadPoolManager (Task 5.2 DoD)
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -436,18 +458,22 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     ft.use_state(get_observable_state)
     ft.use_state(AppColors.get_observable_state)
 
-    # --- Pure UI state ---
-    enable_news = ConfigHandler.get_config("enable_news_alerts", True)
-    news_interval = ConfigHandler.get_config("news_poll_interval", 60)
-    news_enabled, set_news_enabled = ft.use_state(bool(enable_news))
-    interval_val, set_interval_val = ft.use_state(str(news_interval))
+    # --- AutomationSettingsViewModel (内部模式: hook 实例化 + dispose on unmount) ---
+    settings_state, settings_vm = use_viewmodel(factory=lambda: AutomationSettingsViewModel())
 
-    # --- Async save handlers (R2: CancelledError 显式 raise) ---
+    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
+    news_enabled, set_news_enabled = ft.use_state(settings_state.news_enabled)
+    interval_val, set_interval_val = ft.use_state(settings_state.news_interval)
+
+    # --- Async save handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_news_toggle(new_enabled: bool) -> None:
         try:
-            await ThreadPoolManager().run_async(
-                TaskType.IO, ConfigHandler.save_config, {"enable_news_alerts": new_enabled}
-            )
+            success = await settings_vm.save_news_enabled(new_enabled)
+            if not success:
+                set_news_enabled(not new_enabled)
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if new_enabled:
                 if show_snack_callback:
                     show_snack_callback(I18n.get("settings_snack_news_on"))
@@ -463,14 +489,14 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_interval_change(new_val: str) -> None:
         try:
+            success = await settings_vm.save_news_interval(new_val)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
+                return
             val = int(new_val)
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.save_config, {"news_poll_interval": val})
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_interval_set").format(interval=val))
-        except ValueError:
-            logger.warning("[NotificationsTab] interval invalid value: %s", new_val)
-            if show_snack_callback:
-                show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:

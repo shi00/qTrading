@@ -455,7 +455,9 @@ def system_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     mock_config.set_theme_name.return_value = True
     mock_config.set_log_level.return_value = True
     mock_config.set_sync_max_concurrent_heavy.return_value = True
-    monkeypatch.setattr(mod, "ConfigHandler", mock_config)
+    # Task 5.2: ConfigHandler/ThreadPoolManager 下沉到 SystemSettingsViewModel,
+    # patch 目标改为 VM 模块 (View 不再直接持有这两个符号)
+    monkeypatch.setattr("ui.viewmodels.system_settings_view_model.ConfigHandler", mock_config)
 
     # --- Mock ThreadPoolManager ---
     mock_tpm_instance = MagicMock()
@@ -467,7 +469,7 @@ def system_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     mock_tpm_instance.submit = MagicMock(return_value=MagicMock())
     mock_tpm_instance.reload_config = MagicMock()
     mock_tpm_class = MagicMock(return_value=mock_tpm_instance)
-    monkeypatch.setattr(mod, "ThreadPoolManager", mock_tpm_class)
+    monkeypatch.setattr("ui.viewmodels.system_settings_view_model.ThreadPoolManager", mock_tpm_class)
 
     # --- Mock SystemViewModel ---
     fake_vm = _FakeSystemViewModel()
