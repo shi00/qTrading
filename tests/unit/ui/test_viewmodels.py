@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -939,37 +940,53 @@ class TestScreenerViewModelLoadHistoryTree:
             cm_instance = MagicMock()
             cm_instance.get_history_tree = AsyncMock(return_value=df)
             MockCM.return_value = cm_instance
-            result = await screener_vm.load_history_tree()
+            await screener_vm.load_history_tree()
 
-        assert "2026-05-16" in result
-        assert len(result["2026-05-16"]) == 2
-        assert "2026-05-15" in result
-        assert result["2026-05-16"][0]["run_id"] == "r1"
+        rows = screener_vm.state.history_tree.rows
+        assert len(rows) == 2
+        row_0516 = next(r for r in rows if r.d_key == "2026-05-16")
+        assert row_0516.total_cnt == 8
+        assert len(row_0516.strategies) == 2
+        assert row_0516.strategies[0]["run_id"] == "r1"
+        assert row_0516.strategies[0]["strategy_name"] == "momentum"
+        row_0515 = next(r for r in rows if r.d_key == "2026-05-15")
+        assert row_0515.total_cnt == 7
+        assert len(row_0515.strategies) == 1
+        assert row_0515.strategies[0]["run_id"] == "r3"
+        # offset = 0 + len(df) * 5 = 15, has_more = len(df) >= 5 is False
+        assert screener_vm.state.history_tree.offset == 15
+        assert screener_vm.state.history_tree.has_more is False
 
     async def test_with_empty_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.get_history_tree = AsyncMock(return_value=pd.DataFrame())
             MockCM.return_value = cm_instance
-            result = await screener_vm.load_history_tree()
+            await screener_vm.load_history_tree()
 
-        assert result == {}
+        assert screener_vm.state.history_tree.rows == ()
+        assert screener_vm.state.history_tree.offset == 0
+        assert screener_vm.state.history_tree.has_more is False
 
     async def test_with_none_data(self, screener_vm):
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.get_history_tree = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
-            result = await screener_vm.load_history_tree()
+            await screener_vm.load_history_tree()
 
-        assert result == {}
+        assert screener_vm.state.history_tree.rows == ()
+        assert screener_vm.state.history_tree.offset == 0
+        assert screener_vm.state.history_tree.has_more is False
 
-    async def test_with_offset(self, screener_vm):
+    async def test_with_append_uses_state_offset(self, screener_vm):
+        # 预设 offset=10 模拟已加载过一页; append=True 时 VM 应将其透传到 cache
+        screener_vm._set_state(history_tree=replace(screener_vm.state.history_tree, offset=10))
         with patch("ui.viewmodels.screener_view_model.CacheManager") as MockCM:
             cm_instance = MagicMock()
             cm_instance.get_history_tree = AsyncMock(return_value=None)
             MockCM.return_value = cm_instance
-            await screener_vm.load_history_tree(offset=10)
+            await screener_vm.load_history_tree(append=True)
 
         cm_instance.get_history_tree.assert_awaited_once_with(offset=10)
 
