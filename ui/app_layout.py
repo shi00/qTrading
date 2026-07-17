@@ -29,6 +29,7 @@ from ui.views.home_view import HomeView
 from ui.views.screener_view import ScreenerView
 from ui.views.settings_view import SettingsView
 from ui.views.task_center_view import TaskCenterView
+from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ def _get_page() -> ft.Page | None:
 
 
 @ft.component
-def _build_pages_stack(current_tab: int) -> ft.Stack:
+def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
     """构造所有页面控件的 ``ft.Stack`` (``visible`` prop 控制显示/隐藏)。
 
     项目内存硬约束 #34: state-driven rendering (ft.Stack + visible prop)
@@ -66,35 +67,39 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
 
     声明式范式: 每次重渲染重新构造控件树, 由 Flet diff 算法决定实际 DOM 更新。
     子视图内部用 ``use_state``/``use_viewmodel`` 持久化自身状态, 重建不丢失。
+
+    Args:
+        current_tab: 当前激活的 NavTabs 值, 控制 visible prop。
+        viewport: AppLayout 维护的窗口尺寸快照, 下发给所有子视图 (Phase 6.2 P2-1)。
     """
     pages = [
         ft.Container(
-            content=HomeView(active=current_tab == NavTabs.MARKET),
+            content=HomeView(active=current_tab == NavTabs.MARKET, viewport=viewport),
             expand=True,
             visible=current_tab == NavTabs.MARKET,
         ),
         ft.Container(
-            content=ScreenerView(active=current_tab == NavTabs.SCREENER),
+            content=ScreenerView(active=current_tab == NavTabs.SCREENER, viewport=viewport),
             expand=True,
             visible=current_tab == NavTabs.SCREENER,
         ),
         ft.Container(
-            content=BacktestView(active=current_tab == NavTabs.BACKTEST),
+            content=BacktestView(active=current_tab == NavTabs.BACKTEST, viewport=viewport),
             expand=True,
             visible=current_tab == NavTabs.BACKTEST,
         ),
         ft.Container(
-            content=DataExplorerView(active=current_tab == NavTabs.DATA),
+            content=DataExplorerView(active=current_tab == NavTabs.DATA, viewport=viewport),
             expand=True,
             visible=current_tab == NavTabs.DATA,
         ),
         ft.Container(
-            content=TaskCenterView(active=current_tab == NavTabs.TASKS),
+            content=TaskCenterView(active=current_tab == NavTabs.TASKS, viewport=viewport),
             expand=True,
             visible=current_tab == NavTabs.TASKS,
         ),
         ft.Container(
-            content=SettingsView(active=current_tab == NavTabs.SETTINGS),
+            content=SettingsView(active=current_tab == NavTabs.SETTINGS, viewport=viewport),
             expand=True,
             visible=current_tab == NavTabs.SETTINGS,
         ),
@@ -146,7 +151,7 @@ def AppLayout() -> ft.Container:
     current_tab, set_current_tab = ft.use_state(NavTabs.MARKET)
     nav_collapsed, set_nav_collapsed = ft.use_state(False)
     # 窗口尺寸快照 (resize 事件驱动, 触发重渲染让子视图按新尺寸布局)
-    _, set_window_size = ft.use_state((0.0, 0.0))
+    window_size, set_window_size = ft.use_state((0.0, 0.0))
 
     # --- Tab 切换 (防抖, R2: CancelledError 必须 raise) ---
     async def _do_tab_switch(new_tab: int) -> None:
@@ -206,6 +211,13 @@ def AppLayout() -> ft.Container:
 
     ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
 
+    # --- ViewportState (Phase 6.2 P2-1): 基于 window_size 计算响应式断点 ---
+    viewport = ViewportState(
+        width=window_size[0],
+        height=window_size[1],
+        breakpoint="compact" if window_size[0] < 600 else "medium" if window_size[0] < 840 else "expanded",
+    )
+
     # --- 渲染 ---
     collapse_btn = ft.IconButton(
         icon=ft.Icons.MENU_OPEN,
@@ -255,7 +267,7 @@ def AppLayout() -> ft.Container:
     )
 
     body = ft.Container(
-        content=_build_pages_stack(int(current_tab)),
+        content=_build_pages_stack(int(current_tab), viewport),
         expand=True,
         padding=20,
         bgcolor=AppColors.BACKGROUND,

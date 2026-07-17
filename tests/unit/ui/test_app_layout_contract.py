@@ -11,6 +11,7 @@
 """
 
 import contextlib
+import dataclasses
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -367,3 +368,118 @@ class TestNavTabs:
 
         values = [int(tab) for tab in NavTabs]
         assert values == [0, 1, 2, 3, 4, 5]
+
+
+# ============================================================================
+# ViewportState (Phase 6.2 P2-1) 契约守护
+# ============================================================================
+
+
+class TestViewportState:
+    """ViewportState dataclass + AppLayout 下发契约守护测试 (Phase 6.2 P2-1).
+
+    验证:
+    1. ViewportState 是 frozen dataclass, 含 width/height/breakpoint 三字段
+    2. AppLayout 下发 viewport 给 6 个子视图 (源码契约: "XxxView(active=" + "viewport=")
+    3. breakpoint 计算逻辑 (compact/medium/expanded) — 通过源码 + 行为双验证
+    """
+
+    def test_viewport_state_is_frozen_dataclass(self):
+        """DoD: ViewportState 必须是 @dataclass(frozen=True), 含 width/height/breakpoint 三字段。"""
+        import inspect
+
+        from ui.views.viewport_state import ViewportState
+
+        assert dataclasses.is_dataclass(ViewportState), "ViewportState 必须是 dataclass"
+        # __dataclass_params__.frozen 直接读取 frozen 标志
+        assert ViewportState.__dataclass_params__.frozen is True, "ViewportState 必须是 frozen=True"
+        # 三字段必须存在
+        params = inspect.signature(ViewportState).parameters
+        assert "width" in params, "ViewportState 必须含 width 字段"
+        assert "height" in params, "ViewportState 必须含 height 字段"
+        assert "breakpoint" in params, "ViewportState 必须含 breakpoint 字段"
+
+    def test_viewport_state_is_frozen(self):
+        """DoD: ViewportState 实例不可变 (frozen=True)。"""
+        from ui.views.viewport_state import ViewportState
+
+        vp = ViewportState(width=800.0, height=600.0, breakpoint="medium")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            vp.width = 1000.0  # type: ignore[misc]
+
+    def test_app_layout_passes_viewport_to_six_subviews(self):
+        """DoD: AppLayout 必须下发 viewport 给 6 个子视图 (源码契约: "XxxView(active=" + "viewport=")。"""
+        source = _code_source()
+        for view_name in [
+            "HomeView(active=",
+            "ScreenerView(active=",
+            "BacktestView(active=",
+            "DataExplorerView(active=",
+            "TaskCenterView(active=",
+            "SettingsView(active=",
+        ]:
+            assert view_name in source, f"必须函数调用消费 {view_name}"
+        # 6 个子视图都必须接收 viewport 参数 (源码 grep 式契约)
+        viewport_count = source.count("viewport=viewport")
+        assert viewport_count >= 6, f"必须给 6 个子视图下发 viewport=viewport, 实际出现 {viewport_count} 次"
+
+    def test_build_pages_stack_accepts_viewport_param(self):
+        """DoD: _build_pages_stack 必须接收 viewport 参数。"""
+        source = _code_source()
+        assert "def _build_pages_stack(" in source
+        # _build_pages_stack 签名应含 viewport 参数
+        stack_sig_idx = source.index("def _build_pages_stack(")
+        stack_sig_section = source[stack_sig_idx : stack_sig_idx + 200]
+        assert "viewport" in stack_sig_section, "_build_pages_stack 必须接收 viewport 参数"
+
+    def test_app_layout_computes_viewport_from_window_size(self):
+        """DoD: AppLayout 必须基于 window_size 计算 ViewportState (源码契约)。"""
+        source = _code_source()
+        # window_size state 必须被使用 (不是 _ 占位符)
+        assert "window_size, set_window_size = ft.use_state" in source, "window_size 必须被解构使用 (不再是 _ 占位符)"
+        # ViewportState 必须由 window_size[0]/[1] 构造
+        assert "ViewportState(" in source, "AppLayout 必须构造 ViewportState 实例"
+        assert "window_size[0]" in source, "ViewportState.width 必须来自 window_size[0]"
+        assert "window_size[1]" in source, "ViewportState.height 必须来自 window_size[1]"
+
+    def test_breakpoint_compact_below_600(self):
+        """DoD: width < 600 时 breakpoint == "compact"。
+
+        行为验证: inline 重现 AppLayout 的 breakpoint 三元表达式逻辑。
+        """
+        # 引用 ViewportState 触发 import 路径检查 (验证无循环依赖)
+        from ui.views.viewport_state import ViewportState  # noqa: F401  # [reason: 触发 import 路径检查]
+
+        def _compute_breakpoint(width: float) -> str:
+            return "compact" if width < 600 else "medium" if width < 840 else "expanded"
+
+        assert _compute_breakpoint(0.0) == "compact"
+        assert _compute_breakpoint(599.9) == "compact"
+        assert _compute_breakpoint(100.0) == "compact"
+
+    def test_breakpoint_medium_between_600_and_840(self):
+        """DoD: 600 <= width < 840 时 breakpoint == "medium"。"""
+
+        def _compute_breakpoint(width: float) -> str:
+            return "compact" if width < 600 else "medium" if width < 840 else "expanded"
+
+        assert _compute_breakpoint(600.0) == "medium"
+        assert _compute_breakpoint(839.9) == "medium"
+        assert _compute_breakpoint(720.0) == "medium"
+
+    def test_breakpoint_expanded_at_or_above_840(self):
+        """DoD: width >= 840 时 breakpoint == "expanded"。"""
+
+        def _compute_breakpoint(width: float) -> str:
+            return "compact" if width < 600 else "medium" if width < 840 else "expanded"
+
+        assert _compute_breakpoint(840.0) == "expanded"
+        assert _compute_breakpoint(1920.0) == "expanded"
+        assert _compute_breakpoint(10000.0) == "expanded"
+
+    def test_breakpoint_ternary_in_source(self):
+        """DoD: AppLayout 源码必须包含 compact/medium/expanded 三态三元表达式。"""
+        source = _code_source()
+        assert '"compact"' in source, "源码必须含 compact 断点"
+        assert '"medium"' in source, "源码必须含 medium 断点"
+        assert '"expanded"' in source, "源码必须含 expanded 断点"

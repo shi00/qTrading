@@ -45,7 +45,7 @@ class TestBacktestViewDeclarativeContract:
         """源码必须有 @ft.component 装饰器。"""
         src = _source_text()
         assert "@ft.component" in src
-        assert "def BacktestView(active: bool = True) -> ft.Container:" in src
+        assert "def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:" in src
 
     def test_uses_use_viewmodel(self):
         """必须通过 use_viewmodel 消费 BacktestViewModel。"""

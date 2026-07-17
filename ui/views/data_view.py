@@ -31,6 +31,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, SqlResultRow, TableRow
+from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -163,12 +164,24 @@ def _ceil_div(n: int, d: int) -> int:
 
 
 @ft.component
-def TableViewerTab(vm: DataExplorerViewModel, active: bool = True) -> ft.Column:
+def TableViewerTab(
+    vm: DataExplorerViewModel,
+    active: bool = True,
+    viewport: ViewportState | None = None,
+) -> ft.Column:
     """Tab 1: 可视化表浏览器 (声明式).
 
     通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
     FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``。
+
+    Args:
+        vm: 外部传入的 DataExplorerViewModel (由 DataExplorerView 实例化并共享)。
+        active: 当前 tab 是否激活 (控制副作用执行)。
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
+    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
+    _ = viewport
     # --- 订阅 VM state (外部模式) ---
     state, _ = use_viewmodel(vm=vm)
 
@@ -827,7 +840,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
 
 
 @ft.component
-def DataExplorerView(active: bool = True) -> ft.Container:
+def DataExplorerView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:
     """数据浏览器主视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -836,6 +849,11 @@ def DataExplorerView(active: bool = True) -> ft.Container:
     - PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
     - page 访问用 ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 子 Tab 通过 ``use_viewmodel(vm=)`` 外部模式订阅同一 VM
+
+    Args:
+        active: 当前 tab 是否激活 (控制副作用执行)。
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     _state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
@@ -899,7 +917,7 @@ def DataExplorerView(active: bool = True) -> ft.Container:
                 tab_bar,
                 ft.TabBarView(
                     expand=True,
-                    controls=[TableViewerTab(vm=vm, active=active), SQLConsoleTab(vm=vm)],
+                    controls=[TableViewerTab(vm=vm, active=active, viewport=viewport), SQLConsoleTab(vm=vm)],
                 ),
             ],
         ),

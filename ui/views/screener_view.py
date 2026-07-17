@@ -33,6 +33,7 @@ from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
+from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
@@ -220,7 +221,11 @@ def _format_history_date(date_str) -> tuple[str, str]:
 
 
 @ft.component
-def ScreenerView(initial_strategy: str | None = None, active: bool = True) -> ft.Container:
+def ScreenerView(
+    initial_strategy: str | None = None,
+    active: bool = True,
+    viewport: ViewportState | None = None,
+) -> ft.Container:
     """选股视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -233,7 +238,11 @@ def ScreenerView(initial_strategy: str | None = None, active: bool = True) -> ft
 
     Args:
         initial_strategy: 深度链接策略 key (可选, 策略加载后自动执行)
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)
     """
+    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
+    _ = viewport
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
 

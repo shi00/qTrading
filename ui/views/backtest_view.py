@@ -25,6 +25,7 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.backtest_view_model import BacktestViewModel
+from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ _STATUS_COLOR_MAP = {
 
 
 @ft.component
-def BacktestView(active: bool = True) -> ft.Container:
+def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:
     """回测视图（声明式）。
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -48,7 +49,14 @@ def BacktestView(active: bool = True) -> ft.Container:
     - BacktestConfigPanel/BacktestResultPanel 子组件 props 从 VM state 推送，
       state 变化自动重渲染（替代旧重新实例化推送模式）
     - 无 page ref / 生命周期回调 / 手动刷新
+
+    Args:
+        active: 当前 tab 是否激活 (控制副作用执行)。
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
+    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
+    _ = viewport
     state, vm = use_viewmodel(BacktestViewModel)
     # 订阅 i18n + theme 变化（locale/theme 切换时自动重渲染）
     ft.use_state(get_observable_state)
