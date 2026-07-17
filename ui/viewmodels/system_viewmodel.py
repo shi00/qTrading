@@ -14,10 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class SystemState:
     probe_result: ProbeResultRow | None = None
 
 
-class SystemViewModel:
+class SystemViewModel(ObservableViewModelMixin[SystemState]):
     """档位驱动基础设施 ViewModel（半迁移阶段）。
 
     暴露方法：
@@ -77,32 +78,6 @@ class SystemViewModel:
         # --- State snapshot + subscribers ---
         self._state: SystemState = SystemState()
         self._subscribers: list[Callable[[SystemState], None]] = []
-
-    # ------------------------------------------------------------------
-    # State / subscribe / notify
-    # ------------------------------------------------------------------
-
-    @property
-    def state(self) -> SystemState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[SystemState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     def dispose(self):
         """清理资源。"""

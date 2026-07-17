@@ -3,7 +3,7 @@ import functools
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 import pandas as pd
@@ -15,6 +15,7 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,7 @@ class DataExplorerState:
     sql_error: str | None = None
 
 
-class DataExplorerViewModel:
+class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
     """ViewModel for DataExplorerView (MVVM-001 fix, 声明式形态).
 
     Holds all business state for both TableViewerTab and SQLConsoleTab.
@@ -103,30 +104,12 @@ class DataExplorerViewModel:
 
         self._disposed = False
 
-    @property
-    def state(self) -> DataExplorerState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[DataExplorerState], None]) -> Callable[[], None]:
-        """订阅 state 变更,返回取消订阅函数。"""
-        self._subscribers.append(callback)
-
-        def unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return unsubscribe
-
     def _notify(self) -> None:
         for cb in self._subscribers:
             try:
                 cb(self._state)
             except Exception as e:
                 logger.warning("[DataExplorerVM] Subscriber error: %s", e, exc_info=True)
-
-    def _set_state(self, **changes: Any) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     def dispose(self):
         """Release resources held by this ViewModel."""

@@ -14,7 +14,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
@@ -22,6 +22,7 @@ from utils.error_classifier import classify_error
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ class OnboardingState:
     normalized_schedule_time: str = "16:30"
 
 
-class OnboardingViewModel:
+class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
     """ViewModel for OnboardingWizard — MVVM-003 fix.
 
     Panel operations are injected as Callable via bind() to avoid
@@ -183,32 +184,6 @@ class OnboardingViewModel:
         # --- State snapshot + subscribers ---
         self._state: OnboardingState = OnboardingState()
         self._subscribers: list[Callable[[OnboardingState], None]] = []
-
-    # ------------------------------------------------------------------
-    # State / subscribe / notify
-    # ------------------------------------------------------------------
-
-    @property
-    def state(self) -> OnboardingState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[OnboardingState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     # ------------------------------------------------------------------
     # Properties (compat with existing View tests, Phase 4 will remove setters)

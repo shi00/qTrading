@@ -18,6 +18,7 @@ from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class ScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
 
 
-class ScreenerViewModel:
+class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     """ViewModel for ScreenerView.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -172,11 +173,6 @@ class ScreenerViewModel:
 
     # --- State snapshot + subscribe/_notify (§3.0.1) ---
 
-    @property
-    def state(self) -> ScreenerState:
-        """View 只读 state snapshot，不可变。"""
-        return self._state
-
     def subscribe(self, callback: Callable[[ScreenerState], None]) -> Callable[[], None]:
         """订阅 state 变化，返回退订函数。同时捕获 main loop（hook 在主循环注册）。"""
         self._subscribers.append(callback)
@@ -190,12 +186,6 @@ class ScreenerViewModel:
                 self._subscribers.remove(callback)
 
         return _unsubscribe
-
-    def _notify(self) -> None:
-        """state 变化后调所有订阅者，传入新 snapshot。"""
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
 
     def _set_state(self, **changes) -> None:
         """Update state fields and notify subscribers."""

@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 
 from core.i18n import Message
 from services.task_manager import AppTask, TaskManager, TaskStatus
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ class TaskCenterState:
     running_count: int = 0
 
 
-class TaskCenterViewModel:
+class TaskCenterViewModel(ObservableViewModelMixin[TaskCenterState]):
     """ViewModel for TaskCenterView.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -79,11 +80,6 @@ class TaskCenterViewModel:
 
     # --- State snapshot + subscribe/_notify ---
 
-    @property
-    def state(self) -> TaskCenterState:
-        """View 只读 state snapshot，不可变。"""
-        return self._state
-
     def subscribe(self, callback: Callable[[TaskCenterState], None]) -> Callable[[], None]:
         """订阅 state 变化，返回退订函数。同时捕获 main loop（hook 在主循环注册）。"""
         self._subscribers.append(callback)
@@ -97,17 +93,6 @@ class TaskCenterViewModel:
                 self._subscribers.remove(callback)
 
         return _unsubscribe
-
-    def _notify(self) -> None:
-        """state 变化后调所有订阅者，传入新 snapshot。"""
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        """Update state fields and notify subscribers."""
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     def dispose(self) -> None:
         """Cleanup resources."""

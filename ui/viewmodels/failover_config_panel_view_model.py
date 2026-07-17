@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.llm_providers import LLM_PROVIDERS
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -125,7 +126,7 @@ def _load_failover_items_sync() -> list[FailoverItem]:
     return items
 
 
-class FailoverConfigPanelViewModel:
+class FailoverConfigPanelViewModel(ObservableViewModelMixin[FailoverConfigState]):
     """ViewModel for FailoverConfigPanel + ProviderCredentialDialog.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -149,38 +150,6 @@ class FailoverConfigPanelViewModel:
         self._subscribers: list[Callable[[FailoverConfigState], None]] = []
         # 同步初始化 state（从 ConfigHandler 加载 failover 列表）
         self._state = replace(self._state, failover_items=tuple(_load_failover_items_sync()))
-
-    # --- State snapshot + subscribe/_notify ---
-
-    @property
-    def state(self) -> FailoverConfigState:
-        """View 只读 state snapshot，不可变。"""
-        return self._state
-
-    def subscribe(self, callback: Callable[[FailoverConfigState], None]) -> Callable[[], None]:
-        """订阅 state 变化，返回退订函数。"""
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        """state 变化后调所有订阅者，传入新 snapshot。"""
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        """Update state fields and notify subscribers."""
-        self._state = replace(self._state, **changes)
-        self._notify()
-
-    def dispose(self) -> None:
-        """Cleanup resources."""
-        self._subscribers.clear()
 
     # --- Status helpers ---
 

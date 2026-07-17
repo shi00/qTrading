@@ -19,8 +19,9 @@ import asyncio
 import logging
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -57,7 +58,7 @@ class AIBrainSettingsState:
     save_state: str = SAVE_IDLE
 
 
-class AIBrainSettingsViewModel:
+class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
     """AIBrainTab 配置编排 ViewModel。
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -87,33 +88,6 @@ class AIBrainSettingsViewModel:
         self._state = AIBrainSettingsState()
         self._subscribers: list[Callable[[AIBrainSettingsState], None]] = []
         self._load_config_to_state()
-
-    # --- State snapshot + subscribe/_notify ---
-
-    @property
-    def state(self) -> AIBrainSettingsState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[AIBrainSettingsState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
-
-    def dispose(self) -> None:
-        self._subscribers.clear()
 
     # --- Config loading ---
 

@@ -12,7 +12,7 @@ VM 不感知 locale: i18n 消息用 Message (key + params) 透传.
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from utils.config_handler import ConfigHandler
@@ -23,6 +23,7 @@ from data.external.tushare_client import TushareClient
 from services.ai_service import AIService
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class DataSourceState:
     cache_cleared_version: int = 0
 
 
-class DataSourceViewModel:
+class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     """ViewModel for DataSourceTab — manages data source business logic.
 
     L771 合规: state 字段全部用 frozen dataclass / Message,
@@ -132,32 +133,6 @@ class DataSourceViewModel:
 
         # --- Snack seq counter (内部计数, 确保 SnackRow.seq 递增) ---
         self._snack_seq = 0
-
-    # ------------------------------------------------------------------
-    # State / subscribe / notify
-    # ------------------------------------------------------------------
-
-    @property
-    def state(self) -> DataSourceState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[DataSourceState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     def _cancel_all_active_tasks(self):
         """取消所有活跃任务（防孤儿），再清 _active_task_ids。
