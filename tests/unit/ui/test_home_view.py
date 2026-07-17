@@ -639,6 +639,57 @@ class TestHomeViewRuntime:
 
 
 # ============================================================================
+# active prop 生命周期测试 (Phase 5.3): 验证 active=False 时不执行副作用
+# ============================================================================
+
+
+class TestHomeViewActiveProp:
+    """HomeView active prop 生命周期测试 (Phase 5.3 P1-3).
+
+    验证 active=False 时 use_effect setup 不执行副作用 (vm.init / vm.load_market_data / pubsub 订阅).
+    幂等审计: cleanup 总是无条件执行 (退订总是安全), setup 在 active=False 时早返.
+    """
+
+    def test_inactive_mount_does_not_trigger_vm_init(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """active=False 时 vm.init 未被调用 (mount effect 早返)."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=False)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        assert "init" not in mock_home_vm.method_calls
+        assert "init_data" not in mock_home_vm.method_calls
+
+    def test_inactive_mount_does_not_trigger_load_data(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """active=False 时 vm.load_market_data / vm.refresh_news 未被调用."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=False)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        assert "load_market_data" not in mock_home_vm.method_calls
+        assert "refresh_news" not in mock_home_vm.method_calls
+
+    def test_inactive_mount_does_not_subscribe_pubsub(
+        self, mock_i18n_state, mock_app_colors_state, mock_home_vm
+    ) -> None:
+        """active=False 时 page.pubsub.subscribe_topic 未被调用."""
+        from ui.views.home_view import HomeView
+
+        component = make_component(HomeView, active=False)
+        page = _make_fake_page()
+        run_mount_effects(component, page=page)
+
+        page.pubsub.subscribe_topic.assert_not_called()
+
+
+# ============================================================================
 # 异常路径测试 (Task 4.4): 覆盖 17 miss 到 80%+
 # ============================================================================
 
