@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import logging
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -174,6 +175,102 @@ class TestScreenerViewModelDispose:
         assert len(vm._stream_buffers) == 1
         vm.dispose()
         assert len(vm._stream_buffers) == 0
+
+
+class TestScreenerViewModelDisposeBackgroundTasks:
+    """Task 4.2: dispose 后台任务清理 (done_callback + _disposed flag).
+
+    覆盖 5 个 DoD:
+    1. dispose 后延迟完成的任务不调用 subscriber
+    2. 任务取消后最终从集合移除 (引用保留至 done callback)
+    3. 后台任务异常被记录且无 'Task exception was never retrieved'
+    4. CancelledError 继续传播 (R2)
+    5. 反复 mount/unmount 不增长后台任务集合
+    """
+
+    def test_dispose_blocks_set_state_and_subscriber_calls(self, vm):
+        """DoD #1: dispose 后 _set_state 不更新 state 也不调用 subscriber."""
+        calls: list = []
+        vm.subscribe(lambda s: calls.append(s))
+        vm.dispose()
+        # 模拟 dispose 后仍有 subscriber 被加入 (race / 防御)
+        vm._subscribers.append(lambda s: calls.append("post-dispose"))
+        original = vm.state
+        vm._set_state(loading=True)
+        assert vm.state == original  # state 未变
+        assert calls == []  # subscriber 未被调用
+
+    @pytest.mark.asyncio
+    async def test_dispose_retains_task_reference_until_done_callback(self, vm):
+        """DoD #2: dispose 取消任务但保留引用至 done callback 完成 (不立即 clear)."""
+
+        async def long_running():
+            await asyncio.sleep(10)
+
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(long_running())
+        vm._background_tasks.add(task)
+        task.add_done_callback(vm._on_background_task_done)
+        vm.dispose()
+        # 立即检查: 任务已取消但引用仍保留 (未 clear)
+        assert task in vm._background_tasks
+        await asyncio.sleep(0.05)  # 让 cancel 传播 + done callback 触发
+        assert task.cancelled()
+        assert task not in vm._background_tasks  # done callback 移除
+
+    @pytest.mark.asyncio
+    async def test_background_task_exception_logged_and_retrieved(self, vm, caplog):
+        """DoD #3: 后台任务异常被记录且 exception() 已读取 (无 'never retrieved')."""
+
+        async def failing():
+            raise RuntimeError("boom")
+
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(failing())
+        vm._background_tasks.add(task)
+        task.add_done_callback(vm._on_background_task_done)
+        with caplog.at_level(logging.ERROR):
+            await asyncio.sleep(0.05)
+        assert task.done()
+        assert task not in vm._background_tasks  # done callback 移除
+        assert any("boom" in r.message for r in caplog.records)
+        # exception 已被读取 (不会触发 'Task exception was never retrieved')
+        assert task.exception() is not None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_task_not_logged_as_error(self, vm, caplog):
+        """DoD #4: CancelledError 继续传播, 不被记录为 error (R2)."""
+
+        async def long_running():
+            await asyncio.sleep(10)
+
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(long_running())
+        vm._background_tasks.add(task)
+        task.add_done_callback(vm._on_background_task_done)
+        task.cancel()
+        with caplog.at_level(logging.ERROR):
+            await asyncio.sleep(0.05)
+        assert task.cancelled()
+        assert task not in vm._background_tasks  # done callback 移除
+        # CancelledError 不被记录为 error
+        assert not any(r.levelno >= logging.ERROR for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_repeated_mount_unmount_no_task_growth(self, vm):
+        """DoD #5: 反复 mount/unmount 不增长后台任务集合."""
+
+        async def long_running():
+            await asyncio.sleep(10)
+
+        for _ in range(3):
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(long_running())
+            vm._background_tasks.add(task)
+            task.add_done_callback(vm._on_background_task_done)
+            vm.dispose()
+            await asyncio.sleep(0.05)  # 让 cancel + done callback 完成
+            assert len(vm._background_tasks) == 0
 
 
 class TestScreenerViewModelPagination:
