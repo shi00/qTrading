@@ -118,19 +118,14 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     # --- AutomationSettingsViewModel (内部模式: hook 实例化 + dispose on unmount) ---
     settings_state, settings_vm = use_viewmodel(factory=lambda: AutomationSettingsViewModel())
 
-    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
-    auto_enabled, set_auto_enabled = ft.use_state(settings_state.auto_enabled)
-    auto_time, set_auto_time = ft.use_state(settings_state.auto_time)
-    ai_enabled, set_ai_enabled = ft.use_state(settings_state.ai_enabled)
-    ai_time, set_ai_time = ft.use_state(settings_state.ai_time)
-    ai_engine, set_ai_engine = ft.use_state(settings_state.ai_engine)
+    # --- 状态直接消费 settings_state.* (VM 单一真值源, set_* 触发 _notify → 重渲染) ---
 
     # --- Async save handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_schedule_toggle(new_enabled: bool) -> None:
         try:
             success = await settings_vm.save_auto_update_enabled(new_enabled)
             if not success:
-                set_auto_enabled(not new_enabled)
+                settings_vm.set_auto_enabled(not new_enabled)
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
                 return
@@ -142,7 +137,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] schedule toggle save failed: %s", ex, exc_info=True)
-            set_auto_enabled(not new_enabled)
+            settings_vm.set_auto_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -166,7 +161,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         try:
             success = await settings_vm.save_ai_concept_enabled(new_enabled)
             if not success:
-                set_ai_enabled(not new_enabled)
+                settings_vm.set_ai_enabled(not new_enabled)
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
                 return
@@ -178,7 +173,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
             raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[AutomationTab] ai concept toggle save failed: %s", ex, exc_info=True)
-            set_ai_enabled(not new_enabled)
+            settings_vm.set_ai_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -217,93 +212,93 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_schedule_toggle(e: ft.ControlEvent) -> None:
         new_enabled = e.control.value
-        set_auto_enabled(new_enabled)
+        settings_vm.set_auto_enabled(new_enabled)
         page = _get_page()
         if page is not None:
             page.run_task(_do_schedule_toggle, new_enabled)
 
     def _on_schedule_time_change(e: ft.ControlEvent) -> None:
         new_time = e.control.value
-        set_auto_time(new_time)
+        settings_vm.set_auto_time(new_time)
         page = _get_page()
         if page is not None:
             page.run_task(_do_schedule_time_change, new_time)
 
     def _on_ai_concept_toggle(e: ft.ControlEvent) -> None:
         new_enabled = e.control.value
-        set_ai_enabled(new_enabled)
+        settings_vm.set_ai_enabled(new_enabled)
         page = _get_page()
         if page is not None:
             page.run_task(_do_ai_concept_toggle, new_enabled)
 
     def _on_ai_concept_time_change(e: ft.ControlEvent) -> None:
         new_time = e.control.value
-        set_ai_time(new_time)
+        settings_vm.set_ai_time(new_time)
         page = _get_page()
         if page is not None:
             page.run_task(_do_ai_concept_time_change, new_time)
 
     def _on_ai_concept_engine_change(e: ft.ControlEvent) -> None:
         new_engine = e.control.value
-        set_ai_engine(new_engine)
+        settings_vm.set_ai_engine(new_engine)
         page = _get_page()
         if page is not None:
             page.run_task(_do_ai_concept_engine_change, new_engine)
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
-    schedule_status_color = AppColors.SUCCESS if auto_enabled else AppColors.TEXT_HINT
-    ai_status_color = AppColors.SUCCESS if ai_enabled else AppColors.TEXT_HINT
+    schedule_status_color = AppColors.SUCCESS if settings_state.auto_enabled else AppColors.TEXT_HINT
+    ai_status_color = AppColors.SUCCESS if settings_state.ai_enabled else AppColors.TEXT_HINT
 
     schedule_enabled_switch = ft.Switch(
         label=I18n.get("settings_auto_update"),
-        value=auto_enabled,
+        value=settings_state.auto_enabled,
         on_change=_on_schedule_toggle,
     )
     schedule_time_dropdown = ft.Dropdown(
         label=I18n.get("settings_update_time"),
         width=_DROPDOWN_WIDTH,
-        value=auto_time,
+        value=settings_state.auto_time,
         options=_build_time_options(),
         on_select=_on_schedule_time_change,
-        disabled=not auto_enabled,
+        disabled=not settings_state.auto_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     schedule_status = ft.Text(
-        _get_schedule_status_text(auto_enabled),
+        _get_schedule_status_text(settings_state.auto_enabled),
         size=_FONT_SIZE_SMALL,
         color=schedule_status_color,
     )
 
     ai_concept_enabled_switch = ft.Switch(
         label=I18n.get("settings_ai_concept_update"),
-        value=ai_enabled,
+        value=settings_state.ai_enabled,
         on_change=_on_ai_concept_toggle,
     )
     ai_concept_time_dropdown = ft.Dropdown(
         label=I18n.get("settings_update_time"),
         width=_DROPDOWN_WIDTH,
-        value=ai_time,
+        value=settings_state.ai_time,
         options=_build_time_options(),
         on_select=_on_ai_concept_time_change,
-        disabled=not ai_enabled,
+        disabled=not settings_state.ai_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_concept_status = ft.Text(
-        _get_schedule_status_text(ai_enabled),
+        _get_schedule_status_text(settings_state.ai_enabled),
         size=_FONT_SIZE_SMALL,
         color=ai_status_color,
     )
     ai_concept_engine_dropdown = ft.Dropdown(
         label=I18n.get("settings_ai_concept_search_engine"),
         width=_DROPDOWN_WIDTH,
-        value=ai_engine,
+        value=settings_state.ai_engine,
         options=_build_search_engine_options(),
         on_select=_on_ai_concept_engine_change,
-        disabled=not ai_enabled,
+        disabled=not settings_state.ai_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -461,16 +456,14 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     # --- AutomationSettingsViewModel (内部模式: hook 实例化 + dispose on unmount) ---
     settings_state, settings_vm = use_viewmodel(factory=lambda: AutomationSettingsViewModel())
 
-    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
-    news_enabled, set_news_enabled = ft.use_state(settings_state.news_enabled)
-    interval_val, set_interval_val = ft.use_state(settings_state.news_interval)
+    # --- 状态直接消费 settings_state.* (VM 单一真值源, set_* 触发 _notify → 重渲染) ---
 
     # --- Async save handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_news_toggle(new_enabled: bool) -> None:
         try:
             success = await settings_vm.save_news_enabled(new_enabled)
             if not success:
-                set_news_enabled(not new_enabled)
+                settings_vm.set_news_enabled(not new_enabled)
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
                 return
@@ -483,7 +476,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
             raise  # R2: 必须传播
         except Exception as ex:
             logger.error("[NotificationsTab] news toggle save failed: %s", ex, exc_info=True)
-            set_news_enabled(not new_enabled)
+            settings_vm.set_news_enabled(not new_enabled)
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
@@ -507,14 +500,14 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_news_toggle(e: ft.ControlEvent) -> None:
         new_enabled = e.control.value
-        set_news_enabled(new_enabled)
+        settings_vm.set_news_enabled(new_enabled)
         page = _get_page()
         if page is not None:
             page.run_task(_do_news_toggle, new_enabled)
 
     def _on_interval_change(e: ft.ControlEvent) -> None:
         new_val = e.control.value
-        set_interval_val(new_val)
+        settings_vm.set_news_interval(new_val)
         page = _get_page()
         if page is not None:
             page.run_task(_do_interval_change, new_val)
@@ -522,16 +515,16 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     # --- Build controls (状态驱动) ---
     news_switch = ft.Switch(
         label=I18n.get("settings_news_alerts"),
-        value=news_enabled,
+        value=settings_state.news_enabled,
         on_change=_on_news_toggle,
     )
     interval_dropdown = ft.Dropdown(
         label=I18n.get("settings_news_interval"),
         width=AppStyles.CONTROL_WIDTH_MD,
-        value=interval_val,
+        value=settings_state.news_interval,
         options=_build_interval_options(),
         on_select=_on_interval_change,
-        disabled=not news_enabled,
+        disabled=not settings_state.news_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
