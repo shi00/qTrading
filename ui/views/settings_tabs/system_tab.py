@@ -1,4 +1,4 @@
-"""system_tab — 声明式组件 (Phase D.3).
+"""system_tab — 声明式组件 (Phase D.3 + Task 5.2 Settings VM 下沉).
 
 从命令式容器子类重写为 ``@ft.component`` 函数组件范式
 (CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
@@ -6,11 +6,13 @@
 变更要点:
 - 旧命令式 class → ``@ft.component def SystemTab(show_snack_callback)``
 - SystemViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化, 注入 TierApiPanel
+- SystemSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2)
+  收敛 ConfigHandler/ThreadPoolManager 业务编排 (语言/主题/线程池/DB pool/proxy)
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
 - 状态驱动: text/dropdown value 用 ``use_state`` (声明式自动重渲染)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
 - 异步保存: ``page.run_task`` 调度; R2 CancelledError 显式 raise
-- 移除命令式生命周期回调 / 手动刷新 / page 引用持有 / resize 级联
+- View 不再直接写 ConfigHandler / 直接编排 ThreadPoolManager (Task 5.2 DoD)
 """
 
 import asyncio
@@ -23,12 +25,11 @@ from ui.components.settings_widgets import DashboardCard, SectionHeader, Setting
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles, ThemeName
+from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
 from ui.viewmodels.system_viewmodel import SystemViewModel
 from ui.views.settings_tabs.tier_api_panel import TierApiPanel
-from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +83,13 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:
     - SystemViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化, 注入 TierApiPanel
+    - SystemSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
+      收敛 ConfigHandler/ThreadPoolManager 业务编排
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - 状态驱动: text/dropdown value 用 ``use_state``
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步保存: ``page.run_task`` 调度, R2 CancelledError 显式 raise
+    - View 不再直接写 ConfigHandler / 编排 ThreadPoolManager (Task 5.2 DoD)
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -97,23 +101,26 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # --- SystemViewModel for TierApiPanel (internal mode, hook persists VM) ---
     _system_state, system_vm = use_viewmodel(factory=lambda: SystemViewModel())
 
-    # --- Pure UI state (ConfigHandler 读取初始值, use_state 持久化) ---
-    language_value, set_language_value = ft.use_state(ConfigHandler.get_locale())
-    theme_value, set_theme_value = ft.use_state(ConfigHandler.get_theme_name())
-    concurrency_value, set_concurrency_value = ft.use_state(str(ConfigHandler.get_sync_max_concurrent_heavy()))
-    log_level_value, set_log_level_value = ft.use_state(ConfigHandler.get_log_level())
-    pool_size_value, set_pool_size_value = ft.use_state(str(ConfigHandler.get_db_connection_pool_size()))
-    db_overflow_value, set_db_overflow_value = ft.use_state(str(ConfigHandler.get_db_max_overflow()))
-    db_timeout_value, set_db_timeout_value = ft.use_state(str(ConfigHandler.get_db_pool_timeout()))
-    io_workers_value, set_io_workers_value = ft.use_state(str(ConfigHandler.get_max_io_workers()))
-    cpu_workers_value, set_cpu_workers_value = ft.use_state(str(ConfigHandler.get_max_cpu_workers()))
-    no_proxy_value, set_no_proxy_value = ft.use_state(",".join(ConfigHandler.get_no_proxy_domains()))
+    # --- SystemSettingsViewModel for ConfigHandler-driven settings (Task 5.2) ---
+    settings_state, settings_vm = use_viewmodel(factory=lambda: SystemSettingsViewModel())
+
+    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
+    language_value, set_language_value = ft.use_state(settings_state.language_value)
+    theme_value, set_theme_value = ft.use_state(settings_state.theme_value)
+    concurrency_value, set_concurrency_value = ft.use_state(settings_state.concurrency_value)
+    log_level_value, set_log_level_value = ft.use_state(settings_state.log_level_value)
+    pool_size_value, set_pool_size_value = ft.use_state(settings_state.pool_size_value)
+    db_overflow_value, set_db_overflow_value = ft.use_state(settings_state.db_overflow_value)
+    db_timeout_value, set_db_timeout_value = ft.use_state(settings_state.db_timeout_value)
+    io_workers_value, set_io_workers_value = ft.use_state(settings_state.io_workers_value)
+    cpu_workers_value, set_cpu_workers_value = ft.use_state(settings_state.cpu_workers_value)
+    no_proxy_value, set_no_proxy_value = ft.use_state(settings_state.no_proxy_value)
     diagnostics_exporting, set_diagnostics_exporting = ft.use_state(False)
 
-    # --- Async handlers (R2: CancelledError 显式 raise) ---
+    # --- Async handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_language_change(new_locale: str) -> None:
         try:
-            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
+            success = await settings_vm.save_language(new_locale)
             if not success:
                 set_language_value(I18n.current_locale())
                 if show_snack_callback:
@@ -146,7 +153,11 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_theme_change(new_theme: str) -> None:
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_theme_name, new_theme)
+            success = await settings_vm.save_theme(new_theme)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             page = _get_page()
             if page is not None:
                 from ui.theme import apply_page_theme
@@ -163,10 +174,11 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_log_level_change(new_level: str) -> None:
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_log_level, new_level)
-            from utils.logger import update_log_level
-
-            update_log_level(new_level)
+            success = await settings_vm.save_log_level(new_level)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_log_label") + ": " + new_level)
         except asyncio.CancelledError:
@@ -183,7 +195,11 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_concurrency_range"), color=AppColors.ERROR)
                 return
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_sync_max_concurrent_heavy, val)
+            success = await settings_vm.save_concurrency(raw_val)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(
                     I18n.get("sys_sync_heavy") + " " + I18n.get("common_saved"),
@@ -223,12 +239,11 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                     )
                 return
 
-            def _save_db_pool_sync() -> None:
-                ConfigHandler.set_db_connection_pool_size(pool_size)
-                ConfigHandler.set_db_max_overflow(max_overflow)
-                ConfigHandler.set_db_pool_timeout(timeout)
-
-            await ThreadPoolManager().run_async(TaskType.IO, _save_db_pool_sync)
+            success = await settings_vm.save_db_pool(pool_size_str, max_overflow_str, timeout_str)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_db_pool_saved"), color=AppColors.SUCCESS)
         except ValueError:
@@ -258,17 +273,15 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                     show_snack_callback(I18n.get("sys_snack_cpu_range"), color=AppColors.ERROR)
                 return
 
-            def _save_thread_pool_sync() -> None:
-                ConfigHandler.set_max_io_workers(io_val)
-                ConfigHandler.set_max_cpu_workers(cpu_val)
-
-            await ThreadPoolManager().run_async(TaskType.IO, _save_thread_pool_sync)
             if show_snack_callback:
                 show_snack_callback(I18n.get("common_preparing"))
-            await asyncio.to_thread(ThreadPoolManager().reload_config)
+            success = await settings_vm.save_thread_pool(io_str, cpu_str)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_pool_saved"), color=AppColors.SUCCESS)
-            logger.info("Updated ThreadPool: IO=%s, CPU=%s", io_val, cpu_val)
         except ValueError:
             if show_snack_callback:
                 show_snack_callback(I18n.get("sys_snack_num_fmt"), color=AppColors.ERROR)
@@ -281,17 +294,13 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     async def _do_save_no_proxy(raw_text: str) -> None:
         try:
-            if not raw_text:
-                domains: list[str] = []
-            else:
-                domains = [d.strip() for d in raw_text.split(",") if d.strip()]
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_no_proxy_domains, domains)
+            success = await settings_vm.save_no_proxy(raw_text)
+            if not success:
+                if show_snack_callback:
+                    show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
+                return
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_snack_no_proxy_saved"), color=AppColors.SUCCESS)
-            logger.info("No-Proxy domains updated: %s", domains)
-            from utils.proxy_manager import ProxyManager
-
-            ThreadPoolManager().submit(TaskType.IO, ProxyManager.reapply_proxy_policy)
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as ex:

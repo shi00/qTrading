@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import inspect
 import logging
 import time
@@ -54,6 +55,34 @@ class StreamCard:
 
 
 @dataclass(frozen=True)
+class HistoryTreeRow:
+    """历史树单行 (immutable, state-driven, Task 3.2).
+
+    VM 内聚日期格式化 (不依赖 I18n); strategies 中的 strategy_name 为 raw key,
+    View 渲染时调 translate_strategy_name 翻译为当前 locale (§3.2 VM 不感知 locale).
+    """
+
+    display_date: str
+    d_key: str
+    total_cnt: int
+    strategies: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class HistoryTreeState:
+    """历史树子结构 (immutable, state-driven, Task 3.2).
+
+    View 不再持有 rows/offset/has_more/loading 的 use_state, 改为派生自
+    state.history_tree (消除双轨状态, 每项业务状态只有一个 owner).
+    """
+
+    rows: tuple[HistoryTreeRow, ...] = ()
+    offset: int = 0
+    has_more: bool = False
+    loading: bool = False
+
+
+@dataclass(frozen=True)
 class ScreenerState:
     """Immutable state snapshot for ScreenerView (§3.0.1).
 
@@ -93,6 +122,8 @@ class ScreenerState:
     # Strategy description (R.2.6.2: 业务状态迁入 VM, View 映射 color 标识符到 AppColors)
     strategy_desc: str = ""
     strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
+    # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
+    history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
 
 
 class ScreenerViewModel:
@@ -244,6 +275,10 @@ class ScreenerViewModel:
         return self.strategy_mgr.get_all_names()
 
     def get_strategy_desc(self, key: str) -> str:
+        # I18N_GET_ALLOWED: 返回翻译字符串供 update_strategy_desc 拼接为 state.strategy_desc (str).
+        # 迁移路径: state.strategy_desc 改为 Message 结构, View 渲染时翻译; 同时重设
+        # strategy_obj.get_dynamic_description(params) 返回值为 i18n key (而非翻译字符串),
+        # 整体与 R.3 strategy_name 标准化一并处理 (Task 3.1 遗留).
         st = self.strategy_mgr.get_strategy(key)
         return I18n.get(st.desc_key) if st else ""
 
@@ -260,11 +295,31 @@ class ScreenerViewModel:
                     "name": "ai_system_prompt",
                     "label_key": "ai_system_prompt",
                     "type": "textarea",
-                    "default": "",  # UI uses get_base_prompt to map the value dynamically
+                    "default": "",  # UI uses vm.get_base_prompt to map the value dynamically
                 },
             )
 
         return params
+
+    def get_base_prompt(self, strategy_key: str) -> str:
+        """获取策略基础 prompt (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``strategy_prompts.get_base_prompt``，不再直接 import
+        ``strategies`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from strategies.strategy_prompts import get_base_prompt
+
+        return get_base_prompt(strategy_key)
+
+    def get_column_alias(self, table_name: str | None, col: str) -> str:
+        """获取列别名 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``MetaDataManager.get_column_alias``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.persistence.metadata_manager import MetaDataManager
+
+        return MetaDataManager.get_column_alias(table_name, col)
 
     def select_strategy(self, key: str | None) -> None:
         """选中策略 + 计算 tier_hint（R.2.1: 内聚到 VM, 消除 View 双源真相）。
@@ -307,6 +362,9 @@ class ScreenerViewModel:
             selected_strategy: 策略 key, None 表示清空
             params: 动态参数 (可选, 用于 get_dynamic_description; None 时用策略默认参数)
         """
+        # I18N_GET_ALLOWED: strategy_desc 是 str 字段, 需拼接 warning_suffix (含翻译字符串)
+        # 形成 desc 字符串. 迁移路径: state.strategy_desc 改为 Message, 嵌套 desc_msg + missing_apis
+        # (与 R.3 strategy_name 标准化一并处理, Task 3.1 遗留).
         if not selected_strategy:
             self._set_state(strategy_desc="", strategy_desc_color="default")
             return
@@ -414,14 +472,14 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.05,
-                    I18n.get("task_loading_data"),
+                    Message("task_loading_data"),
                 )
                 context = await self.data_processor.get_strategy_data()
                 if not context:
                     TaskManager().update_progress(
                         task_id,
                         0.1,
-                        I18n.get("task_cache_empty_init"),
+                        Message("task_cache_empty_init"),
                     )
                     await self.data_processor.init_data()
                     context = await self.data_processor.get_strategy_data()
@@ -475,7 +533,7 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.2,
-                    I18n.get("task_executing_strategy", name=I18n.get(strategy.name_key)),
+                    Message("task_executing_strategy", {"name_key": strategy.name_key}),
                 )
 
                 if inspect.iscoroutinefunction(strategy.filter):
@@ -494,7 +552,7 @@ class ScreenerViewModel:
                 TaskManager().update_progress(
                     task_id,
                     0.95,
-                    I18n.get("task_aggregating_results"),
+                    Message("task_aggregating_results"),
                 )
 
                 if result_df is not None and not result_df.empty:
@@ -528,7 +586,7 @@ class ScreenerViewModel:
                         status_color="success",
                         data_version=self._state.data_version + 1,
                     )
-                    return I18n.get("task_screening_success", count=len(result_df))
+                    return Message("task_screening_success", {"count": len(result_df)})
 
                 self._full_results = pd.DataFrame()
                 self._update_pagination(page_no=1)
@@ -539,7 +597,7 @@ class ScreenerViewModel:
                     status_color="warning",
                     data_version=self._state.data_version + 1,
                 )
-                return I18n.get("screener_no_results")
+                return Message("screener_no_results")
 
             except asyncio.CancelledError:
                 self._set_state(
@@ -559,7 +617,7 @@ class ScreenerViewModel:
                     status_message=Message("screener_blocked", {"reason": str(e)}),
                     status_color="warning",
                 )
-                return I18n.get("screener_blocked", reason=str(e))
+                return Message("screener_blocked", {"reason": str(e)})
             except Exception as e:
                 logger.error(
                     "[ScreenerVM] Strategy execution failed: %s",
@@ -590,9 +648,12 @@ class ScreenerViewModel:
         )
 
         # Dispatch to TaskManager!
+        # Task 3.1: name 改为 Message (复用 screener_running_strategy key + name_key params),
+        # task_type 也是 Message. _on_tasks_updated 通过 task_type.key 检测策略任务 (替代
+        # 旧 TASK_NAME_PREFIX in t.name 字符串检测, 因 t.name 现为 Message 实例不支持 `in`).
         task_id = TaskManager().submit_task(
-            name=f"{TASK_NAME_PREFIX}: {I18n.get(strategy.name_key)}",
-            task_type=I18n.get("task_type_ai_screening"),
+            name=Message("screener_running_strategy", {"name_key": strategy.name_key}),
+            task_type=Message("task_type_ai_screening"),
             coroutine_factory=_execute_screening,
             cancellable=True,
         )
@@ -897,6 +958,7 @@ class ScreenerViewModel:
         self._stream_buffers.clear()
         # _update_pagination only updates pagination fields; sort_* are set in _set_state below.
         self._update_pagination(page_no=1)
+        # Task 3.2: 重置 history_tree state (消除 View 双轨状态, View 不再 set_history_tree_*)
         self._set_state(
             mode="HISTORY",
             page_no=1,
@@ -904,6 +966,7 @@ class ScreenerViewModel:
             sort_ascending=True,
             stream_cards=(),
             data_version=self._state.data_version + 1,
+            history_tree=HistoryTreeState(),
         )
         logger.info("[ScreenerVM] Switched to HISTORY mode")
 
@@ -939,42 +1002,122 @@ class ScreenerViewModel:
             self._set_state(mode="REALTIME")
         logger.info("[ScreenerVM] Switched to REALTIME mode")
 
-    async def load_history_tree(self, offset=0):
-        """Load tree data for the history sidebar."""
+    async def load_history_tree(self, append: bool = False) -> None:
+        """加载历史树数据并更新 state.history_tree (Task 3.2: 不再返回 dict).
+
+        Args:
+            append: True 追加到现有 rows (load_more 路径); False 重置 rows (切换模式/初始加载).
+        """
         cache = CacheManager()
+        offset = self._state.history_tree.offset if append else 0
         df = await cache.get_history_tree(offset=offset)
         if df is None or df.empty:
-            return {}
+            if not append:
+                # 重置 rows (切换到 HISTORY 模式后无数据)
+                self._set_state(
+                    history_tree=replace(
+                        self._state.history_tree,
+                        rows=(),
+                        offset=0,
+                        has_more=False,
+                    )
+                )
+            else:
+                # append 路径下无更多数据, 仅隐藏 load_more
+                self._set_state(history_tree=replace(self._state.history_tree, has_more=False))
+            return
+
+        new_rows = self._build_history_tree_rows(df)
+        if append:
+            merged_rows = self._state.history_tree.rows + new_rows
+        else:
+            merged_rows = new_rows
+        self._set_state(
+            history_tree=replace(
+                self._state.history_tree,
+                rows=merged_rows,
+                offset=offset + len(df) * 5,
+                has_more=len(df) >= 5,
+            )
+        )
+
+    @staticmethod
+    def _build_history_tree_rows(df: pd.DataFrame) -> tuple[HistoryTreeRow, ...]:
+        """从 DataFrame 构建历史树行 (不依赖 I18n, 日期格式化内聚到 VM).
+
+        策略名 strategy_name 为 raw key, View 渲染时调 translate_strategy_name 翻译 (§3.2).
+        """
         # Group by trade_date -> {date: [{run_id, strategy_name, cnt}, ...]}
-        tree = {}
+        tree: dict[str, list[dict]] = {}
         for _, row in df.iterrows():
             date = str(row["trade_date"])
-            if date not in tree:
-                tree[date] = []
-            tree[date].append(
-                {"run_id": row["run_id"], "strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore[untyped]
+            tree.setdefault(date, []).append(
+                {
+                    "run_id": row["run_id"],
+                    "strategy_name": row["strategy_name"],
+                    "cnt": int(row["cnt"]),
+                }
             )
-        return tree
+        rows: list[HistoryTreeRow] = []
+        for date_str, strategies in tree.items():
+            display_date, d_key = ScreenerViewModel._format_history_date(date_str)
+            total_cnt = sum(s["cnt"] for s in strategies)
+            rows.append(
+                HistoryTreeRow(
+                    display_date=display_date,
+                    d_key=d_key,
+                    total_cnt=total_cnt,
+                    strategies=tuple(strategies),
+                )
+            )
+        return tuple(rows)
+
+    @staticmethod
+    def _format_history_date(date_str) -> tuple[str, str]:
+        """格式化历史树日期: 返回 (display_date, internal_key).
+
+        纯函数不依赖 I18n, 与 View 中同名函数保持一致行为 (Task 3.2 内聚到 VM).
+        """
+        if isinstance(date_str, (datetime.date, datetime.datetime)):
+            display = date_str.strftime("%Y-%m-%d")
+            key = display
+        else:
+            s = str(date_str)
+            display = f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 and s.isdigit() else s
+            key = s
+        return display, key
 
     async def load_history_data(self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None):  # type: ignore[untyped]
-        """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name."""
-        cache = CacheManager()
-        df = await cache.get_history_records(trade_date, strategy_name, run_id)
-        if df is not None and not df.empty:
-            self._full_results = df
-        else:
-            self._full_results = pd.DataFrame()
-        if df is not None and not df.empty and "ai_score" in df.columns:
-            sort_column = "ai_score"
-        else:
-            sort_column = None
-        self._update_pagination(page_no=1)
-        self._set_state(
-            page_no=1,
-            sort_column=sort_column,
-            sort_ascending=False,
-            data_version=self._state.data_version + 1,
-        )
+        """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name.
+
+        Task 3.2: VM 内聚 loading 管理 (View 不再 set_progress_visible).
+        """
+        self._set_state(loading=True)
+        try:
+            cache = CacheManager()
+            df = await cache.get_history_records(trade_date, strategy_name, run_id)
+            if df is not None and not df.empty:
+                self._full_results = df
+            else:
+                self._full_results = pd.DataFrame()
+            if df is not None and not df.empty and "ai_score" in df.columns:
+                sort_column = "ai_score"
+            else:
+                sort_column = None
+            self._update_pagination(page_no=1)
+            self._set_state(
+                page_no=1,
+                loading=False,
+                sort_column=sort_column,
+                sort_ascending=False,
+                data_version=self._state.data_version + 1,
+            )
+        except asyncio.CancelledError:
+            self._set_state(loading=False)
+            raise
+        except Exception:
+            self._set_state(loading=False)
+            raise
 
     def get_export_data(self):
         """Get the current results DataFrame for export"""
@@ -1013,7 +1156,16 @@ class ScreenerViewModel:
 
     def _on_tasks_updated(self, tasks: list):
         """TaskManager subscriber: detect strategy task completion and notify View."""
-        running = [t for t in tasks if TASK_NAME_PREFIX in t.name and t.status.name in ("RUNNING", "QUEUED")]
+        # Task 3.1: 改用 task_type.key 检测策略任务 (替代旧 TASK_NAME_PREFIX in t.name).
+        # 因 t.name 现为 Message 实例, 不支持 `in` 操作; task_type 也是 Message,
+        # 其 key 为 "task_type_ai_screening" 标识本 VM 提交的筛选任务.
+        running = [
+            t
+            for t in tasks
+            if isinstance(t.task_type, Message)
+            and t.task_type.key == "task_type_ai_screening"
+            and t.status.name in ("RUNNING", "QUEUED")
+        ]
         if not running and self._strategy_submitted:
             self._strategy_submitted = False
             self._set_state(task_unlocked=True)

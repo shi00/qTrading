@@ -24,7 +24,6 @@ from decimal import Decimal
 import flet as ft
 import pandas as pd
 
-from data.persistence.metadata_manager import MetaDataManager
 from ui.components._markdown_safe import safe_open_url
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
@@ -142,7 +141,7 @@ def _format_cell_value(col: str, val) -> str:
     return str(val)
 
 
-def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
+def _build_table_data(df: pd.DataFrame, vm: ScreenerViewModel) -> tuple[list, list]:
     vt_columns = []
     visible_cols = []
     for col in df.columns:
@@ -150,7 +149,7 @@ def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
             continue
         visible_cols.append(col)
         width = _COLUMN_WIDTHS.get(col, 80)
-        label = MetaDataManager.get_column_alias("screening_history", col)
+        label = vm.get_column_alias("screening_history", col)
         vt_columns.append({"id": col, "label": label, "width": width})
 
     records = df[visible_cols].to_dict("records")  # type: ignore[call-overload]
@@ -247,13 +246,9 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     #                     R.2.4: mode/page_size 已迁入 VM state;
     #                     R.2.6.1: strategies_loaded/strategy_options 已迁入 VM state;
     #                     R.2.6.2: strategy_desc/strategy_desc_color 已迁入 VM state;
-    #                     R.2.6.3: status_msg/status_color 已迁入 VM state) ---
-    progress_visible, set_progress_visible = ft.use_state(False)
-    run_disabled, set_run_disabled = ft.use_state(True)
-    export_disabled, set_export_disabled = ft.use_state(True)
-    history_tree_offset, set_history_tree_offset = ft.use_state(0)
-    history_tree_items, set_history_tree_items = ft.use_state(())
-    history_load_more_visible, set_history_load_more_visible = ft.use_state(False)
+    #                     R.2.6.3: status_msg/status_color 已迁入 VM state;
+    #                     Task 3.2: progress_visible/run_disabled/export_disabled 改为派生;
+    #                               历史树 rows/offset/has_more/loading 迁入 VM state.history_tree) ---
     detail_dialog_data, set_detail_dialog_data = ft.use_state(None)
     pending_strategy, set_pending_strategy = ft.use_state(initial_strategy)
     # params_version 触发重渲染; params_ref 持久化参数值 (避免 stale closure)
@@ -292,15 +287,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     ft.use_effect(_load_strategies_async, dependencies=[])
 
-    # --- task_unlocked 响应 (VM state.task_unlocked 变化触发) ---
-
-    def _on_task_unlocked() -> None:
-        if state.task_unlocked:
-            set_progress_visible(False)
-            set_run_disabled(False)
-
-    ft.use_effect(_on_task_unlocked, dependencies=[state.task_unlocked])
-
     # --- 深度链接 (策略加载后执行 pending_strategy) ---
 
     async def _execute_pending_strategy() -> None:
@@ -316,14 +302,11 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         vm.select_strategy(key)
         # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
         vm.update_strategy_desc(key)
-        set_run_disabled(False)
         # 默认参数
         params_def = vm.get_strategy_params(key)
         for p in params_def:
             if p.get("name") == "ai_system_prompt":
-                from strategies.strategy_prompts import get_base_prompt
-
-                params_ref.current[p["name"]] = get_base_prompt(key) or p.get("default", "")
+                params_ref.current[p["name"]] = vm.get_base_prompt(key) or p.get("default", "")
             else:
                 params_ref.current[p["name"]] = p.get("default")
         bump_params(_params_version + 1)
@@ -343,8 +326,8 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         new_val = e.control.value if e and e.control else None
         UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
         # R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state
+        # Task 3.2: run_disabled 改为派生 (state.loading or not state.selected_strategy)
         vm.select_strategy(new_val)
-        set_run_disabled(not new_val)
         # R.2.6.2: vm.update_strategy_desc 内聚 strategy_desc/color 到 VM state
         vm.update_strategy_desc(new_val)
         # 初始化参数默认值
@@ -352,9 +335,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             params_def = vm.get_strategy_params(new_val)
             for p in params_def:
                 if p.get("name") == "ai_system_prompt":
-                    from strategies.strategy_prompts import get_base_prompt
-
-                    params_ref.current[p["name"]] = get_base_prompt(new_val) or p.get("default", "")
+                    params_ref.current[p["name"]] = vm.get_base_prompt(new_val) or p.get("default", "")
                 else:
                     params_ref.current[p["name"]] = p.get("default")
             bump_params(_params_version + 1)
@@ -363,7 +344,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         UILogger.log_action("ScreenerView", "Click", f"btn_run | strategy={state.selected_strategy}")
         if not state.selected_strategy:
             return
-        set_run_disabled(True)
+        # Task 3.2: run_disabled 改为派生, VM run_strategy 内部设置 loading=True 自动禁用
         try:
             await vm.run_strategy(state.selected_strategy, params=dict(params_ref.current or {}))
         except asyncio.CancelledError:
@@ -406,7 +387,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         )
         if not filepath:
             return
-        set_export_disabled(True)
+        # Task 3.2: export_disabled 改为派生 (state.total_items == 0), 不再手动 set
         try:
             path, error = await vm.export_results(filepath)
             page = _get_page()
@@ -421,8 +402,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             page = _get_page()
             if page is not None and hasattr(page, "show_toast"):
                 page.show_toast(I18n.get("data_export_fail"), "error")
-        finally:
-            set_export_disabled(False)
 
     def _on_export_click_sync(e: ft.ControlEvent) -> None:
         page = _get_page()
@@ -452,9 +431,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             return
         if new_mode == "HISTORY":
             vm.switch_to_history()
-            # 清空表格
-            set_history_tree_offset(0)
-            set_history_tree_items(())
+            # Task 3.2: history_tree state 由 VM switch_to_history 重置, View 仅触发加载
             page = _get_page()
             if page is not None:
                 page.run_task(_load_history_tree, False)
@@ -462,32 +439,9 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             vm.switch_to_realtime()
 
     async def _load_history_tree(append: bool) -> None:
-        """加载历史树数据。"""
+        """加载历史树数据 (Task 3.2: VM 更新 state.history_tree, View 不再处理 items)."""
         try:
-            tree_data = await vm.load_history_tree(offset=history_tree_offset)
-            if not tree_data:
-                if not append:
-                    set_history_tree_items(())
-                set_history_load_more_visible(False)
-                return
-            items = []
-            for date_str, strategies in tree_data.items():
-                display_date, d_key = _format_history_date(date_str)
-                total_cnt = sum(s["cnt"] for s in strategies)
-                items.append(
-                    {
-                        "display_date": display_date,
-                        "d_key": d_key,
-                        "total_cnt": total_cnt,
-                        "strategies": strategies,
-                    }
-                )
-            if append:
-                set_history_tree_items(history_tree_items + tuple(items))
-            else:
-                set_history_tree_items(tuple(items))
-            set_history_load_more_visible(len(tree_data) >= 5)
-            set_history_tree_offset(history_tree_offset + len(tree_data) * 5)
+            await vm.load_history_tree(append=append)
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -502,7 +456,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             page.run_task(_load_history_tree, True)
 
     async def _load_history_for_date(trade_date: str, strategy_name: str | None, run_id: str | None) -> None:
-        set_progress_visible(True)
+        # Task 3.2: progress_visible 改为派生 (state.loading), VM load_history_data 内聚 loading 管理
         if isinstance(trade_date, (datetime.date, datetime.datetime)):
             display = trade_date.strftime("%Y-%m-%d")
             trade_date = display
@@ -522,8 +476,6 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             await vm.load_history_data(trade_date, strategy_name, run_id)
         except asyncio.CancelledError:
             raise
-        finally:
-            set_progress_visible(False)
 
     def _on_tree_item_click(trade_date: str, strategy_name: str | None = None, run_id: str | None = None) -> None:
         page = _get_page()
@@ -554,11 +506,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
         try:
-            from strategies.strategy_prompts import get_base_prompt
             from utils.config_handler import ConfigHandler
 
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
-            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, get_base_prompt, strat))
+            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, vm.get_base_prompt, strat))
             _update_param("ai_system_prompt", new_val)
             page = _get_page()
             if page is not None and hasattr(page, "show_toast"):
@@ -619,7 +570,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     df = vm.get_current_page_data()
     if df is not None and not df.empty:
         _raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
-        vt_columns, formatted_rows = _build_table_data(df)
+        vt_columns, formatted_rows = _build_table_data(df, vm)
     else:
         _raw_row_lookup = {}
         vt_columns = []
@@ -630,8 +581,11 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     total_pages = state.total_pages
     total_items = state.total_items
 
+    # Task 3.2: 派生状态 (单源真相: state.loading / state.selected_strategy / state.total_items)
+    progress_visible = state.loading
+    run_disabled = state.loading or not state.selected_strategy
     # 导出按钮: 有数据时启用
-    export_btn_disabled = export_disabled or (total_items == 0)
+    export_btn_disabled = total_items == 0
 
     # --- 构建参数面板 ---
 
@@ -700,10 +654,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
         if p_type == "textarea":
             if p_name == "ai_system_prompt" and state.selected_strategy:
-                from strategies.strategy_prompts import get_base_prompt
-
                 current_val = (
-                    params_ref.current.get(p_name) or get_base_prompt(state.selected_strategy) or p.get("default", "")
+                    params_ref.current.get(p_name)
+                    or vm.get_base_prompt(state.selected_strategy)
+                    or p.get("default", "")
                 )
             else:
                 current_val = params_ref.current.get(p_name, p.get("default", ""))
@@ -926,9 +880,14 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     # --- 构建历史树控件 ---
 
     def _build_history_tree() -> ft.Control:
-        """构建历史树侧栏。"""
+        """构建历史树侧栏 (Task 3.2: 从 state.history_tree.rows 派生, 不持有 use_state)."""
+        # Task 3.2: 历史树状态从 VM state 派生 (消除双轨状态)
+        history_tree_rows = state.history_tree.rows
+        history_tree_offset = state.history_tree.offset
+        history_load_more_visible = state.history_tree.has_more
+
         tree_controls: list[ft.Control] = []
-        if not history_tree_items:
+        if not history_tree_rows:
             tree_controls.append(
                 ft.Container(
                     content=ft.Text(I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=13),
@@ -936,12 +895,12 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                 )
             )
         else:
-            first_expand = history_tree_offset <= 5 and len(history_tree_items) <= 5
-            for idx, item in enumerate(history_tree_items):
-                display_date = item["display_date"]
-                d_key = item["d_key"]
-                total_cnt = item["total_cnt"]
-                strategies = item["strategies"]
+            first_expand = history_tree_offset <= 5 and len(history_tree_rows) <= 5
+            for idx, item in enumerate(history_tree_rows):
+                display_date = item.display_date
+                d_key = item.d_key
+                total_cnt = item.total_cnt
+                strategies = item.strategies
 
                 subtiles: list[ft.Control] = [
                     ft.ListTile(

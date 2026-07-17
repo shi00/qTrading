@@ -187,28 +187,40 @@ class TestTableRowsToPaginatedRows:
 class TestBuildTableSelectorOptions:
     """_build_table_selector_options: 构建表选择器选项。"""
 
+    def _make_vm(self) -> MagicMock:
+        """Task 5.1: helper 需要 vm.get_table_alias 参数。"""
+        vm = MagicMock()
+        vm.get_table_alias.side_effect = lambda t: t
+        return vm
+
     def test_returns_options_for_each_table(self):
         from ui.views.data_view import _build_table_selector_options
 
         MetaDataManager._alias_cache.clear()
-        opts = _build_table_selector_options(("stock_basic", "daily_quotes"))
+        opts = _build_table_selector_options(("stock_basic", "daily_quotes"), self._make_vm())
         assert len(opts) == 2
         assert opts[0].key == "stock_basic"
 
     def test_empty_tuple_returns_empty_list(self):
         from ui.views.data_view import _build_table_selector_options
 
-        assert _build_table_selector_options(()) == []
+        assert _build_table_selector_options((), self._make_vm()) == []
 
 
 class TestBuildFilterColOptions:
     """_build_filter_col_options: 构建过滤列选项。"""
 
+    def _make_vm(self) -> MagicMock:
+        """Task 5.1: helper 需要 vm.get_column_alias 参数。"""
+        vm = MagicMock()
+        vm.get_column_alias.side_effect = lambda t, c: c
+        return vm
+
     def test_returns_options_for_each_column(self):
         from ui.views.data_view import _build_filter_col_options
 
         MetaDataManager._alias_cache.clear()
-        opts = _build_filter_col_options("stock_basic", ("ts_code", "name"))
+        opts = _build_filter_col_options("stock_basic", ("ts_code", "name"), self._make_vm())
         assert len(opts) == 2
         assert opts[0].key == "ts_code"
 
@@ -216,11 +228,17 @@ class TestBuildFilterColOptions:
 class TestBuildTableColumnsSpec:
     """_build_table_columns_spec: 构建 PaginatedTable columns spec。"""
 
+    def _make_vm(self) -> MagicMock:
+        """Task 5.1: helper 需要 vm.get_column_alias 参数。"""
+        vm = MagicMock()
+        vm.get_column_alias.side_effect = lambda t, c: c
+        return vm
+
     def test_returns_spec_with_id_label_width(self):
         from ui.views.data_view import _build_table_columns_spec
 
         MetaDataManager._alias_cache.clear()
-        spec = _build_table_columns_spec("stock_basic", ("ts_code", "name"))
+        spec = _build_table_columns_spec("stock_basic", ("ts_code", "name"), self._make_vm())
         assert len(spec) == 2
         assert spec[0]["id"] == "ts_code"
         assert spec[0]["width"] == 140
@@ -229,11 +247,17 @@ class TestBuildTableColumnsSpec:
 class TestBuildSqlColumnsSpec:
     """_build_sql_columns_spec: 构建 SQL 结果表 columns spec (从 tuple[str, ...])。"""
 
+    def _make_vm(self) -> MagicMock:
+        """Task 5.1: helper 需要 vm.get_column_alias 参数。"""
+        vm = MagicMock()
+        vm.get_column_alias.side_effect = lambda t, c: c
+        return vm
+
     def test_returns_spec_from_columns_tuple(self):
         from ui.views.data_view import _build_sql_columns_spec
 
         MetaDataManager._alias_cache.clear()
-        spec = _build_sql_columns_spec(("col1", "col2"))
+        spec = _build_sql_columns_spec(("col1", "col2"), self._make_vm())
         assert len(spec) == 2
         assert spec[0]["id"] == "col1"
         assert spec[0]["width"] == 140
@@ -415,6 +439,14 @@ class _FakeDataExplorerViewModel:
     def set_table(self, table_name: str) -> None:
         self.method_calls.append(("set_table", {"table_name": table_name}))
         self._set_state(current_table=table_name)
+
+    def get_table_alias(self, table_name: str) -> str:
+        """Mock vm.get_table_alias (Task 5.1: 从 View 迁入 VM)."""
+        return table_name
+
+    def get_column_alias(self, table_name: str | None, col: str) -> str:
+        """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
+        return col
 
     def reset_table_state(self) -> None:
         self.method_calls.append(("reset_table_state", {}))

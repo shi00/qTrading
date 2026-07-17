@@ -15,7 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date
 
-from core.i18n import I18n
 from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from services.task_manager import TaskManager
@@ -249,7 +248,7 @@ class BacktestViewModel:
                     status_color="success",
                 )
 
-                return I18n.get("backtest_success").format(sharpe=f"{result.metrics['sharpe_ratio']:.2f}")
+                return Message("backtest_success", {"sharpe": f"{result.metrics['sharpe_ratio']:.2f}"})
 
             except asyncio.CancelledError:
                 raise
@@ -269,10 +268,15 @@ class BacktestViewModel:
 
         strategy_obj = get_strategy_registry().get(strategy_key)
         name_key = getattr(strategy_obj, "name_key", None) if strategy_obj else None
-        strategy_name = I18n.get(name_key) if name_key else strategy_key
+        # Task 3.1: VM 不调 I18n.get; task name 改为 Message, View 渲染时翻译.
+        # name_key 是 i18n key (策略名), 用 *_key params 约定传给 View.
+        # 若 strategy_obj 不存在或缺 name_key, 回退到 strategy_key 字面值 (无翻译).
         task_id = TaskManager().submit_task(
-            name=f"{TASK_NAME_PREFIX}: {strategy_name}",
-            task_type=I18n.get("task_type_backtest"),
+            name=Message(
+                "task_name_backtest",
+                {"name_key": name_key or strategy_key, "fallback": strategy_key},
+            ),
+            task_type=Message("task_type_backtest"),
             coroutine_factory=_execute_backtest,
             cancellable=True,
         )

@@ -25,7 +25,6 @@ import time
 import flet as ft
 import pandas as pd
 
-from data.persistence.metadata_manager import MetaDataManager
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -79,28 +78,32 @@ def _build_filter_op_options() -> list[ft.dropdown.Option]:
     ]
 
 
-def _build_table_selector_options(tables: tuple[str, ...]) -> list[ft.dropdown.Option]:
+def _build_table_selector_options(tables: tuple[str, ...], vm: DataExplorerViewModel) -> list[ft.dropdown.Option]:
     """构建表选择器选项 (locale 变更时由组件重渲染自动刷新)。"""
-    return [ft.dropdown.Option(key=t, text=MetaDataManager.get_table_alias(t)) for t in tables]
+    return [ft.dropdown.Option(key=t, text=vm.get_table_alias(t)) for t in tables]
 
 
-def _build_filter_col_options(current_table: str, columns: tuple[str, ...]) -> list[ft.dropdown.Option]:
+def _build_filter_col_options(
+    current_table: str, columns: tuple[str, ...], vm: DataExplorerViewModel
+) -> list[ft.dropdown.Option]:
     """构建过滤列选项。"""
     return [
         ft.dropdown.Option(
             key=col,
-            text=MetaDataManager.get_column_alias(current_table, col),
+            text=vm.get_column_alias(current_table, col),
         )
         for col in columns
     ]
 
 
-def _build_table_columns_spec(current_table: str, columns: tuple[str, ...]) -> list[dict[str, object]]:
+def _build_table_columns_spec(
+    current_table: str, columns: tuple[str, ...], vm: DataExplorerViewModel
+) -> list[dict[str, object]]:
     """构建 PaginatedTable columns spec (id/label/width)。"""
     return [
         {
             "id": col,
-            "label": MetaDataManager.get_column_alias(current_table, col),
+            "label": vm.get_column_alias(current_table, col),
             "width": 140,
         }
         for col in columns
@@ -122,12 +125,12 @@ def _table_rows_to_paginated_rows(
     ]
 
 
-def _build_sql_columns_spec(columns: tuple[str, ...]) -> list[dict[str, object]]:
+def _build_sql_columns_spec(columns: tuple[str, ...], vm: DataExplorerViewModel) -> list[dict[str, object]]:
     """构建 SQL 结果表的 columns spec (从 state.sql_result_columns)."""
     return [
         {
             "id": col,
-            "label": MetaDataManager.get_column_alias(None, col),
+            "label": vm.get_column_alias(None, col),
             "width": 140,
         }
         for col in columns
@@ -396,7 +399,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         if state.sort_col_index is not None and 0 <= state.sort_col_index < len(state.table_columns)
         else None
     )
-    columns_spec = _build_table_columns_spec(state.current_table, state.table_columns)
+    columns_spec = _build_table_columns_spec(state.current_table, state.table_columns, vm)
     rows_data = _table_rows_to_paginated_rows(state.table_rows, state.table_columns)
 
     # --- 构建 UI ---
@@ -410,7 +413,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        options=_build_table_selector_options(state.tables_list),
+        options=_build_table_selector_options(state.tables_list, vm),
         height=36,
         text_size=13,
         content_padding=10,
@@ -425,7 +428,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
-        options=_build_filter_col_options(state.current_table, state.table_columns),
+        options=_build_filter_col_options(state.current_table, state.table_columns, vm),
         height=36,
         text_size=13,
         content_padding=10,
@@ -692,7 +695,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     has_data = state.sql_success and bool(all_sql_rows)
     if has_data:
         display_rows = all_sql_rows[:MAX_ROWS_UI] if len(all_sql_rows) > MAX_ROWS_UI else all_sql_rows
-        result_cols = _build_sql_columns_spec(state.sql_result_columns)
+        result_cols = _build_sql_columns_spec(state.sql_result_columns, vm)
         result_rows = _sql_rows_to_paginated_rows(display_rows, state.sql_result_columns)
     else:
         result_cols = []

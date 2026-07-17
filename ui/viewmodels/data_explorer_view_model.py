@@ -451,6 +451,26 @@ class DataExplorerViewModel:
         finally:
             self._set_state(sql_is_executing=False)
 
+    def get_table_alias(self, table_name: str) -> str:
+        """获取表别名 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``MetaDataManager.get_table_alias``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.persistence.metadata_manager import MetaDataManager
+
+        return MetaDataManager.get_table_alias(table_name)
+
+    def get_column_alias(self, table_name: str | None, col: str) -> str:
+        """获取列别名 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``MetaDataManager.get_column_alias``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.persistence.metadata_manager import MetaDataManager
+
+        return MetaDataManager.get_column_alias(table_name, col)
+
     def set_filter(self, col: str, op: str, val: str):
         """Set the current filter parameters."""
         self._set_state(filter_col=col, filter_op=op, filter_val=val)

@@ -865,11 +865,9 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Health scan dialog (条件渲染) ---
     if scan_dialog_open:
-        from data.data_processor import DataProcessor
-
         page = _get_page()
         scan_dialog_ctrl = HealthScanDialog(
-            data_processor=DataProcessor(),
+            data_processor=vm.get_data_processor(),
             page=page,
             open_state=True,
             on_close=_on_scan_close,

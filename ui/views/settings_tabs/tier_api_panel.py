@@ -37,14 +37,12 @@ _TIER_PANEL_MD_BREAKPOINT = 800
 # ------------------------------------------------------------------
 
 
-def _build_tier_options() -> list[ft.dropdown.Option]:
+def _build_tier_options(vm: SystemViewModel) -> list[ft.dropdown.Option]:
     """构建档位下拉框选项（locale 变更时由组件重渲染自动刷新）。"""
-    from data.constants import TUSHARE_POINT_TIERS
-
-    return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
+    return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in vm.get_tier_options()]
 
 
-def _render_probe_status(api_name: str, available: bool | None) -> tuple[ft.Icon, ft.Text, str]:
+def _render_probe_status(api_name: str, available: bool | None, vm: SystemViewModel) -> tuple[ft.Icon, ft.Text, str]:
     """渲染 probe 三态状态图标 + 文本。
 
     Returns:
@@ -57,9 +55,7 @@ def _render_probe_status(api_name: str, available: bool | None) -> tuple[ft.Icon
             AppColors.SUCCESS,
         )
     if available is False:
-        from data.external.tushare_client import TushareClient
-
-        if TushareClient().is_independent_purchase(api_name):
+        if vm.is_independent_purchase(api_name):
             return (
                 ft.Icon(ft.Icons.CANCEL, size=14, color=AppColors.WARNING),
                 ft.Text(I18n.get("sys_tier_independent_purchase"), size=11, color=AppColors.WARNING),
@@ -77,11 +73,9 @@ def _render_probe_status(api_name: str, available: bool | None) -> tuple[ft.Icon
     )
 
 
-def _build_api_description(api_name: str, available: bool | None) -> ft.Control:
+def _build_api_description(api_name: str, available: bool | None, vm: SystemViewModel) -> ft.Control:
     """构建 API 说明列（独立付费/积分不足/默认空）。"""
-    from data.external.tushare_client import TushareClient
-
-    if TushareClient().is_independent_purchase(api_name):
+    if vm.is_independent_purchase(api_name):
         return ft.Text(
             I18n.get("sys_tier_independent_purchase"),
             size=10,
@@ -98,24 +92,23 @@ def _build_api_description(api_name: str, available: bool | None) -> ft.Control:
     return ft.Text("", size=10)
 
 
-def _build_api_list_controls(current_tier: str, probe_status: dict[str, bool | None]) -> list[ft.Control]:
+def _build_api_list_controls(
+    current_tier: str, probe_status: dict[str, bool | None], vm: SystemViewModel
+) -> list[ft.Control]:
     """构建 API 列表控件（按当前档位过滤 _TIER_API_COVERAGE）。
 
     每项含：API 名称 + 独立付费标记（💰）+ probe 三态状态图标 + 状态文本。
     """
-    from data.external.tushare_client import TushareClient
-
-    client = TushareClient()
-    tier_apis = client.get_tier_apis(current_tier)
+    tier_apis = vm.get_tier_apis(current_tier)
     sorted_apis = sorted(tier_apis)
 
     controls: list[ft.Control] = []
     for api_name in sorted_apis:
         available = probe_status.get(api_name)
-        status_icon, status_text, _ = _render_probe_status(api_name, available)
+        status_icon, status_text, _ = _render_probe_status(api_name, available, vm)
 
         independent_badge: list[ft.Control] = []
-        if client.is_independent_purchase(api_name):
+        if vm.is_independent_purchase(api_name):
             independent_badge.append(
                 ft.Icon(
                     ft.Icons.ATTACH_MONEY_ROUNDED,
@@ -142,7 +135,7 @@ def _build_api_list_controls(current_tier: str, probe_status: dict[str, bool | N
                     col={"xs": 12, "sm": 6, "md": 6, "lg": 4},
                 ),
                 ft.Container(
-                    content=_build_api_description(api_name, available),
+                    content=_build_api_description(api_name, available, vm),
                     col={"xs": 12, "sm": 12, "md": 12, "lg": 4},
                 ),
             ],
@@ -356,7 +349,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         text_size=14,
         border_radius=8,
         content_padding=10,
-        options=_build_tier_options(),
+        options=_build_tier_options(vm),
         on_select=_on_tier_change,
         disabled=probe_in_progress,
     )
@@ -384,7 +377,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     progress_text_ctrl = ft.Text(progress_text, size=11, color=ft.Colors.PRIMARY)
 
     api_list_view = ft.ListView(
-        controls=_build_api_list_controls(current_tier, probe_status),
+        controls=_build_api_list_controls(current_tier, probe_status, vm),
         spacing=4,
         padding=8,
         height=list_height,

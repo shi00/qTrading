@@ -455,20 +455,26 @@ def system_tab_env(mock_i18n, mock_app_colors_state):
 
     fake_vm = _FakeSystemVM()
     _configure_i18n(mock_i18n)
+    # Task 5.2: ConfigHandler/ThreadPoolManager 下沉到 SystemSettingsViewModel,
+    # patch 目标改为 VM 模块 (View 不再直接持有这两个符号)
+    from ui.viewmodels import system_settings_view_model as settings_vm_mod
+
+    mock_config = MagicMock()
+    mock_tpm_class = MagicMock()
+    _configure_config_handler(mock_config)
     patches = [
         patch.object(mod, "SystemViewModel", return_value=fake_vm),
         patch.object(mod, "TierApiPanel", return_value=MagicMock(name="TierApiPanel")),
-        patch.object(mod, "ConfigHandler"),
         patch.object(mod, "I18n", mock_i18n),
         patch.object(mod, "UILogger"),
         patch.object(mod, "DataSanitizer"),
-        patch.object(mod, "ThreadPoolManager"),
+        patch.object(settings_vm_mod, "ConfigHandler", mock_config),
+        patch.object(settings_vm_mod, "ThreadPoolManager", mock_tpm_class),
     ]
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
-        _configure_config_handler(mod.ConfigHandler)
-        yield mod, mod.ConfigHandler, mock_i18n, fake_vm
+        yield mod, mock_config, mock_i18n, fake_vm
 
 
 def _render_with_page(mod: Any, page: Any, show_snack: Any = None) -> Any:

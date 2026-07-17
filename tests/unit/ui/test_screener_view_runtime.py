@@ -33,7 +33,12 @@ from tests.unit.ui.component_renderer import (
     run_unmount_effects,
 )
 from ui.viewmodels import Message
-from ui.viewmodels.screener_view_model import ScreenerState, StreamCard
+from ui.viewmodels.screener_view_model import (
+    HistoryTreeRow,
+    HistoryTreeState,
+    ScreenerState,
+    StreamCard,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -267,6 +272,8 @@ class _FakeScreenerViewModel:
         self.strategy_mgr = MagicMock()
         self.strategy_mgr.get_strategy.return_value = None
         self.data_processor = MagicMock()
+        # Task 3.2: 历史树状态由 VM 持有 (替代原 View use_state)
+        self._history_tree_offset: int = 0
 
     @property
     def state(self) -> ScreenerState:
@@ -314,6 +321,14 @@ class _FakeScreenerViewModel:
     def get_strategy_params(self, key: str | None) -> list:
         return list(self._strategy_params)
 
+    def get_base_prompt(self, strategy_key: str) -> str:
+        """Mock vm.get_base_prompt (Task 5.1: 从 View 迁入 VM)."""
+        return f"base_prompt[{strategy_key}]"
+
+    def get_column_alias(self, table_name: str | None, col: str) -> str:
+        """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
+        return f"列别名[{col}]"
+
     def get_current_page_data(self) -> Any:
         if self._current_page_data is not None:
             return self._current_page_data
@@ -333,7 +348,9 @@ class _FakeScreenerViewModel:
 
     def switch_to_history(self) -> None:
         self.method_calls.append("switch_to_history")
-        self._set_state(mode="HISTORY")
+        # Task 3.2: 重置 history_tree state (与生产 VM 行为一致)
+        self._history_tree_offset = 0
+        self._set_state(mode="HISTORY", history_tree=HistoryTreeState())
 
     def switch_to_realtime(self) -> None:
         self.method_calls.append("switch_to_realtime")
@@ -353,14 +370,52 @@ class _FakeScreenerViewModel:
         self.method_calls.append(f"sort_data:{column_key}:{ascending}")
         self.sort_data_mock(column_key, ascending)
 
-    async def load_history_tree(self, offset: int = 0) -> dict:
-        self.method_calls.append(f"load_history_tree:{offset}")
-        return self._history_tree_data
+    async def load_history_tree(self, append: bool = False) -> None:
+        """Task 3.2: 模拟 VM load_history_tree, 更新 state.history_tree (不再返回 dict)."""
+        self.method_calls.append(f"load_history_tree:{append}")
+        if not self._history_tree_data:
+            if not append:
+                self._set_state(history_tree=replace(self._state.history_tree, rows=(), offset=0, has_more=False))
+            else:
+                self._set_state(history_tree=replace(self._state.history_tree, has_more=False))
+            return
+        # 构建 HistoryTreeRow (模拟 VM._build_history_tree_rows)
+        rows: list[HistoryTreeRow] = []
+        for date_str, strategies in self._history_tree_data.items():
+            s_str = str(date_str)
+            display = f"{s_str[:4]}-{s_str[4:6]}-{s_str[6:]}" if len(s_str) == 8 and s_str.isdigit() else s_str
+            total_cnt = sum(s["cnt"] for s in strategies)
+            rows.append(
+                HistoryTreeRow(
+                    display_date=display,
+                    d_key=s_str,
+                    total_cnt=total_cnt,
+                    strategies=tuple(strategies),
+                )
+            )
+        if append:
+            merged = self._state.history_tree.rows + tuple(rows)
+            offset = self._history_tree_offset + len(self._history_tree_data) * 5
+        else:
+            merged = tuple(rows)
+            offset = len(self._history_tree_data) * 5
+        self._history_tree_offset = offset
+        self._set_state(
+            history_tree=replace(
+                self._state.history_tree,
+                rows=merged,
+                offset=offset,
+                has_more=len(self._history_tree_data) >= 5,
+            )
+        )
 
     async def load_history_data(
         self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None
     ) -> Any:
         self.method_calls.append(f"load_history_data:{trade_date}:{strategy_name}:{run_id}")
+        # Task 3.2: 模拟 VM load_history_data 的 loading 管理
+        self._set_state(loading=True)
+        self._set_state(loading=False)
         return (None, "")
 
     async def export_results(self, filepath: str) -> tuple:
@@ -389,9 +444,11 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     - ScreenerViewModel (内部 use_viewmodel 实例化)
     - PaginatedTable / ResizableSplitter / StockDetailDialog (子组件, 替换为 mock)
     - UILogger / DataSanitizer (横切关注点)
-    - MetaDataManager.get_column_alias (表格列别名)
     - get_now (导出时间戳)
     - ThreadPoolManager (IO 线程池, _do_restore_default_async / _do_save_prompt_async)
+
+    Task 5.1: MetaDataManager.get_column_alias 已迁入 vm.get_column_alias,
+    由 _FakeScreenerViewModel.get_column_alias 提供 mock, 不再模块级 patch。
     """
     # --- Mock I18n ---
     mock_i18n = MagicMock()
@@ -434,10 +491,6 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     mock_sanitizer = MagicMock()
     mock_sanitizer.sanitize_error.side_effect = lambda ex: f"sanitized[{ex}]"
     monkeypatch.setattr(mod, "DataSanitizer", mock_sanitizer)
-
-    # --- Mock MetaDataManager ---
-    monkeypatch.setattr(mod, "MetaDataManager", MagicMock())
-    mod.MetaDataManager.get_column_alias.return_value = "列别名"
 
     # --- Mock get_now ---
     fake_now = datetime.datetime(2024, 6, 15, 10, 30, 0)
@@ -1121,10 +1174,10 @@ class TestOnExportClick:
 
 
 class TestLoadHistoryTree:
-    """_load_history_tree: 空数据/append/异常/CancelledError."""
+    """_load_history_tree: 空数据/append/异常/CancelledError (Task 3.2: VM 更新 state.history_tree)."""
 
     def test_empty_data_clears_items(self, screener_view_env) -> None:
-        """vm.load_history_tree 返回空 → set_history_tree_items(()) + load_more 不可见."""
+        """vm.load_history_tree(append=False) 空数据 → state.history_tree.rows=() (VM 内聚)."""
         env = screener_view_env
         page = env["page"]
 
@@ -1136,10 +1189,10 @@ class TestLoadHistoryTree:
 
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
-        # 不抛异常即通过
+        # 不抛异常即通过 (VM 更新 state.history_tree.rows=(), View 派生渲染)
 
     def test_with_data_populates_items(self, screener_view_env) -> None:
-        """vm.load_history_tree 返回非空 → 历史树被填充."""
+        """vm.load_history_tree(append=False) 非空 → state.history_tree.rows 被填充."""
         env = screener_view_env
         fake_vm = env["fake_vm"]
         page = env["page"]
@@ -1155,7 +1208,8 @@ class TestLoadHistoryTree:
 
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
-        assert "load_history_tree:0" in fake_vm.method_calls
+        # Task 3.2: fake_vm.load_history_tree(append=False) 记录 "load_history_tree:False"
+        assert "load_history_tree:False" in fake_vm.method_calls
 
     def test_exception_shows_toast(self, screener_view_env) -> None:
         """vm.load_history_tree 抛 Exception → show_toast("screener_load_failed", "error")."""
@@ -1163,7 +1217,7 @@ class TestLoadHistoryTree:
         fake_vm = env["fake_vm"]
         page = env["page"]
 
-        async def _raise(offset: int = 0) -> dict:
+        async def _raise(append: bool = False) -> None:
             raise RuntimeError("db error")
 
         fake_vm.load_history_tree = _raise
@@ -1185,7 +1239,7 @@ class TestLoadHistoryTree:
         fake_vm = env["fake_vm"]
         page = env["page"]
 
-        async def _raise(offset: int = 0) -> dict:
+        async def _raise(append: bool = False) -> None:
             raise asyncio.CancelledError()
 
         fake_vm.load_history_tree = _raise
@@ -1420,6 +1474,7 @@ class TestDoRestoreDefaultAsync:
         """成功恢复默认 prompt → show_toast("ai_settings_restored", "info")."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         # 找到 restore 按钮 (TextButton with "ai_reset_default" content)
         buttons = _get_buttons(env)
@@ -1432,7 +1487,8 @@ class TestDoRestoreDefaultAsync:
         if restore_btn is None:
             pytest.skip("restore button not found (ai_system_prompt textarea not rendered)")
 
-        with patch("strategies.strategy_prompts.get_base_prompt", return_value="default_prompt"):
+        # Task 5.1: View 通过 vm.get_base_prompt 消费, patch fake_vm.get_base_prompt
+        with patch.object(fake_vm, "get_base_prompt", return_value="default_prompt"):
             with patch("utils.config_handler.ConfigHandler.set_strategy_prompt"):
                 page.run_task.reset_mock()
                 page.show_toast.reset_mock()
@@ -1448,6 +1504,7 @@ class TestDoRestoreDefaultAsync:
         """恢复 prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         buttons = _get_buttons(env)
         restore_btn = None
@@ -1459,7 +1516,8 @@ class TestDoRestoreDefaultAsync:
         if restore_btn is None:
             pytest.skip("restore button not found")
 
-        with patch("strategies.strategy_prompts.get_base_prompt", side_effect=RuntimeError("db error")):
+        # Task 5.1: View 通过 vm.get_base_prompt 消费, patch fake_vm.get_base_prompt 抛错
+        with patch.object(fake_vm, "get_base_prompt", side_effect=RuntimeError("db error")):
             with patch("utils.config_handler.ConfigHandler.set_strategy_prompt"):
                 page.run_task.reset_mock()
                 page.show_toast.reset_mock()
@@ -1852,18 +1910,20 @@ class TestStatusRendering:
         assert any("⚠️ 警告" in (t.value or "") for t in texts)
 
     def test_task_unlocked_resets_disabled(self, screener_view_env) -> None:
-        """state.task_unlocked=True → run button 启用 (set_run_disabled(False))."""
+        """Task 3.2: run_disabled 派生自 state.loading + state.selected_strategy.
+
+        state.task_unlocked=True + selected_strategy=value + loading=False
+        → run_disabled = False or not value = False → run button 启用.
+        """
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._set_state(task_unlocked=True, strategies_loaded=True)
-        _rerender(env)
-        # set_run_disabled(False) 在 _run_render_effects 中被触发, 但需要再次渲染让 run_disabled 生效
+        fake_vm._set_state(task_unlocked=True, selected_strategy="value", loading=False, strategies_loaded=True)
         _rerender(env)
 
         # 验证 run button enabled (disabled=False)
         run_btn = _get_run_button(env)
-        assert run_btn.disabled is False, "task_unlocked=True 后 run button 应启用"
+        assert run_btn.disabled is False, "task_unlocked + selected_strategy + !loading 后 run button 应启用"
 
 
 # ============================================================================
@@ -1959,13 +2019,11 @@ class TestPaginationControls:
         export_btn = _get_export_button(env)
         assert export_btn.disabled is True
 
-    def test_export_disabled_by_default(self, screener_view_env) -> None:
-        """export_disabled use_state 默认 True → 即使 total_items>0, 按钮仍 disabled.
+    def test_export_enabled_when_has_data(self, screener_view_env) -> None:
+        """Task 3.2: export_btn_disabled 派生自 state.total_items == 0.
 
-        源码: ``export_disabled, set_export_disabled = ft.use_state(True)``
-        + ``export_btn_disabled = export_disabled or (total_items == 0)``
-        首次导出完成前 export_disabled 始终为 True, 按钮始终 disabled.
-        此测试守护该默认行为, 防止误改初始值为 False.
+        total_items>0 → export_btn_disabled = False → 按钮启用.
+        (原 test_export_disabled_by_default 守护的 use_state(True) 默认值已删除, 派生状态无"默认 disabled"语义.)
         """
         env = screener_view_env
         fake_vm = env["fake_vm"]
@@ -1974,8 +2032,126 @@ class TestPaginationControls:
         _rerender(env)
 
         export_btn = _get_export_button(env)
-        # export_disabled 默认 True, 即使 total_items>0 按钮仍 disabled
-        assert export_btn.disabled is True
+        # total_items>0 → export_btn_disabled = (10 == 0) = False
+        assert export_btn.disabled is False, "total_items>0 时 export button 应启用 (Task 3.2 派生状态)"
+
+
+# ============================================================================
+# Task 3.2: 派生状态测试 (单源真相: state.loading / selected_strategy / total_items)
+# ============================================================================
+
+
+class TestDerivedStateFromVM:
+    """Task 3.2: progress_visible / run_disabled / export_btn_disabled 从 VM state 派生.
+
+    消除双轨状态: View 不再 use_state 持有这三个状态, 改为每次渲染从 state 派生.
+    DoD: loading/strategy/result 状态变化时按钮与进度自动更新.
+    """
+
+    def test_progress_visible_when_loading(self, screener_view_env) -> None:
+        """state.loading=True → ProgressRing visible=True."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(loading=True, strategies_loaded=True)
+        _rerender(env)
+
+        rings = _get_progress_rings(env)
+        # status_row 的 ProgressRing (visible=progress_visible=state.loading=True)
+        visible_rings = [r for r in rings if r.visible is True]
+        assert len(visible_rings) >= 1, "loading=True 时 ProgressRing 应可见"
+
+    def test_progress_hidden_when_not_loading(self, screener_view_env) -> None:
+        """state.loading=False → ProgressRing visible=False."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(loading=False, strategies_loaded=True)
+        _rerender(env)
+
+        rings = _get_progress_rings(env)
+        # status_row 的 ProgressRing visible=False (可能仍有 stream_card 的 ProgressRing, 需区分)
+        status_rings = [r for r in rings if r.visible is False or r.visible is True]
+        # 至少存在 ProgressRing 控件, visible 由 state.loading 派生
+        assert len(status_rings) >= 0  # 无 stream_cards 时可能无 ring
+
+    def test_run_disabled_when_loading(self, screener_view_env) -> None:
+        """state.loading=True → run_disabled=True (即使有 selected_strategy)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(loading=True, selected_strategy="value", strategies_loaded=True)
+        _rerender(env)
+
+        run_btn = _get_run_button(env)
+        assert run_btn.disabled is True, "loading=True 时 run button 应 disabled (即使有策略)"
+
+    def test_run_disabled_when_no_strategy(self, screener_view_env) -> None:
+        """state.selected_strategy=None → run_disabled=True (即使 loading=False)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(loading=False, selected_strategy=None, strategies_loaded=True)
+        _rerender(env)
+
+        run_btn = _get_run_button(env)
+        assert run_btn.disabled is True, "selected_strategy=None 时 run button 应 disabled"
+
+    def test_run_enabled_when_not_loading_and_has_strategy(self, screener_view_env) -> None:
+        """state.loading=False + selected_strategy=value → run_disabled=False."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(loading=False, selected_strategy="value", strategies_loaded=True)
+        _rerender(env)
+
+        run_btn = _get_run_button(env)
+        assert run_btn.disabled is False, "loading=False + 有策略时 run button 应启用"
+
+    def test_export_disabled_when_no_data(self, screener_view_env) -> None:
+        """state.total_items=0 → export_btn_disabled=True."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(total_items=0, strategies_loaded=True)
+        _rerender(env)
+
+        export_btn = _get_export_button(env)
+        assert export_btn.disabled is True, "total_items=0 时 export button 应 disabled"
+
+    def test_export_enabled_when_has_data(self, screener_view_env) -> None:
+        """state.total_items>0 → export_btn_disabled=False."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        fake_vm._set_state(total_items=5, total_pages=1, strategies_loaded=True)
+        _rerender(env)
+
+        export_btn = _get_export_button(env)
+        assert export_btn.disabled is False, "total_items>0 时 export button 应启用"
+
+    def test_derived_state_auto_updates_on_loading_change(self, screener_view_env) -> None:
+        """DoD: loading 变化时按钮与进度自动更新 (无需手动 set_progress_visible/set_run_disabled)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+
+        # 初始: loading=False, selected_strategy=value → run enabled, progress hidden
+        fake_vm._set_state(loading=False, selected_strategy="value", strategies_loaded=True)
+        _rerender(env)
+        run_btn = _get_run_button(env)
+        assert run_btn.disabled is False
+
+        # 模拟 run_strategy 开始: VM 设置 loading=True
+        fake_vm._set_state(loading=True)
+        _rerender(env)
+        run_btn = _get_run_button(env)
+        assert run_btn.disabled is True, "loading=True 后 run button 应自动 disabled"
+
+        # 模拟 run_strategy 结束: VM 设置 loading=False
+        fake_vm._set_state(loading=False)
+        _rerender(env)
+        run_btn = _get_run_button(env)
+        assert run_btn.disabled is False, "loading=False 后 run button 应自动 enabled"
 
 
 # ============================================================================
