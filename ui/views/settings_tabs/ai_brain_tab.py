@@ -151,13 +151,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         )
     )
 
-    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
-    max_candidates_value, set_max_candidates = ft.use_state(ai_settings_state.max_candidates_value)
-    min_turnover_value, set_min_turnover = ft.use_state(ai_settings_state.min_turnover_value)
-    ai_concurrency_value, set_ai_concurrency = ft.use_state(ai_settings_state.ai_concurrency_value)
-    news_concurrency_value, set_news_concurrency = ft.use_state(ai_settings_state.news_concurrency_value)
-    ai_prompt_value, set_ai_prompt = ft.use_state(ai_settings_state.ai_prompt_value)
-    news_prompt_value, set_news_prompt = ft.use_state(ai_settings_state.news_prompt_value)
+    # --- Pure UI state (VM state 是唯一真值源, 无 use_state 本地副本) ---
 
     # --- 异步保存 (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_save_ai_settings() -> None:
@@ -170,18 +164,10 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         UILogger.log_action("AIBrainTab", "Click", "btn_save_ai")
 
         # Prompt 验证 (UI 反馈逻辑, 保留在 View)
-        if not _validate_prompt_or_warn(ai_prompt_value, show_snack_callback):
+        if not _validate_prompt_or_warn(ai_settings_state.ai_prompt_value, show_snack_callback):
             return
-        if not _validate_prompt_or_warn(news_prompt_value, show_snack_callback):
+        if not _validate_prompt_or_warn(ai_settings_state.news_prompt_value, show_snack_callback):
             return
-
-        # 同步本地输入态到 VM state (声明式: VM state 是 SSOT)
-        ai_settings_vm.set_max_candidates_value(max_candidates_value)
-        ai_settings_vm.set_min_turnover_value(min_turnover_value)
-        ai_settings_vm.set_ai_concurrency_value(ai_concurrency_value)
-        ai_settings_vm.set_news_concurrency_value(news_concurrency_value)
-        ai_settings_vm.set_ai_prompt_value(ai_prompt_value)
-        ai_settings_vm.set_news_prompt_value(news_prompt_value)
 
         try:
             await ai_settings_vm.save_ai_settings()
@@ -228,84 +214,84 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_save_ai_settings)
 
     def _on_reset_ai_prompt(_e: ft.ControlEvent) -> None:
-        set_ai_prompt(DEFAULT_AI_PROMPT)
+        ai_settings_vm.set_ai_prompt_value(DEFAULT_AI_PROMPT)
         show_snack_callback(I18n.get("settings_snack_prompt_reset"))
 
     def _on_reset_news_prompt(_e: ft.ControlEvent) -> None:
-        set_news_prompt(DEFAULT_NEWS_PROMPT)
+        ai_settings_vm.set_news_prompt_value(DEFAULT_NEWS_PROMPT)
         show_snack_callback(I18n.get("settings_snack_prompt_reset"))
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     ai_max_candidates_input = ft.TextField(
         label=I18n.get("settings_max_candidates"),
-        value=max_candidates_value,
+        value=ai_settings_state.max_candidates_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=30),
         tooltip=I18n.get("settings_hint_ai_cost"),
-        on_change=lambda e: set_max_candidates(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_max_candidates_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     strategy_min_turnover_input = ft.TextField(
         label=I18n.get("settings_min_turnover"),
-        value=min_turnover_value,
+        value=ai_settings_state.min_turnover_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=2.0),
         tooltip=I18n.get("settings_hint_turnover"),
-        on_change=lambda e: set_min_turnover(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_min_turnover_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_concurrency_input = ft.TextField(
         label=I18n.get("settings_ai_concurrency"),
-        value=ai_concurrency_value,
+        value=ai_settings_state.ai_concurrency_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=5),
         tooltip=I18n.get("settings_hint_ai_model"),
-        on_change=lambda e: set_ai_concurrency(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_ai_concurrency_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_news_concurrency_input = ft.TextField(
         label=I18n.get("settings_ai_news_concurrency"),
-        value=news_concurrency_value,
+        value=ai_settings_state.news_concurrency_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=1),
         tooltip=I18n.get("settings_hint_ai_news_concurrency"),
-        on_change=lambda e: set_news_concurrency(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_news_concurrency_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_prompt_input = ft.TextField(
         label=I18n.get("settings_ai_prompt"),
-        value=ai_prompt_value,
+        value=ai_settings_state.ai_prompt_value,
         multiline=True,
         min_lines=5,
         max_lines=15,
         text_size=_FONT_SIZE_BODY,
         hint_text=I18n.get("settings_ai_prompt_hint"),
-        on_change=lambda e: set_ai_prompt(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_ai_prompt_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_news_prompt_input = ft.TextField(
         label=I18n.get("settings_news_prompt"),
-        value=news_prompt_value,
+        value=ai_settings_state.news_prompt_value,
         multiline=True,
         min_lines=3,
         max_lines=10,
         text_size=_FONT_SIZE_BODY,
         hint_text=I18n.get("settings_news_prompt_hint"),
-        on_change=lambda e: set_news_prompt(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_news_prompt_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
