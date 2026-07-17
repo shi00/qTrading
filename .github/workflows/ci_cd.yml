@@ -179,8 +179,8 @@ jobs:
         continue-on-error: false
         run: pyright
 
-      - name: Scan weak assertions (advisory)
-        run: python scripts/scan_weak_assertions.py
+      - name: Scan weak assertions (incremental gate)
+        run: python scripts/scan_weak_assertions.py --path tests/ --base tests/weak_assertion_baseline.json
 
       - name: Verify Alembic Migrations
         env:

@@ -1,0 +1,4045 @@
+{
+  "version": 1,
+  "total": 577,
+  "entries": [
+    {
+      "file": "integration/test_api_tushare_client.py",
+      "line": 268,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            api_limiter.consume_async.assert_called_once()"
+    },
+    {
+      "file": "integration/test_api_tushare_client.py",
+      "line": 269,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            general_limiter.consume_async.assert_called_once()"
+    },
+    {
+      "file": "integration/test_api_tushare_client.py",
+      "line": 324,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            general_limiter.consume_async.assert_called_once()"
+    },
+    {
+      "file": "integration/test_config_panels.py",
+      "line": 461,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ensure.assert_called_once()"
+    },
+    {
+      "file": "integration/test_config_panels.py",
+      "line": 495,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ensure.assert_called_once()"
+    },
+    {
+      "file": "integration/test_config_panels.py",
+      "line": 565,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ensure.assert_called_once()"
+    },
+    {
+      "file": "integration/test_config_panels.py",
+      "line": 603,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ensure.assert_called_once()"
+    },
+    {
+      "file": "integration/test_data_processor.py",
+      "line": 677,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.processor.cache.init_db.assert_called_once()  # type: ignore[untyped]"
+    },
+    {
+      "file": "integration/test_data_processor.py",
+      "line": 1052,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_cache.close.assert_called_once()"
+    },
+    {
+      "file": "integration/test_data_processor.py",
+      "line": 1038,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            strategy.cancel.assert_called_once()"
+    },
+    {
+      "file": "integration/test_data_processor.py",
+      "line": 1501,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_latest.assert_called_once()"
+    },
+    {
+      "file": "integration/test_data_trade_calendar.py",
+      "line": 107,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_api.get_trade_cal.assert_called_once()"
+    },
+    {
+      "file": "integration/test_data_trade_calendar.py",
+      "line": 149,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_api.get_trade_cal.assert_called_once()"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 30,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_singletons[\"scheduler\"].stop.assert_called_once()"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 34,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_singletons[\"LocalModelManager\"]._instance.unload_model.assert_called_once()"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 121,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_toast.stop_all.assert_called_once()"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 145,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        LocalModelManager._instance.unload_model.assert_called_once()"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 206,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_thread.assert_called_once()"
+    },
+    {
+      "file": "integration/test_graceful_shutdown.py",
+      "line": 209,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_thread.assert_called_once()"
+    },
+    {
+      "file": "integration/test_historical_sync_integrity.py",
+      "line": 1525,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        cache_manager._mock_conn.execute.assert_called_once()"
+    },
+    {
+      "file": "integration/test_holder_dao.py",
+      "line": 316,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_read.assert_called_once()"
+    },
+    {
+      "file": "integration/test_review_round_trip.py",
+      "line": 87,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm.cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "integration/test_review_round_trip.py",
+      "line": 206,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_conn.execute.assert_called_once()"
+    },
+    {
+      "file": "integration/test_review_run_review_integration.py",
+      "line": 86,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        manager.cache.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_review_run_review_integration.py",
+      "line": 115,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        manager.cache.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_review_run_review_integration.py",
+      "line": 156,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        manager.cache.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 410,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 517,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 548,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 579,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 812,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache_instance.get_index_daily_range.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 880,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache_instance.get_index_daily.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 881,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache_instance.screener_dao.update_prediction_result.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 954,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_review_manager.py",
+      "line": 1009,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "integration/test_service_task_manager.py",
+      "line": 137,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        callback.assert_called_once()"
+    },
+    {
+      "file": "integration/test_spike_pubsub_runtask.py",
+      "line": 82,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        spy_subscribe.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ai_mixin.py",
+      "line": 642,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        task1.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ai_service.py",
+      "line": 2207,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_rm.get_learning_context.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ai_service.py",
+      "line": 2250,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_rm.get_learning_context.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ai_service_failover.py",
+      "line": 89,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_completion.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ai_service_failover.py",
+      "line": 214,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_completion.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ai_service_failover.py",
+      "line": 322,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_completion_patch.assert_called_once()"
+    },
+    {
+      "file": "unit/test_app_state_service.py",
+      "line": 79,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        engine.begin.assert_called_once()"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 883,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        read_fn.assert_called_once()"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 1031,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        write_fn.assert_called_once()"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 2336,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        db_fn.assert_called_once()"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 2549,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        db_fn.assert_called_once()"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 546,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_conn.exec_driver_sql.assert_called_once()"
+    },
+    {
+      "file": "unit/test_base_dao.py",
+      "line": 1188,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_stmt.on_conflict_do_nothing.assert_called_once()"
+    },
+    {
+      "file": "unit/test_bootstrap.py",
+      "line": 95,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_md.preload_aliases.assert_called_once()"
+    },
+    {
+      "file": "unit/test_bootstrap.py",
+      "line": 97,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ss_instance.start.assert_called_once()"
+    },
+    {
+      "file": "unit/test_bootstrap.py",
+      "line": 123,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/test_bootstrap.py",
+      "line": 148,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/test_bootstrap.py",
+      "line": 309,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client.get_capability_cache.assert_called_once()"
+    },
+    {
+      "file": "unit/test_bootstrap.py",
+      "line": 687,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ss.return_value.start.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1082,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_bulk_expected_stock_counts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1148,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.stock_dao.save_stock_basic.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1164,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_daily_quotes.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1172,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_daily_quotes.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1180,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.market_dao.save_daily_indicators.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1188,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.market_dao.get_daily_indicators.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1196,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_financial_reports.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1211,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.sync_dao.get_sync_status.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1235,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.screener_dao.get_screening_data.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1243,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.stock_dao.save_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1251,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.stock_dao.overwrite_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1267,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_moneyflow.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1275,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_northbound.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1283,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_fina_forecast.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1291,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_fina_mainbz.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1299,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_pledge_stat.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1307,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_repurchase.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1315,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_dividend.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1323,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_index_daily.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1331,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_index_dailybasic.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1339,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_index_daily.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1347,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_limit_list.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1355,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_margin_daily.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1363,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_suspend_d.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1371,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.save_fina_audit.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1379,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_top_list.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1387,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_top_list.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1395,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.save_block_trade.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1403,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_block_trade.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1411,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_moneyflow.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1419,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_northbound.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1427,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.screener_dao.get_screening_history.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1435,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.screener_dao.get_history_tree.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1443,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.screener_dao.get_history_records.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1459,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.screener_dao.get_learning_examples.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1467,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.sync_dao.get_completed_step4_stocks.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1491,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.stock_dao.save_trade_cal.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1499,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.stock_dao.get_trade_cal.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1515,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.macro_dao.save_macro_economy.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1523,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.macro_dao.save_shibor_daily.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1531,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.holder_dao.save_holder_number.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1539,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.holder_dao.save_top10_holders.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1547,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.market_dao.save_index_weights.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1571,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.market_dao.save_moneyflow_hsgt.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1579,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.market_dao.get_moneyflow_hsgt.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1707,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.macro_dao.get_macro_economy_latest.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1715,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.macro_dao.get_shibor_latest.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1730,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.quote_dao.get_latest_northbound.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1738,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.get_latest_indicators.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1754,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao.get_cached_financial_records.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1762,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.screener_dao.get_fundamental_screening_data.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1975,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr.financial_dao._guarded_begin.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 202,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_migrator.init_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 335,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 468,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_event.clear.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 509,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 518,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 532,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 542,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1060,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr.quote_dao.get_field_completeness.assert_called_once()"
+    },
+    {
+      "file": "unit/test_cache_manager.py",
+      "line": 1957,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_migrator.init_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 147,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_em_concepts.assert_called()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 353,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.clear_today_limit_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 354,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_limit_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 549,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 551,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 815,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 854,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 893,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 923,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concept_failure.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 947,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 971,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 992,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1018,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1040,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1060,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1080,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1188,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.get_stocks_without_ai_concepts.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1258,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1418,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1573,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1598,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1620,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concept_sync.py",
+      "line": 1663,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.ai_service.chat_with_web_search.assert_called_once()"
+    },
+    {
+      "file": "unit/test_concurrency_audit.py",
+      "line": 51,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_explorer_query_client.py",
+      "line": 59,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_create.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_explorer_query_client.py",
+      "line": 98,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        engine.dispose.assert_called_once()  # type: ignore[union-attr]"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 106,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.cache.close.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 147,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.strategies[\"historical\"].sync_daily_market_snapshot.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 335,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.cache.init_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 447,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.cache.get_index_daily_range.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 480,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.api.get_index_daily.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 491,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.cache.get_daily_quotes.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 500,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp.cache.get_daily_quotes.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 621,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dp._assign_basic_tier.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 94,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 510,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            dp.cache.get_daily_quotes.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 520,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            dp.cache.get_daily_quotes.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 535,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            dp.init_data.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor.py",
+      "line": 788,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_evt.clear.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor_ai_concept.py",
+      "line": 65,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            MockAKShare.return_value.run.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor_ai_concept.py",
+      "line": 84,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            MockLimitList.return_value.run.assert_called_once()"
+    },
+    {
+      "file": "unit/test_data_processor_ai_concept.py",
+      "line": 107,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            MockAITag.return_value.run.assert_called_once()"
+    },
+    {
+      "file": "unit/test_db_migrator.py",
+      "line": 560,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/test_db_migrator.py",
+      "line": 497,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                        mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/test_db_migrator.py",
+      "line": 447,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                            mock_classify.assert_called_once()"
+    },
+    {
+      "file": "unit/test_db_migrator.py",
+      "line": 448,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                            mock_severity.assert_called_once()"
+    },
+    {
+      "file": "unit/test_financial_dao.py",
+      "line": 36,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 454,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 498,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        progress_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/test_financial_sync.py",
+      "line": 1276,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        progress_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/test_historical_sync.py",
+      "line": 354,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_holder_dao.py",
+      "line": 44,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_holder_dao.py",
+      "line": 59,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_holder_dao.py",
+      "line": 418,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 250,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_proc.terminate.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 267,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_proc.kill.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 305,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_proc.terminate.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 323,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_proc.terminate.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 324,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_proc.kill.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1361,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_instance._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1398,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_res_queue.put.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1411,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_res_queue.put.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1430,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_res_queue.put.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 119,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker_locked.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 158,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 187,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 202,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 282,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_sw.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1051,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_locked.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1062,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_locked.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1081,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1115,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1143,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1559,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1572,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1898,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_unload.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 634,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 878,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 984,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mgr._shutdown_worker.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1308,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mgr._await_worker_ready.assert_called_once()"
+    },
+    {
+      "file": "unit/test_local_model_manager.py",
+      "line": 1879,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_unload.assert_called_once()"
+    },
+    {
+      "file": "unit/test_log_decorators_extended.py",
+      "line": 399,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_info.assert_called_once()"
+    },
+    {
+      "file": "unit/test_macro_dao.py",
+      "line": 129,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db_select.assert_called_once()"
+    },
+    {
+      "file": "unit/test_macro_dao.py",
+      "line": 152,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db_select.assert_called_once()"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 371,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        strategy.dao.save_macro_economy.assert_called_once()"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 395,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        strategy.dao.save_macro_economy.assert_called_once()"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 1022,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctx.cache.update_sync_status.assert_called_once()"
+    },
+    {
+      "file": "unit/test_macro_sync.py",
+      "line": 594,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            ctx.cache.update_sync_status.assert_called_once()"
+    },
+    {
+      "file": "unit/test_market_dao.py",
+      "line": 247,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_market_dao.py",
+      "line": 295,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_market_dao.py",
+      "line": 305,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_market_data_service.py",
+      "line": 529,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        listener.assert_called_once()"
+    },
+    {
+      "file": "unit/test_metadata_manager.py",
+      "line": 25,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_i18n.get.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_fetcher.py",
+      "line": 1693,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_get.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 160,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        cb.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 515,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        cb.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 675,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        svc.cache.save_market_news.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 810,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 252,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            svc._notify_listeners.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 356,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            svc.cache.save_market_news.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 569,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            alert_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription.py",
+      "line": 1253,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            svc._notify_listeners.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription_service.py",
+      "line": 561,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_tpm.return_value.run_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription_service.py",
+      "line": 827,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_tpm.return_value.run_async.assert_called()"
+    },
+    {
+      "file": "unit/test_news_subscription_service.py",
+      "line": 86,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_news_subscription_viewmodel.py",
+      "line": 134,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cs.assert_called_once()"
+    },
+    {
+      "file": "unit/test_oversold_strategy.py",
+      "line": 155,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    dp.trade_calendar.get_latest_trade_date.assert_called_once()"
+    },
+    {
+      "file": "unit/test_polars_filter_async_offload.py",
+      "line": 59,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_run_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 861,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 869,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 877,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 993,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1016,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1035,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1058,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1081,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1092,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1102,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 1149,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_quote_dao.py",
+      "line": 371,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            dao._read_db_select.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 79,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 160,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 323,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 381,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 402,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 744,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 781,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 820,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 964,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1001,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1043,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1083,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1125,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        rm._update_result.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1257,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1278,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1323,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_review_manager.py",
+      "line": 1345,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 70,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_ch.save_config.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 245,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        svc._schedule_jobs.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 647,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        svc.scheduler.start.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 781,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        svc._schedule_jobs.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 1054,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_rm.save_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 422,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 442,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 480,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 557,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 704,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            svc._schedule_jobs.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 728,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            svc._schedule_jobs.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 928,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dp.run_ai_concept_tagging.assert_called_once()"
+    },
+    {
+      "file": "unit/test_scheduler_service.py",
+      "line": 1131,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_tm.submit_task.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 291,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_conn.execute.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 316,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_conn.execute.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 347,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 364,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_thinking.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 536,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_conn.execute.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 561,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 616,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 635,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._read_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_dao.py",
+      "line": 550,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_view_model.py",
+      "line": 361,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.review_mgr.save_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_screener_view_model.py",
+      "line": 424,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.review_mgr.save_results.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 343,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_toast.stop_all.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 353,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_toast.stop_all.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 223,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_instance.cancel_all_running_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 253,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_sched._instance.stop.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 270,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_news_instance.stop_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 287,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_mds_instance.stop_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 304,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_instance.flush_persistence.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 321,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_instance.close.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 415,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dm.close_all.assert_called_once()"
+    },
+    {
+      "file": "unit/test_shutdown.py",
+      "line": 424,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_dm.close_all.assert_called_once()"
+    },
+    {
+      "file": "unit/test_singleton_atexit_cleanup.py",
+      "line": 37,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_sync_engine.dispose.assert_called_once()"
+    },
+    {
+      "file": "unit/test_singleton_atexit_cleanup.py",
+      "line": 97,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_event.set.assert_called_once()"
+    },
+    {
+      "file": "unit/test_startup_controller.py",
+      "line": 286,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        ctrl._on_exit.assert_called_once()"
+    },
+    {
+      "file": "unit/test_startup_controller.py",
+      "line": 345,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_exit.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao.py",
+      "line": 404,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao.py",
+      "line": 411,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 118,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 132,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 169,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 199,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 225,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 319,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_conn.exec_driver_sql.assert_called_once()"
+    },
+    {
+      "file": "unit/test_stock_dao_concepts.py",
+      "line": 543,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_strategy_base.py",
+      "line": 454,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_analyze.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 199,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        cb.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 507,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 740,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1447,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1519,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1559,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_sched.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1633,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_notify.assert_called()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 2013,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_notify.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 148,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mgr._loop.call_soon_threadsafe.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1279,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_cache.write_db.assert_called_once()"
+    },
+    {
+      "file": "unit/test_task_manager.py",
+      "line": 1925,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_persist.assert_called_once()"
+    },
+    {
+      "file": "unit/test_trade_calendar_service.py",
+      "line": 98,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        svc._cache.save_trade_cal.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 521,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client._handle_api_call.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 552,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client._handle_api_call.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 578,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client._handle_api_call.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 605,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client._handle_api_call.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 635,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client._handle_api_call.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 657,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        client._handle_api_call.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 858,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_wait.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 974,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            api_limiter.consume_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 975,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            api_limiter.on_success.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 993,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            rate_limiter.consume_async.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 994,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            rate_limiter.on_success.assert_called_once()"
+    },
+    {
+      "file": "unit/test_tushare_client.py",
+      "line": 1347,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ui_home_vm.py",
+      "line": 61,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        callback.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ui_home_vm.py",
+      "line": 419,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.processor.init_data.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ui_home_vm.py",
+      "line": 50,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_news_svc.return_value.add_listener.assert_called_once()"
+    },
+    {
+      "file": "unit/test_ui_home_vm.py",
+      "line": 51,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_market_svc.return_value.add_listener.assert_called_once()"
+    },
+    {
+      "file": "unit/data/test_backtest_dao.py",
+      "line": 148,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/data/test_backtest_dao.py",
+      "line": 163,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        dao._save_upsert.assert_called_once()"
+    },
+    {
+      "file": "unit/data/test_backtest_dao.py",
+      "line": 289,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_conn.execute.assert_called_once()"
+    },
+    {
+      "file": "unit/services/test_backtest_service.py",
+      "line": 178,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.backtest_dao.save_result.assert_called_once()"
+    },
+    {
+      "file": "unit/services/test_backtest_service.py",
+      "line": 316,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.backtest_dao.save_result.assert_called_once()"
+    },
+    {
+      "file": "unit/services/test_backtest_service.py",
+      "line": 388,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_error.assert_called_once()"
+    },
+    {
+      "file": "unit/services/test_backtest_service.py",
+      "line": 458,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cache.backtest_dao.save_result.assert_called_once()"
+    },
+    {
+      "file": "unit/services/test_backtest_service.py",
+      "line": 471,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_error.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_ai_brain_tab_contract.py",
+      "line": 316,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_ai_brain_tab_contract.py",
+      "line": 341,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_app_layout_runtime.py",
+      "line": 403,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        tasks[0].cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_app_layout_runtime.py",
+      "line": 409,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        tasks[1].cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_backtest_view_model.py",
+      "line": 267,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.service.list_results.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_backtest_view_model.py",
+      "line": 65,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_engine_cls.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_explorer_view_model.py",
+      "line": 155,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_db.close.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_explorer_view_model.py",
+      "line": 161,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_db.close.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_explorer_view_model.py",
+      "line": 163,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_db.close.assert_called_once()  # Still only one close call"
+    },
+    {
+      "file": "unit/ui/test_data_explorer_view_model.py",
+      "line": 327,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_db.query_table.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 835,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_tm.subscribe.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 874,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_tm.unsubscribe.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1233,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1255,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1379,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1440,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.pubsub.send_all_on_topic.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1531,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1573,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1692,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1728,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1745,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1781,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1799,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_tab_contract.py",
+      "line": 1992,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        snack_cb.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_data_source_view_model.py",
+      "line": 420,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_processor.run_ai_concept_tagging.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_view_model.py",
+      "line": 853,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_task_manager.update_progress.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_view_model.py",
+      "line": 305,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_classify.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_source_view_model.py",
+      "line": 717,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_tc.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 918,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.pubsub.subscribe_topic.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 939,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.pubsub.unsubscribe_topic.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1287,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1325,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1677,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1698,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_data_view_contract.py",
+      "line": 1859,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_failover_config_panel.py",
+      "line": 753,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.save_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 883,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"on_close\"].assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 892,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"on_close\"].assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 893,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"on_deep_scan\"].assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 1034,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_close.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_health_report_dialog.py",
+      "line": 1057,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_future.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_home_view.py",
+      "line": 401,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.pubsub.subscribe_topic.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_home_view.py",
+      "line": 700,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_sanitizer.sanitize_error.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_markdown_safe.py",
+      "line": 147,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_onboarding_view_model.py",
+      "line": 376,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        bound_vm.fn_push_schedule_state.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_onboarding_wizard_contract.py",
+      "line": 1026,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_vm.next_step.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_onboarding_wizard_contract.py",
+      "line": 1027,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_vm.prev_step.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_onboarding_wizard_contract.py",
+      "line": 1028,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_vm.skip_step.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_onboarding_wizard_contract.py",
+      "line": 1056,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_vm.skip_sync.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_resizable_splitter_body.py",
+      "line": 302,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_resize.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_resizable_splitter_body.py",
+      "line": 318,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_persist.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1001,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1052,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1077,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1113,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_sanitizer.sanitize_error.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1115,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1179,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1444,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1471,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1531,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                mock_set.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1532,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1559,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_screener_view_runtime.py",
+      "line": 1503,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "                    page.show_toast.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 311,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_notify.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 567,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_data.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 590,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_data.assert_called()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 247,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 486,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 498,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_settings_view.py",
+      "line": 510,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 169,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_upgrade.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 188,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_ok.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 200,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_exit.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 202,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_retry.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 222,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_retry.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 224,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_reconfigure.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 226,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    on_skip.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 92,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_classify.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_startup_views.py",
+      "line": 93,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_msg.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_system_tab_contract.py",
+      "line": 560,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mod.SystemViewModel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_system_viewmodel.py",
+      "line": 105,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_client.reload_rate_limiters.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_system_viewmodel.py",
+      "line": 107,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_client.clear_capability_cache.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_system_viewmodel.py",
+      "line": 109,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_client.probe_api_capabilities.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_system_viewmodel.py",
+      "line": 219,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "    mock_client.get_capability_cache.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 194,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_tm.subscribe.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 219,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_tm.unsubscribe.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 250,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        callback.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 355,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        callback.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_task_center_view.py",
+      "line": 372,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        self.mock_tm.clear_finished.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_task_center_view_model.py",
+      "line": 81,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_loop.call_soon_threadsafe.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_toast_manager.py",
+      "line": 755,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.debug.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_toast_manager.py",
+      "line": 821,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_task.cancel.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_ui_i18n.py",
+      "line": 227,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_invalidate.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_ui_i18n.py",
+      "line": 233,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_invalidate.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_viewmodels.py",
+      "line": 60,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_news_service.remove_listener.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_viewmodels.py",
+      "line": 482,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_sm.get_all_names.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/test_viewmodels.py",
+      "line": 1118,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_rcts.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 387,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_set.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 512,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_save.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 527,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_save.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 619,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_set_pw.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 782,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_save.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 798,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_save.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 597,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_save.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 696,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.debug.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_config_handler.py",
+      "line": 1794,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.warning.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_security_utils.py",
+      "line": 290,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_open.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_security_utils.py",
+      "line": 588,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_kernel32.SetFileAttributesW.assert_called_once()"
+    },
+    {
+      "file": "unit/utils/test_security_utils.py",
+      "line": 953,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_logger.debug.assert_called()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 181,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_change.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 509,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_test_success.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 536,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_db_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 559,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_svc.create_database.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 608,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_save.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_database_config_panel_view_model.py",
+      "line": 733,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_test_success.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
+      "line": 526,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_provider_credential.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
+      "line": 527,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_config.assert_called()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
+      "line": 569,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_provider_credential.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
+      "line": 688,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_config.assert_called()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
+      "line": 723,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_config.assert_called()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_failover_config_panel_view_model.py",
+      "line": 806,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_save.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
+      "line": 558,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_llm_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
+      "line": 591,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_llm_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
+      "line": 646,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_save.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
+      "line": 679,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_provider_credential.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_llm_config_panel_view_model.py",
+      "line": 956,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_config_handler.save_provider_credential.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
+      "line": 288,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_change.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
+      "line": 559,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_verify_success.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
+      "line": 629,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_save.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_local_model_config_panel_view_model.py",
+      "line": 690,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_commit.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 120,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_change.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 239,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_client.reload_rate_limiters.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 240,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_client.clear_capability_cache.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 332,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_pro.trade_cal.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 377,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_client.probe_api_capabilities.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/viewmodels/test_tushare_config_panel_view_model.py",
+      "line": 378,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_strategy_manager.invalidate_dependency_cache.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/test_backtest_view.py",
+      "line": 479,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        page.run_task.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/test_backtest_view.py",
+      "line": 509,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"fake_vm\"].create_config_mock.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/test_backtest_view.py",
+      "line": 525,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"fake_vm\"].cancel_backtest_mock.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 265,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 278,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 628,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 644,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 683,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 698,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 735,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 745,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 755,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 765,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 775,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 785,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 795,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 806,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 836,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 846,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"mock_config\"].save_local_ai_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 847,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 857,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"mock_config\"].save_config.assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 858,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 868,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"mock_config\"].save_ai_system_prompt.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 869,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 879,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"mock_config\"].set_ai_news_prompt.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 880,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 910,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 923,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 945,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 966,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1021,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_classify.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1022,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_severity.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1023,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1041,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_severity.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1042,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1061,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_classify.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1062,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1079,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_classify.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1080,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1242,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 207,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_service.test_connection.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1115,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_service.test_connection.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
+      "line": 1162,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_inst.reload_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 729,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 738,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 747,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 779,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 788,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 816,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 825,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 857,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 866,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 894,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 903,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 936,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 945,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 954,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 986,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 998,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_automation_tab.py",
+      "line": 1007,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
+      "line": 243,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_cls.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
+      "line": 254,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        fake_vm.reload_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
+      "line": 342,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        show_snack.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 784,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 804,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 833,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 853,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 882,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 891,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 918,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"mock_config\"].set_sync_max_concurrent_heavy.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 919,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 942,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 951,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 981,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 990,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 999,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1008,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1017,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1026,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1055,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"mock_tpm\"].reload_config.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1056,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1065,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1074,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1083,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1092,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1101,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1154,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1193,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1207,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 831,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_apply.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1130,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            env[\"mock_tpm\"].submit.assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1131,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            env[\"show_snack\"].assert_called()"
+    },
+    {
+      "file": "unit/ui/views/settings_tabs/test_system_tab.py",
+      "line": 1192,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "            mock_collector.export.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
+      "line": 313,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        callback.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
+      "line": 412,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_run.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
+      "line": 997,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        on_run1.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
+      "line": 234,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_logger.error.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
+      "line": 992,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        run_task.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
+      "line": 341,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.save.assert_called_once()"
+    },
+    {
+      "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
+      "line": 763,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        vm.save.assert_called_once()"
+    },
+    {
+      "file": "unit/strategies/backtest/test_data_provider.py",
+      "line": 263,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_processor.get_screening_data.assert_called_once()"
+    },
+    {
+      "file": "unit/strategies/backtest/test_data_provider.py",
+      "line": 264,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        mock_processor.get_fundamental_screening_data.assert_called_once()"
+    },
+    {
+      "file": "unit/strategies/backtest/test_data_provider.py",
+      "line": 498,
+      "type": "weak_mock",
+      "detail": "Mock 弱断言（不验证参数）",
+      "source_line": "        cache.get_screening_data_range.assert_called_once()"
+    }
+  ]
+}
