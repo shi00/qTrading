@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 @ft.component
-def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
+def HomeView(on_run_strategy: Callable[[], None] | None = None, active: bool = True) -> ft.Container:
     """Home dashboard view (declarative).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -97,6 +97,8 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
             logger.error("[HomeView] Load failed: %s", DataSanitizer.sanitize_error(exc))
 
     async def _init_and_load() -> None:
+        if not active:
+            return
         try:
             vm.init()  # 添加 service listener (use_viewmodel cleanup 时 vm.dispose() 移除)
             await vm.init_data()
@@ -109,6 +111,8 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
     # --- PubSub 订阅/退订 (Phase 3.0.3 模式) ---
 
     async def _setup_pubsub() -> None:
+        if not active:
+            return
         try:
             page = ft.context.page
             if page is not None:
@@ -124,10 +128,10 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
         except RuntimeError:
             pass
 
-    ft.use_effect(_setup_pubsub, dependencies=[], cleanup=_cleanup_pubsub)
+    ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
 
     # --- 初始加载 (mount 时执行一次) ---
-    ft.use_effect(_init_and_load, dependencies=[])
+    ft.use_effect(_init_and_load, dependencies=[active])
 
     # --- 渲染 (直接从 state 读取, 无 dual-track) ---
 

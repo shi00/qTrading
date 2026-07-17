@@ -220,7 +220,7 @@ def _format_history_date(date_str) -> tuple[str, str]:
 
 
 @ft.component
-def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
+def ScreenerView(initial_strategy: str | None = None, active: bool = True) -> ft.Container:
     """选股视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -258,6 +258,8 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
     def _setup_file_picker() -> None:
+        if not active:
+            return
         page = _get_page()
         if page is not None and file_picker not in page.services:
             page.services.append(file_picker)
@@ -267,28 +269,34 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         if page is not None and file_picker in page.services:
             page.services.remove(file_picker)
 
-    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
+    ft.use_effect(_setup_file_picker, dependencies=[active], cleanup=_cleanup_file_picker)
 
     # --- PubSub (TaskManager) 订阅/退订 ---
 
     def _setup_task_manager() -> None:
+        if not active:
+            return
         vm.subscribe_task_manager()
 
     def _cleanup_task_manager() -> None:
         vm.unsubscribe_task_manager()
 
-    ft.use_effect(_setup_task_manager, dependencies=[], cleanup=_cleanup_task_manager)
+    ft.use_effect(_setup_task_manager, dependencies=[active], cleanup=_cleanup_task_manager)
 
     # --- 策略加载 (mount 时执行一次, R.2.6.1: VM.load_strategies 内聚) ---
 
     async def _load_strategies_async() -> None:
+        if not active:
+            return
         vm.load_strategies()
 
-    ft.use_effect(_load_strategies_async, dependencies=[])
+    ft.use_effect(_load_strategies_async, dependencies=[active])
 
     # --- 深度链接 (策略加载后执行 pending_strategy) ---
 
     async def _execute_pending_strategy() -> None:
+        if not active:
+            return
         if not state.strategies_loaded or not pending_strategy:
             return
         key = pending_strategy
@@ -317,7 +325,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         except Exception as e:
             logger.error("[ScreenerView] Pending strategy execution failed: %s", e, exc_info=True)
 
-    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy])
+    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
 
     # --- 事件 handler ---
 

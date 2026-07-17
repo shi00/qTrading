@@ -69,32 +69,32 @@ def _build_pages_stack(current_tab: int) -> ft.Stack:
     """
     pages = [
         ft.Container(
-            content=HomeView(),
+            content=HomeView(active=current_tab == NavTabs.MARKET),
             expand=True,
             visible=current_tab == NavTabs.MARKET,
         ),
         ft.Container(
-            content=ScreenerView(),
+            content=ScreenerView(active=current_tab == NavTabs.SCREENER),
             expand=True,
             visible=current_tab == NavTabs.SCREENER,
         ),
         ft.Container(
-            content=BacktestView(),
+            content=BacktestView(active=current_tab == NavTabs.BACKTEST),
             expand=True,
             visible=current_tab == NavTabs.BACKTEST,
         ),
         ft.Container(
-            content=DataExplorerView(),
+            content=DataExplorerView(active=current_tab == NavTabs.DATA),
             expand=True,
             visible=current_tab == NavTabs.DATA,
         ),
         ft.Container(
-            content=TaskCenterView(),
+            content=TaskCenterView(active=current_tab == NavTabs.TASKS),
             expand=True,
             visible=current_tab == NavTabs.TASKS,
         ),
         ft.Container(
-            content=SettingsView(),
+            content=SettingsView(active=current_tab == NavTabs.SETTINGS),
             expand=True,
             visible=current_tab == NavTabs.SETTINGS,
         ),

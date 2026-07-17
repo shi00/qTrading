@@ -186,15 +186,15 @@ class TestAppLayoutContract:
         assert "page.on_resize" in _code_source(), "必须设置 page.on_resize"
 
     def test_consumes_subviews_via_function_call(self):
-        """DoD: 6 个子视图必须用函数调用消费 (HomeView()/ScreenerView()/...)。"""
+        """DoD: 6 个子视图必须用函数调用消费 (HomeView(active=...)/ScreenerView(active=...)/...)。"""
         source = _code_source()
         for view_name in [
-            "HomeView()",
-            "ScreenerView()",
-            "BacktestView()",
-            "DataExplorerView()",
-            "TaskCenterView()",
-            "SettingsView()",
+            "HomeView(active=",
+            "ScreenerView(active=",
+            "BacktestView(active=",
+            "DataExplorerView(active=",
+            "TaskCenterView(active=",
+            "SettingsView(active=",
         ]:
             assert view_name in source, f"必须函数调用消费 {view_name}"
 
@@ -271,12 +271,12 @@ class TestBuildPagesStack:
         """DoD: ``_build_pages_stack`` 必须预先创建所有 6 个子视图放入 Stack。"""
         source = _code_source()
         for view_name in [
-            "HomeView()",
-            "ScreenerView()",
-            "BacktestView()",
-            "DataExplorerView()",
-            "TaskCenterView()",
-            "SettingsView()",
+            "HomeView(active=",
+            "ScreenerView(active=",
+            "BacktestView(active=",
+            "DataExplorerView(active=",
+            "TaskCenterView(active=",
+            "SettingsView(active=",
         ]:
             assert view_name in source, f"_build_pages_stack 必须预创建 {view_name}"
 

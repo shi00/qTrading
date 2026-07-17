@@ -95,7 +95,7 @@ def _show_snack_impl(
 
 
 @ft.component
-def SettingsView() -> ft.Container:
+def SettingsView(active: bool = True) -> ft.Container:
     """Settings view — declarative shell container.
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式 UI:

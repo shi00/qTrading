@@ -273,7 +273,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
 
 
 @ft.component
-def TaskCenterView() -> ft.Container:
+def TaskCenterView(active: bool = True) -> ft.Container:
     """Task center dashboard (declarative).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:

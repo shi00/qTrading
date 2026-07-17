@@ -163,7 +163,7 @@ def _ceil_div(n: int, d: int) -> int:
 
 
 @ft.component
-def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
+def TableViewerTab(vm: DataExplorerViewModel, active: bool = True) -> ft.Column:
     """Tab 1: 可视化表浏览器 (声明式).
 
     通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
@@ -191,6 +191,8 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
     def _setup_file_picker() -> None:
+        if not active:
+            return
         page = _get_page()
         if page is not None and file_picker not in page.services:
             page.services.append(file_picker)
@@ -200,7 +202,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         if page is not None and file_picker in page.services:
             page.services.remove(file_picker)
 
-    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
+    ft.use_effect(_setup_file_picker, dependencies=[active], cleanup=_cleanup_file_picker)
 
     # --- 异步加载逻辑 (R2: except Exception 不捕获 CancelledError) ---
     async def _load_schema_and_data() -> None:
@@ -218,6 +220,8 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                 page.show_toast(I18n.get("data_err_load_schema"), "error")
 
     async def _init_tables() -> None:
+        if not active:
+            return
         if state.tables_loaded:
             return
         try:
@@ -233,7 +237,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                 page.show_toast(I18n.get("data_err_load_schema"), "error")
 
     # tables_loaded 变化时触发 (mount + cache_cleared stale 重载)
-    ft.use_effect(_init_tables, dependencies=[state.tables_loaded])
+    ft.use_effect(_init_tables, dependencies=[state.tables_loaded, active])
 
     # --- 异步 handler (供 page.run_task 调度) ---
     async def _do_table_change(new_table: str) -> None:
@@ -821,7 +825,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
 
 
 @ft.component
-def DataExplorerView() -> ft.Container:
+def DataExplorerView(active: bool = True) -> ft.Container:
     """数据浏览器主视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -848,6 +852,8 @@ def DataExplorerView() -> ft.Container:
             logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
 
     async def _setup_pubsub() -> None:
+        if not active:
+            return
         try:
             page = ft.context.page
             if page is not None:
@@ -863,7 +869,7 @@ def DataExplorerView() -> ft.Container:
         except RuntimeError:
             pass
 
-    ft.use_effect(_setup_pubsub, dependencies=[], cleanup=_cleanup_pubsub)
+    ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
 
     # --- 事件 handler ---
     def _on_tab_changed(e: ft.ControlEvent) -> None:
@@ -891,7 +897,7 @@ def DataExplorerView() -> ft.Container:
                 tab_bar,
                 ft.TabBarView(
                     expand=True,
-                    controls=[TableViewerTab(vm=vm), SQLConsoleTab(vm=vm)],
+                    controls=[TableViewerTab(vm=vm, active=active), SQLConsoleTab(vm=vm)],
                 ),
             ],
         ),

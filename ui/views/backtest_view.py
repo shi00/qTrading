@@ -39,7 +39,7 @@ _STATUS_COLOR_MAP = {
 
 
 @ft.component
-def BacktestView() -> ft.Container:
+def BacktestView(active: bool = True) -> ft.Container:
     """回测视图（声明式）。
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
