@@ -45,6 +45,7 @@ FLET_PROJECT_DIFFERENCES_PATH = ROOT / "docs" / "flet" / "project-differences.md
 FLET_UPGRADE_CHECKLIST_PATH = ROOT / "docs" / "flet" / "upgrade-checklist.md"
 FLET_API_VERIFICATION_TEMPLATE_PATH = ROOT / "docs" / "flet" / "api-verification-template.md"
 FLET_ACCESSIBILITY_BASELINE_PATH = ROOT / "docs" / "flet" / "accessibility-baseline.md"
+KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 
@@ -59,7 +60,7 @@ FLET_DOCS_PATHS: list[Path] = [
 ]
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
-CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
+CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS, KNOWN_TECHNICAL_DEBT_PATH]
 
 # Flet 版本漂移检查范围（治理文档）
 FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]

@@ -78,7 +78,7 @@ async def test_settings_language_switch(e2e_page):
 @pytest.mark.mutates_config
 # Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright snackbar 时序 + select_dropdown 性能问题。
 # 单层 skipif 装饰器足够；非 Windows 平台 + 集成测试覆盖 log level command/state 路径。
-# 详见 CONTRIBUTING.md「已知架构技术债」P3-WinE2E-Skip。
+# 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Windows Flet/Playwright snackbar 时序问题 + select_dropdown 性能问题导致 30+ 分钟耗时 (P3-WinE2E-Skip)",

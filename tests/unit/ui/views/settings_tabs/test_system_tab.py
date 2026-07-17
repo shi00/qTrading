@@ -866,7 +866,7 @@ class TestDoThemeChange:
 class TestDoLogLevelChange:
     """_do_log_level_change: 成功/异常/CancelledError + command/state 测试。
 
-    Task 6.1 (P3-WinE2E-Skip): 补 state 验证（dropdown value 前进/None 防御）
+    Task 6.1 (P3-WinE2E-Skip, 见 docs/debt/known-technical-debt.md): 补 state 验证（dropdown value 前进/None 防御）
     与 command 链路完整性（snack 消息格式），替代 Windows E2E skip 路径。
     """
 
