@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from urllib.parse import unquote_plus, urlparse
 
 import pytest
+import pytest_asyncio
 
 # Session 级 keyring mock — 隔离 E2E 测试对宿主机 keyring 的污染
 # 必须在任何可能 import keyring 的项目模块之前生效（参考 tests/conftest.py 的 _MOCK_KEYRING）
@@ -187,7 +188,7 @@ _assert_columns_subset("INDEX_DAILY_COLUMNS", INDEX_DAILY_COLUMNS, IndexDaily)
 _assert_columns_subset("SYNC_STATUS_COLUMNS", SYNC_STATUS_COLUMNS, SyncStatus)
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def e2e_playwright():
     from playwright.async_api import async_playwright
 
@@ -195,7 +196,7 @@ async def e2e_playwright():
         yield p
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def e2e_browser(e2e_playwright):
     # 启动期断言 canvaskit.wasm 本地存在（route handler 离线化依赖此文件）
     wasm_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / "canvaskit.wasm"
@@ -747,7 +748,7 @@ async def _seed_e2e_data() -> None:
         await conn.close()
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def seed_e2e_data():
     """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。"""
     await _seed_e2e_data()
