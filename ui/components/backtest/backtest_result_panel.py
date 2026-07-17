@@ -302,9 +302,19 @@ def _build_trades_table(
 
     pagination = ft.Row(
         [
-            ft.IconButton(ft.Icons.NAVIGATE_BEFORE, on_click=_prev_page, disabled=trades_page == 0),
+            ft.IconButton(
+                ft.Icons.NAVIGATE_BEFORE,
+                on_click=_prev_page,
+                disabled=trades_page == 0,
+                tooltip=I18n.get("common_prev_page"),
+            ),
             page_info,
-            ft.IconButton(ft.Icons.NAVIGATE_NEXT, on_click=_next_page, disabled=trades_page >= total_pages - 1),
+            ft.IconButton(
+                ft.Icons.NAVIGATE_NEXT,
+                on_click=_next_page,
+                disabled=trades_page >= total_pages - 1,
+                tooltip=I18n.get("common_next_page"),
+            ),
         ],
         alignment=ft.MainAxisAlignment.CENTER,
         spacing=8,

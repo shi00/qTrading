@@ -595,6 +595,7 @@ def TableViewerTab(vm: DataExplorerViewModel, active: bool = True) -> ft.Column:
                     ft.Icons.CHEVRON_LEFT,
                     on_click=_on_prev_page,
                     disabled=is_loading or state.current_page <= 1,
+                    tooltip=I18n.get("common_prev_page"),
                 ),
                 ft.Text(
                     I18n.get("data_page_num").format(
@@ -606,6 +607,7 @@ def TableViewerTab(vm: DataExplorerViewModel, active: bool = True) -> ft.Column:
                     ft.Icons.CHEVRON_RIGHT,
                     on_click=_on_next_page,
                     disabled=is_loading or state.current_page >= total_pages,
+                    tooltip=I18n.get("common_next_page"),
                 ),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

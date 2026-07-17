@@ -1088,7 +1088,11 @@ def ScreenerView(initial_strategy: str | None = None, active: bool = True) -> ft
     pagination_row = ft.Row(
         [
             ft.IconButton(
-                ft.Icons.CHEVRON_LEFT, on_click=_on_prev_page, icon_color=AppColors.PRIMARY, disabled=page_no <= 1
+                ft.Icons.CHEVRON_LEFT,
+                on_click=_on_prev_page,
+                icon_color=AppColors.PRIMARY,
+                disabled=page_no <= 1,
+                tooltip=I18n.get("screener_page_prev"),
             ),
             ft.Text(
                 I18n.get("screener_page_info").format(current=page_no, total=total_pages), color=AppColors.TEXT_PRIMARY
@@ -1098,6 +1102,7 @@ def ScreenerView(initial_strategy: str | None = None, active: bool = True) -> ft
                 on_click=_on_next_page,
                 icon_color=AppColors.PRIMARY,
                 disabled=page_no >= total_pages,
+                tooltip=I18n.get("screener_page_next"),
             ),
             ft.Container(width=20),
             ft.Dropdown(
