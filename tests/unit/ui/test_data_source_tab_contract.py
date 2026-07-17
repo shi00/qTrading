@@ -127,8 +127,8 @@ class TestDataSourceTabContract:
     def test_no_use_ref_cache(self):
         """DoD: 禁止 use_ref cache 命令式实例。
 
-        NOTE: data_source_tab 使用 use_ref 持久化 tushare_vm 和 task_update_cb,
-        但这些是 hook 内部状态持久化, 不是命令式控件实例缓存。
+        NOTE: data_source_tab 使用 use_ref 持久化 tushare_vm,
+        但这是 hook 内部状态持久化, 不是命令式控件实例缓存。
         本测试检查 use_ref 不用于缓存 ft.Control 实例 (命令式模式)。
         """
         # use_ref 用于 VM 持久化是合法的 (hook 模式), 不应禁止
@@ -514,11 +514,14 @@ class _FakeDataSourceViewModel:
     def execute_init_historical_data(self) -> None:
         self.method_calls.append(("execute_init_historical_data", {}))
 
-    def save_tushare_token(self, token: str) -> None:
+    async def save_tushare_token(self, token: str) -> None:
         self.method_calls.append(("save_tushare_token", {"token": token}))
 
-    def set_history_years(self, years: int) -> None:
+    async def set_history_years(self, years: int) -> None:
         self.method_calls.append(("set_history_years", {"years": years}))
+
+    def get_history_years(self) -> int:
+        return 3
 
     def handle_task_update(self, current_tasks: list) -> None:
         self.method_calls.append(("handle_task_update", {"current_tasks": current_tasks}))
@@ -693,11 +696,12 @@ def _mock_data_source_deps(monkeypatch):
     - @ft.component 子组件 (DashboardCard/MetricCard/ActionChip/SettingRow/SectionHeader)
       → 透明包装 (使 _collect_controls 能递归到内部 ft.Button/ft.Dropdown 等直接创建的控件)
     - TushareConfigPanel / HealthReportDialog / HealthScanDialog → 简单桩
-    - TaskManager → MagicMock
-    - ThreadPoolManager → 直接调用 (不经线程池, 便于异常传播测试)
-    - ConfigHandler.get_init_history_years → 3
+    - VM 模块 (DataSourceViewModel) 的 ConfigHandler/ThreadPoolManager/TaskManager → mock
+      (Phase 3.1: 业务编排下沉到 VM, patch 目标从 View 模块改到 VM 模块;
+       fake_vm 不触发真实 VM 构造, 但 patch VM 模块以防未来测试直接实例化真实 VM)
     """
     import ui.views.settings_tabs.data_source_tab as _mod
+    from ui.viewmodels import data_source_view_model as _vm_mod
 
     # I18n.get 返回 key 本身, 便于测试用 key 断言
     monkeypatch.setattr(_mod.I18n, "get", lambda key, *a, **kw: key)
@@ -731,8 +735,10 @@ def _mock_data_source_deps(monkeypatch):
     monkeypatch.setattr(_mod, "TushareConfigPanel", lambda **kwargs: ft.Column([]))
     monkeypatch.setattr(_mod, "HealthReportDialog", lambda **kwargs: ft.Column([]))
     monkeypatch.setattr(_mod, "HealthScanDialog", lambda **kwargs: ft.Column([]))
+
+    # Phase 3.1: ConfigHandler/ThreadPoolManager/TaskManager 下沉到 VM, patch VM 模块
     fake_tm = MagicMock()
-    monkeypatch.setattr(_mod, "TaskManager", lambda: fake_tm)
+    monkeypatch.setattr(_vm_mod, "TaskManager", lambda: fake_tm)
 
     # ThreadPoolManager mock: 直接调用函数 (同步/async), 不经线程池
     class _FakeThreadPoolManager:
@@ -741,8 +747,8 @@ def _mock_data_source_deps(monkeypatch):
                 return await func(*args, **kwargs)
             return func(*args, **kwargs)
 
-    monkeypatch.setattr(_mod, "ThreadPoolManager", lambda: _FakeThreadPoolManager())
-    monkeypatch.setattr(_mod.ConfigHandler, "get_init_history_years", staticmethod(lambda: 3))
+    monkeypatch.setattr(_vm_mod, "ThreadPoolManager", lambda: _FakeThreadPoolManager())
+    monkeypatch.setattr(_vm_mod.ConfigHandler, "get_init_history_years", staticmethod(lambda: 3))
     return fake_tm
 
 
@@ -752,7 +758,7 @@ def _mock_data_source_deps(monkeypatch):
 
 
 class TestDataSourceTabComponentBody:
-    """DataSourceTab 组件体测试: 渲染结构 + VM 生命周期 + TaskManager 订阅。"""
+    """DataSourceTab 组件体测试: 渲染结构 + VM 生命周期 (Phase 3.1: TaskManager 订阅下沉到 VM)。"""
 
     def test_mount_returns_container(self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch):
         """挂载 DataSourceTab 返回 ft.Container。"""
@@ -822,18 +828,6 @@ class TestDataSourceTabComponentBody:
         calls = [c[0] for c in fake_tushare_vm.method_calls]
         assert "reload_config" in calls
 
-    def test_mount_subscribes_task_manager(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """挂载后 TaskManager.subscribe 被调用 (_setup_tm_subscription effect)。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        _patch_data_source_vms(monkeypatch)
-        fake_tm = _mock_data_source_deps
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        _mount(component)
-        fake_tm.subscribe.assert_called_once()
-
     def test_unmount_disposes_main_vm(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
     ):
@@ -859,19 +853,6 @@ class TestDataSourceTabComponentBody:
         assert fake_tushare_vm.dispose_called is False
         run_unmount_effects(component)
         assert fake_tushare_vm.dispose_called is True
-
-    def test_unmount_unsubscribes_task_manager(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """卸载后 TaskManager.unsubscribe 被调用 (_cleanup_tm_subscription)。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        _patch_data_source_vms(monkeypatch)
-        fake_tm = _mock_data_source_deps
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        _mount(component)
-        run_unmount_effects(component)
-        fake_tm.unsubscribe.assert_called_once()
 
     def test_check_health_button_present(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1492,14 +1473,14 @@ class TestDataSourceTabAsyncErrorPaths:
     ):
         """_do_history_years_change raises CancelledError → 传播 (R2)。
 
-        set_history_years 是同步方法 (由 ThreadPoolManager 调度),
-        同步 raise CancelledError 经 _FakeThreadPoolManager.run_async 传播。
+        Phase 3.1: set_history_years 是 async 方法 (由 VM 内部 ThreadPoolManager 调度),
+        View 直接 await vm.set_history_years(val); CancelledError 经 await 传播。
         """
         from ui.views.settings_tabs.data_source_tab import DataSourceTab
 
         fake_vm, _ = _patch_data_source_vms(monkeypatch)
 
-        def _raise_cancelled(years: int) -> None:
+        async def _raise_cancelled(years: int) -> None:
             raise asyncio.CancelledError()
 
         fake_vm.set_history_years = _raise_cancelled
@@ -1686,7 +1667,7 @@ class TestDataSourceTabCoverageBranches:
         assert on_save is not None, "on_save 回调应被传入"
         on_save({"token": "test_token"})
         # _on_save → page.run_task(_do_tushare_save, "test_token")
-        # _do_tushare_save → ThreadPoolManager.run_async(vm.save_tushare_token, "test_token")
+        # _do_tushare_save → await vm.save_tushare_token("test_token") (Phase 3.1: 直接 await, 无 ThreadPoolManager 包装)
         calls = [c[0] for c in fake_vm.method_calls]
         assert "save_tushare_token" in calls
         snack_cb.assert_called()
@@ -1918,25 +1899,6 @@ class TestDataSourceTabCoverageBranches:
         texts = _find_by_type(result, ft.Text)
         # health_summary_content = ft.Text(I18n.get("ds_health_check_error"))
         assert any(t.value == "ds_health_check_error" for t in texts)
-
-    def test_task_manager_callback_calls_handle_task_update(
-        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
-    ):
-        """TaskManager subscribe callback → vm.handle_task_update 调用。"""
-        from ui.views.settings_tabs.data_source_tab import DataSourceTab
-
-        fake_vm, _ = _patch_data_source_vms(monkeypatch)
-        fake_tm = _mock_data_source_deps
-        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
-        _mount(component)
-        # _setup_tm_subscription 注册了 _on_task_update callback
-        # 获取 subscribe 调用时的 callback
-        subscribe_args = fake_tm.subscribe.call_args
-        callback = subscribe_args[0][0]
-        # 调用 callback (模拟 TaskManager 通知)
-        callback([MagicMock()])
-        calls = [c[0] for c in fake_vm.method_calls]
-        assert "handle_task_update" in calls
 
     def test_metric_sync_never_when_latest_is_empty(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch

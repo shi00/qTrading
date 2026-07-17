@@ -325,6 +325,24 @@ class _FakeScreenerViewModel:
         """Mock vm.get_base_prompt (Task 5.1: 从 View 迁入 VM)."""
         return f"base_prompt[{strategy_key}]"
 
+    async def reset_strategy_prompt(self, strategy_key: str) -> str:
+        """Mock vm.reset_strategy_prompt (Phase 3.3: 从 View 迁入 VM).
+
+        默认返回 base_prompt 字符串, 与生产 VM 行为一致 (ConfigHandler 重置 + 读 base_prompt).
+        测试可通过 ``patch.object(fake_vm, "reset_strategy_prompt", ...)`` 覆盖返回值/副作用.
+        """
+        self.method_calls.append(f"reset_strategy_prompt:{strategy_key}")
+        return self.get_base_prompt(strategy_key)
+
+    async def save_strategy_prompt(self, strategy_key: str, prompt: str) -> tuple[bool, str | None]:
+        """Mock vm.save_strategy_prompt (Phase 3.3: 从 View 迁入 VM).
+
+        默认返回 (True, None) 表示保存成功. 测试可通过 ``patch.object`` 覆盖返回值
+        以模拟 validate_prompt 失败或异常路径.
+        """
+        self.method_calls.append(f"save_strategy_prompt:{strategy_key}")
+        return True, None
+
     def get_column_alias(self, table_name: str | None, col: str) -> str:
         """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
         return f"列别名[{col}]"
@@ -445,10 +463,12 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     - PaginatedTable / ResizableSplitter / StockDetailDialog (子组件, 替换为 mock)
     - UILogger / DataSanitizer (横切关注点)
     - get_now (导出时间戳)
-    - ThreadPoolManager (IO 线程池, _do_restore_default_async / _do_save_prompt_async)
 
     Task 5.1: MetaDataManager.get_column_alias 已迁入 vm.get_column_alias,
     由 _FakeScreenerViewModel.get_column_alias 提供 mock, 不再模块级 patch。
+    Phase 3.3: ConfigHandler/ThreadPoolManager 已下沉到 ScreenerViewModel
+    (_do_restore_default_async / _do_save_prompt_async 改调 vm 命令),
+    不再模块级 patch ThreadPoolManager; VM 命令由 _FakeScreenerViewModel 提供默认 mock.
     """
     # --- Mock I18n ---
     mock_i18n = MagicMock()
@@ -495,16 +515,6 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     # --- Mock get_now ---
     fake_now = datetime.datetime(2024, 6, 15, 10, 30, 0)
     monkeypatch.setattr(mod, "get_now", lambda: fake_now)
-
-    # --- Mock ThreadPoolManager ---
-    mock_tpm_instance = MagicMock()
-
-    async def _fake_run_async(task_type: Any, func: Any, *args: Any, **kwargs: Any) -> Any:
-        return func(*args, **kwargs)
-
-    mock_tpm_instance.run_async = MagicMock(side_effect=_fake_run_async)
-    mock_tpm_class = MagicMock(return_value=mock_tpm_instance)
-    monkeypatch.setattr(mod, "ThreadPoolManager", mock_tpm_class)
 
     return {
         "mock_i18n": mock_i18n,
@@ -1468,7 +1478,11 @@ class TestUpdateParamAndSliderChange:
 
 
 class TestDoRestoreDefaultAsync:
-    """_do_restore_default_async: 成功恢复 / 异常处理 / CancelledError 传播."""
+    """_do_restore_default_async: 成功恢复 / 异常处理 / CancelledError 传播.
+
+    Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
+    vm.reset_strategy_prompt, 测试 patch 目标改为 fake_vm.reset_strategy_prompt.
+    """
 
     def test_restore_success(self, screener_view_with_params_env) -> None:
         """成功恢复默认 prompt → show_toast("ai_settings_restored", "info")."""
@@ -1487,21 +1501,22 @@ class TestDoRestoreDefaultAsync:
         if restore_btn is None:
             pytest.skip("restore button not found (ai_system_prompt textarea not rendered)")
 
-        # Task 5.1: View 通过 vm.get_base_prompt 消费, patch fake_vm.get_base_prompt
-        with patch.object(fake_vm, "get_base_prompt", return_value="default_prompt"):
-            with patch("utils.config_handler.ConfigHandler.set_strategy_prompt"):
-                page.run_task.reset_mock()
-                page.show_toast.reset_mock()
-                _invoke(restore_btn.on_click, _make_event())
+        # Phase 3.3: patch fake_vm.reset_strategy_prompt 返回 base_prompt 字符串
+        with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
+            mock_reset.return_value = "default_prompt"
+            page.run_task.reset_mock()
+            page.show_toast.reset_mock()
+            _invoke(restore_btn.on_click, _make_event())
 
-                handler, args, _ = _await_run_task_handler(page)
-                asyncio.run(handler(*args))
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
 
-                page.show_toast.assert_called_once()
-                assert "ai_settings_restored" in page.show_toast.call_args.args[0]
+            mock_reset.assert_awaited_once()
+            page.show_toast.assert_called_once()
+            assert "ai_settings_restored" in page.show_toast.call_args.args[0]
 
     def test_restore_exception_shows_error(self, screener_view_with_params_env) -> None:
-        """恢复 prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
+        """vm.reset_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
         env = screener_view_with_params_env
         page = env["page"]
         fake_vm = env["fake_vm"]
@@ -1516,27 +1531,32 @@ class TestDoRestoreDefaultAsync:
         if restore_btn is None:
             pytest.skip("restore button not found")
 
-        # Task 5.1: View 通过 vm.get_base_prompt 消费, patch fake_vm.get_base_prompt 抛错
-        with patch.object(fake_vm, "get_base_prompt", side_effect=RuntimeError("db error")):
-            with patch("utils.config_handler.ConfigHandler.set_strategy_prompt"):
-                page.run_task.reset_mock()
-                page.show_toast.reset_mock()
-                _invoke(restore_btn.on_click, _make_event())
+        # Phase 3.3: patch fake_vm.reset_strategy_prompt 抛 RuntimeError
+        with patch.object(fake_vm, "reset_strategy_prompt", new_callable=AsyncMock) as mock_reset:
+            mock_reset.side_effect = RuntimeError("db error")
+            page.run_task.reset_mock()
+            page.show_toast.reset_mock()
+            _invoke(restore_btn.on_click, _make_event())
 
-                handler, args, _ = _await_run_task_handler(page)
-                asyncio.run(handler(*args))
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
 
-                page.show_toast.assert_called_once()
-                assert "sys_snack_save_err" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once()
+            assert "sys_snack_save_err" in page.show_toast.call_args.args[0]
 
 
 class TestDoSavePromptAsync:
-    """_do_save_prompt_async: validate_prompt 失败/成功/异常."""
+    """_do_save_prompt_async: 校验失败/成功/异常.
+
+    Phase 3.3: validate_prompt + ConfigHandler.set_strategy_prompt 下沉到
+    vm.save_strategy_prompt, 测试 patch 目标改为 fake_vm.save_strategy_prompt.
+    """
 
     def test_invalid_prompt_shows_warning(self, screener_view_with_params_env) -> None:
-        """validate_prompt 返回 (False, warning) → show_toast(warning)."""
+        """vm.save_strategy_prompt 返回 (False, warning) → show_toast(warning)."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         buttons = _get_buttons(env)
         save_btn = None
@@ -1548,24 +1568,27 @@ class TestDoSavePromptAsync:
         if save_btn is None:
             pytest.skip("save button not found")
 
-        with patch("utils.prompt_guard.validate_prompt", return_value=(False, "prompt_err_length")):
-            with patch("utils.prompt_guard.MAX_PROMPT_LENGTH", 5000):
-                with patch("utils.config_handler.ConfigHandler.set_strategy_prompt") as mock_set:
-                    page.run_task.reset_mock()
-                    page.show_toast.reset_mock()
-                    _invoke(save_btn.on_click, _make_event())
+        # Phase 3.3: patch fake_vm.save_strategy_prompt 返回 (False, "prompt_err_length")
+        # 模拟 validate_prompt 失败路径 (VM 内部不应调用 ConfigHandler.set_strategy_prompt)
+        with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
+            mock_save.return_value = (False, "prompt_err_length")
+            page.run_task.reset_mock()
+            page.show_toast.reset_mock()
+            _invoke(save_btn.on_click, _make_event())
 
-                    handler, args, _ = _await_run_task_handler(page)
-                    asyncio.run(handler(*args))
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
 
-                    page.show_toast.assert_called_once()
-                    # ConfigHandler.set_strategy_prompt 不应被调用
-                    mock_set.assert_not_called()
+            mock_save.assert_awaited_once()
+            page.show_toast.assert_called_once()
+            # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值
+            assert "prompt_err_length" in page.show_toast.call_args.args[0]
 
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:
-        """validate_prompt 返回 (True, '') → ConfigHandler.set_strategy_prompt 被调用 + show_toast("ai_settings_saved")."""
+        """vm.save_strategy_prompt 返回 (True, None) → show_toast("ai_settings_saved")."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         buttons = _get_buttons(env)
         save_btn = None
@@ -1577,23 +1600,25 @@ class TestDoSavePromptAsync:
         if save_btn is None:
             pytest.skip("save button not found")
 
-        with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
-            with patch("utils.config_handler.ConfigHandler.set_strategy_prompt") as mock_set:
-                page.run_task.reset_mock()
-                page.show_toast.reset_mock()
-                _invoke(save_btn.on_click, _make_event())
+        # Phase 3.3: patch fake_vm.save_strategy_prompt 返回 (True, None) 表示保存成功
+        with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
+            mock_save.return_value = (True, None)
+            page.run_task.reset_mock()
+            page.show_toast.reset_mock()
+            _invoke(save_btn.on_click, _make_event())
 
-                handler, args, _ = _await_run_task_handler(page)
-                asyncio.run(handler(*args))
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
 
-                mock_set.assert_called_once()
-                page.show_toast.assert_called_once()
-                assert "ai_settings_saved" in page.show_toast.call_args.args[0]
+            mock_save.assert_awaited_once()
+            page.show_toast.assert_called_once()
+            assert "ai_settings_saved" in page.show_toast.call_args.args[0]
 
     def test_save_exception_shows_error(self, screener_view_with_params_env) -> None:
-        """ConfigHandler.set_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
+        """vm.save_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         buttons = _get_buttons(env)
         save_btn = None
@@ -1605,17 +1630,18 @@ class TestDoSavePromptAsync:
         if save_btn is None:
             pytest.skip("save button not found")
 
-        with patch("utils.prompt_guard.validate_prompt", return_value=(True, "")):
-            with patch("utils.config_handler.ConfigHandler.set_strategy_prompt", side_effect=RuntimeError("db error")):
-                page.run_task.reset_mock()
-                page.show_toast.reset_mock()
-                _invoke(save_btn.on_click, _make_event())
+        # Phase 3.3: patch fake_vm.save_strategy_prompt 抛 RuntimeError
+        with patch.object(fake_vm, "save_strategy_prompt", new_callable=AsyncMock) as mock_save:
+            mock_save.side_effect = RuntimeError("db error")
+            page.run_task.reset_mock()
+            page.show_toast.reset_mock()
+            _invoke(save_btn.on_click, _make_event())
 
-                handler, args, _ = _await_run_task_handler(page)
-                asyncio.run(handler(*args))
+            handler, args, _ = _await_run_task_handler(page)
+            asyncio.run(handler(*args))
 
-                page.show_toast.assert_called_once()
-                assert "sys_snack_save_err" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once()
+            assert "sys_snack_save_err" in page.show_toast.call_args.args[0]
 
 
 # ============================================================================

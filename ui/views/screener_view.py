@@ -35,7 +35,6 @@ from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -505,11 +504,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             vm.update_strategy_desc(state.selected_strategy, params=dict(params_ref.current or {}))
 
     async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
+        # Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
+        # vm.reset_strategy_prompt (返回 base_prompt 字符串), View 仅更新 UI state + 展示反馈.
         try:
-            from utils.config_handler import ConfigHandler
-
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
-            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, vm.get_base_prompt, strat))
+            new_val = await vm.reset_strategy_prompt(strat)
             _update_param("ai_system_prompt", new_val)
             page = _get_page()
             if page is not None and hasattr(page, "show_toast"):
@@ -523,25 +521,25 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                 page.show_toast(I18n.get("sys_snack_save_err"), "error")
 
     async def _do_save_prompt_async(strat: str) -> None:
+        # Phase 3.3: validate_prompt + ConfigHandler.set_strategy_prompt 下沉到
+        # vm.save_strategy_prompt (返回 (success, error_key)), View 仅展示反馈.
         try:
-            from utils.config_handler import ConfigHandler
-            from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
-
             prompt_val = params_ref.current.get("ai_system_prompt", "") or ""
-            is_valid, warning = validate_prompt(prompt_val)
-            if not is_valid:
-                page = _get_page()
-                if page is not None and hasattr(page, "show_toast"):
-                    msg = I18n.get(warning, warning)
-                    if warning == "prompt_err_length":
-                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                    page.show_toast(f"⚠ {msg}", "warning")
-                return
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, prompt_val)
-            UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
+            success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
+            if page is None or not hasattr(page, "show_toast"):
+                return
+            if success:
+                UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
                 page.show_toast(I18n.get("ai_settings_saved"), "success")
+            else:
+                from utils.prompt_guard import MAX_PROMPT_LENGTH
+
+                assert error_key is not None  # validate_prompt 失败时返回 (False, warning)
+                msg = I18n.get(error_key, error_key)
+                if error_key == "prompt_err_length":
+                    msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+                page.show_toast(f"⚠ {msg}", "warning")
         except asyncio.CancelledError:
             raise
         except Exception as ex:

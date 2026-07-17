@@ -25,7 +25,7 @@ AST 扫描覆盖的违规形式 (相比 regex 升级点):
 10 类禁止业务对象 (5 原有 + 5 新增):
 - 原有: ``MetaDataManager`` / ``strategy_prompts.get_base_prompt`` / ``TushareClient`` /
   ``TUSHARE_POINT_TIERS`` / ``DataProcessor``
-- 新增: ``services.task_manager`` (TaskManager/AppTask/TaskStatus) /
+- 新增: ``services.task_manager`` (TaskManager/AppTask; TaskStatus 作为纯展示枚举允许) /
   ``services.ai_service.AIService`` /
   ``services.local_model_manager.LocalModelManager`` /
   ``utils.config_handler.ConfigHandler`` /
@@ -106,7 +106,9 @@ FORBIDDEN_BUSINESS_OBJECTS: tuple[ForbiddenModule, ...] = (
     ForbiddenModule(
         key="services.task_manager",
         module_path="services.task_manager",
-        symbols=frozenset({"TaskManager", "AppTask", "TaskStatus"}),
+        # TaskStatus 作为纯展示枚举白名单允许 (View 用于颜色/文案映射, 非业务编排).
+        # 仅 TaskManager/AppTask 视为业务编排对象, 必须下沉到 VM.
+        symbols=frozenset({"TaskManager", "AppTask"}),
     ),
     ForbiddenModule(
         key="services.ai_service.AIService",
@@ -136,34 +138,8 @@ FORBIDDEN_BUSINESS_OBJECTS: tuple[ForbiddenModule, ...] = (
 # 每个条目: (relative_path, forbidden_key), 配套注释说明原因.
 # Phase 3 各 Task 完成后, 对应条目应被移除 (白名单压路机: Plans-ui-review-20260717.md
 #   Phase 1.1 DoD 4: 当前 17 处真实违规先入白名单含原因注释, 随 Phase 3 完成逐步移除).
-# 实际盘点 13 条 (按文件 × 禁止类目维度去重; 17 处含同一文件多处 lazy import 重复点).
+# 实际盘点 2 条 (Phase 3.2 完成后从 5 条移除 ai_brain_tab 3 条).
 ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = {
-    # === ui/views/settings_tabs/data_source_tab.py ===
-    # Phase 3.1 待迁移: TaskManager 订阅 + AppTask/TaskStatus 类型断言下沉到 DataSourceViewModel
-    ("ui/views/settings_tabs/data_source_tab.py", "services.task_manager"),
-    # Phase 3.1 待迁移: ConfigHandler.get_init_history_years 读迁入 VM._load_config_to_state
-    ("ui/views/settings_tabs/data_source_tab.py", "utils.config_handler.ConfigHandler"),
-    # Phase 3.1 待迁移: ThreadPoolManager.run_async 编排下沉到 VM save_token/set_history_years
-    ("ui/views/settings_tabs/data_source_tab.py", "utils.thread_pool"),
-    # === ui/views/settings_tabs/ai_brain_tab.py ===
-    # Phase 3.2 待迁移: AIService.test_connection/reload_config 下沉到 AIBrainSettingsViewModel
-    ("ui/views/settings_tabs/ai_brain_tab.py", "services.ai_service.AIService"),
-    # Phase 3.2 待迁移: LocalModelManager MD5 检查 + verify_model 下沉到 VM (NOTE(lazy) 标记)
-    ("ui/views/settings_tabs/ai_brain_tab.py", "services.local_model_manager.LocalModelManager"),
-    # Phase 3.2 待迁移: ThreadPoolManager.run_async(LocalModelManager.calculate_file_md5) 下沉到 VM
-    ("ui/views/settings_tabs/ai_brain_tab.py", "utils.thread_pool"),
-    # === ui/views/screener_view.py ===
-    # Phase 3.3 待迁移: ConfigHandler.set_strategy_prompt/reset_strategy_prompt 下沉到 ScreenerViewModel
-    ("ui/views/screener_view.py", "utils.config_handler.ConfigHandler"),
-    # Phase 3.3 待迁移: ThreadPoolManager.run_async 编排下沉到 VM save/reset_strategy_prompt
-    ("ui/views/screener_view.py", "utils.thread_pool"),
-    # === ui/views/onboarding_wizard.py ===
-    # Phase 3.4 待迁移: ConfigHandler.set_locale/get_auto_update_time/get_init_history_years 下沉到 VM
-    ("ui/views/onboarding_wizard.py", "utils.config_handler.ConfigHandler"),
-    # Phase 3.4 待迁移: ThreadPoolManager.run_async(ConfigHandler.set_locale) 下沉到 VM.save_language
-    ("ui/views/onboarding_wizard.py", "utils.thread_pool"),
-    # Phase 3.4 待迁移: LocalModelManager.cancel_verification_if_active 迁入 VM.dispose
-    ("ui/views/onboarding_wizard.py", "services.local_model_manager.LocalModelManager"),
     # === ui/views/data_view.py ===
     # Phase 3.5 待迁移: ThreadPoolManager.run_async(TaskType.CPU) 数据加载编排下沉到 DataExplorerViewModel
     ("ui/views/data_view.py", "utils.thread_pool"),

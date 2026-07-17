@@ -43,10 +43,8 @@ from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
 from ui.viewmodels.onboarding_view_model import STEP_CONFIGS, OnboardingViewModel
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
-from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -321,7 +319,7 @@ def OnboardingWizard(
 
     # --- Pure UI state ---
     schedule_enabled, set_schedule_enabled = ft.use_state(True)
-    schedule_time, set_schedule_time = ft.use_state(ConfigHandler.get_auto_update_time())
+    schedule_time, set_schedule_time = ft.use_state(state.schedule_time)
     language_value, set_language_value = ft.use_state(I18n.current_locale())
     hovered_card, set_hovered_card = ft.use_state(-1)
 
@@ -360,9 +358,6 @@ def OnboardingWizard(
                     await onboarding_vm.cancel_sync()
             except Exception as exc:
                 logger.debug("[OnboardingWizard] Cleanup cancel sync failed: %s", exc, exc_info=True)
-            from services.local_model_manager import LocalModelManager
-
-            LocalModelManager.cancel_verification_if_active()
 
         page.run_task(_do_cleanup)
 
@@ -372,7 +367,7 @@ def OnboardingWizard(
     async def _do_language_change(new_locale: str) -> None:
         """持久化 locale 并触发 I18n observable 重渲染。"""
         try:
-            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
+            success = await onboarding_vm.save_language(new_locale)
             if not success:
                 set_language_value(I18n.current_locale())
                 logger.warning("[OnboardingWizard] Failed to persist locale: %s", new_locale)
@@ -792,11 +787,7 @@ def OnboardingWizard(
 
     elif step == 5:
         # Data Sync step
-        years = (
-            ConfigHandler.get_init_history_years()
-            if hasattr(ConfigHandler, "get_init_history_years")
-            else DEFAULT_SYNC_YEARS
-        )
+        years = state.init_history_years
         is_syncing = state.sync_in_progress
 
         step_content = ft.Column(

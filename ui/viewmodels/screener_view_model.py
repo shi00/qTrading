@@ -301,6 +301,52 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
         return get_base_prompt(strategy_key)
 
+    async def reset_strategy_prompt(self, strategy_key: str) -> str:
+        """重置策略 prompt 为默认值 (Phase 3.3: 从 View 迁入, 内聚到 VM).
+
+        通过 ``ConfigHandler.set_strategy_prompt(strategy_key, None)`` 清除用户覆盖,
+        然后返回基础 prompt 字符串供 View 更新 UI state.
+
+        Args:
+            strategy_key: 策略 key
+
+        Returns:
+            基础 prompt 字符串
+
+        Raises:
+            Exception: ConfigHandler 失败时抛出 (View 负责展示错误)
+        """
+        from utils.config_handler import ConfigHandler
+
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, None)
+        # get_base_prompt 内部调 ConfigHandler.get_strategy_prompt / get_ai_system_prompt (load_config IO),
+        # 需 ThreadPoolManager 包装 (R16).
+        return str(await ThreadPoolManager().run_async(TaskType.IO, self.get_base_prompt, strategy_key))
+
+    async def save_strategy_prompt(self, strategy_key: str, prompt: str) -> tuple[bool, str | None]:
+        """保存策略 prompt (Phase 3.3: 从 View 迁入, 内聚到 VM).
+
+        内部完成 ``validate_prompt`` + ``ConfigHandler.set_strategy_prompt`` 编排.
+
+        Args:
+            strategy_key: 策略 key
+            prompt: 用户输入的 prompt 字符串
+
+        Returns:
+            (success, error_key): 成功时 (True, None); 失败时 (False, error_key) 其中
+            error_key 为 i18n key (如 ``prompt_err_length`` / ``prompt_err_injection``)
+        """
+        from utils.prompt_guard import validate_prompt
+
+        is_valid, warning = validate_prompt(prompt)
+        if not is_valid:
+            return False, warning
+
+        from utils.config_handler import ConfigHandler
+
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, prompt)
+        return True, None
+
     def get_column_alias(self, table_name: str | None, col: str) -> str:
         """获取列别名 (Task 5.1: 从 View 迁入, 内聚到 VM).
 

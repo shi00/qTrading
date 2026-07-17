@@ -593,3 +593,83 @@ class TestScreenerViewContract:
 
         # 必须: 从 state.history_tree 派生历史树控件
         assert "state.history_tree" in code, "必须从 state.history_tree 派生历史树控件 (Task 3.2)"
+
+    # ========================================================================
+    # Phase 3.3: ConfigHandler/ThreadPoolManager 下沉到 ScreenerViewModel
+    # View 不直接 import 业务编排对象 (CLAUDE.md §3.2 MVVM)
+    # ========================================================================
+
+    def test_screener_view_does_not_import_config_handler_or_thread_pool(self):
+        """Phase 3.3: View 不应直接 import ConfigHandler/ThreadPoolManager/TaskType (已下沉到 VM).
+
+        DoD: AST 扫描 screener_view.py 源码, 无 ConfigHandler/ThreadPoolManager/TaskType
+        的 import 语句 (含 alias / lazy import / from parent import child).
+        跳过 TYPE_CHECKING 块内的 import (仅类型注解用途, 不引入运行时依赖).
+        """
+        import ast
+        from pathlib import Path
+
+        import ui.views.screener_view as mod
+
+        source = Path(mod.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        # TYPE_CHECKING 块内 import 不算违规 (类型注解用途)
+        type_checking_imports: set[tuple[str, str]] = set()
+
+        def _is_type_checking_test(test: ast.expr) -> bool:
+            if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+                return True
+            return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and _is_type_checking_test(node.test):
+                for stmt in node.body:
+                    if isinstance(stmt, ast.ImportFrom):
+                        for alias in stmt.names:
+                            bound = alias.asname or alias.name
+                            type_checking_imports.add((stmt.module or "", bound))
+                    elif isinstance(stmt, ast.Import):
+                        for alias in stmt.names:
+                            bound = alias.asname or alias.name.split(".")[-1]
+                            type_checking_imports.add((alias.name, bound))
+
+        forbidden_symbols = {"ConfigHandler", "ThreadPoolManager", "TaskType"}
+        violations: list[str] = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                # 跳过 TYPE_CHECKING 块内 import
+                if any(
+                    (node.module or "", alias.asname or alias.name) in type_checking_imports for alias in node.names
+                ):
+                    continue
+                for alias in node.names:
+                    bound = alias.asname or alias.name
+                    if bound in forbidden_symbols:
+                        violations.append(
+                            f"line {node.lineno}: from {node.module} import {alias.name}"
+                            + (f" as {alias.asname}" if alias.asname else "")
+                        )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    bound = alias.asname or alias.name.split(".")[-1]
+                    if bound in forbidden_symbols:
+                        violations.append(
+                            f"line {node.lineno}: import {alias.name}" + (f" as {alias.asname}" if alias.asname else "")
+                        )
+
+        assert violations == [], (
+            "screener_view.py 不应直接 import ConfigHandler/ThreadPoolManager/TaskType "
+            "(Phase 3.3 已下沉到 ScreenerViewModel, CLAUDE.md §3.2 MVVM): " + str(violations)
+        )
+
+    def test_screener_view_calls_vm_reset_strategy_prompt(self):
+        """Phase 3.3: View 必须通过 vm.reset_strategy_prompt 消费业务编排 (替代 ConfigHandler + ThreadPoolManager)."""
+        code = _code_source()
+        assert "vm.reset_strategy_prompt" in code, "必须调用 vm.reset_strategy_prompt (Phase 3.3 新 API)"
+
+    def test_screener_view_calls_vm_save_strategy_prompt(self):
+        """Phase 3.3: View 必须通过 vm.save_strategy_prompt 消费业务编排 (替代 validate_prompt + ConfigHandler)."""
+        code = _code_source()
+        assert "vm.save_strategy_prompt" in code, "必须调用 vm.save_strategy_prompt (Phase 3.3 新 API)"

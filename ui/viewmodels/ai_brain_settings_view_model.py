@@ -1,4 +1,4 @@
-"""AIBrainSettingsViewModel — AIBrainTab 配置编排 ViewModel (Task 5.2).
+"""AIBrainSettingsViewModel — AIBrainTab 配置编排 ViewModel (Task 5.2 + Phase 3.2 P1-1).
 
 承担 AIBrainTab 中 AI 调优参数 (max_candidates/min_turnover/concurrency/news_concurrency/
 ai_prompt/news_prompt) + 三阶段保存状态机编排（CLAUDE.md §3.2 MVVM）。
@@ -11,6 +11,9 @@ ai_prompt/news_prompt) + 三阶段保存状态机编排（CLAUDE.md §3.2 MVVM�
 - 同步阻塞 ConfigHandler 写入通过 ThreadPoolManager.run_async offload (R16)
 - R2: asyncio.CancelledError 显式 raise, 不被 except Exception 吞没
 - 重复提交检测：save_state="saving" 时拒绝新提交
+- Phase 3.2 P1-1: 子 VM 业务回调 (test_connection/reload_service/verify_local_model)
+  作为本 VM 静态 command 暴露, View 注入到子 VM; 本地模型 MD5 检查整合进 save_ai_settings,
+  结果通过 state.warning_message 暴露给 View (View 仅调 save_ai_settings 并据 state 反馈)
 
 不感知 locale：状态字段为字符串/布尔值，View 渲染时按当前 locale 翻译。
 """
@@ -56,6 +59,9 @@ class AIBrainSettingsState:
     ai_prompt_value: str = ""
     news_prompt_value: str = ""
     save_state: str = SAVE_IDLE
+    # Phase 3.2 P1-1: MD5 检查结果 i18n key (非空时 View 显示 WARNING snack)
+    # 下沉自 View._check_local_model_md5, VM 在 save_ai_settings 末尾写入
+    warning_message: str = ""
 
 
 class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
@@ -88,6 +94,52 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         self._state = AIBrainSettingsState()
         self._subscribers: list[Callable[[AIBrainSettingsState], None]] = []
         self._load_config_to_state()
+
+    # --- 子 VM 回调 commands (Phase 3.2 P1-1: 下沉自 View 模块级函数) ---
+
+    @staticmethod
+    async def test_connection(
+        provider: str,
+        model: str,
+        base_url: str,
+        api_key: str,
+        **kwargs,
+    ) -> dict:
+        """LLM 连接测试 command (注入 LLMConfigPanelViewModel/FailoverConfigPanelViewModel)。
+
+        下沉自 View._on_llm_test_connection (Phase 3.2 P1-1)。
+        静态方法: 纯业务转发, 不访问 VM state, 避免与子 VM 工厂的循环依赖。
+        """
+        from services.ai_service import AIService
+
+        return await AIService.test_connection(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            **kwargs,
+        )
+
+    @staticmethod
+    async def reload_service() -> None:
+        """重载 AIService 配置 command (注入 LLMConfigPanelViewModel.on_reload_service)。
+
+        下沉自 View._on_reload_ai_service (Phase 3.2 P1-1)。
+        """
+        from services.ai_service import AIService
+
+        await AIService().reload_config()
+
+    @staticmethod
+    async def verify_local_model(model_path: str, config: dict) -> bool:
+        """验证本地模型 command (注入 LocalModelConfigPanelViewModel.on_verify_model)。
+
+        下沉自 View._on_verify_local_model (Phase 3.2 P1-1)。
+        """
+        from services.local_model_manager import LocalModelManager
+
+        manager = await LocalModelManager.get_instance()
+        return await manager.load_model(model_path, config, is_verification=True)
 
     # --- Config loading ---
 
@@ -188,7 +240,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
         # ========== 阶段 1: 验证 ==========
         is_valid, err_key = self._validate_all()
         if not is_valid:
-            self._set_state(save_state=SAVE_ERROR)
+            self._set_state(save_state=SAVE_ERROR, warning_message="")
             logger.warning("[AIBrainSettingsVM] validation failed: %s", err_key)
             return False
 
@@ -218,7 +270,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             # 先保存 LLM 配置 (复用 llm_vm.save_config)
             llm_saved = await self._llm_vm.save_config()
             if not llm_saved:
-                self._set_state(save_state=SAVE_ERROR)
+                self._set_state(save_state=SAVE_ERROR, warning_message="")
                 return False
 
             def _save_configs_sync() -> bool:
@@ -240,7 +292,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
 
             success = await ThreadPoolManager().run_async(TaskType.IO, _save_configs_sync)
             if not success:
-                self._set_state(save_state=SAVE_ERROR)
+                self._set_state(save_state=SAVE_ERROR, warning_message="")
                 return False
 
             # 提交验证模式 (如果活跃) — 验证模型成为正式模型
@@ -258,10 +310,24 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             if local_path:
                 exists = await ThreadPoolManager().run_async(TaskType.IO, os.path.exists, local_path)
                 if not exists:
-                    self._set_state(save_state=SAVE_ERROR)
+                    self._set_state(save_state=SAVE_ERROR, warning_message="")
                     return False
 
-            self._set_state(save_state=SAVE_SUCCESS)
+            # MD5 检查 (Phase 3.2 P1-1: 下沉自 View._check_local_model_md5)
+            # 结果写入 state.warning_message, View 据此决定显示 WARNING snack 还是 SUCCESS snack
+            warning_msg = ""
+            if local_path:
+                local_mgr = await LocalModelManager.get_instance()
+                loaded_md5 = local_mgr.get_loaded_model_md5()
+                new_md5 = await ThreadPoolManager().run_async(
+                    TaskType.IO,
+                    LocalModelManager.calculate_file_md5,
+                    local_path,
+                )
+                if loaded_md5 and new_md5 and loaded_md5 != new_md5:
+                    warning_msg = "ai_local_model_changed"
+
+            self._set_state(save_state=SAVE_SUCCESS, warning_message=warning_msg)
             return True
         except asyncio.CancelledError:
             raise  # R2: 必须传播
@@ -283,5 +349,5 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
                     ex,
                     exc_info=True,
                 )
-            self._set_state(save_state=SAVE_ERROR)
+            self._set_state(save_state=SAVE_ERROR, warning_message="")
             return False
