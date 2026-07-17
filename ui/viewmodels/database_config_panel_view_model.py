@@ -14,6 +14,7 @@ View 渲染时 I18n.get(msg.key, **msg.params)。动态错误消息用 _RAW_MSG_
 - ConfigHandler.save_db_config 是同步 IO，通过 ThreadPoolManager offload
 """
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -23,6 +24,7 @@ from ui.viewmodels import Message
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error, get_error_message
 from utils.log_decorators import PerfThreshold, log_async_operation
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -311,13 +313,17 @@ class DatabaseConfigPanelViewModel:
                 self._show_error(self._raw_message(result.message))
                 return False
 
+        except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+            raise
         except ValueError as e:
-            logger.warning("[DatabaseConfigVM] ValueError: %s", e, exc_info=True)
+            logger.warning("[DatabaseConfigVM] ValueError: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[DatabaseConfigVM] ValueError traceback", exc_info=True)
             error_info = classify_error(e, context="db")
             self._show_error(self._raw_message(get_error_message(error_info)))
             return False
         except Exception as e:
-            logger.error("[DatabaseConfigVM] Test connection failed: %s", e, exc_info=True)
+            logger.error("[DatabaseConfigVM] Test connection failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[DatabaseConfigVM] Test connection failed traceback", exc_info=True)
             error_info = classify_error(e, context="db")
             self._show_error(self._raw_message(get_error_message(error_info)))
             return False
@@ -399,8 +405,11 @@ class DatabaseConfigPanelViewModel:
 
             return True
 
+        except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+            raise
         except Exception as e:
-            logger.error("[DatabaseConfigVM] Save config failed: %s", e, exc_info=True)
+            logger.error("[DatabaseConfigVM] Save config failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[DatabaseConfigVM] Save config failed traceback", exc_info=True)
             error_info = classify_error(e, context="db")
             self._show_error(self._raw_message(get_error_message(error_info)))
             return False

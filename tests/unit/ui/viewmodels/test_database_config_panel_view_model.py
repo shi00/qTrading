@@ -4,6 +4,8 @@
 VM 是独立类，消费方（DatabaseTab/OnboardingWizard）直接实例化以调用 commands。
 """
 
+import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -837,3 +839,99 @@ class TestSaveConfigEdgeCases:
         assert result is False
         assert vm.state.status_type == "error"
         assert vm.state.is_saving is False
+
+
+# --- R9: 异常日志脱敏 + R2: CancelledError 传播 ---
+
+
+# 测试用 secret 必须长度 >= 8 (DataSanitizer._MIN_SECRET_LEN)
+_LEAKED_SECRET = "leaked_db_password_xyz123"
+
+
+class TestSanitizeErrorAndCancelledError:
+    """R9: 异常日志中不得出现明文 secret; R2: CancelledError 必须传播。"""
+
+    @pytest.fixture(autouse=True)
+    def _reset_known_secrets(self):
+        """每个测试前后清空 DataSanitizer._known_secrets，避免测试间状态污染。"""
+        from utils.sanitizers import DataSanitizer
+
+        DataSanitizer._reset_known_secrets()
+        yield
+        DataSanitizer._reset_known_secrets()
+
+    @pytest.mark.asyncio
+    async def test_test_connection_logs_sanitized_error(self, mock_config_handler, mock_thread_pool, caplog):
+        """test_connection 抛含 secret 的异常时，日志中不得出现明文 secret。
+
+        模拟真实场景：secret 已通过 ConfigHandler.get_db_password() 注册到
+        DataSanitizer，view_model 的 except 分支用 sanitize_error(e) 脱敏。
+        """
+        from utils.sanitizers import DataSanitizer
+
+        DataSanitizer.register_secret(_LEAKED_SECRET)
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=RuntimeError(f"auth failed: {_LEAKED_SECRET}"))
+            with caplog.at_level(logging.ERROR):
+                result = await vm.test_connection()
+
+        assert result is False
+        assert _LEAKED_SECRET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_save_config_logs_sanitized_error(self, mock_config_handler, mock_thread_pool, caplog):
+        """save_config 抛含 secret 的异常时，日志中不得出现明文 secret。"""
+        from utils.sanitizers import DataSanitizer
+
+        DataSanitizer.register_secret(_LEAKED_SECRET)
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=RuntimeError(f"auth failed: {_LEAKED_SECRET}"))
+            with caplog.at_level(logging.ERROR):
+                result = await vm.save_config()
+
+        assert result is False
+        assert _LEAKED_SECRET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_test_connection_propagates_cancelled_error(self, mock_config_handler, mock_thread_pool):
+        """R2: test_connection 中 await 抛 CancelledError 时必须传播，不被 except Exception 吞没。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError):
+                await vm.test_connection()
+
+    @pytest.mark.asyncio
+    async def test_save_config_propagates_cancelled_error(self, mock_config_handler, mock_thread_pool):
+        """R2: save_config 中 await 抛 CancelledError 时必须传播，不被 except Exception 吞没。"""
+        vm = _make_vm(mock_config_handler)
+        vm.update_host("localhost")
+        vm.update_port("5432")
+        vm.update_user("postgres")
+        vm.update_password("pass")
+        vm.update_database("astock")
+
+        with patch("ui.viewmodels.database_config_panel_view_model.DatabaseConfigService") as mock_svc:
+            mock_svc.test_connection = AsyncMock(side_effect=asyncio.CancelledError())
+            with pytest.raises(asyncio.CancelledError):
+                await vm.save_config()

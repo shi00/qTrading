@@ -4,6 +4,8 @@
 VM 是独立类，消费方（AIBrainTab/OnboardingWizard）直接实例化以调用 commands。
 """
 
+import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -727,3 +729,89 @@ class TestLocalModelConfigPanelViewModelDispose:
         vm.subscribe(lambda s: received.append(s))
         vm.update_model_path("/new.gguf")
         assert len(received) == 1
+
+
+# --- R9: 异常日志脱敏 + R2: CancelledError 传播 ---
+
+
+# 测试用 secret 必须长度 >= 8 (DataSanitizer._MIN_SECRET_LEN)
+_LEAKED_SECRET = "leaked_local_model_secret_abc"
+
+
+class TestSanitizeErrorAndCancelledError:
+    """R9: 异常日志中不得出现明文 secret; R2: CancelledError 必须传播。"""
+
+    @pytest.fixture(autouse=True)
+    def _reset_known_secrets(self):
+        """每个测试前后清空 DataSanitizer._known_secrets，避免测试间状态污染。"""
+        from utils.sanitizers import DataSanitizer
+
+        DataSanitizer._reset_known_secrets()
+        yield
+        DataSanitizer._reset_known_secrets()
+
+    @pytest.mark.asyncio
+    async def test_verify_model_logs_sanitized_error(self, mock_verify_model, mock_config_handler, caplog):
+        """verify_model 抛含 secret 的异常时，日志中不得出现明文 secret。
+
+        模拟真实场景：secret 已注册到 DataSanitizer（如 AI API key），
+        view_model 的 except 分支用 sanitize_error(e) 脱敏。
+        """
+        from utils.sanitizers import DataSanitizer
+
+        DataSanitizer.register_secret(_LEAKED_SECRET)
+        mock_verify_model.side_effect = RuntimeError(f"model load failed: {_LEAKED_SECRET}")
+        vm = _make_vm(mock_verify_model)
+        vm.update_model_path("/models/test.gguf")
+        vm.update_timeout("300")
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("asyncio.sleep"),
+            caplog.at_level(logging.ERROR),
+        ):
+            result = await vm.verify_model()
+
+        assert result is False
+        assert _LEAKED_SECRET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_save_config_logs_sanitized_error(
+        self, mock_verify_model, mock_config_handler, mock_thread_pool, caplog
+    ):
+        """save_config 抛含 secret 的异常时，日志中不得出现明文 secret。"""
+        from utils.sanitizers import DataSanitizer
+
+        DataSanitizer.register_secret(_LEAKED_SECRET)
+        mock_config_handler.save_local_ai_config.side_effect = RuntimeError(f"persist failed: {_LEAKED_SECRET}")
+        vm = _make_vm(mock_verify_model)
+        vm.update_model_path("/models/test.gguf")
+        with caplog.at_level(logging.ERROR):
+            result = await vm.save_config()
+
+        assert result is False
+        assert _LEAKED_SECRET not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_verify_model_propagates_cancelled_error(self, mock_verify_model, mock_config_handler):
+        """R2: verify_model 中 await 抛 CancelledError 时必须传播，不被 except Exception 吞没。"""
+        mock_verify_model.side_effect = asyncio.CancelledError()
+        vm = _make_vm(mock_verify_model)
+        vm.update_model_path("/models/test.gguf")
+        vm.update_timeout("300")
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("asyncio.sleep"),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await vm.verify_model()
+
+    @pytest.mark.asyncio
+    async def test_save_config_propagates_cancelled_error(
+        self, mock_verify_model, mock_config_handler, mock_thread_pool
+    ):
+        """R2: save_config 中 await 抛 CancelledError 时必须传播，不被 except Exception 吞没。"""
+        mock_thread_pool.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+        vm = _make_vm(mock_verify_model)
+        vm.update_model_path("/models/test.gguf")
+        with pytest.raises(asyncio.CancelledError):
+            await vm.save_config()

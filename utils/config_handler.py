@@ -595,12 +595,14 @@ class ConfigHandler:
         # 1. 环境变量优先（最高优先级）
         env_password = os.environ.get(ENV_FALLBACK_MAP["db_password"])
         if env_password:
+            DataSanitizer.register_secret(env_password)
             return env_password
 
         # 2. keyring
         try:
             password = keyring.get_password(KEYRING_SERVICE_NAME, "db_password")
             if password:
+                DataSanitizer.register_secret(password)
                 return password
         # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
@@ -610,7 +612,9 @@ class ConfigHandler:
         user_config = ConfigHandler.load_config()
         encrypted = user_config.get("db_password_encrypted", "")
         if encrypted:
-            return ConfigHandler._try_decrypt(encrypted)
+            decrypted = ConfigHandler._try_decrypt(encrypted)
+            DataSanitizer.register_secret(decrypted)
+            return decrypted
         return ""
 
     @staticmethod
@@ -893,11 +897,15 @@ class ConfigHandler:
 
         # 1. 环境变量优先（最高优先级）
         api_key = os.environ.get(ENV_FALLBACK_MAP["ai_api_key"])
+        if api_key:
+            DataSanitizer.register_secret(api_key)
 
         # 2. keyring
         if not api_key:
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+                if api_key:
+                    DataSanitizer.register_secret(api_key)
             # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as exc:
                 logger.debug("Keyring get_password for ai_api_key failed: %s", DataSanitizer.sanitize_error(exc))
@@ -907,6 +915,7 @@ class ConfigHandler:
             encrypted = config.get("ai_api_key", "")
             api_key = ConfigHandler._try_decrypt(encrypted)
             if api_key:
+                DataSanitizer.register_secret(api_key)
                 try:
                     keyring.set_password(KEYRING_SERVICE_NAME, "ai_api_key", api_key)
                     ConfigHandler.save_config({"ai_api_key": ""})
@@ -1114,6 +1123,8 @@ class ConfigHandler:
 
         try:
             api_key = keyring.get_password(KEYRING_SERVICE_NAME, f"ai_api_key_{provider}")
+            if api_key:
+                DataSanitizer.register_secret(api_key)
         # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
         except Exception as e:
             logger.debug(
@@ -1125,6 +1136,8 @@ class ConfigHandler:
         if not api_key and cred.get("api_key_encrypted"):
             try:
                 api_key = SecurityManager.decrypt_data(cred["api_key_encrypted"])
+                if api_key:
+                    DataSanitizer.register_secret(api_key)
             # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
             except Exception as e:
                 logger.debug(
@@ -1138,6 +1151,8 @@ class ConfigHandler:
             # Try keyring global key first
             try:
                 api_key = keyring.get_password(KEYRING_SERVICE_NAME, "ai_api_key")
+                if api_key:
+                    DataSanitizer.register_secret(api_key)
             # NOTE(lazy): keyring 操作失败降级到加密配置/忽略. ceiling: keyring 不可用(无 D-Bus/未登录/权限拒绝). upgrade: 引入 keyring 可用性预检或统一 fallback 包装.
             except Exception as e:
                 logger.debug(
@@ -1152,6 +1167,8 @@ class ConfigHandler:
                 if global_encrypted:
                     try:
                         api_key = SecurityManager.decrypt_data(global_encrypted)
+                        if api_key:
+                            DataSanitizer.register_secret(api_key)
                     # NOTE(lazy): 加密/解密失败兜底(密钥变化/数据损坏). ceiling: SecurityManager 密钥未初始化或数据损坏. upgrade: 引入密钥迁移机制或显式提示用户重置.
                     except Exception as e:
                         logger.debug(

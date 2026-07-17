@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
 from utils.config_handler import ConfigHandler
+from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
@@ -304,8 +305,11 @@ class LocalModelConfigPanelViewModel:
                 self._on_verify_success()
             return True
 
+        except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+            raise
         except Exception as e:
-            logger.error("[LocalModelConfigVM] Model verification failed: %s", e, exc_info=True)
+            logger.error("[LocalModelConfigVM] Model verification failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[LocalModelConfigVM] Model verification failed traceback", exc_info=True)
             self._show_error(Message("wizard_err_model_load_failed"))
             return False
         finally:
@@ -353,8 +357,11 @@ class LocalModelConfigPanelViewModel:
                 self._on_save()
             return True
 
+        except asyncio.CancelledError:  # R2: CancelledError 必须传播, 不被 except Exception 吞没
+            raise
         except Exception as e:
-            logger.error("[LocalModelConfigVM] Save failed: %s", e, exc_info=True)
+            logger.error("[LocalModelConfigVM] Save failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("[LocalModelConfigVM] Save failed traceback", exc_info=True)
             self._show_error(Message("sys_snack_save_err"))
             return False
         finally:
