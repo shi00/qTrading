@@ -155,7 +155,7 @@
 - Pre-commit hooks 必须在提交前执行并保持通过；新增依赖必须先编辑 `pyproject.toml`，再由 pre-commit 自动重新生成 `requirements*.txt` (禁止手改)。
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别；涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
-- **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
+- **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装，除非能证明该封装带来实质性价值。
 - **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
