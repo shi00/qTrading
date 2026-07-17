@@ -864,7 +864,11 @@ class TestDoThemeChange:
 
 
 class TestDoLogLevelChange:
-    """_do_log_level_change: 成功/异常/CancelledError。"""
+    """_do_log_level_change: 成功/异常/CancelledError + command/state 测试。
+
+    Task 6.1 (P3-WinE2E-Skip): 补 state 验证（dropdown value 前进/None 防御）
+    与 command 链路完整性（snack 消息格式），替代 Windows E2E skip 路径。
+    """
 
     def _trigger(self, env, level: str = "DEBUG") -> tuple:
         dropdowns = _get_dropdowns(env)
@@ -899,6 +903,62 @@ class TestDoLogLevelChange:
         handler, args, _ = self._trigger(env)
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(handler(*args))
+
+    def test_state_dropdown_value_updates_after_change(self, system_tab_env) -> None:
+        """state: _on_log_level_change 触发后 rerender，dropdown.value 反映新 level。
+
+        覆盖状态前进路径：用户切换 dropdown → set_log_level_value(new_level) →
+        闭包重渲染 → dropdown.value == new_level。
+        """
+        env = system_tab_env
+        dropdowns = _get_dropdowns(env)
+        # 初始 value 来自 ConfigHandler.get_log_level() = "INFO"
+        assert dropdowns[2].value == "INFO"
+
+        # 触发 _on_log_level_change，内部调 set_log_level_value("ERROR")
+        _invoke(dropdowns[2].on_select, _make_event("ERROR"))
+        _rerender(env)
+
+        # 重新拿到渲染后的 dropdown，验证 value 已前进
+        new_dropdowns = _get_dropdowns(env)
+        assert new_dropdowns[2].value == "ERROR"
+
+    def test_state_no_change_when_value_is_none(self, system_tab_env) -> None:
+        """state: control.value=None → 早返回，dropdown.value 不变（防御性 state 保护）。
+
+        覆盖防御路径：空值不应触发 state 变化或 run_task。
+        """
+        env = system_tab_env
+        dropdowns = _get_dropdowns(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        original_value = dropdowns[2].value
+
+        _invoke(dropdowns[2].on_select, _make_event(None))
+        _rerender(env)
+
+        new_dropdowns = _get_dropdowns(env)
+        assert new_dropdowns[2].value == original_value
+        assert not page.run_task.called
+
+    def test_command_snack_message_contains_level(self, system_tab_env) -> None:
+        """command: 成功路径下 show_snack 收到 ``"i18n[sys_log_label]: DEBUG"`` 消息。
+
+        覆盖 command 链路完整性：on_change → run_task → _do_log_level_change →
+        show_snack_callback(I18n.get("sys_log_label") + ": " + new_level)。
+        mock_i18n.get 返回 ``f"i18n[{key}]"``，故期望消息为 ``"i18n[sys_log_label]: DEBUG"``。
+        """
+        env = system_tab_env
+        handler, args, _ = self._trigger(env, level="DEBUG")
+        with patch("utils.logger.update_log_level"):
+            asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once()
+        snack_args = env["show_snack"].call_args
+        # show_snack_callback(message) — 第一个位置参数应含 "DEBUG"
+        snack_message = snack_args.args[0]
+        assert "DEBUG" in snack_message
+        assert "sys_log_label" in snack_message
 
 
 class TestDoSaveConcurrency:

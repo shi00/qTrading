@@ -121,14 +121,15 @@ async def test_wizard_db_validation_failure(wizard_page):
     assert not await wizard_page.has_text(token_title)
 
 
+# Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题。
+# 单层 skipif 装饰器足够（移除函数内重复 pytest.skip），非 Windows 平台 + 集成测试覆盖成功路径。
+# 详见 CONTRIBUTING.md「已知架构技术债」P3-WinE2E-Skip。
 @pytest.mark.skipif(
     sys.platform == "win32",
-    reason="Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题",
+    reason="Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题 (P3-WinE2E-Skip)",
 )
 async def test_wizard_db_validation_success(wizard_page):
     """测试：数据库校验成功后前进到 Token 步骤（A 类门禁，用 CI 测试库）。"""
-    if sys.platform == "win32":
-        pytest.skip("Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题")
     from tests.conftest import _get_test_db_url
 
     db_url = os.environ.get(
