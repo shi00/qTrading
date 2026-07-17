@@ -8,6 +8,7 @@ import pandas as pd
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.base import SyncResult
 from data.persistence.daos.base_dao import EngineDisposedError
+from utils.time_utils import get_now
 
 pytestmark = pytest.mark.unit
 
@@ -219,7 +220,7 @@ class TestFinancialSyncRunModes:
     @pytest.mark.asyncio
     async def test_incremental_with_disclosure_dates(self):
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
@@ -601,7 +602,7 @@ class TestFinancialSyncIncrementalPaths:
     @pytest.mark.asyncio
     async def test_incremental_no_dates_to_sync(self):
         ctx = make_ctx()
-        now = datetime.datetime.now()
+        now = get_now()
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
         strategy = FinancialSyncStrategy(ctx)
         result = await strategy.run()
@@ -622,7 +623,7 @@ class TestFinancialSyncIncrementalWithDisclosure:
     @pytest.mark.asyncio
     async def test_incremental_with_aux_updates(self):
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
@@ -651,7 +652,7 @@ class TestFinancialSyncIncrementalWithDisclosure:
     @pytest.mark.asyncio
     async def test_incremental_fetch_error_continues(self):
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
@@ -1202,7 +1203,7 @@ class TestFinancialSyncPeakSeasonAdjustment:
     async def test_peak_season_incremental_adjusts_concurrency(self):
         """peak 披露季时 _run_incremental_sync 应进入 _is_peak_disclosure_season 分支并记日志。"""
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
@@ -1287,7 +1288,7 @@ class TestFinancialSyncIncrementalBoundaries:
     async def test_incremental_last_sync_today_no_dates_early_return(self):
         """last_sync_date 为今天时，dates_to_sync 为空，早返回且不调用 disclosure_date。"""
         ctx = make_ctx()
-        now = datetime.datetime.now()
+        now = get_now()
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": now})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
@@ -1300,7 +1301,7 @@ class TestFinancialSyncIncrementalBoundaries:
     async def test_incremental_last_sync_yesterday_generates_dates(self):
         """last_sync_date 为昨天时，生成 dates_to_sync 并调用 disclosure_date。"""
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(return_value=None)
         strategy = FinancialSyncStrategy(ctx)
@@ -1313,7 +1314,7 @@ class TestFinancialSyncIncrementalBoundaries:
     async def test_incremental_empty_target_list_continues(self):
         """disclosure_date 返回数据但 drop_duplicates 后 target_list 为空时 continue。"""
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         # 返回无 ts_code/end_date 列的 df → drop_duplicates 后 to_dict 为空
         ctx.api.get_disclosure_date = AsyncMock(return_value=pd.DataFrame({"other_col": ["x"]}))
@@ -1473,7 +1474,7 @@ class TestFinancialSyncRepairScenarios:
     async def test_repair_latest_period_empty_history_has_data(self):
         """最新季度返回空，历史季度有数据 → 只保存历史数据。"""
         ctx = make_ctx()
-        now = datetime.datetime.now()
+        now = get_now()
         current_year = now.year
 
         async def selective_income(*args, **kwargs):
@@ -1732,7 +1733,7 @@ class TestFinancialSyncIncrementalErrorPaths:
     async def test_incremental_save_failure_continues(self):
         """save_financial_reports 抛异常时 sync_one_target 应继续处理。"""
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
@@ -1752,7 +1753,7 @@ class TestFinancialSyncIncrementalErrorPaths:
     async def test_incremental_aux_status_updated(self):
         """增量 sync 中 aux 表有数据时应更新 sync_status。"""
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
@@ -1782,7 +1783,7 @@ class TestFinancialSyncIncrementalErrorPaths:
     async def test_incremental_batch_task_exception_logged(self):
         """增量 batch 中任务异常应记 warning 日志。"""
         ctx = make_ctx()
-        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        yesterday = get_now() - datetime.timedelta(days=1)
         ctx.cache.get_sync_status = AsyncMock(return_value={"last_sync_date": yesterday})
         ctx.api.get_disclosure_date = AsyncMock(
             return_value=pd.DataFrame(
