@@ -27,30 +27,17 @@ class TestClearAllCacheReset:
     async def _db_url_override(self, test_db_url_override):
         """自动应用 DB URL 覆盖（P2-4），避免每个测试方法重复 with override_db_url。"""
 
-    @pytest_asyncio.fixture
-    async def cache_mgr(self, test_engine: AsyncEngine):
-        """Provide an isolated CacheManager instance wired to the test engine."""
+    @pytest_asyncio.fixture(loop_scope="function")
+    async def cache_mgr(self):
+        """Provide an isolated CacheManager instance with function-loop engine.
+
+        loop_scope='function' override: CacheManager() creates a loop-bound engine
+        in __init__. session loop_scope would cause cross-loop hang on teardown dispose.
+        """
         with singleton_state(CacheManager, extra_attrs=["_initialized"]):
             mgr = CacheManager()
-            mgr.engine = test_engine
             mgr._disposed = False
             mgr._schema_initialized = False
-
-            # Wire all DAO engines to the test engine
-            for dao_attr in (
-                "stock_dao",
-                "quote_dao",
-                "financial_dao",
-                "sync_dao",
-                "market_dao",
-                "screener_dao",
-                "macro_dao",
-                "holder_dao",
-                "backtest_dao",
-            ):
-                dao = getattr(mgr, dao_attr, None)
-                if dao is not None:
-                    dao.engine = test_engine
 
             await mgr.init_db(auto_migrate=True)
 

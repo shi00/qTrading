@@ -15,7 +15,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pandas as pd
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 from data.constants import SAFE_BACKTEST_LEARNING_OFFSET_DAYS
 from data.external.news_fetcher import NewsFetcher
@@ -24,18 +23,27 @@ from strategies.oversold_strategy import OversoldStrategy
 pytestmark = pytest.mark.integration
 
 
-@pytest_asyncio.fixture
-async def db_cache(test_engine: AsyncEngine):
-    """Create CacheManager instance with test engine."""
+@pytest_asyncio.fixture(loop_scope="function")
+async def db_cache():
+    """Create CacheManager instance with function-loop engine.
+
+    loop_scope='function' override: CacheManager() creates a loop-bound engine
+    in __init__. session loop_scope would cause cross-loop hang on teardown dispose.
+    """
     from data.cache.cache_manager import CacheManager
+    from data.persistence.db_url_override import override_db_url
+    from tests.integration.conftest import TEST_DB_URL
 
-    CacheManager._reset_singleton()
-    cache = CacheManager()
-    cache._create_engine(str(test_engine.url))
-    cache._disposed = False
-    yield cache
-
-    CacheManager._reset_singleton()
+    with override_db_url(TEST_DB_URL):
+        CacheManager._reset_singleton()
+        cache = CacheManager()
+        cache._disposed = False
+        yield cache
+        try:
+            await cache.close()
+        except Exception:
+            pass
+        CacheManager._reset_singleton()
 
 
 @pytest.fixture

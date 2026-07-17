@@ -207,6 +207,7 @@ jobs:
           python -m pytest tests/unit/ -v --tb=short --cov --cov-report=term-missing --cov-report=xml --cov-report=json --junitxml=junit-unit.xml
 
       - name: Run Integration Tests
+        timeout-minutes: 10
         env:
           TEST_DB_HOST: localhost
           TEST_DB_PORT: 5432
@@ -215,7 +216,14 @@ jobs:
           DATABASE_URL: postgresql+asyncpg://postgres:${{ env.CI_PG_PASSWORD }}@localhost:5432/test_astock
         run: |
           set -e
-          python -m pytest tests/integration/ -n auto -v --tb=short --cov --cov-report=term-missing --cov-append --junitxml=junit-integration.xml
+          # Diagnose xdist worker hang: thread method dumps all thread stacks to stderr on timeout.
+          # --max-worker-restart=0 prevents xdist from masking the deadlock by restarting workers.
+          # --capture=no ensures faulthandler.dump_traceback() output reaches GitHub Actions logs.
+          # step-level timeout-minutes=10 fails fast if thread method can't interrupt (e.g., C extension deadlock).
+          python -m pytest tests/integration/ -n auto --max-worker-restart=0 \
+            --timeout=120 --timeout-method=thread \
+            -v --tb=long --capture=no \
+            --cov --cov-report=term-missing --cov-append --junitxml=junit-integration.xml
 
       - name: Check Per-File Coverage >= 80%
         run: python scripts/check_per_file_coverage.py

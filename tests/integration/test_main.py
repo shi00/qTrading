@@ -406,8 +406,8 @@ class TestMainMaskSensitive:
             page = _DummyPage()
             await app_main.main(page)
 
-            assert len(logger_spy.debugs) > 0
-            assert any("DB_URL" in d for d in logger_spy.debugs)
+            assert len(logger_spy.messages) > 0
+            assert any("DB_URL" in d for d in logger_spy.messages)
 
 
 class TestMainOnError:

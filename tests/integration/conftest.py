@@ -167,7 +167,6 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
-_test_engine: AsyncEngine | None = None
 _test_db_initialized = False
 
 
@@ -194,32 +193,14 @@ async def _ensure_test_db():
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def test_engine():
-    global _test_engine
+async def _session_db_setup():
+    """Session-scoped: 确保测试数据库存在，xdist worker 退出时 drop。
 
-    if _test_engine is None:
-        await _ensure_test_db()
-
-        # 强制会话时区为 UTC，与生产环境前提对齐（stock_dao.py 注释：PG 时区必须为 UTC）。
-        # 否则 SQL `now()` 返回本地时区时间，与 to_utc_for_db() 写入的 UTC tz-naive 比较时偏移，
-        # 导致 cooldown / next_retry_at 语义错误（本地 Windows PG 默认 Asia/Shanghai 会失败）。
-        from tests._helpers import create_test_engine
-
-        _test_engine = create_test_engine(TEST_DB_URL, echo=False)
-
-        from data.persistence.db_migrator import DatabaseMigrator
-
-        with override_db_url(TEST_DB_URL):
-            await DatabaseMigrator.init_db(_test_engine, auto_migrate=True)
-
-    yield _test_engine
-
-    try:
-        if _test_engine is not None:
-            await _test_engine.dispose()
-    finally:
-        _test_engine = None
-
+    将 DB 创建/drop 从 test_engine 分离，使 test_engine 可改为 function-scoped
+    避免 session loop 与 function loop 测试跨 loop 冲突（P1-2 根因修复）。
+    """
+    await _ensure_test_db()
+    yield
     if _xdist_worker:
         try:
             conn = await asyncpg.connect(
@@ -237,6 +218,26 @@ async def test_engine():
                 await conn.close()
         except (OSError, asyncpg.PostgresError):
             pass
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def test_engine(_session_db_setup):
+    """Function-scoped engine: 每个 test 创建独立 engine，避免跨 loop。
+
+    根因修复：test_engine 原为 session-scoped + session loop，与 function loop 测试
+    混用导致 ``Future attached to a different loop``。改为 function-scoped + function loop
+    后，engine 绑定到当前测试的 function loop，与测试在同一 loop 中执行。
+
+    Schema 初始化由 ``db_schema_ready`` autouse fixture 负责（幂等）。
+    DB 创建/drop 由 ``_session_db_setup`` fixture 负责（session 级）。
+    UTC 时区由 ``create_test_engine`` 的 ``server_settings.setdefault("timezone", "UTC")``
+    保证（与生产环境前提对齐）。
+    """
+    from tests._helpers import create_test_engine
+
+    engine = create_test_engine(TEST_DB_URL, echo=False)
+    yield engine
+    await engine.dispose()
 
 
 async def _cleanup_mvd_data(test_engine: AsyncEngine):
@@ -423,8 +424,8 @@ async def flet_test_page():
             pass
 
 
-@pytest_asyncio.fixture
-async def mvd_data(test_engine):
+@pytest_asyncio.fixture(loop_scope="function")
+async def mvd_data(monkeypatch):
     """
     Function 级 MVD：包含 L0 到 L4 的全量最小可行数据集。
     每个测试独立插入并清理，保证绝对的读写隔离安全，
@@ -437,6 +438,25 @@ async def mvd_data(test_engine):
     避免 xdist 下上一个测试（如 test_quote_dao 的 clean_db 无 teardown）残留导致
     UniqueViolationError。try/finally 包裹确保 setup 失败时 CacheManager 单例仍被清理。
     """
+    # 强制 UTC 时区（与 test_engine 的 create_test_engine 一致），
+    # 避免 cache.engine 的 now() 返回本地时间导致 cooldown / next_retry_at 比较错误。
+    # 生产环境已确认 PG 服务器时区为 UTC；本地测试 PG 默认 Asia/Shanghai 需覆盖。
+    # 使用 asyncpg 原生 server_settings（非 event listener），与 create_test_engine 同源。
+    import data.cache.cache_manager as _cm_module
+
+    _original_get_db_pool_config = _cm_module.get_db_pool_config
+
+    def _get_db_pool_config_with_utc():
+        cfg = _original_get_db_pool_config()
+        connect_args = dict(cfg.get("connect_args") or {})
+        server_settings = dict(connect_args.get("server_settings") or {})
+        server_settings["timezone"] = "UTC"
+        connect_args["server_settings"] = server_settings
+        cfg["connect_args"] = connect_args
+        return cfg
+
+    monkeypatch.setattr(_cm_module, "get_db_pool_config", _get_db_pool_config_with_utc)
+
     from contextlib import ExitStack
 
     with ExitStack() as url_stack:
@@ -450,10 +470,10 @@ async def mvd_data(test_engine):
             await cache.init_db(auto_migrate=True)
 
             # --- Setup: 幂等清理（防止上一个测试残留数据导致主键冲突）---
-            await _cleanup_mvd_data(test_engine)
+            await _cleanup_mvd_data(cache.engine)
 
             # --- Setup: 插入 MVD 数据并 commit ---
-            async with test_engine.begin() as conn:
+            async with cache.engine.begin() as conn:
                 # L0 基础层
                 await conn.execute(insert(StockBasic), MVD_STOCK_BASIC)
                 await conn.execute(insert(TradeCal), MVD_TRADE_CAL)
@@ -482,7 +502,7 @@ async def mvd_data(test_engine):
         finally:
             # --- Teardown: 显式定向删除数据并 commit ---
             try:
-                await _cleanup_mvd_data(test_engine)
+                await _cleanup_mvd_data(cache.engine)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -504,6 +524,23 @@ async def prompt_data_set(mvd_data):
     这是一个纯转发 fixture，本身不做额外操作，仅用于语义化依赖声明。
     """
     yield
+
+
+@pytest.fixture
+def function_engine(request):
+    """Function-loop engine for tests using mvd_data.
+
+    解决 test_engine (session loop) 与 mvd_data (function loop) 跨 loop 冲突：
+    DAO 用 test_engine 查询时 asyncpg 连接绑定 session loop，
+    而测试运行在 function loop → ``Future attached to a different loop``。
+
+    本 fixture 确保使用 mvd_data 创建的 cache.engine（function loop），
+    使 DAO 查询与数据插入在同一 loop 中执行。
+    """
+    request.getfixturevalue("mvd_data")
+    engine = CacheManager().engine
+    assert engine is not None, "CacheManager.engine 未初始化，mvd_data setup 可能未完成"
+    return engine
 
 
 @pytest.fixture
@@ -566,7 +603,7 @@ def _test_engine_dep(request):
     return request.getfixturevalue("test_engine")
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True, loop_scope="function")
 async def db_schema_ready(request, _test_engine_dep):
     """Ensure database schema is ready before each test.
 
@@ -588,7 +625,7 @@ async def db_schema_ready(request, _test_engine_dep):
     yield
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
+@pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
 async def cleanup_singletons_session():
     """Ensure all registered singletons with async close() are cleaned up at session teardown.
 

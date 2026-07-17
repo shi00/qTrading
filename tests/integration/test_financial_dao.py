@@ -24,8 +24,8 @@ class TestFinancialDaoIntegrity:
     pytestmark = pytest.mark.usefixtures("mvd_data")
 
     @pytest.fixture
-    def financial_dao(self, test_engine):
-        return FinancialDao(test_engine)
+    def financial_dao(self, function_engine):
+        return FinancialDao(function_engine)
 
     @pytest.mark.asyncio
     async def test_get_financial_reports_history(self, financial_dao):

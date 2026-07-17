@@ -22,9 +22,9 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def stock_dao(test_engine):
-    """Direct StockDao bound to test engine (bypass CacheManager singleton)."""
-    return StockDao(test_engine)
+def stock_dao(function_engine):
+    """Direct StockDao bound to CacheManager engine (function loop, 与 mvd_data 同 loop)."""
+    return StockDao(function_engine)
 
 
 @pytest_asyncio.fixture

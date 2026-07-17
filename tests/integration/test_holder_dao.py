@@ -23,8 +23,8 @@ class TestHolderDaoIntegrity:
     pytestmark = pytest.mark.usefixtures("mvd_data")
 
     @pytest.fixture
-    def holder_dao(self, test_engine):
-        return HolderDao(test_engine)
+    def holder_dao(self, function_engine):
+        return HolderDao(function_engine)
 
     @pytest.mark.asyncio
     async def test_get_top10_holders_batch(self, holder_dao):

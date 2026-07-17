@@ -78,7 +78,7 @@ class TestGetHeadRevision:
 class TestFreshInstall:
     """Tests for fresh database initialization with real PostgreSQL and Alembic."""
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def fresh_db_engine(self, pg_params):
         """Create an isolated empty database for fresh install testing."""
         db_name = f"migrator_fresh_{uuid.uuid4().hex[:8]}"
@@ -227,7 +227,7 @@ class TestEngineBoundMigration:
 class TestUpToDateSchema:
     """Tests for database that is already at latest schema version."""
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def migrated_db_engine(self, pg_params):
         """Create an isolated database and run Alembic upgrade to head."""
         async_engine, db_name, sync_url, sync_engine = await _migrated_db_fixture(pg_params, "migrator_uptodate")
@@ -255,14 +255,14 @@ class TestUpToDateSchema:
 class TestCheckSchemaStatus:
     """Tests for check_schema_status method with real database."""
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def migrated_db_engine(self, pg_params):
         """Create an isolated database and run Alembic upgrade to head."""
         async_engine, db_name, sync_url, sync_engine = await _migrated_db_fixture(pg_params, "migrator_status")
         yield async_engine, db_name
         await _cleanup_migrated_db(pg_params, async_engine, sync_engine, db_name)
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def empty_status_db_engine(self, pg_params):
         """Create an isolated empty database for status check testing."""
         db_name = f"migrator_empty_status_{uuid.uuid4().hex[:8]}"
@@ -306,7 +306,7 @@ class TestIncrementalUpgrade:
     at an older revision can be upgraded to the latest schema.
     """
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def partial_db_engine(self, pg_params):
         """Create an isolated database and run Alembic upgrade only to 0001."""
         async_engine, db_name, sync_url, sync_engine = await _migrated_db_fixture(
@@ -377,7 +377,7 @@ class TestIncrementalUpgrade:
 class TestDowngradeAndReupgrade:
     """Tests for downgrade → re-upgrade idempotency (CI gate: upgrade → downgrade → upgrade)."""
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def head_db_engine(self, pg_params):
         """Create an isolated database and run Alembic upgrade to head."""
         async_engine, db_name, sync_url, sync_engine = await _migrated_db_fixture(pg_params, "migrator_downgrade")
@@ -608,7 +608,7 @@ class TestMigrationInterruptionRecovery:
     are missing (simulating a mid-migration crash).
     """
 
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def corrupted_db_engine(self, pg_params):
         """Create a database with version mismatch: alembic_version says 'head' but tables missing."""
         db_name = f"migrator_corrupted_{uuid.uuid4().hex[:8]}"
@@ -713,7 +713,7 @@ class TestMigrationInterruptionRecovery:
 
 
 class TestOrphanedRevisionHeal:
-    @pytest_asyncio.fixture
+    @pytest_asyncio.fixture(loop_scope="function")
     async def orphaned_test_engine(self, pg_params):
         db_name = f"migrator_orphaned_{uuid.uuid4().hex[:8]}"
         params = pg_params
