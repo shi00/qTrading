@@ -754,3 +754,946 @@ class TestRedlinesYamlConsistency:
         errors = check_redlines_yaml_consistency()
         assert len(errors) > 0, "Should detect missing R15, got no errors"
         assert any("R15" in e for e in errors), f"Errors should mention R15, got: {errors}"
+
+
+class TestEnforcementMapping:
+    """C5 第二阶段 3c: enforcement 字段与实际 hook/CI job 映射一致性校验 (ADR-0005).
+
+    校验 docs/governance/redlines.yml 的 enforcement 字段中声称的守护机制
+    实际配置存在且粗粒度可达 (9 个不变量 N1~N9).
+
+    测试覆盖:
+    - 纯函数 _extract_enforcement_keywords / _check_enforcement_invariants 正反例
+    - 辅助函数 _check_precommit_hook / _extract_workflow_run_blocks / _check_gitleaks_scan_exists
+    - 集成测试 check_enforcement_mapping() 在当前项目配置下通过
+    - 漂移检测: monkeypatch 替换模块级路径常量构造临时配置
+    """
+
+    # === _extract_enforcement_keywords 纯函数测试 ===
+
+    def test_extract_keywords_check_redlines(self):
+        """enforcement 含 'check_redlines.py' 关键词被正确提取."""
+        from check_docs_consistency import _extract_enforcement_keywords
+
+        kws = _extract_enforcement_keywords("pre-commit（check_redlines.py）")
+        assert "check_redlines.py" in kws
+
+    def test_extract_keywords_multiple(self):
+        """enforcement 含多个关键词 (如 '安全扫描 + 仅人工评审') 被全部提取."""
+        from check_docs_consistency import _extract_enforcement_keywords
+
+        kws = _extract_enforcement_keywords("安全扫描 + 仅人工评审")
+        assert "安全扫描" in kws
+        assert "仅人工评审" in kws
+
+    def test_extract_keywords_pending(self):
+        """enforcement 含 '待实现' 和 '暂缓' 被识别为 pending 关键词."""
+        from check_docs_consistency import _extract_enforcement_keywords
+
+        kws = _extract_enforcement_keywords("可自动化待实现（AST 检查，暂缓：误报风险高）")
+        assert "待实现" in kws
+        assert "暂缓" in kws
+
+    def test_extract_keywords_ruff_word_boundary(self):
+        """'ruff' 关键词使用 word boundary 匹配, 不误匹配 'scruffian'."""
+        from check_docs_consistency import _extract_enforcement_keywords
+
+        assert "ruff" in _extract_enforcement_keywords("ruff")
+        assert "ruff" in _extract_enforcement_keywords("使用 ruff 检查")
+        assert "ruff" not in _extract_enforcement_keywords("scruffian")
+        assert "ruff" not in _extract_enforcement_keywords("scruffy")
+
+    # === N1: check_redlines.py 不变量测试 ===
+
+    def test_n1_check_redlines_keyword_without_hook(self):
+        """N1: enforcement 含 'check_redlines.py' 但 redline-check hook 不存在 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",  # 空 precommit → hook 不存在
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R4" in e and "N1" in e for e in errors), f"应报 N1 错误, got: {errors}"
+
+    def test_n1_check_redlines_keyword_with_hook_but_wrong_entry(self):
+        """N1: enforcement 含 'check_redlines.py' 且 hook 存在但 entry 指向其他脚本 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: redline-check
+        name: Redline
+        entry: python scripts/other_script.py
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R4" in e and "N1" in e for e in errors), f"应报 N1 entry 错误, got: {errors}"
+
+    def test_n1_check_redlines_keyword_with_hook_and_correct_entry(self):
+        """N1: enforcement 含 'check_redlines.py' 且 hook + entry + 脚本文件均正确 → 通过."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: redline-check
+        name: Redline
+        entry: python scripts/check_redlines.py
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert errors == [], f"N1 正例不应报错, got: {errors}"
+
+    def test_n1_check_redlines_script_missing(self):
+        """N1: hook + entry 正确但 scripts/check_redlines.py 文件不存在 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: redline-check
+        name: Redline
+        entry: python scripts/check_redlines.py
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=False,  # 脚本文件不存在
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R4", "enforcement": "pre-commit（check_redlines.py）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R4" in e and "N1" in e and "文件不存在" in e for e in errors), f"应报 N1 脚本缺失, got: {errors}"
+
+    # === N2: import-linter 不变量测试 ===
+
+    def test_n2_import_linter_hook_missing(self):
+        """N2: enforcement 含 'import-linter' 但 lint-imports hook 不存在 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",  # 无 hook
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R1" in e and "N2" in e for e in errors), f"应报 N2 错误, got: {errors}"
+
+    def test_n2_import_linter_wrong_entry(self):
+        """N2: enforcement 含 'import-linter' 且 hook 存在但 entry 不含 lint-imports → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: Lint Imports
+        entry: python scripts/other_linter.py
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R1" in e and "N2" in e for e in errors), f"应报 N2 entry 错误, got: {errors}"
+
+    def test_n2_import_linter_no_contract_count_in_enforcement_skipped(self):
+        """N2: enforcement 含 'import-linter' 但未含『N 条契约』描述 → 跳过数量校验 (不报错)."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: Lint Imports
+        entry: lint-imports
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",  # 空 pyproject
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        # enforcement 不含 "N 条契约" → 跳过数量校验
+        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert errors == [], f"无契约数量描述时不应报 N2 数量错误, got: {errors}"
+
+    def test_n2_import_linter_contract_count_mismatch(self):
+        """N2: enforcement 声明 '4 条契约' 但 pyproject.toml 实际 3 条 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: Lint Imports
+        entry: lint-imports
+        language: system
+"""
+        pyproject = """[[tool.importlinter.contracts]]\nname = "c1"\n[[tool.importlinter.contracts]]\nname = "c2"\n[[tool.importlinter.contracts]]\nname = "c3"\n"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content=pyproject,  # 3 条契约
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R1" in e and "N2" in e and "4" in e and "3" in e for e in errors), (
+            f"应报 N2 数量不匹配, got: {errors}"
+        )
+
+    def test_n2_import_linter_contract_count_match(self):
+        """N2: enforcement 声明 '4 条契约' 且 pyproject.toml 实际 4 条 → 通过."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: lint-imports
+        name: Lint Imports
+        entry: lint-imports
+        language: system
+"""
+        pyproject = """[[tool.importlinter.contracts]]\nname = "c1"\n[[tool.importlinter.contracts]]\nname = "c2"\n[[tool.importlinter.contracts]]\nname = "c3"\n[[tool.importlinter.contracts]]\nname = "c4"\n"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content=pyproject,  # 4 条契约
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R1", "enforcement": "pre-commit（import-linter 4 条契约）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert errors == [], f"N2 正例不应报错, got: {errors}"
+
+    # === N3: ruff 不变量测试 (v3 §14.2.1 补齐) ===
+
+    def test_n3_ruff_hook_missing(self):
+        """N3: enforcement 含 'ruff' 但 ruff-check hook 不存在 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",  # 无 hook
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R6", "enforcement": "ruff", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R6" in e and "N3" in e for e in errors), f"应报 N3 错误, got: {errors}"
+
+    def test_n3_ruff_hook_wrong_entry(self):
+        """N3: enforcement 含 'ruff' 且 hook 存在但 entry 不含 ruff → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff Check
+        entry: python scripts/other_linter.py
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R6", "enforcement": "ruff", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R6" in e and "N3" in e for e in errors), f"应报 N3 entry 错误, got: {errors}"
+
+    def test_n3_ruff_hook_correct(self):
+        """N3: enforcement 含 'ruff' 且 hook + entry 正确 → 通过."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff Check
+        entry: python -m ruff check --fix
+        language: system
+"""
+        env = EnforcementEnvironment(
+            precommit_content=precommit,
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R6", "enforcement": "ruff", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert errors == [], f"N3 正例不应报错, got: {errors}"
+
+    # === N4: 安全扫描不变量测试 (含 v3 §14.2.4 半配置反例) ===
+
+    def test_n4_security_scan_requires_gitleaks_and_config(self):
+        """N4: 安全扫描需同时存在 Gitleaks workflow 与 .gitleaks.toml."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        # 无 Gitleaks workflow + 无 config
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=False,
+        )
+        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R9" in e and "N4" in e for e in errors), f"应报 N4 错误, got: {errors}"
+
+    def test_n4_pip_audit_alone_not_security_scan_evidence(self):
+        """N4: 仅存在 pip-audit 不应被当作 R9/R10 安全扫描证据."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        # workflow 只含 pip-audit, 不含 gitleaks/gitleaks-action
+        workflow = """name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pip install pip-audit
+      - run: pip-audit
+"""
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(workflow,),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R9" in e and "N4" in e for e in errors), f"pip-audit 不应满足 N4, got: {errors}"
+
+    def test_n4_gitleaks_workflow_exists_but_config_missing(self):
+        """N4: Gitleaks workflow 存在但 .gitleaks.toml 缺失 → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        workflow = """name: Gitleaks
+jobs:
+  scan:
+    steps:
+      - uses: gitleaks/gitleaks-action@v2
+"""
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(workflow,),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=False,  # config 缺失
+        )
+        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R9" in e and "N4" in e for e in errors), f"半配置应报 N4, got: {errors}"
+
+    def test_n4_gitleaks_config_exists_but_workflow_missing(self):
+        """N4: .gitleaks.toml 存在但所有 workflow 均无 Gitleaks → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),  # 无 workflow
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,  # config 存在
+        )
+        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R9" in e and "N4" in e for e in errors), f"半配置应报 N4, got: {errors}"
+
+    # === N5: CI-test 不变量测试 ===
+
+    def test_n5_pytest_only_matches_run_command_block(self):
+        """N5: pytest 只在 run: 命令块中出现时才算 CI-test 证据."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        # workflow 含 pytest in run block → 应通过
+        workflow = """name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python -m pytest tests/unit/
+"""
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(workflow,),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert errors == [], f"N5 正例不应报错, got: {errors}"
+
+        # 无 pytest in run block → 应报错
+        env2 = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),  # 无 workflow
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        errors2 = _check_enforcement_invariants(redlines, env2)
+        assert any("R2" in e and "N5" in e for e in errors2), f"无 pytest 应报 N5, got: {errors2}"
+
+    def test_n5_pytest_in_cache_step_name_does_not_satisfy_ci_test(self):
+        """N5: pytest 只出现在 step 名称或 cache key 中时, 不应满足 CI-test 映射."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        # pytest 只出现在 step name 和 cache key, 不在 run: 命令块
+        workflow = """name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cache pytest
+        uses: actions/cache@v3
+        with:
+          path: .pytest_cache
+          key: pytest-${{ runner.os }}
+"""
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(workflow,),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R2" in e and "N5" in e for e in errors), f"step name 中的 pytest 不应满足 N5, got: {errors}"
+
+    def test_n5_pip_install_pytest_in_run_block_does_not_satisfy_ci_test(self):
+        """N5: run: 块中含 'pip install pytest' → 不应被误判为满足 CI-test 映射.
+
+        真实场景: ci_cd.yml:314 含 'pip install playwright pytest-playwright'.
+        验证 'pip install pytest' 中的 pytest 不会被误匹配 (正则要求 pytest 在行首).
+        """
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        workflow = """name: CI
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pip install pytest
+      - run: pip install pytest-playwright
+"""
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(workflow,),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R2" in e and "N5" in e for e in errors), f"pip install pytest 不应满足 N5, got: {errors}"
+
+    # === N6~N9: human_review_required 一致性测试 ===
+
+    def test_n6_human_review_keyword_mismatch(self):
+        """N6: enforcement 含 '仅人工评审' 但 human_review_required=false → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R5", "enforcement": "仅人工评审", "human_review_required": False}]  # 矛盾
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R5" in e and "N6" in e for e in errors), f"应报 N6 错误, got: {errors}"
+
+    def test_n7_pending_keyword_mismatch(self):
+        """N7: enforcement 含 '待实现' 但 human_review_required=true → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R16", "enforcement": "可自动化待实现", "human_review_required": True}]  # 矛盾
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R16" in e and "N7" in e for e in errors), f"应报 N7 错误, got: {errors}"
+
+    def test_n8_reverse_invariant_violation(self):
+        """N8: human_review_required=true 但 enforcement 不含 '仅人工评审' → 报错."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R5", "enforcement": "pre-commit（some-hook）", "human_review_required": True}]  # 矛盾
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R5" in e and "N8" in e for e in errors), f"应报 N8 错误, got: {errors}"
+
+    def test_n9_deleted_no_duplicate_with_n6(self):
+        """N9 已在实施后检视中删除（与 N6 触发条件等价）：相同场景仅 N6 报错，无 N9 错误."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R5", "enforcement": "仅人工评审", "human_review_required": False}]  # 矛盾
+        errors = _check_enforcement_invariants(redlines, env)
+        # N6 应报错（enforcement 含「仅人工评审」但 human_review_required=false）
+        assert any("R5" in e and "N6" in e for e in errors), f"应报 N6 错误, got: {errors}"
+        # N9 已删除，不应出现 N9 错误
+        assert not any("N9" in e for e in errors), f"N9 已删除不应报错, got: {errors}"
+
+    def test_missing_human_review_required_field_skipped(self):
+        """yml 条目缺 human_review_required 字段时 N6~N8 跳过 (由 3b 守护字段完整性)."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        # 缺 human_review_required 字段 → N6~N8 跳过 (不报 N6/N7/N8 错误)
+        redlines = [{"id": "R5", "enforcement": "仅人工评审"}]  # 无 human_review_required
+        errors = _check_enforcement_invariants(redlines, env)
+        n6_to_n8_errors = [e for e in errors if "N6" in e or "N7" in e or "N8" in e]
+        assert n6_to_n8_errors == [], f"字段缺失时应跳过 N6~N8, got: {n6_to_n8_errors}"
+
+    # === v3 §14.2.7 R9 多关键词 + R16 双 pending 特例 ===
+
+    def test_n4_and_n6_both_checked_for_r9_style_enforcement(self):
+        """R9 风格 enforcement='安全扫描 + 仅人工评审' 触发 N4 + N6 双重校验.
+
+        构造 Gitleaks 缺失场景: N4 报错, N6 通过 (human_review_required=true).
+        """
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),  # 无 Gitleaks workflow
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R9", "enforcement": "安全扫描 + 仅人工评审", "human_review_required": True}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert any("R9" in e and "N4" in e for e in errors), f"应报 N4, got: {errors}"
+        # N6 应通过 (human_review_required=true 与 '仅人工评审' 一致)
+        assert not any("R9" in e and "N6" in e for e in errors), f"不应报 N6, got: {errors}"
+
+    def test_r16_dual_pending_keywords_passes_n7(self):
+        """R16 enforcement='可自动化待实现（AST 检查，暂缓：误报风险高）'
+        同时含 '待实现' 和 '暂缓', human_review_required=false → N7 通过 (不报错).
+        """
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [
+            {
+                "id": "R16",
+                "enforcement": "可自动化待实现（AST 检查，暂缓：误报风险高）",
+                "human_review_required": False,
+            }
+        ]
+        errors = _check_enforcement_invariants(redlines, env)
+        n7_errors = [e for e in errors if "R16" in e and "N7" in e]
+        assert n7_errors == [], f"R16 双 pending 特例不应报 N7, got: {n7_errors}"
+
+    # === _extract_workflow_run_blocks 辅助函数单测 (v3 §14.2.6) ===
+
+    def test_extract_workflow_run_blocks_excludes_step_names(self):
+        """_extract_workflow_run_blocks() 不应纳入 step name 行 (只含 run: 命令块)."""
+        from check_docs_consistency import _extract_workflow_run_blocks
+
+        workflow = """name: CI
+jobs:
+  test:
+    steps:
+      - name: Run pytest tests
+        run: pytest tests/
+      - name: Cache pytest
+        uses: actions/cache@v3
+"""
+        blocks = _extract_workflow_run_blocks(workflow)
+        # 应只提取 1 个 block: 'pytest tests/'
+        assert len(blocks) == 1, f"应提取 1 个 run block, got {len(blocks)}: {blocks}"
+        assert "pytest tests/" in blocks[0]
+        # step name 中的 'Run pytest tests' 不应出现在任何 block 中
+        for block in blocks:
+            assert "Run pytest tests" not in block, f"step name 不应被提取: {block}"
+            assert "Cache pytest" not in block, f"step name 不应被提取: {block}"
+
+    def test_extract_workflow_run_blocks_handles_four_yaml_styles(self):
+        """_extract_workflow_run_blocks() 必须覆盖 4 种 YAML 写法:
+        1. run: pytest (单行无引号)
+        2. run: python -m pytest tests/unit/ (单行带参数)
+        3. run: | + 多行命令块 (块状字面量)
+        4. run: >- + 多行折叠块 (折叠去尾换行)
+        """
+        from check_docs_consistency import _extract_workflow_run_blocks
+
+        workflow = """name: CI
+jobs:
+  test1:
+    steps:
+      - run: pytest
+  test2:
+    steps:
+      - run: python -m pytest tests/unit/
+  test3:
+    steps:
+      - run: |
+          set -e
+          python -m pytest tests/unit/
+  test4:
+    steps:
+      - run: >-
+          set -e
+          pytest tests/integration/
+"""
+        blocks = _extract_workflow_run_blocks(workflow)
+        # 应提取 4 个 block，按出现顺序对应 4 种 YAML 风格
+        assert len(blocks) == 4, f"应提取 4 个 run block, got {len(blocks)}: {blocks}"
+        # 风格 1: 单行无引号 → block 内容 = 'pytest'
+        assert blocks[0] == "pytest", f"blocks[0] 应为 'pytest', got: {blocks[0]!r}"
+        # 风格 2: 单行带参数 → block 内容 = 'python -m pytest tests/unit/'
+        assert blocks[1] == "python -m pytest tests/unit/", f"blocks[1] 错误, got: {blocks[1]!r}"
+        # 风格 3: 块状字面量 → block 含 'set -e' 和 'python -m pytest tests/unit/'
+        assert "set -e" in blocks[2], f"blocks[2] 应含 'set -e', got: {blocks[2]!r}"
+        assert "python -m pytest tests/unit/" in blocks[2], f"blocks[2] 应含 pytest 命令, got: {blocks[2]!r}"
+        # 风格 4: 折叠块 → block 含 'set -e' 和 'pytest tests/integration/'
+        assert "set -e" in blocks[3], f"blocks[3] 应含 'set -e', got: {blocks[3]!r}"
+        assert "pytest tests/integration/" in blocks[3], f"blocks[3] 应含 pytest 命令, got: {blocks[3]!r}"
+
+    def test_n5_four_yaml_styles_all_satisfy_ci_test(self):
+        """N5 端到端: 4 种 YAML 风格的 pytest 命令都应让 N5 通过 (不报错)."""
+        from check_docs_consistency import (
+            EnforcementEnvironment,
+            _check_enforcement_invariants,
+        )
+
+        # 4 种 YAML 风格各一个 workflow，都含 pytest 命令
+        workflow = """name: CI
+jobs:
+  test1:
+    steps:
+      - run: pytest
+  test2:
+    steps:
+      - run: python -m pytest tests/unit/
+  test3:
+    steps:
+      - run: |
+          set -e
+          python -m pytest tests/unit/
+  test4:
+    steps:
+      - run: >-
+          set -e
+          pytest tests/integration/
+"""
+        env = EnforcementEnvironment(
+            precommit_content="",
+            workflow_contents=(workflow,),
+            pyproject_content="",
+            check_redlines_script_exists=True,
+            gitleaks_config_exists=True,
+        )
+        redlines = [{"id": "R2", "enforcement": "CI-test（全量，asyncio 相关测试）", "human_review_required": False}]
+        errors = _check_enforcement_invariants(redlines, env)
+        assert errors == [], f"4 种 YAML 风格都含 pytest，N5 不应报错, got: {errors}"
+
+    # === 集成测试: 真实项目配置 ===
+
+    def test_check_enforcement_mapping_passes(self):
+        """当前项目配置下 check_enforcement_mapping() 应返回空错误列表."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        errors = check_enforcement_mapping()
+        assert errors == [], "当前项目配置应通过 3c 校验, 失败:\n  " + "\n  ".join(errors)
+
+    # === 漂移检测: monkeypatch 构造临时配置 ===
+
+    def test_detects_deleted_redline_check_hook(self, tmp_path, monkeypatch):
+        """构造缺失 redline-check hook 的 .pre-commit-config.yaml → 应报错 (N1)."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        # 真实 redlines.yml (含 R4 含 'check_redlines.py')
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", REDLINES_YAML_PATH)
+
+        # 构造无 redline-check hook 的 precommit
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: Ruff Check
+        entry: python -m ruff check --fix
+        language: system
+"""
+        tmp_precommit = tmp_path / ".pre-commit-config.yaml"
+        tmp_precommit.write_text(precommit, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.PRECOMMIT_PATH", tmp_precommit)
+
+        errors = check_enforcement_mapping()
+        assert any("N1" in e for e in errors), f"应检测到 redline-check hook 缺失, got: {errors}"
+
+    def test_detects_wrong_hook_entry(self, tmp_path, monkeypatch):
+        """构造 redline-check hook 但 entry 指向其他脚本 → 应报错 (N1)."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", REDLINES_YAML_PATH)
+
+        # entry 指向 other_script.py 而非 check_redlines.py
+        precommit = """repos:
+  - repo: local
+    hooks:
+      - id: redline-check
+        name: Redline
+        entry: python scripts/other_script.py
+        language: system
+"""
+        tmp_precommit = tmp_path / ".pre-commit-config.yaml"
+        tmp_precommit.write_text(precommit, encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.PRECOMMIT_PATH", tmp_precommit)
+
+        errors = check_enforcement_mapping()
+        assert any("N1" in e for e in errors), f"应检测到 entry 篡改, got: {errors}"
+
+    def test_detects_gitleaks_removed_from_all_workflows(self, tmp_path, monkeypatch):
+        """构造全部 workflow 文件缺失 Gitleaks → 应报错 (N4, R9/R10 enforcement 含 '安全扫描')."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", REDLINES_YAML_PATH)
+
+        # 构造无 Gitleaks 的 workflow 目录
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "ci.yml").write_text(
+            "name: CI\njobs:\n  test:\n    steps:\n      - run: pytest\n", encoding="utf-8"
+        )
+        monkeypatch.setattr("check_docs_consistency.CI_WORKFLOW_DIR", workflows_dir)
+
+        errors = check_enforcement_mapping()
+        assert any("N4" in e for e in errors), f"应检测到 Gitleaks 缺失, got: {errors}"
+
+    def test_detects_gitleaks_moved_to_security_workflow(self, tmp_path, monkeypatch):
+        """Gitleaks 从 ci_cd.yml 迁移到 security.yml → 不应报错 (glob 扫描全部 workflow)."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", REDLINES_YAML_PATH)
+
+        # Gitleaks 在 security.yml 而非 ci.yml
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "ci.yml").write_text(
+            "name: CI\njobs:\n  test:\n    steps:\n      - run: pytest\n", encoding="utf-8"
+        )
+        (workflows_dir / "security.yml").write_text(
+            "name: Gitleaks\njobs:\n  scan:\n    steps:\n      - uses: gitleaks/gitleaks-action@v2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CI_WORKFLOW_DIR", workflows_dir)
+        # gitleaks config 存在
+        tmp_config = tmp_path / ".gitleaks.toml"
+        tmp_config.write_text("[allowlist]\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.GITLEAKS_CONFIG_PATH", tmp_config)
+
+        errors = check_enforcement_mapping()
+        n4_errors = [e for e in errors if "N4" in e]
+        assert n4_errors == [], f"Gitleaks 迁移到 security.yml 不应报 N4, got: {n4_errors}"
+
+    def test_detects_gitleaks_moved_to_yaml_extension_workflow(self, tmp_path, monkeypatch):
+        """Gitleaks 迁移到 security.yaml (非 .yml) → 不应报错 (glob 双模式扫描, v3 §14.2.5)."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", REDLINES_YAML_PATH)
+
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "ci.yml").write_text(
+            "name: CI\njobs:\n  test:\n    steps:\n      - run: pytest\n", encoding="utf-8"
+        )
+        # security.yaml (注意 .yaml 扩展名)
+        (workflows_dir / "security.yaml").write_text(
+            "name: Gitleaks\njobs:\n  scan:\n    steps:\n      - uses: gitleaks/gitleaks-action@v2\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CI_WORKFLOW_DIR", workflows_dir)
+        tmp_config = tmp_path / ".gitleaks.toml"
+        tmp_config.write_text("[allowlist]\n", encoding="utf-8")
+        monkeypatch.setattr("check_docs_consistency.GITLEAKS_CONFIG_PATH", tmp_config)
+
+        errors = check_enforcement_mapping()
+        n4_errors = [e for e in errors if "N4" in e]
+        assert n4_errors == [], f"Gitleaks 迁移到 .yaml 不应报 N4, got: {n4_errors}"
+
+    def test_detects_pytest_removed_from_all_workflows(self, tmp_path, monkeypatch):
+        """构造全部 workflow run: 命令块缺失 pytest → 应报错 (N5, R2/R7/R8 enforcement 含 'CI-test')."""
+        from check_docs_consistency import check_enforcement_mapping
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", REDLINES_YAML_PATH)
+
+        # workflow 只含 ruff 命令, 无 pytest
+        workflows_dir = tmp_path / "workflows"
+        workflows_dir.mkdir()
+        (workflows_dir / "ci.yml").write_text(
+            "name: CI\njobs:\n  test:\n    steps:\n      - run: ruff check .\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("check_docs_consistency.CI_WORKFLOW_DIR", workflows_dir)
+
+        errors = check_enforcement_mapping()
+        assert any("N5" in e for e in errors), f"应检测到 pytest 缺失, got: {errors}"

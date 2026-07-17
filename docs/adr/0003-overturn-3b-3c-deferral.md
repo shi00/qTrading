@@ -1,6 +1,6 @@
 # ADR-0003: 推翻「3b/3c 过度工程不做」决策
 
-> Status: Accepted
+> Status: Partial Superseded by ADR-0005 (3c portion only; 3b portion remains valid)
 > Date: 2026-07-17
 > Owner: 架构维护者
 > Supersedes: CONTRIBUTING.md 历史版本中「doc-lint 自动化第二阶段 3b/3c 判定为过度工程，不做」决策（3b 部分）
