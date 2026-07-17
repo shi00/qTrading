@@ -106,8 +106,7 @@ mylog*.txt
 # 5. E2E test diagnostics
 e2e-artifacts/
 
-# 6. docs
-docs/
+# 6. Worktrees
 .worktrees/
 
 # 7. AI assistant working state (harness-plan / harness-review products)

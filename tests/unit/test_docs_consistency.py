@@ -205,8 +205,13 @@ class TestStrategyExampleSignature:
         )
 
 
-class TestNoDeadDocsLinks:
-    """审计报告 P0: 被跟踪 markdown 不得引用 docs/ 路径（docs/ 被 .gitignore 排除，不推送）。"""
+class TestTrackedDocsLinksResolve:
+    """审计报告 P0: 被跟踪 markdown 中指向 docs/ 的链接目标必须存在。
+
+    docs/ 已从 .gitignore 移除，转为正式文档目录；引用 docs/ 路径的链接
+    应解析到真实存在的文件，避免死链。沿用 check_relative_dead_links 逻辑：
+    扫描 markdown 链接 [text](url)，跳过外部链接与 fenced code block。
+    """
 
     # CHANGELOG.md 由 release-please 自动生成，不纳入手动检查
     TRACKED_MD_FILES = [
@@ -220,21 +225,34 @@ class TestNoDeadDocsLinks:
     ]
 
     @pytest.mark.parametrize("doc_path", TRACKED_MD_FILES)
-    def test_no_docs_path_reference(self, doc_path):
-        """被跟踪 markdown 不得引用 docs/ 路径（docs/ 被 .gitignore 排除，不推送）。"""
+    def test_docs_links_resolve(self, doc_path):
+        """被跟踪 markdown 中指向 docs/ 的链接目标必须存在（沿用 check_relative_dead_links 逻辑）。"""
         content = _read(doc_path)
-        # 覆盖行内链接 (docs/、(./docs/、(../docs/、(/docs/ 与 Windows 反斜杠
-        inline_pattern = r"\((?:\./|\.\./|/)?docs[/\\]"
-        # 覆盖引用式链接 [ref]: docs/ 或 [ref]: ./docs/ 等
-        ref_pattern = r"^\s*\[[^\]]+\]:\s*(?:\./|\.\./|/)?docs[/\\]"
-        for i, line in enumerate(content.splitlines(), 1):
-            assert not re.search(inline_pattern, line), (
-                f"{doc_path.name}:{i} references docs/ path which is gitignored "
-                f"(dead link for external readers): {line.strip()!r}"
-            )
-            assert not re.search(ref_pattern, line), (
-                f"{doc_path.name}:{i} references docs/ path via reference link: {line.strip()!r}"
-            )
+        link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+        in_code_block = False
+        for line_no, line in enumerate(content.splitlines(), 1):
+            if line.lstrip().startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+            for m in link_pattern.finditer(line):
+                url = m.group(2).strip()
+                # 忽略外部链接
+                if url.startswith(("http://", "https://", "mailto:")):
+                    continue
+                # 解析路径部分（去掉锚点），同文件锚点链接跳过
+                path_part = url.split("#", 1)[0]
+                if not path_part:
+                    continue
+                # 从 source_doc 所在目录解析相对路径
+                target = (doc_path.parent / path_part).resolve()
+                # 只检查指向 docs/ 目录的链接
+                try:
+                    target.relative_to(ROOT / "docs")
+                except ValueError:
+                    continue
+                assert target.exists(), f"{doc_path.name}:{line_no}: 指向 docs/ 的死链 '{url}' (目标 '{target}' 不存在)"
 
 
 class TestCoverageSourceConsistency:
