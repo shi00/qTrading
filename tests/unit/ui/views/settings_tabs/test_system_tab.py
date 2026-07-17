@@ -953,7 +953,7 @@ class TestDoLogLevelChange:
         with patch("utils.logger.update_log_level"):
             asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called_once()
+        assert env["show_snack"].call_count == 1
         snack_args = env["show_snack"].call_args
         # show_snack_callback(message) — 第一个位置参数应含 "DEBUG"
         snack_message = snack_args.args[0]

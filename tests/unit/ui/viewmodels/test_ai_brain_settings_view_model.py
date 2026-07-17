@@ -242,6 +242,6 @@ class TestThreadPoolOffloadContract:
                 )
                 await vm.save_ai_settings()
                 # ThreadPoolManager.run_async 至少调用一次 (save_local_ai_config + save_config + save_ai_system_prompt + set_ai_news_prompt)
-                mock_thread_pool.run_async.assert_called()
+                assert mock_thread_pool.run_async.call_count >= 1
                 args, _ = mock_thread_pool.run_async.call_args
                 assert args[0] is TaskType.IO

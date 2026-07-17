@@ -297,7 +297,7 @@ class TestSaveThreadPool:
         assert result is True
         mock_config_handler.set_max_io_workers.assert_called_once_with(16)
         mock_config_handler.set_max_cpu_workers.assert_called_once_with(8)
-        mock_thread_pool[0].reload_config.assert_called_once()
+        mock_thread_pool[0].reload_config.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_save_thread_pool_empty_returns_false(self, mock_config_handler, mock_thread_pool):
@@ -382,7 +382,7 @@ class TestThreadPoolOffloadContract:
     async def test_save_language_uses_thread_pool(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
         await vm.save_language("en_US")
-        mock_thread_pool[0].run_async.assert_called_once()
+        assert mock_thread_pool[0].run_async.call_count == 1
         # 第一个参数应为 TaskType.IO
         args, _ = mock_thread_pool[0].run_async.call_args
         assert args[0] is TaskType.IO
@@ -392,4 +392,4 @@ class TestThreadPoolOffloadContract:
         vm = _make_vm(mock_config_handler)
         await vm.save_thread_pool("16", "8")
         # reload_config 应被调用 (ThreadPoolManager.reload_config)
-        mock_thread_pool[0].reload_config.assert_called_once()
+        mock_thread_pool[0].reload_config.assert_called_once_with()

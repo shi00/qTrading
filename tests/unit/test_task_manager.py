@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import inspect
 import logging
 import threading
 import pytest
@@ -1480,7 +1481,10 @@ class TestTaskManagerClearFinishedImplExtras:
         mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
         with patch.object(mgr, "_schedule_coro", mock_sched) as mock_s:
             mgr._clear_finished_impl()
-        mock_s.assert_called_once()
+        # 强断言：_schedule_coro 应被调用一次，且参数是 coroutine（_clear_finished_db 任务）
+        assert mock_s.call_count == 1
+        scheduled_arg = mock_s.call_args.args[0]
+        assert inspect.iscoroutine(scheduled_arg)
 
     @patch("services.task_manager.ThreadPoolManager")
     def test_no_db_cleanup_when_nothing_to_clear(self, mock_tp):

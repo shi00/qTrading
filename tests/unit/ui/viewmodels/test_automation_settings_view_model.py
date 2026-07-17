@@ -246,6 +246,6 @@ class TestThreadPoolOffloadContract:
     async def test_save_auto_update_enabled_uses_thread_pool(self, mock_config_handler, mock_thread_pool):
         vm = _make_vm(mock_config_handler)
         await vm.save_auto_update_enabled(True)
-        mock_thread_pool.run_async.assert_called_once()
+        assert mock_thread_pool.run_async.call_count == 1
         args, _ = mock_thread_pool.run_async.call_args
         assert args[0] is TaskType.IO

@@ -891,7 +891,7 @@ async def test_math_filter_run_async_called_with_cpu_task_type():
         mock_run_async.return_value = pd.DataFrame()
         await s._math_filter(context, 14, 30, 0.5)
 
-        mock_run_async.assert_called_once()
+        assert mock_run_async.call_count == 1
         call_args = mock_run_async.call_args
         assert call_args[0][0] == TaskType.CPU
 
