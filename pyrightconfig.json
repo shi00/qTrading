@@ -10,8 +10,7 @@
     "**/node_modules",
     "**/.worktrees",
     "venv",
-    "alembic",
-    "scripts/spike_ui_debt"
+    "alembic"
   ],
   "extraPaths": [
     ".",
