@@ -815,12 +815,15 @@ def wizard_app(tmp_path_factory):
     _terminate(proc)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def e2e_page(e2e_browser, flet_app: AppServer, request):
     """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
 
     性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。
     CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
+
+    loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
+    fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
     """
     fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
     if request.node.get_closest_marker("slow"):
@@ -836,7 +839,7 @@ async def e2e_page(e2e_browser, flet_app: AppServer, request):
     await _teardown_page(fp, request, failed=failed)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def wizard_page(e2e_browser, wizard_app: AppServer, request):
     """Function 级 Page（向导测试）：每用例独立 context，无状态污染。"""
     fp = await _make_page(e2e_browser, wizard_app, request)
