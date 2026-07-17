@@ -1,9 +1,11 @@
+import logging
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import sqlalchemy as sa
 
 from data.persistence.data_explorer_query_client import DataExplorerQueryClient
+from utils.sanitizers import DataSanitizer
 
 pytestmark = pytest.mark.unit
 
@@ -607,6 +609,239 @@ class TestExecuteSql:
         dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
         result = dm.execute_sql("SELECT * FROM stock_basic WHERE name = 'updated record'")
         assert result["success"] is True
+
+
+class TestStatementTimeoutAndSanitization:
+    """Task 2.3: SQL Console 限制查询成本 + 脱敏。
+
+    DoD:
+    1. 事务按顺序执行 read-only 与 statement timeout
+    2. 超时返回结构化错误且经脱敏
+    3. 已注册 secret 不出现在返回值和日志中
+    4. 重查询有数据库侧硬超时
+    """
+
+    def teardown_method(self):
+        # 隔离 DataSanitizer 全局状态(已注册 secret 集合),避免跨测试污染
+        DataSanitizer._reset_known_secrets()
+
+    def test_statement_timeout_set_before_user_query(self):
+        """SET LOCAL statement_timeout 应在事务内、READ ONLY 之后、用户 SQL 之前执行。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        mock_result.fetchmany.return_value = [(1,)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = dm.execute_sql("SELECT 1")
+        assert result["success"] is True
+
+        execute_calls = mock_conn.execute.call_args_list
+        # 顺序: SET TRANSACTION READ ONLY → SET LOCAL statement_timeout → 用户 SQL
+        assert len(execute_calls) >= 3
+        first_sql = str(execute_calls[0][0][0]).upper()
+        second_sql = str(execute_calls[1][0][0]).upper()
+        third_sql = str(execute_calls[2][0][0]).upper()
+        assert "READ ONLY" in first_sql
+        assert "STATEMENT_TIMEOUT" in second_sql
+        assert "10S" in second_sql.replace("'", "")
+        # 第三次是用户 SQL
+        assert "SELECT 1" in third_sql
+
+    def test_statement_timeout_uses_set_local_not_session(self):
+        """必须使用 SET LOCAL(仅当前事务生效),不能用 SET(会污染连接)。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        mock_result.fetchmany.return_value = [(1,)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        dm.execute_sql("SELECT 1")
+
+        execute_calls = mock_conn.execute.call_args_list
+        # 找到 statement_timeout 设置语句
+        timeout_call = None
+        for call in execute_calls:
+            call_sql = str(call[0][0]).upper()
+            if "STATEMENT_TIMEOUT" in call_sql:
+                timeout_call = call_sql
+                break
+        assert timeout_call is not None, "未找到 statement_timeout 设置语句"
+        assert "SET LOCAL" in timeout_call, "必须使用 SET LOCAL 限定当前事务"
+
+    def test_execution_error_sanitized(self):
+        """执行异常返回的错误消息必须经过 sanitize_error 脱敏。
+
+        不再返回 str(e),而是 DataSanitizer.sanitize_error(e)。
+        """
+        secret = "super_secret_token_12345"
+        DataSanitizer.register_secret(secret)
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execution_options.return_value = mock_conn
+        # 模拟错误消息中含已注册 secret
+        mock_conn.execute.side_effect = Exception(f"query failed token={secret}")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = dm.execute_sql("SELECT * FROM nonexistent")
+        assert result["success"] is False
+        assert isinstance(result, dict)  # 结构化错误(dict),非裸 str(e)
+        assert result["error"] is not None
+        # 已注册 secret 不应出现在返回值
+        assert secret not in result["error"]
+        # 应该被脱敏为 ***
+        assert "***" in result["error"]
+
+    def test_timeout_returns_structured_error(self):
+        """超时返回结构化错误(dict 含 success/data/error 字段),非 str(e)。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execution_options.return_value = mock_conn
+        # 模拟 PostgreSQL 超时错误(statement_timeout 触发)
+        mock_conn.execute.side_effect = Exception("canceling statement due to statement timeout")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        result = dm.execute_sql("SELECT * FROM huge_table")
+        # 结构化错误: dict 字段
+        assert isinstance(result, dict)
+        assert result["success"] is False
+        assert result["data"] is None
+        assert result["error"] is not None
+        # 错误消息应保留 timeout 关键词(经脱敏后仍可识别类别)
+        lowered = result["error"].lower()
+        assert "timeout" in lowered or "canceling" in lowered
+
+    def test_secret_not_in_logs(self, caplog):
+        """已注册 secret 不应出现在任何日志记录中。"""
+        secret = "super_secret_token_12345"
+        DataSanitizer.register_secret(secret)
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.side_effect = Exception(f"error with token={secret}")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="data.persistence.data_explorer_query_client",
+        ):
+            dm.execute_sql("SELECT * FROM nonexistent")
+
+        # 已注册 secret 不应出现在任何日志记录的消息中
+        for record in caplog.records:
+            assert secret not in record.getMessage(), f"secret leaked in log: {record.getMessage()}"
+
+    def test_logs_correlation_duration_status_truncation(self, caplog):
+        """日志应记录 correlation id/耗时/成功失败/截断状态,不记录 SQL/错误细节。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        # 不截断(< 2000 行)
+        mock_result.fetchmany.return_value = [(1,)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="data.persistence.data_explorer_query_client",
+        ):
+            result = dm.execute_sql("SELECT 1")
+
+        assert result["success"] is True
+
+        # 至少有一条 INFO 日志记录成功状态
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(info_records) >= 1
+        combined = " ".join(r.getMessage() for r in info_records)
+        # 应包含: correlation id (cid= 或 correlation)、耗时 (ms)、成功状态、截断状态
+        assert "cid" in combined.lower() or "correlation" in combined.lower()
+        assert "ms" in combined.lower() or "duration" in combined.lower()
+        assert "success" in combined.lower() or "ok" in combined.lower()
+        assert "truncat" in combined.lower() or "false" in combined.lower() or "0" in combined
+
+    def test_logs_truncation_true_when_truncated(self, caplog):
+        """截断时日志应反映 truncated=True。"""
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        # 截断(= 2000 行,触发 truncated 提示)
+        mock_result.fetchmany.return_value = [(1,)] * 2000
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with caplog.at_level(
+            logging.INFO,
+            logger="data.persistence.data_explorer_query_client",
+        ):
+            result = dm.execute_sql("SELECT 1")
+
+        assert result["success"] is True
+        assert "truncated" in (result["error"] or "").lower()
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(info_records) >= 1
+        combined = " ".join(r.getMessage() for r in info_records)
+        assert "truncat" in combined.lower()
+
+    def test_success_path_does_not_log_sql_content(self, caplog):
+        """成功路径日志不应包含 SQL 内容(避免泄露查询语义)。"""
+        sensitive_sql = "SELECT password FROM users WHERE api_key='LEAKED_VALUE_12345'"
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_result = MagicMock()
+        mock_result.keys.return_value = ["col"]
+        mock_result.fetchmany.return_value = [(1,)]
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.return_value = mock_result
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="data.persistence.data_explorer_query_client",
+        ):
+            dm.execute_sql(sensitive_sql)
+
+        for record in caplog.records:
+            msg = record.getMessage()
+            assert "LEAKED_VALUE_12345" not in msg, f"SQL content leaked in log: {msg}"
+            assert "password" not in msg.lower() or "api_key" not in msg.lower()
+
+    def test_execution_error_does_not_log_raw_exception(self, caplog):
+        """错误路径日志不应包含未脱敏的原始异常文本。"""
+        secret = "super_secret_token_12345"
+        DataSanitizer.register_secret(secret)
+        dm = _make_dm()
+        mock_conn = MagicMock()
+        mock_conn.execution_options.return_value = mock_conn
+        mock_conn.execute.side_effect = Exception(f"error details token={secret}")
+        dm._engine.connect.return_value.__enter__ = MagicMock(return_value=mock_conn)
+        dm._engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with caplog.at_level(
+            logging.DEBUG,
+            logger="data.persistence.data_explorer_query_client",
+        ):
+            dm.execute_sql("SELECT * FROM nonexistent")
+
+        for record in caplog.records:
+            assert secret not in record.getMessage(), f"raw secret leaked in log: {record.getMessage()}"
 
 
 class TestDatabaseConfigServiceSQLInjection:
