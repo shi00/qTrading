@@ -24,7 +24,6 @@ from decimal import Decimal
 import flet as ft
 import pandas as pd
 
-from data.persistence.metadata_manager import MetaDataManager
 from ui.components._markdown_safe import safe_open_url
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
@@ -142,7 +141,7 @@ def _format_cell_value(col: str, val) -> str:
     return str(val)
 
 
-def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
+def _build_table_data(df: pd.DataFrame, vm: ScreenerViewModel) -> tuple[list, list]:
     vt_columns = []
     visible_cols = []
     for col in df.columns:
@@ -150,7 +149,7 @@ def _build_table_data(df: pd.DataFrame) -> tuple[list, list]:
             continue
         visible_cols.append(col)
         width = _COLUMN_WIDTHS.get(col, 80)
-        label = MetaDataManager.get_column_alias("screening_history", col)
+        label = vm.get_column_alias("screening_history", col)
         vt_columns.append({"id": col, "label": label, "width": width})
 
     records = df[visible_cols].to_dict("records")  # type: ignore[call-overload]
@@ -321,9 +320,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         params_def = vm.get_strategy_params(key)
         for p in params_def:
             if p.get("name") == "ai_system_prompt":
-                from strategies.strategy_prompts import get_base_prompt
-
-                params_ref.current[p["name"]] = get_base_prompt(key) or p.get("default", "")
+                params_ref.current[p["name"]] = vm.get_base_prompt(key) or p.get("default", "")
             else:
                 params_ref.current[p["name"]] = p.get("default")
         bump_params(_params_version + 1)
@@ -352,9 +349,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             params_def = vm.get_strategy_params(new_val)
             for p in params_def:
                 if p.get("name") == "ai_system_prompt":
-                    from strategies.strategy_prompts import get_base_prompt
-
-                    params_ref.current[p["name"]] = get_base_prompt(new_val) or p.get("default", "")
+                    params_ref.current[p["name"]] = vm.get_base_prompt(new_val) or p.get("default", "")
                 else:
                     params_ref.current[p["name"]] = p.get("default")
             bump_params(_params_version + 1)
@@ -554,11 +549,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
         try:
-            from strategies.strategy_prompts import get_base_prompt
             from utils.config_handler import ConfigHandler
 
             await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
-            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, get_base_prompt, strat))
+            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, vm.get_base_prompt, strat))
             _update_param("ai_system_prompt", new_val)
             page = _get_page()
             if page is not None and hasattr(page, "show_toast"):
@@ -619,7 +613,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     df = vm.get_current_page_data()
     if df is not None and not df.empty:
         _raw_row_lookup = {str(r.get("ts_code", "")): r for r in df.to_dict("records")}
-        vt_columns, formatted_rows = _build_table_data(df)
+        vt_columns, formatted_rows = _build_table_data(df, vm)
     else:
         _raw_row_lookup = {}
         vt_columns = []
@@ -700,10 +694,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
         if p_type == "textarea":
             if p_name == "ai_system_prompt" and state.selected_strategy:
-                from strategies.strategy_prompts import get_base_prompt
-
                 current_val = (
-                    params_ref.current.get(p_name) or get_base_prompt(state.selected_strategy) or p.get("default", "")
+                    params_ref.current.get(p_name)
+                    or vm.get_base_prompt(state.selected_strategy)
+                    or p.get("default", "")
                 )
             else:
                 current_val = params_ref.current.get(p_name, p.get("default", ""))

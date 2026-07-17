@@ -571,6 +571,14 @@ class DataSourceViewModel:
         """Get health report data for dialog display."""
         return await self._processor.check_data_health()
 
+    def get_data_processor(self) -> DataProcessor:
+        """暴露 DataProcessor 实例 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法获取处理器实例并传递给 HealthScanDialog 组件,
+        不再直接 import ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        return self._processor
+
 
 # ============================================================
 # 纯转换函数 (dict → frozen dataclass, 模块级, 无副作用)

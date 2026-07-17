@@ -62,6 +62,17 @@ def _raw_source() -> str:
     return Path(mod.__file__).read_text(encoding="utf-8")
 
 
+def _vm_code_source() -> str:
+    """AIBrainSettingsViewModel 源码 (含 docstring), 用于状态机契约检查.
+
+    Task 5.2 后状态机下沉到 VM, 常量定义与 _set_state(save_state=SAVE_*) 调用
+    位于 VM 模块而非 View。
+    """
+    import ui.viewmodels.ai_brain_settings_view_model as vm_mod
+
+    return Path(vm_mod.__file__).read_text(encoding="utf-8")
+
+
 # ============================================================================
 # 契约守护：声明式范式 (AIBrainTab)
 # ============================================================================
@@ -202,48 +213,52 @@ class TestR2CancelledErrorPropagation:
 
 
 class TestSaveStateMachineContract:
-    """三阶段保存状态机 (idle/saving/success/error) 契约守护测试 (Phase E.1)。"""
+    """三阶段保存状态机 (idle/saving/success/error) 契约守护测试 (Phase E.1 + Task 5.2)。
+
+    Task 5.2 后状态机下沉到 AIBrainSettingsViewModel, 常量定义与状态切换调用
+    位于 VM 模块; View 通过 ai_settings_state.save_state 派生 is_saving/is_error/is_success。
+    """
 
     def test_has_save_idle_constant(self):
-        """DoD: 必须定义 _SAVE_IDLE 状态常量。"""
-        assert "_SAVE_IDLE" in _code_source(), "必须定义 _SAVE_IDLE 状态常量"
+        """DoD: 必须定义 SAVE_IDLE 状态常量 (VM 模块)。"""
+        assert "SAVE_IDLE" in _vm_code_source(), "必须定义 SAVE_IDLE 状态常量"
 
     def test_has_save_saving_constant(self):
-        """DoD: 必须定义 _SAVE_SAVING 状态常量。"""
-        assert "_SAVE_SAVING" in _code_source(), "必须定义 _SAVE_SAVING 状态常量"
+        """DoD: 必须定义 SAVE_SAVING 状态常量 (VM 模块)。"""
+        assert "SAVE_SAVING" in _vm_code_source(), "必须定义 SAVE_SAVING 状态常量"
 
     def test_has_save_success_constant(self):
-        """DoD: 必须定义 _SAVE_SUCCESS 状态常量。"""
-        assert "_SAVE_SUCCESS" in _code_source(), "必须定义 _SAVE_SUCCESS 状态常量"
+        """DoD: 必须定义 SAVE_SUCCESS 状态常量 (VM 模块)。"""
+        assert "SAVE_SUCCESS" in _vm_code_source(), "必须定义 SAVE_SUCCESS 状态常量"
 
     def test_has_save_error_constant(self):
-        """DoD: 必须定义 _SAVE_ERROR 状态常量。"""
-        assert "_SAVE_ERROR" in _code_source(), "必须定义 _SAVE_ERROR 状态常量"
+        """DoD: 必须定义 SAVE_ERROR 状态常量 (VM 模块)。"""
+        assert "SAVE_ERROR" in _vm_code_source(), "必须定义 SAVE_ERROR 状态常量"
 
-    def test_save_state_is_use_state_driven(self):
-        """DoD: save_state 必须通过 ft.use_state 持久化 (state 驱动渲染)。"""
-        assert "ft.use_state(_SAVE_IDLE)" in _code_source(), "save_state 必须用 ft.use_state(_SAVE_IDLE) 初始化"
+    def test_save_state_is_state_field_initialized(self):
+        """DoD: VM 的 state dataclass 必须有 save_state 字段, 初始化为 SAVE_IDLE。"""
+        assert "save_state: str = SAVE_IDLE" in _vm_code_source(), "VM state.save_state 必须用 SAVE_IDLE 初始化"
 
     def test_save_state_drives_button_disabled(self):
-        """DoD: 按钮的 disabled 必须由 save_state 派生 (状态驱动渲染)。"""
+        """DoD: View 的按钮 disabled 必须由 save_state 派生 (声明式自动重渲染)。"""
         assert "is_saving" in _code_source(), "必须定义 is_saving 派生状态"
         assert "disabled=is_saving" in _code_source(), "按钮 disabled 必须由 is_saving 派生"
 
     def test_save_state_drives_progress_ring(self):
-        """DoD: ProgressRing 的 visible 必须由 save_state 派生 (状态驱动渲染)。"""
+        """DoD: View 的 ProgressRing visible 必须由 save_state 派生。"""
         assert "visible=is_saving" in _code_source(), "ProgressRing visible 必须由 is_saving 派生"
 
     def test_save_flow_sets_saving_state(self):
-        """DoD: 保存流程开始时必须 set_save_state(_SAVE_SAVING)。"""
-        assert "set_save_state(_SAVE_SAVING)" in _code_source(), "保存流程必须先 set _SAVE_SAVING"
+        """DoD: 保存流程开始时必须 _set_state(save_state=SAVE_SAVING)。"""
+        assert "save_state=SAVE_SAVING" in _vm_code_source(), "保存流程必须先 set SAVE_SAVING"
 
     def test_save_flow_sets_success_state(self):
-        """DoD: 保存成功时必须 set_save_state(_SAVE_SUCCESS)。"""
-        assert "set_save_state(_SAVE_SUCCESS)" in _code_source(), "保存成功必须 set _SAVE_SUCCESS"
+        """DoD: 保存成功时必须 _set_state(save_state=SAVE_SUCCESS)。"""
+        assert "save_state=SAVE_SUCCESS" in _vm_code_source(), "保存成功必须 set SAVE_SUCCESS"
 
     def test_save_flow_sets_error_state(self):
-        """DoD: 保存失败/异常时必须 set_save_state(_SAVE_ERROR)。"""
-        assert "set_save_state(_SAVE_ERROR)" in _code_source(), "保存失败必须 set _SAVE_ERROR"
+        """DoD: 保存失败/异常时必须 _set_state(save_state=SAVE_ERROR)。"""
+        assert "save_state=SAVE_ERROR" in _vm_code_source(), "保存失败必须 set SAVE_ERROR"
 
 
 # ============================================================================

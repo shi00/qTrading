@@ -400,7 +400,9 @@ def _patch_automation_common_mocks(mod, monkeypatch) -> dict:
     mock_config.set_ai_concept_schedule_enabled.return_value = True
     mock_config.set_ai_concept_schedule_time.return_value = True
     mock_config.set_ai_concept_search_engine.return_value = True
-    monkeypatch.setattr(mod, "ConfigHandler", mock_config)
+    # Task 5.2: ConfigHandler/ThreadPoolManager 下沉到 AutomationSettingsViewModel,
+    # patch 目标改为 VM 模块 (View 不再直接持有这两个符号)
+    monkeypatch.setattr("ui.viewmodels.automation_settings_view_model.ConfigHandler", mock_config)
 
     # --- Mock ThreadPoolManager ---
     mock_tpm_instance = MagicMock()
@@ -410,7 +412,7 @@ def _patch_automation_common_mocks(mod, monkeypatch) -> dict:
 
     mock_tpm_instance.run_async = MagicMock(side_effect=_fake_run_async)
     mock_tpm_class = MagicMock(return_value=mock_tpm_instance)
-    monkeypatch.setattr(mod, "ThreadPoolManager", mock_tpm_class)
+    monkeypatch.setattr("ui.viewmodels.automation_settings_view_model.ThreadPoolManager", mock_tpm_class)
 
     # --- Mock UILogger / DataSanitizer (模块级 logger 不直接 mock, 仅留空) ---
     mock_sanitizer = MagicMock()

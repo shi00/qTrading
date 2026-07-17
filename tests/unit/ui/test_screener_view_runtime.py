@@ -314,6 +314,14 @@ class _FakeScreenerViewModel:
     def get_strategy_params(self, key: str | None) -> list:
         return list(self._strategy_params)
 
+    def get_base_prompt(self, strategy_key: str) -> str:
+        """Mock vm.get_base_prompt (Task 5.1: 从 View 迁入 VM)."""
+        return f"base_prompt[{strategy_key}]"
+
+    def get_column_alias(self, table_name: str | None, col: str) -> str:
+        """Mock vm.get_column_alias (Task 5.1: 从 View 迁入 VM)."""
+        return f"列别名[{col}]"
+
     def get_current_page_data(self) -> Any:
         if self._current_page_data is not None:
             return self._current_page_data
@@ -389,9 +397,11 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     - ScreenerViewModel (内部 use_viewmodel 实例化)
     - PaginatedTable / ResizableSplitter / StockDetailDialog (子组件, 替换为 mock)
     - UILogger / DataSanitizer (横切关注点)
-    - MetaDataManager.get_column_alias (表格列别名)
     - get_now (导出时间戳)
     - ThreadPoolManager (IO 线程池, _do_restore_default_async / _do_save_prompt_async)
+
+    Task 5.1: MetaDataManager.get_column_alias 已迁入 vm.get_column_alias,
+    由 _FakeScreenerViewModel.get_column_alias 提供 mock, 不再模块级 patch。
     """
     # --- Mock I18n ---
     mock_i18n = MagicMock()
@@ -434,10 +444,6 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
     mock_sanitizer = MagicMock()
     mock_sanitizer.sanitize_error.side_effect = lambda ex: f"sanitized[{ex}]"
     monkeypatch.setattr(mod, "DataSanitizer", mock_sanitizer)
-
-    # --- Mock MetaDataManager ---
-    monkeypatch.setattr(mod, "MetaDataManager", MagicMock())
-    mod.MetaDataManager.get_column_alias.return_value = "列别名"
 
     # --- Mock get_now ---
     fake_now = datetime.datetime(2024, 6, 15, 10, 30, 0)
@@ -1420,6 +1426,7 @@ class TestDoRestoreDefaultAsync:
         """成功恢复默认 prompt → show_toast("ai_settings_restored", "info")."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         # 找到 restore 按钮 (TextButton with "ai_reset_default" content)
         buttons = _get_buttons(env)
@@ -1432,7 +1439,8 @@ class TestDoRestoreDefaultAsync:
         if restore_btn is None:
             pytest.skip("restore button not found (ai_system_prompt textarea not rendered)")
 
-        with patch("strategies.strategy_prompts.get_base_prompt", return_value="default_prompt"):
+        # Task 5.1: View 通过 vm.get_base_prompt 消费, patch fake_vm.get_base_prompt
+        with patch.object(fake_vm, "get_base_prompt", return_value="default_prompt"):
             with patch("utils.config_handler.ConfigHandler.set_strategy_prompt"):
                 page.run_task.reset_mock()
                 page.show_toast.reset_mock()
@@ -1448,6 +1456,7 @@ class TestDoRestoreDefaultAsync:
         """恢复 prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
         env = screener_view_with_params_env
         page = env["page"]
+        fake_vm = env["fake_vm"]
 
         buttons = _get_buttons(env)
         restore_btn = None
@@ -1459,7 +1468,8 @@ class TestDoRestoreDefaultAsync:
         if restore_btn is None:
             pytest.skip("restore button not found")
 
-        with patch("strategies.strategy_prompts.get_base_prompt", side_effect=RuntimeError("db error")):
+        # Task 5.1: View 通过 vm.get_base_prompt 消费, patch fake_vm.get_base_prompt 抛错
+        with patch.object(fake_vm, "get_base_prompt", side_effect=RuntimeError("db error")):
             with patch("utils.config_handler.ConfigHandler.set_strategy_prompt"):
                 page.run_task.reset_mock()
                 page.show_toast.reset_mock()

@@ -57,6 +57,9 @@ class TestBuildTierOptions:
     @pytest.fixture(autouse=True)
     def _setup(self, mock_i18n):
         self.mock_i18n = mock_i18n
+        # Task 5.1: _build_tier_options 需要 vm.get_tier_options 参数
+        self.vm = MagicMock()
+        self.vm.get_tier_options.return_value = TUSHARE_POINT_TIERS
         self.patches = [
             patch("ui.views.settings_tabs.tier_api_panel.I18n", self.mock_i18n),
         ]
@@ -67,19 +70,19 @@ class TestBuildTierOptions:
 
     def test_returns_option_for_each_tier(self):
         """返回的 Option 数量与 TUSHARE_POINT_TIERS 一致。"""
-        options = _build_tier_options()
+        options = _build_tier_options(self.vm)
         assert len(options) == len(TUSHARE_POINT_TIERS)
 
     def test_option_key_matches_tier(self):
         """每个 Option 的 key 对应 TUSHARE_POINT_TIERS 中的档位。"""
-        options = _build_tier_options()
+        options = _build_tier_options(self.vm)
         keys = [opt.key for opt in options]
         assert keys == list(TUSHARE_POINT_TIERS)
 
     def test_option_text_uses_i18n_label(self):
         """Option 的 text 来自 I18n.get(f'sys_tier_{tier}_label')。"""
         self.mock_i18n.get.side_effect = lambda key, *a, **kw: f"translated_{key}"
-        options = _build_tier_options()
+        options = _build_tier_options(self.vm)
         for opt, tier in zip(options, TUSHARE_POINT_TIERS, strict=True):
             assert opt.text == f"translated_sys_tier_{tier}_label"
 
@@ -98,11 +101,12 @@ class TestRenderProbeStatus:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.mock_client = _make_mock_client()
+        # Task 5.1: _render_probe_status 需要 vm.is_independent_purchase 参数
+        self.vm = MagicMock()
+        self.vm.is_independent_purchase.return_value = False
         self.patches = [
             patch("ui.views.settings_tabs.tier_api_panel.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.tier_api_panel.AppColors", self.mock_ac),
-            patch("data.external.tushare_client.TushareClient", return_value=self.mock_client),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -111,26 +115,26 @@ class TestRenderProbeStatus:
 
     def test_available_true_returns_success(self):
         """available=True → SUCCESS 图标 + 'sys_tier_available' 文案。"""
-        icon, text, color = _render_probe_status("daily", True)
+        icon, text, color = _render_probe_status("daily", True, self.vm)
         assert color == self.mock_ac.SUCCESS
         assert text.value == "sys_tier_available"
 
     def test_available_false_independent_purchase_returns_warning(self):
         """available=False + 独立付费 → WARNING + 'sys_tier_independent_purchase'。"""
-        self.mock_client.is_independent_purchase.return_value = True
-        icon, text, color = _render_probe_status("cyq_perf", False)
+        self.vm.is_independent_purchase.return_value = True
+        icon, text, color = _render_probe_status("cyq_perf", False, self.vm)
         assert color == self.mock_ac.WARNING
         assert text.value == "sys_tier_independent_purchase"
 
     def test_available_false_insufficient_points_returns_error(self):
         """available=False + 非独立付费 → ERROR + 'sys_tier_unavailable'。"""
-        icon, text, color = _render_probe_status("daily", False)
+        icon, text, color = _render_probe_status("daily", False, self.vm)
         assert color == self.mock_ac.ERROR
         assert text.value == "sys_tier_unavailable"
 
     def test_available_none_returns_not_probed(self):
         """available=None → HELP_OUTLINE + 'sys_tier_not_probed'。"""
-        icon, text, color = _render_probe_status("daily", None)
+        icon, text, color = _render_probe_status("daily", None, self.vm)
         assert text.value == "sys_tier_not_probed"
         assert isinstance(color, str)
 
@@ -149,11 +153,12 @@ class TestBuildApiDescription:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.mock_client = _make_mock_client()
+        # Task 5.1: _build_api_description 需要 vm.is_independent_purchase 参数
+        self.vm = MagicMock()
+        self.vm.is_independent_purchase.return_value = False
         self.patches = [
             patch("ui.views.settings_tabs.tier_api_panel.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.tier_api_panel.AppColors", self.mock_ac),
-            patch("data.external.tushare_client.TushareClient", return_value=self.mock_client),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -162,24 +167,24 @@ class TestBuildApiDescription:
 
     def test_independent_purchase_returns_warning_text(self):
         """独立付费 API → WARNING italic 文案。"""
-        self.mock_client.is_independent_purchase.return_value = True
-        desc = _build_api_description("cyq_perf", None)
+        self.vm.is_independent_purchase.return_value = True
+        desc = _build_api_description("cyq_perf", None, self.vm)
         assert desc.value == "sys_tier_independent_purchase"
 
     def test_available_false_returns_insufficient_points(self):
         """available=False + 非独立付费 → ERROR 'insufficient_points' 文案。"""
-        desc = _build_api_description("daily", False)
+        desc = _build_api_description("daily", False, self.vm)
         assert desc.value == "sys_tier_insufficient_points"
 
     def test_available_true_returns_empty(self):
         """available=True + 非独立付费 → 空文案。"""
-        desc = _build_api_description("daily", True)
+        desc = _build_api_description("daily", True, self.vm)
         assert desc.value == ""
 
     def test_independent_purchase_takes_precedence_over_available_false(self):
         """独立付费标记优先于 available=False（独立付费 API 不显示积分不足）。"""
-        self.mock_client.is_independent_purchase.return_value = True
-        desc = _build_api_description("cyq_perf", False)
+        self.vm.is_independent_purchase.return_value = True
+        desc = _build_api_description("cyq_perf", False, self.vm)
         assert desc.value == "sys_tier_independent_purchase"
 
 
@@ -197,11 +202,13 @@ class TestBuildApiListControls:
     def _setup(self, mock_i18n, mock_app_colors):
         self.mock_i18n = mock_i18n
         self.mock_ac = mock_app_colors
-        self.mock_client = _make_mock_client()
+        # Task 5.1: _build_api_list_controls 需要 vm.get_tier_apis / vm.is_independent_purchase 参数
+        self.vm = MagicMock()
+        self.vm.is_independent_purchase.return_value = False
+        self.vm.get_tier_apis.return_value = {"daily", "fina_indicator"}
         self.patches = [
             patch("ui.views.settings_tabs.tier_api_panel.I18n", self.mock_i18n),
             patch("ui.views.settings_tabs.tier_api_panel.AppColors", self.mock_ac),
-            patch("data.external.tushare_client.TushareClient", return_value=self.mock_client),
         ]
         with contextlib.ExitStack() as stack:
             for p in self.patches:
@@ -210,15 +217,15 @@ class TestBuildApiListControls:
 
     def test_returns_one_control_per_api(self):
         """每个 API 生成一个 ResponsiveRow 控件。"""
-        self.mock_client.get_tier_apis.return_value = {"daily", "fina_indicator"}
-        controls = _build_api_list_controls("points_5000", {})
+        self.vm.get_tier_apis.return_value = {"daily", "fina_indicator"}
+        controls = _build_api_list_controls("points_5000", {}, self.vm)
         assert len(controls) == 2
 
     def test_independent_purchase_adds_badge(self):
         """独立付费 API 在列表行中附加 ATTACH_MONEY_ROUNDED 图标。"""
-        self.mock_client.is_independent_purchase.side_effect = lambda api: api == "cyq_perf"
-        self.mock_client.get_tier_apis.return_value = {"cyq_perf"}
-        controls = _build_api_list_controls("points_5000", {})
+        self.vm.is_independent_purchase.side_effect = lambda api: api == "cyq_perf"
+        self.vm.get_tier_apis.return_value = {"cyq_perf"}
+        controls = _build_api_list_controls("points_5000", {}, self.vm)
         assert len(controls) == 1
         # ResponsiveRow.controls[0] 是 Container，content 是 Row，Row.controls 含 [Text, Icon]
         api_name_container = controls[0].controls[0]
@@ -228,9 +235,9 @@ class TestBuildApiListControls:
 
     def test_non_independent_purchase_no_badge(self):
         """非独立付费 API 不附加 ATTACH_MONEY_ROUNDED 图标。"""
-        self.mock_client.is_independent_purchase.return_value = False
-        self.mock_client.get_tier_apis.return_value = {"daily"}
-        controls = _build_api_list_controls("points_5000", {})
+        self.vm.is_independent_purchase.return_value = False
+        self.vm.get_tier_apis.return_value = {"daily"}
+        controls = _build_api_list_controls("points_5000", {}, self.vm)
         api_name_container = controls[0].controls[0]
         api_row = api_name_container.content
         has_badge = any(getattr(c, "icon", None) == ft.Icons.ATTACH_MONEY_ROUNDED for c in api_row.controls)
@@ -238,8 +245,8 @@ class TestBuildApiListControls:
 
     def test_empty_tier_apis_returns_empty_list(self):
         """档位无 API 覆盖时返回空列表。"""
-        self.mock_client.get_tier_apis.return_value = set()
-        controls = _build_api_list_controls("points_120", {})
+        self.vm.get_tier_apis.return_value = set()
+        controls = _build_api_list_controls("points_120", {}, self.vm)
         assert controls == []
 
 
@@ -525,6 +532,18 @@ class _FakeSystemVM:
 
     def get_last_probe_time(self) -> datetime | None:
         return self._last_probe_time
+
+    def get_tier_options(self) -> tuple[str, ...]:
+        """Task 5.1: 从 View 迁入 VM 的方法。"""
+        return TUSHARE_POINT_TIERS
+
+    def is_independent_purchase(self, api_name: str) -> bool:
+        """Task 5.1: 从 View 迁入 VM 的方法。"""
+        return False
+
+    def get_tier_apis(self, tier: str) -> set[str]:
+        """Task 5.1: 从 View 迁入 VM 的方法。"""
+        return {"daily", "fina_indicator"}
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)

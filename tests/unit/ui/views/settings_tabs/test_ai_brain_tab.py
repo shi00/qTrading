@@ -465,7 +465,11 @@ def _patch_ai_brain_common_mocks(mod, monkeypatch) -> dict:
     mock_config.save_config.return_value = True
     mock_config.save_ai_system_prompt.return_value = True
     mock_config.set_ai_news_prompt.return_value = True
-    monkeypatch.setattr(mod, "ConfigHandler", mock_config)
+    # Task 5.2: ConfigHandler/ThreadPoolManager 下沉到 AIBrainSettingsViewModel,
+    # patch 目标改为 VM 模块 (View 不再直接持有这两个符号);
+    # 同时 patch utils.thread_pool 源模块, 覆盖 ai_brain_tab._do_save_ai_settings
+    # 中局部 import 的 ThreadPoolManager (MD5 检查保留在 View)
+    monkeypatch.setattr("ui.viewmodels.ai_brain_settings_view_model.ConfigHandler", mock_config)
 
     # --- Mock ThreadPoolManager ---
     mock_tpm_instance = MagicMock()
@@ -475,7 +479,8 @@ def _patch_ai_brain_common_mocks(mod, monkeypatch) -> dict:
 
     mock_tpm_instance.run_async = MagicMock(side_effect=_fake_run_async)
     mock_tpm_class = MagicMock(return_value=mock_tpm_instance)
-    monkeypatch.setattr(mod, "ThreadPoolManager", mock_tpm_class)
+    monkeypatch.setattr("ui.viewmodels.ai_brain_settings_view_model.ThreadPoolManager", mock_tpm_class)
+    monkeypatch.setattr("utils.thread_pool.ThreadPoolManager", mock_tpm_class)
 
     # --- Mock UILogger ---
     monkeypatch.setattr(mod, "UILogger", MagicMock())

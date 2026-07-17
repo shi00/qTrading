@@ -125,6 +125,36 @@ class SystemViewModel:
 
         return TushareClient().get_last_probe_time()
 
+    def get_tier_options(self) -> tuple[str, ...]:
+        """获取 Tushare 积分档位元组 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``TUSHARE_POINT_TIERS``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.constants import TUSHARE_POINT_TIERS
+
+        return TUSHARE_POINT_TIERS
+
+    def is_independent_purchase(self, api_name: str) -> bool:
+        """查询 API 是否为独立付费 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``TushareClient.is_independent_purchase``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.external.tushare_client import TushareClient
+
+        return TushareClient().is_independent_purchase(api_name)
+
+    def get_tier_apis(self, tier: str) -> list[str]:
+        """获取档位下的 API 列表 (Task 5.1: 从 View 迁入, 内聚到 VM).
+
+        View 通过本方法消费 ``TushareClient.get_tier_apis``，不再直接 import
+        ``data`` 业务对象 (CLAUDE.md §3.2 MVVM 契约)。
+        """
+        from data.external.tushare_client import TushareClient
+
+        return TushareClient().get_tier_apis(tier)
+
     async def on_tier_changed(
         self,
         new_tier: str,
