@@ -34,7 +34,6 @@ from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, SqlRes
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -318,10 +317,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             )
             if filepath:
                 try:
-                    await ThreadPoolManager().run_async(
-                        TaskType.CPU,
-                        lambda: df.to_csv(filepath, index=False, encoding="utf-8-sig"),
-                    )
+                    await vm.write_csv(df, filepath)
                     filename = os.path.basename(filepath)
                     msg = I18n.get("data_export_success", file=filename)
                     page = _get_page()

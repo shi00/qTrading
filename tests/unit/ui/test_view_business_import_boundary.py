@@ -138,15 +138,10 @@ FORBIDDEN_BUSINESS_OBJECTS: tuple[ForbiddenModule, ...] = (
 # 每个条目: (relative_path, forbidden_key), 配套注释说明原因.
 # Phase 3 各 Task 完成后, 对应条目应被移除 (白名单压路机: Plans-ui-review-20260717.md
 #   Phase 1.1 DoD 4: 当前 17 处真实违规先入白名单含原因注释, 随 Phase 3 完成逐步移除).
-# 实际盘点 2 条 (Phase 3.2 完成后从 5 条移除 ai_brain_tab 3 条).
-ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = {
-    # === ui/views/data_view.py ===
-    # Phase 3.5 待迁移: ThreadPoolManager.run_async(TaskType.CPU) 数据加载编排下沉到 DataExplorerViewModel
-    ("ui/views/data_view.py", "utils.thread_pool"),
-    # === ui/views/task_center_view.py ===
-    # Phase 3.6 待迁移: TaskStatus 类型常量映射下沉到 TaskCenterViewModel (i18n key + icon + color)
-    ("ui/views/task_center_view.py", "services.task_manager"),
-}
+# Phase 3 全部完成: data_view ThreadPoolManager 已下沉到 DataExplorerViewModel.write_csv;
+# task_center_view 的 TaskStatus 作为纯展示枚举被 AST 扫描器允许
+#   (FORBIDDEN_BUSINESS_OBJECTS 中 services.task_manager 的 symbols 仅含 TaskManager/AppTask).
+ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = set()
 
 
 # ============================================================================
