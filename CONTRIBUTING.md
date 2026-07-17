@@ -44,6 +44,7 @@
   - [标准开发工作流 (How-To)](./docs/guides/how-to.md)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
+  - [文档索引](#文档索引)
 
 ---
 
@@ -587,6 +588,53 @@ except Exception as e:
 > 本节已迁移到 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。本节作为 CONTRIBUTING.md 入口索引保留，不再维护技术债表格内容；新增条目请直接编辑 docs/debt/known-technical-debt.md。
 
 技术债清单（含级别、产生背景、期望解法、upgrade 触发条件）见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。CLAUDE.md §3.3 亦指向该位置。
+
+## 文档索引
+
+> 本节列出 docs/ 下全部子文档，作为 CONTRIBUTING.md 入口索引的补充。完整目录结构见 [docs/README.md](./docs/README.md)。
+
+### docs/guides/ — 流程类指南
+
+- [git-workflow.md](./docs/guides/git-workflow.md) — Git 工作流与分支策略（GitHub Flow + worktree 隔离）
+- [testing.md](./docs/guides/testing.md) — 测试规范（单元 / 集成 / E2E）
+- [ci-cd.md](./docs/guides/ci-cd.md) — CI/CD 流水线与门禁
+- [dependency-management.md](./docs/guides/dependency-management.md) — 依赖管理 + PyInstaller 打包
+- [how-to.md](./docs/guides/how-to.md) — 标准开发工作流 (How-To)
+
+### docs/architecture/ — 架构类深入
+
+- [singleton-lifecycle.md](./docs/architecture/singleton-lifecycle.md) — 单例模式实现模板
+
+### docs/patterns/ — 模式类深入
+
+- [strategy-template.md](./docs/patterns/strategy-template.md) — 策略模式实现模板
+- [polars-vectorized-strategy.md](./docs/patterns/polars-vectorized-strategy.md) — Polars 向量化策略基类
+- [ai-strategy-mixin.md](./docs/patterns/ai-strategy-mixin.md) — AI 策略混入
+- [dao-pattern.md](./docs/patterns/dao-pattern.md) — DAO 模式
+- [data-sync.md](./docs/patterns/data-sync.md) — 数据同步架构
+- [task-manager.md](./docs/patterns/task-manager.md) — TaskManager 任务生命周期
+- [config-quality-perf.md](./docs/patterns/config-quality-perf.md) — 配置管理、质量门控、性能监控
+- [mvvm.md](./docs/patterns/mvvm.md) — MVVM 表现层
+
+### docs/flet/ — Flet V1 项目差异与升级清单
+
+- [v1-api-constraints.md](./docs/flet/v1-api-constraints.md) — Flet V1 API 关键约束（迁移 API 表 / 声明式组件契约 / V1 声明式 UI 开发规范 / 兼容垫片 / 升级协同 / 例外清单）
+- [project-differences.md](./docs/flet/project-differences.md) — 项目相对 Flet 官方默认的分叉点与高风险 API（含 R16 UI 阻塞红线）
+- [upgrade-checklist.md](./docs/flet/upgrade-checklist.md) — Flet 版本升级时的验证步骤与文档同步要求
+- [api-verification-template.md](./docs/flet/api-verification-template.md) — Flet API 核验记录模板
+- [accessibility-baseline.md](./docs/flet/accessibility-baseline.md) — UI 可访问性最低标准
+
+### docs/debt/ — 已知架构技术债
+
+- [known-technical-debt.md](./docs/debt/known-technical-debt.md) — 技术债清单（含 upgrade 触发条件）
+
+### docs/adr/ — 架构决策记录
+
+- 占位目录，待 Phase 4 落地 ADR-0001~0004
+
+### docs/governance/ — 治理类机器可读文件
+
+- 占位目录，待 Phase 3 落地 redlines.yml
 
 ---
 
