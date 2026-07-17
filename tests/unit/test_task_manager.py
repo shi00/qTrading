@@ -1016,8 +1016,17 @@ class TestTaskManagerPersistTask:
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
         t = AppTask(name="test")
-        mgr._persist_task(t)
+
+        def fake_sched(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            return True
+
+        mock_sched = MagicMock(side_effect=fake_sched)
+        with patch.object(mgr, "_schedule_coro", mock_sched):
+            mgr._persist_task(t)
         assert mgr._persist_pending_count >= 0
+        mock_sched.assert_called_once()
 
 
 class TestTaskManagerInitDb:
@@ -1338,8 +1347,17 @@ class TestTaskManagerQueuePersistSnapshot:
         mgr._db_ready = True
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
-        mgr._queue_persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
+
+        def fake_sched(coro):
+            if hasattr(coro, "close"):
+                coro.close()
+            return True
+
+        mock_sched = MagicMock(side_effect=fake_sched)
+        with patch.object(mgr, "_schedule_coro", mock_sched):
+            mgr._queue_persist_snapshot(("id", "name", "type", "QUEUED", 0.0, "", "", None, None, None, None))
         assert mgr._persist_pending_count == 1
+        mock_sched.assert_called_once()
 
 
 class TestTaskManagerFlushPersistenceTimeout:
@@ -1513,7 +1531,9 @@ class TestTaskManagerSubmitTaskRollback:
         mgr = TaskManager()
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
-        result = mgr.submit_task("test", "System", lambda **kw: None, unique_key="key2")
+        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        with patch.object(mgr, "_schedule_coro", mock_sched):
+            result = mgr.submit_task("test", "System", lambda **kw: None, unique_key="key2")
         assert result is not None
         assert "key2" in mgr._active_keys
         mgr._loop.call_soon_threadsafe.assert_called_once()
@@ -1543,7 +1563,8 @@ class TestTaskManagerClearFinishedImplExtras:
         t = AppTask(name="done", status=TaskStatus.COMPLETED, unique_key="key_a")
         mgr._tasks[t.id] = t
         mgr._active_keys.add("key_a")
-        with patch.object(mgr, "_schedule_coro"):
+        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        with patch.object(mgr, "_schedule_coro", mock_sched):
             mgr._clear_finished_impl()
         assert "key_a" not in mgr._active_keys
         assert t.id not in mgr._tasks
@@ -1554,9 +1575,10 @@ class TestTaskManagerClearFinishedImplExtras:
         mgr = TaskManager()
         t = AppTask(name="done", status=TaskStatus.COMPLETED)
         mgr._tasks[t.id] = t
-        with patch.object(mgr, "_schedule_coro") as mock_sched:
+        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        with patch.object(mgr, "_schedule_coro", mock_sched) as mock_s:
             mgr._clear_finished_impl()
-        mock_sched.assert_called_once()
+        mock_s.assert_called_once()
 
     @patch("services.task_manager.ThreadPoolManager")
     @patch("services.task_manager.I18n")
@@ -1564,9 +1586,10 @@ class TestTaskManagerClearFinishedImplExtras:
         mgr = TaskManager()
         t = AppTask(name="running", status=TaskStatus.RUNNING)
         mgr._tasks[t.id] = t
-        with patch.object(mgr, "_schedule_coro") as mock_sched:
+        mock_sched = MagicMock(side_effect=lambda coro: coro.close() if hasattr(coro, "close") else None)
+        with patch.object(mgr, "_schedule_coro", mock_sched) as mock_s:
             mgr._clear_finished_impl()
-        mock_sched.assert_not_called()
+        mock_s.assert_not_called()
 
 
 class TestTaskManagerCancelAllRunningAsyncFast:

@@ -49,6 +49,7 @@ Relates to #XXX
 - [ ] CONTRIBUTING.md 流程、安装命令、测试步骤同步
 - [ ] SECURITY.md 支持版本、依赖CVE更新
 - [ ] man/ 专题文档（flet-best-practices / database-account-separation / table-partitioning-strategy）按变更同步
+- [ ] 依赖版本变化时，man/flet-best-practices.md 等专项文档已复核（Owner/复核触发器见文档头部）
 - [ ] CHANGELOG.md 由release-please自动生成，无手动修改
 
 ## ✅ 提交前自检清单（强制全部核对）
