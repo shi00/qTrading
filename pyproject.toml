@@ -107,6 +107,7 @@ log_level = "DEBUG"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
 filterwarnings = [
+    "error::DeprecationWarning",
     "ignore::DeprecationWarning:pytest_asyncio.plugin",
 ]
 addopts = "--durations=20 --durations-min=1.0"
