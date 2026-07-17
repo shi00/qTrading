@@ -53,6 +53,28 @@ class CacheManager:
     _initialized = False
     _lock = threading.Lock()  # Thread-safe singleton
 
+    # DAO 注册表：单一权威列表，驱动 _create_engine 和 close 的循环同步。
+    # __init__ 中仍保留 17 行显式赋值以保持 R13 静态检查兼容性和 pyright 类型推断。
+    _DAO_REGISTRY: tuple[tuple[str, type[BaseDao]], ...] = (
+        ("stock_dao", StockDao),
+        ("quote_dao", QuoteDao),
+        ("financial_dao", FinancialDao),
+        ("sync_dao", SyncDao),
+        ("market_dao", MarketDao),
+        ("screener_dao", ScreenerDao),
+        ("macro_dao", MacroDao),
+        ("holder_dao", HolderDao),
+        ("backtest_dao", BacktestDAO),
+        ("top_inst_dao", TopInstDao),
+        ("stk_limit_dao", StkLimitDao),
+        ("pledge_detail_dao", PledgeDetailDao),
+        ("share_float_dao", ShareFloatDao),
+        ("stk_holdertrade_dao", StkHoldertradeDao),
+        ("sw_industry_classify_dao", SwIndustryClassifyDao),
+        ("sw_industry_member_dao", SwIndustryMemberDao),
+        ("express_dao", ExpressDao),
+    )
+
     def __new__(cls):
         with cls._lock:
             if cls._instance is None:
@@ -156,23 +178,9 @@ class CacheManager:
             **pool_config,
         )
 
-        self.stock_dao.engine = self.engine
-        self.quote_dao.engine = self.engine
-        self.financial_dao.engine = self.engine
-        self.sync_dao.engine = self.engine
-        self.market_dao.engine = self.engine
-        self.screener_dao.engine = self.engine
-        self.macro_dao.engine = self.engine
-        self.holder_dao.engine = self.engine
-        self.backtest_dao.engine = self.engine
-        self.top_inst_dao.engine = self.engine
-        self.stk_limit_dao.engine = self.engine
-        self.pledge_detail_dao.engine = self.engine
-        self.share_float_dao.engine = self.engine
-        self.stk_holdertrade_dao.engine = self.engine
-        self.sw_industry_classify_dao.engine = self.engine
-        self.sw_industry_member_dao.engine = self.engine
-        self.express_dao.engine = self.engine
+        # 由 _DAO_REGISTRY 驱动 DAO.engine 同步，消除 17 行重复手写赋值
+        for attr_name, _ in self._DAO_REGISTRY:
+            getattr(self, attr_name).engine = self.engine
 
         logger.debug("[CacheManager] Engine created: %s", self._sanitize_url(connection_string))
 
@@ -203,23 +211,9 @@ class CacheManager:
         if self.engine is not None:
             await self.engine.dispose()
             self.engine = None
-            self.stock_dao.engine = None
-            self.quote_dao.engine = None
-            self.financial_dao.engine = None
-            self.sync_dao.engine = None
-            self.market_dao.engine = None
-            self.screener_dao.engine = None
-            self.macro_dao.engine = None
-            self.holder_dao.engine = None
-            self.backtest_dao.engine = None
-            self.top_inst_dao.engine = None
-            self.stk_limit_dao.engine = None
-            self.pledge_detail_dao.engine = None
-            self.share_float_dao.engine = None
-            self.stk_holdertrade_dao.engine = None
-            self.sw_industry_classify_dao.engine = None
-            self.sw_industry_member_dao.engine = None
-            self.express_dao.engine = None
+            # 由 _DAO_REGISTRY 驱动 DAO.engine 清空，消除 17 行重复手写赋值
+            for attr_name, _ in self._DAO_REGISTRY:
+                getattr(self, attr_name).engine = None
         # 重置 schema 标志，使下次 init_db() 能重新初始化引擎。
         # 桌面模式下 close() 后进程退出，此重置不会被观测到；
         # web 模式下多 session 共享进程，必须重置以允许新 session 重建连接。
