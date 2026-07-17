@@ -59,7 +59,7 @@ def register_singleton[TClass: type](cls: TClass) -> TClass:
     if not hasattr(cls, "_reset_singleton") and not cls.__module__.startswith("tests."):
         raise TypeError(
             f"Singleton {cls.__name__} must implement _reset_singleton for test isolation (R15/L2). "
-            "See CLAUDE.md §4.3 and CONTRIBUTING.md「单例模式实现模板」."
+            "See CLAUDE.md §4.3 and docs/architecture/singleton-lifecycle.md."
         )
     with _lock:
         if cls not in _registry:
