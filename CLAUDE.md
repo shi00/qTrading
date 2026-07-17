@@ -225,4 +225,4 @@ app → 编排所有层，仅被 main.py 调用
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
 | 已知架构技术债 / Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | 对应小节 |
-| 通用 Flet v1 开发参考（man/flet-best-practices.md） | 「通用 Flet v1 开发参考」 |
+| Flet V1 项目差异与升级清单（man/flet-best-practices.md） | 「Flet V1 项目差异与升级清单」 |

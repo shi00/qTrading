@@ -3,7 +3,7 @@
 > 面向 AStockScreener 工程团队的项目 Flet 集成差异指南
 >
 > Owner: UI 维护者
-> 复核触发器: Flet 依赖版本变化（pyproject.toml）、关键 API 变化、架构 ADR 变化
+> 复核触发器: Flet 依赖版本变化（pyproject.toml）、关键 API 变化、架构红线/边界变化或 ADR 决策（见 docs/adr/）
 > 最后验证日期: 2026-07-16
 
 ---

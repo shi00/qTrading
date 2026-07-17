@@ -14,7 +14,7 @@
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
 第二阶段扩展（未实现，登记于 CONTRIBUTING.md 已知技术债）：
-- 红线 R1~R17 编号 append-only 检查。
+- 红线 R1~R18 编号 append-only 检查。
 - "强制状态"与实际 hook / CI job 的映射检查。
 """
 

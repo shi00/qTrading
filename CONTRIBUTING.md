@@ -1006,17 +1006,17 @@ def ScreenerView():
   4. 仅当升级影响红线、架构边界或 AI 行为规则时，才同步修改 `CLAUDE.md`。
 - 禁止在两份文档中重复维护同一 Flet API 细节；长期规范引用用符号锚点，不用硬编码行号。
 
-### 通用 Flet v1 开发参考
+### Flet V1 项目差异与升级清单
 
 > 宪法依据：CLAUDE.md §5 索引指向本节；本节不重复 API 细节，仅声明引用关系与优先级。
 
-项目规范的 Flet 知识聚焦于**项目专属约束**（V0→V1 迁移 API 表、声明式组件内 API 表、V1 声明式 UI 规范、兼容垫片、依赖管理、PyInstaller、升级协同）。通用 Flet v1 概念（路由 `ft.Router`、Services 用法、`SharedPreferences`/`Clipboard`/`StoragePaths`/`FilePicker`、`use_state`/`use_effect`/`use_ref`/`use_dialog`/`create_context` 基础 Hooks、`yield` 中间进度反馈、资源管理、构建打包、性能与错误处理通用模式等）见 [`man/flet-best-practices.md`](./man/flet-best-practices.md)（通用 Flet v1 开发参考手册）。
+项目规范的 Flet 知识聚焦于**项目专属约束**（V0→V1 迁移 API 表、声明式组件内 API 表、V1 声明式 UI 规范、兼容垫片、依赖管理、PyInstaller、升级协同）。通用 Flet v1 概念（路由 `ft.Router`、Services 用法、`SharedPreferences`/`Clipboard`/`StoragePaths`/`FilePicker`、`use_state`/`use_effect`/`use_ref`/`use_dialog`/`create_context` 基础 Hooks、`yield` 中间进度反馈、资源管理、构建打包、性能与错误处理通用模式等）见 [`man/flet-best-practices.md`](./man/flet-best-practices.md)（Flet V1 项目差异与升级清单）。
 
 **优先级（冲突时前者覆盖后者）**：
 
 1. [CLAUDE.md](./CLAUDE.md)（红线 R1~R18、架构边界、交互准则）
 2. 本文件（CONTRIBUTING.md，项目实现规范）
-3. [`man/flet-best-practices.md`](./man/flet-best-practices.md)（通用 Flet v1 参考）
+3. [`man/flet-best-practices.md`](./man/flet-best-practices.md)（Flet V1 项目差异与升级清单）
 
 **项目专属约束覆盖通用手册的 8 处分叉**（查阅通用手册时须以下表项目规范为准）：
 
