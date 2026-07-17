@@ -1,7 +1,7 @@
 # Dependabot 配置 — 仅覆盖 GitHub Actions 生态。
 # Python 依赖（pip）由 CI 中的 `scripts/run_pip_audit.py`（pip-audit，双源 PyPI + OSV）负责漏洞扫描，
 # 版本升级通过手动编辑 `pyproject.toml` 触发 pre-commit 再生成 requirements*.txt。
-# 详见 CONTRIBUTING.md「CI/CD 流水线与门禁」与「新增依赖」。
+# 详见 docs/guides/ci-cd.md「CI/CD 流水线与门禁」与 docs/guides/dependency-management.md「依赖管理」。
 version: 2
 updates:
   - package-ecosystem: "github-actions"

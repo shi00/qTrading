@@ -13,7 +13,7 @@
   - [如何贡献](#如何贡献)
   - [Pull Request 流程](#pull-request-流程)
   - [代码审查与合并](#代码审查与合并)
-  - [Git 工作流与分支策略](#git-工作流与分支策略)
+  - [Git 工作流与分支策略](./docs/guides/git-workflow.md)
 - [第二部分：开发环境与命令参考](#第二部分开发环境与命令参考)
   - [前置要求](#前置要求)
   - [安装步骤](#安装步骤)
@@ -39,9 +39,9 @@
   - [异步编程规范](#异步编程规范)
   - [数据库操作规范](#数据库操作规范)
   - [错误处理标准模式](#错误处理标准模式)
-  - [测试规范](#测试规范)
-  - [CI/CD 流水线与门禁](#cicd-流水线与门禁)
-  - [标准开发工作流 (How-To)](#标准开发工作流-how-to)
+  - [测试规范](./docs/guides/testing.md)
+  - [CI/CD 流水线与门禁](./docs/guides/ci-cd.md)
+  - [标准开发工作流 (How-To)](./docs/guides/how-to.md)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
 
@@ -113,132 +113,7 @@
 
 ## Git 工作流与分支策略
 
-> 对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)。本节承接宪法中关于 git 隔离开发的强制要求，提供分支模型、命名规范、worktree 标准流程。**使用 git worktree 隔离开发，确保主工作区整洁**。
-
-### 分支模型：GitHub Flow
-
-项目采用 **GitHub Flow**：单一长期分支 `main` + 短命 feature 分支。不引入 Git Flow 的 `develop`/`release`/`hotfix` 多长期分支（违反 YAGNI）。
-
-```text
-main (受保护，禁止直接 push)
-  ├── feature/strategy-macd   ── PR ── Squash Merge ──┐
-  ├── fix/dao-memory-leak     ── PR ── Squash Merge ──┤
-  └── refactor/cache-layer    ── PR ── Squash Merge ──┘
-                                                       ↓
-                                                    main 推进
-```
-
-例外：发布冻结期可临时使用 `release/<version>` 分支，发布后立即删除，不长期保留。
-
-### 分支命名规范
-
-格式：`<type>/<scope>-<short-desc>`，`type` 复用「提交信息规范」类型，保持一致：
-
-| 类型 | 用途 | 示例 |
-|------|------|------|
-| `feature/` | 新功能 | `feature/strategy-macd` |
-| `fix/` | Bug 修复 | `fix/dao-memory-leak` |
-| `refactor/` | 重构（不改行为） | `refactor/cache-layer` |
-| `docs/` | 文档更新（多文件） | `docs/api-reference` |
-| `test/` | 测试补强 | `test/dao-coverage` |
-| `chore/` | 构建/工具/依赖 | `chore/upgrade-flet` |
-| `perf/` | 性能优化 | `perf/data-loader-batch` |
-| `ci/` | CI 配置 | `ci/add-coverage-check` |
-
-约束：
-- 全小写，单词用 `-` 分隔，禁用下划线/中文
-- 长度 ≤ 50 字符
-- 语义清晰可检索
-
-### Worktree 强制使用
-
-**强制场景**（违反即 R18）：
-- 新特性开发（涉及新增文件或多文件改动）
-- 重构任务（跨文件结构调整）
-- 实验性探索（不确定是否合并的工作）
-- 多步骤实现任务（含 AI 助手驱动的实现任务）
-
-**豁免场景**：
-- 单文件文档纯改（如仅改 README.md 一处）
-- 单行修复（typo、配置值修正）
-- bug 复现脚本（临时一次性代码）
-- 已在 `.worktrees/<branch>/` 内的开发（已满足隔离）
-
-### 标准工作流
-
-完整生命周期（在主仓库根目录起算）：
-
-```bash
-# 1. 创建 worktree（默认 .worktrees/<branch-name>/，已在 .gitignore）
-git worktree add .worktrees/feature-strategy-macd -b feature/strategy-macd
-cd .worktrees/feature-strategy-macd
-
-# 2. 项目 setup（在 worktree 内独立 venv）
-uv venv
-.venv\Scripts\activate         # Windows；或 source .venv/bin/activate
-uv pip install -r requirements.txt -r requirements-dev.txt
-pre-commit install             # 安装 git hooks
-
-# 3. 基线测试验证（确保起点干净）
-ruff check . && ruff format --check . && pyright
-python -m pytest tests/unit/ -v -m "not slow"
-
-# 4. 开发（遵循 TDD：先写测试，再写实现，每步 commit）
-#    提交遵循「提交信息规范」+ 原子提交原则（见下节）
-
-# 5. 完成后跑完整门禁
-pre-commit run --all-files
-python -m pytest tests/unit/ -v -m "not slow"
-
-# 6. 推送并创建 PR
-git push -u origin feature/strategy-macd
-gh pr create --title "feat(strategy): add MACD crossover" --body "..."
-
-# 7. PR 通过 Merge Queue 合并后，清理 worktree（回主工作区执行）
-cd ../..  # 回主仓库根
-git worktree remove .worktrees/feature-strategy-macd
-git worktree prune
-git branch -d feature/strategy-macd       # Squash Merge 后本地分支可删
-```
-
-> 完成开发后，按 PR 反馈决策：merge（合并入 main）/ keep（保留分支继续迭代）/ discard（丢弃分支并清理 worktree）。决策依据为 PR review 结果与剩余迭代计划。
-
-### 原子提交
-
-每次提交应满足：
-- **可独立构建**：任意 commit checkout 后都能通过 `ruff check` + `pyright`
-- **单一职责**：一次提交只做一件事（新功能 / 修复 / 重构二选一，不混合）
-- **测试先行**：实现代码与对应测试同一 commit 提交（TDD RED→GREEN 中的 GREEN 步）
-- **可回滚**：单个 commit 可通过 `git revert` 安全回滚，不影响其他功能
-
-反例（禁止）：
-```bash
-# ❌ 混合多事
-git commit -m "feat: add MACD + fix login bug + rename utils"
-# ❌ 实现与测试分离
-git commit -m "feat: add MACD"          # 只有实现
-git commit -m "test: add MACD tests"    # 测试滞后
-# ❌ 编译失败的中间态
-git commit -m "wip: refactor in progress"
-```
-
-### 长期分支禁令（软规范）
-
-Feature 分支存活建议 ≤ 7 天。超期需评估：
-- 拆分为更小的 PR 分批合并
-- 或显式标注为长任务，在 PR 描述中说明原因
-
-避免长期分支与 main 漂移过大导致合并冲突爆炸。
-
-### 与现有流程的关系
-
-| 流程 | 文档位置 | 与本节关系 |
-|------|---------|-----------|
-| Conventional Commits | 「提交信息规范」 | 分支 type 与 commit type 对齐 |
-| PR 流程 | 「Pull Request 流程」 | worktree 完成后进入 PR 阶段 |
-| Merge Queue + Squash | 「合并策略」 | 本节规定的合并方式 |
-| CODEOWNERS | 「代码审查与合并」 | 关键路径强制审查 |
-| pre-commit | 「代码风格基础」 | 提交前质量门禁 |
+> 本节已迁移到 [docs/guides/git-workflow.md](./docs/guides/git-workflow.md)。
 
 ---
 
@@ -275,7 +150,7 @@ pre-commit install
 python -m pytest tests/unit/ -v --tb=short -m "not slow"
 ```
 
-> 项目使用 pre-commit hooks（Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护），hook 数量见 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml)，亦见 [Pre-commit Hooks](#pre-commit-hooks)。
+> 项目使用 pre-commit hooks（Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护），hook 数量见 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml)，亦见 [Pre-commit Hooks](./docs/guides/ci-cd.md#pre-commit-hooks)。
 >
 > **新特性开发请使用 worktree 隔离**，避免在主工作区直接开发（对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)，详见 [Git 工作流与分支策略](#git-工作流与分支策略) 中的「Worktree 强制使用」）。
 
@@ -599,7 +474,7 @@ class MyStrategy(BaseStrategy):
 
 - **策略入口**: `strategies/all_strategies.py` 通过导入触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 统一暴露。
 - **策略 API**: 依赖声明 (`required_context_keys`/`required_tables`/`required_history_days`/`required_apis`)、动态参数 (`get_parameters()`)、动态描述 (`get_dynamic_description()`)、依赖检查 (`check_dependencies()`) — 详见 `strategies/base_strategy.py`。
-- **新增策略流程**: 见 [标准开发工作流](#3-新增一个策略)。
+- **新增策略流程**: 见 [标准开发工作流](./docs/guides/how-to.md#3-新增一个策略)。
 
 ## Polars 向量化策略基类
 
@@ -982,18 +857,11 @@ def ScreenerView():
 
 ### 依赖管理
 
-- `flet` / `flet-desktop` / `flet-charts` 三个独立包，版本以 `==` 精确锁定（锁定值见 [`pyproject.toml`](./pyproject.toml) 的 `dependencies` 中 `flet` / `flet-desktop` / `flet-charts` 三项）
-- `flet-charts` 是 V1 拆分出的图表控件独立包，新增图表控件必须 `import flet_charts as fch`
-- 版本锁定策略：`==` 精确锁定，避免 minor 版本间的 API 漂移（V1 处于 alpha/beta 阶段）
-- 升级 Flet 版本时，三个包必须同步升级
+> 本节已迁移到 [docs/guides/dependency-management.md](./docs/guides/dependency-management.md)。
 
 ### PyInstaller 打包
 
-[`AStockScreener.spec`](./AStockScreener.spec) 的 `hiddenimports` 列表必须含 `flet` / `flet_desktop` / `flet_charts` 三项：
-
-- `flet_charts` 是 V1 新增的独立模块，遗漏会导致打包产物 `import flet_charts` 报 ImportError
-- `flet_core` / `flet_desktop` 在 V1 已合并入 `flet`，但保守保留 `flet_desktop` 以兼容桌面打包路径
-- 新增 flet 相关 import 时，同步检查 spec 文件的 `hiddenimports` 是否覆盖
+> 本节已迁移到 [docs/guides/dependency-management.md](./docs/guides/dependency-management.md)。
 
 ### Flet 版本升级文档协同机制
 
@@ -1144,180 +1012,17 @@ except Exception as e:
 
 ## 测试规范
 
-> 宪法依据：CLAUDE.md §3.1 R7（测试状态污染红线）与 §1.5（目标驱动与验证）；实现细则以本节为准。
-
-### 测试架构
-
-分为 `unit/` (单元测试, 纯逻辑隔离), `integration/` (集成测试, 依赖 PostgreSQL), `e2e/` (端到端测试)。
-
-测试 marker 清单见 [`pyproject.toml`](./pyproject.toml) 的 `[tool.pytest.ini_options].markers`（含 `unit` / `integration` / `e2e` / `slow` / `network` / `database` / `migration` / `ai` / `no_auto_mock` / `mutates_config` / `no_db` 等）。本文档不手工维护子集，以 `pyproject.toml` 为单一事实源。
-
-### 测试编写规则
-
-- **单例隔离**: 单元测试（`tests/unit/`）由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置所有注册单例。集成测试和 e2e 测试不自动重置单例，需手动管理。需精细控制单例初始化状态时（如测试 `__init__` 重复初始化防护），可使用 `singleton_state` 上下文管理器：
-
-  ```python
-  from tests.conftest import singleton_state
-
-  with singleton_state(TaskManager, extra_attrs=["_initialized"]):
-      mgr = TaskManager()
-      # 测试逻辑...
-  # 自动恢复原始单例状态
-  ```
-
-- **外部服务 Mock**: 单元测试由 `mock_external_services` autouse fixture 自动 mock 外部网络调用 (`NewsFetcher`/`ReviewManager`)。测试自身模块需跳过 mock 时，在文件顶部声明 `pytestmark = pytest.mark.no_auto_mock`。
-
-- **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
-- **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。
-- **事件循环 scope**（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.pytest.ini_options]`）：
-  - **unit test**：`asyncio_default_test_loop_scope = "function"`（每个测试独立循环，隔离单例/loop-local 状态，避免测试间污染）
-  - **integration / e2e**：在 `tests/integration/conftest.py` 等处通过 `@pytest_asyncio.fixture(scope="session", loop_scope="session")` 显式 override，复用 session 级事件循环以降低启动开销
-  - Windows 事件循环策略使用 `WindowsSelectorEventLoopPolicy`
-- **配置隔离**: 测试使用临时配置文件 (`tempfile.mkdtemp`)，通过 `pytest_configure` 在 import 之前重写 `utils.config_handler.CONFIG_FILE`。
-- **DB 隔离**: 集成测试连接 `test_astock` 数据库 (CI 通过 service container 启动 PostgreSQL 16)，通过 `TEST_DB_*` 环境变量配置。
-
-### 覆盖率要求
-
-> [!NOTE]
-> 覆盖率阈值的单一事实源位于 `pyproject.toml`。
-> - **整体覆盖率**：具体数值见 `pyproject.toml` 中的 `fail_under`（目前为 ≥ 85%）
-> - **单文件覆盖率**：具体数值见 `pyproject.toml` 中的 `per_file_minimum`（目前为 ≥ 80%，由 `scripts/check_per_file_coverage.py` 强制检查）
-> - **覆盖率源**：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）
-> - **覆盖率排除行**：`pragma: no cover`、`if __name__ == "__main__"`、`if TYPE_CHECKING:`、`raise NotImplementedError`、`...`
+> 本节已迁移到 [docs/guides/testing.md](./docs/guides/testing.md)。
+>
+> 覆盖率源（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.coverage.run] source`）：`core`, `app`, `data`, `services`, `strategies`, `utils`, `ui`, `config`, `main`（排除 `tests/`, `scripts/`, `data/tiktoken_cache/`）。整体覆盖率 ≥ 85%，单文件 ≥ 80%（由 `scripts/check_per_file_coverage.py` 强制检查）。
 
 ## CI/CD 流水线与门禁
 
-> 宪法依据：CLAUDE.md §3.2（pre-commit、Alembic 迁移、质量门控强制）；实现细则以本节为准。
-
-### 三层门禁区分
-
-修改代码后按下表选择对应门禁层级，避免全量跑浪费时间或漏跑：
-
-| 层级 | 触发场景 | 命令/Job |
-|------|---------|----------|
-| **本地最小门禁** | 每次小改动后自检 | `ruff check .` + `ruff format --check .` + 变更相关测试 |
-| **变更相关门禁** | 提交前按变更范围自检 | 按 [变更类型 → 最小验证子集](#变更类型--最小验证子集) 选择 |
-| **CI 全量门禁** | 推送 / PR / 跨层修改 | `ruff` → `format` → `pre-commit` → `pyright` → `pytest` → 安全扫描 → 迁移一致性 → integration/e2e |
-
-### CI Job 矩阵
-
-GitHub Actions 双平台验证 (`.github/workflows/ci_cd.yml`)，PR/主干质量门禁包括：
-
-1. **Fast Ruff Check & Format** (`lint-fast` job)：matrix 含 Python `3.13` 与 `3.14`，其中 `3.14` 标记 `experimental: true` 并 `continue-on-error`（**Python 3.14 仅在 `lint-fast` job 中作为 experimental 矩阵项运行**，仅跑 `ruff check` + `ruff format --check`，不安装项目依赖）
-2. **Pre-commit Hooks** (Ruff、格式化、裸 `type: ignore`、requirements 同步、版本一致性、文档一致性、红线自动化、import-linter 架构守护；hook 数量见 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml))
-3. **Security Audit** (`scripts/run_pip_audit.py`，扫描 `requirements.txt`、`requirements-optional.txt`、`requirements-dev.txt`，使用 `.security/audit-allowlist.yml`)
-4. **Pyright Type Check** (版本见 `ci_cd.yml`，`continue-on-error: false`)
-5. **Alembic Migration** (`upgrade head` → `alembic check` → `downgrade base` → `upgrade head`)
-6. **Unit & Integration Tests** (Linux/Windows unit，Linux integration；完整测试矩阵仅 Python `3.13`)
-7. **Windows E2E Tests** (`tests/e2e/`，Chromium + PostgreSQL)
-8. **Per-File (≥ 80%) & Overall Coverage (≥ 85%)** (覆盖率阈值见 [`pyproject.toml`](./pyproject.toml))
-9. **requirements*.txt 漂移处理** (`requirements-drift` job 检测到 main 分支漂移时，由 `update-requirements` job 创建同步 PR)
-
-> **Python 3.14 状态说明**：完整测试矩阵（Code Quality & Tests、Windows E2E、Windows Build 等）仅运行 Python `3.13`。Python `3.14` 因上游 `litellm` 限制 `Requires-Python <3.14`，暂时无法安装项目依赖，故仅在 `lint-fast` job 中作为 experimental 矩阵项运行（详见 [已知架构技术债](#已知架构技术债-known-technical-debt) 中的 litellm 限制条目）。
-
-发布流程: 打 `v*.*.*` tag → 触发 `build-windows` job → PyInstaller 打包 CPU/CUDA 两个变体 → smoke test → Inno Setup 制作安装包 → GitHub Release 发布。
-
-**其他 workflow**: CodeQL 静态安全分析 (`codeql.yml`)、密钥泄露扫描 (`gitleaks.yml`)、自动化 Release PR (`release-please.yml`)、依赖更新机器人 (`renovate.yml`)、OpenSSF Scorecard 安全评分 (`scorecard.yml`)。
-
-### Pre-commit Hooks
-
-本项目使用 pre-commit hooks (定义在 [`.pre-commit-config.yaml`](./.pre-commit-config.yaml)，含 Ruff lint/format、裸 `type: ignore` 检测、禁止 `IsolatedAsyncioTestCase`、requirements 同步、版本一致性校验、文档一致性校验、红线自动化校验、import-linter 架构守护)。hook 数量见 `.pre-commit-config.yaml`，提交前必须全部通过。
-
-### 数据库迁移
-
-如果修改了数据库模型：
-
-1. 确保创建了新的 Alembic 迁移
-2. 迁移必须可逆（实现 `upgrade` 和 `downgrade`）
-3. CI 会验证 `upgrade → check → downgrade base → upgrade head` 链
+> 本节已迁移到 [docs/guides/ci-cd.md](./docs/guides/ci-cd.md)。
 
 ## 标准开发工作流 (How-To)
 
-### 1. 新增一张数据表
-
-1. 在 `data/persistence/models.py` 中添加 SQLAlchemy ORM 模型 (继承 `Base`)。
-2. 在 `data/data_dictionary.py` 的 `TABLE_DEFINITIONS` 中注册：表名 → 同步配置、质量监控配置、依赖关系。
-3. 运行 `python -m alembic revision --autogenerate -m "add xxx table"`，**人工检查** 生成的迁移文件。
-4. 运行 `python -m alembic upgrade head` 验证。
-5. 若需要 DAO 访问，参考[新增一个 DAO](#2-新增一个-dao)。
-
-### 2. 新增一个 DAO
-
-1. 在 `data/persistence/daos/` 下创建 `xxx_dao.py`，继承 `BaseDao`。
-2. 实现读写方法，**只用** `_read_db_select` / `_save_upsert` / `chunked_in_query`，禁止裸 SQL 字符串拼接。
-3. 在 `data/cache/cache_manager.py` 的 `CacheManager.__init__` 中实例化：`self.xxx_dao = XxxDao(self.engine)`。
-4. 在 `CacheManager._create_engine` 中更新 `.engine` 引用：`self.xxx_dao.engine = self.engine`。
-5. 在 `tests/unit/` 下编写对应单测，使用 mock engine 隔离 DB。
-
-### 3. 新增一个策略
-
-1. 在 `strategies/` 下创建 `xxx_strategy.py`。
-2. 使用 `@register_strategy("key")` 装饰器注册；继承 `BaseStrategy` (普通) 或 `PolarsBaseStrategy` (向量化)。
-3. 声明 `required_context_keys` / `required_tables` / `required_history_days`。
-4. 若需访问 LLM，使用 `AIStrategyMixin` 混入；Prompt 添加到 `strategies/strategy_prompts.py`。继承 `PolarsBaseStrategy` 时已自带 AI 阶段（可通过 `enable_ai_analysis = False` 关闭）。
-5. 在 `strategies/all_strategies.py` 的 `_import_all_strategies()` 中导入该模块以触发自动注册。
-6. 在 `locales/` 添加 `strategy_xxx` / `strategy_xxx_desc` 等 i18n key。
-7. 在 `tests/unit/` 下编写单测。
-
-### 4. 新增一个 UI 视图
-
-1. 先确认 `ui.hooks.use_viewmodel` 是否已满足当前 ViewModel 消费需求；若未满足，先实现/扩展该 hook（见 [MVVM 表现层](#mvvm-表现层)）。
-2. 在 `ui/viewmodels/` 下创建对应 ViewModel：暴露不可变 state snapshot、commands、`subscribe(callback) -> unsub`，禁止 import Flet、禁止持有 Flet 控件、禁止调 `page.update()`/`control.update()`。
-3. 在 `ui/views/` 下创建 `@ft.component` 声明式 View：只读取 state 渲染控件树，只在事件中调用 commands；禁止 `did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`（见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)）。
-4. i18n 文案由 VM 输出 key + params，View 按当前 locale 渲染；locale 变化作为 View 层声明式状态源触发重渲染（见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范) 中的 i18n 状态驱动规则）。
-5. 响应式布局优先使用声明式 state / props / `ResponsiveRow`，禁止新增 `handle_resize` 鸭子分发式命令式代码。
-6. 若需注册新标签页，再修改 `ui/app_layout.py`。
-7. UI 事件中的同步 IO/CPU 密集任务必须通过 `ThreadPoolManager.run_async()` 或 `TaskManager.submit_task()` 提交，避免阻塞 Flet 主循环（对应 CLAUDE.md §3.1 R16）。
-8. UI 事件回调使用 `@log_ui_action` 装饰器埋点。
-9. 按 [变更类型 → 最小验证子集](#变更类型--最小验证子集) 运行 UI 相关验证。
-
-### 5. 新增一个外部数据源
-
-1. 在 `data/external/` 下创建客户端模块，封装第三方 SDK 或 HTTP API。
-2. 使用 `utils/rate_limiter.py` 提供的限流器避免触发对方风控。
-3. 网络错误必须用 `classify_error(e, context="general")` 分类，自动处理重试。
-4. 方法挂 `@log_async_operation(threshold_ms=PerfThreshold.EXTERNAL_NETWORK)`。
-5. 若需走代理，使用 `utils/proxy_manager.py`。
-
-### 6. 新增与升级依赖
-
-1. **编辑依赖配置**：
-   - 编辑 `pyproject.toml`：
-     - 运行时依赖加到 `[project] dependencies`
-     - 开发依赖加到 `[project.optional-dependencies] dev`
-     - 可选依赖加到 `[project.optional-dependencies] optional`
-   - 若要升级已有依赖，可运行 `uv lock --upgrade` 更新锁文件。
-2. **生成与编译 `requirements*.txt`**：
-   - **自动化生成**：在 `git commit` 时，本地 pre-commit 钩子会自动运行 `uv pip compile` 重新编译所有的 `requirements*.txt`。
-   - **手动即时生成（用于本地即时升级调试）**：若在 commit 前需要使升级或新依赖立即在本地生效，请手动编译：
-     ```bash
-     uv pip compile --universal --no-emit-index-url pyproject.toml -o requirements.txt
-     uv pip compile --universal --no-emit-index-url --extra dev pyproject.toml -o requirements-dev.txt
-     uv pip compile --universal --no-emit-index-url --extra optional pyproject.toml -o requirements-optional.txt
-     ```
-3. **本地安装新依赖**：运行以下命令将编译后的依赖同步到本地环境：
-   ```bash
-   uv pip install --system -r requirements.txt -r requirements-dev.txt
-   # 如需可选功能：
-   uv pip install --system -r requirements-optional.txt
-   ```
-
-### 7. 新增回测配置
-
-1. 在 `strategies/backtest/config.py` 中定义回测参数 (`BacktestConfig`)。
-2. 在 `strategies/backtest/adapter.py` 中适配待回测的策略。
-3. 通过 `services/backtest_service.py` 的 `run_backtest()` 启动。
-4. 结果通过 `BacktestDAO` 持久化，由 `ui/views/backtest_view.py` 展示。
-
-### 8. 新增一个单例
-
-1. 使用 `@register_singleton` 装饰器注册类（代码模板见[单例模式实现模板](#单例模式实现模板)）。
-2. 实现 `_reset_singleton()` 类方法 (测试隔离必须)。
-3. 实例创建必须受 `threading.Lock` 保护 (优先在 `__new__` 中持锁)。
-4. 支持 `_initialized` 标志防止重复初始化。
-5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
-6. 在 [CLAUDE.md §4.3](./CLAUDE.md#43-单例模式) 的单例列表中补充新单例名称。
-7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器。
+> 本节已迁移到 [docs/guides/how-to.md](./docs/guides/how-to.md)。
 
 ## 排查典型问题
 
