@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import inspect
 import logging
 import time
@@ -54,6 +55,34 @@ class StreamCard:
 
 
 @dataclass(frozen=True)
+class HistoryTreeRow:
+    """历史树单行 (immutable, state-driven, Task 3.2).
+
+    VM 内聚日期格式化 (不依赖 I18n); strategies 中的 strategy_name 为 raw key,
+    View 渲染时调 translate_strategy_name 翻译为当前 locale (§3.2 VM 不感知 locale).
+    """
+
+    display_date: str
+    d_key: str
+    total_cnt: int
+    strategies: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class HistoryTreeState:
+    """历史树子结构 (immutable, state-driven, Task 3.2).
+
+    View 不再持有 rows/offset/has_more/loading 的 use_state, 改为派生自
+    state.history_tree (消除双轨状态, 每项业务状态只有一个 owner).
+    """
+
+    rows: tuple[HistoryTreeRow, ...] = ()
+    offset: int = 0
+    has_more: bool = False
+    loading: bool = False
+
+
+@dataclass(frozen=True)
 class ScreenerState:
     """Immutable state snapshot for ScreenerView (§3.0.1).
 
@@ -93,6 +122,8 @@ class ScreenerState:
     # Strategy description (R.2.6.2: 业务状态迁入 VM, View 映射 color 标识符到 AppColors)
     strategy_desc: str = ""
     strategy_desc_color: str = "default"  # 语义标识符: "default"/"warning"
+    # History tree (Task 3.2: 子结构内聚 rows/offset/has_more/loading, 消除 View 双轨状态)
+    history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
 
 
 class ScreenerViewModel:
@@ -901,6 +932,7 @@ class ScreenerViewModel:
         self._stream_buffers.clear()
         # _update_pagination only updates pagination fields; sort_* are set in _set_state below.
         self._update_pagination(page_no=1)
+        # Task 3.2: 重置 history_tree state (消除 View 双轨状态, View 不再 set_history_tree_*)
         self._set_state(
             mode="HISTORY",
             page_no=1,
@@ -908,6 +940,7 @@ class ScreenerViewModel:
             sort_ascending=True,
             stream_cards=(),
             data_version=self._state.data_version + 1,
+            history_tree=HistoryTreeState(),
         )
         logger.info("[ScreenerVM] Switched to HISTORY mode")
 
@@ -943,42 +976,122 @@ class ScreenerViewModel:
             self._set_state(mode="REALTIME")
         logger.info("[ScreenerVM] Switched to REALTIME mode")
 
-    async def load_history_tree(self, offset=0):
-        """Load tree data for the history sidebar."""
+    async def load_history_tree(self, append: bool = False) -> None:
+        """加载历史树数据并更新 state.history_tree (Task 3.2: 不再返回 dict).
+
+        Args:
+            append: True 追加到现有 rows (load_more 路径); False 重置 rows (切换模式/初始加载).
+        """
         cache = CacheManager()
+        offset = self._state.history_tree.offset if append else 0
         df = await cache.get_history_tree(offset=offset)
         if df is None or df.empty:
-            return {}
+            if not append:
+                # 重置 rows (切换到 HISTORY 模式后无数据)
+                self._set_state(
+                    history_tree=replace(
+                        self._state.history_tree,
+                        rows=(),
+                        offset=0,
+                        has_more=False,
+                    )
+                )
+            else:
+                # append 路径下无更多数据, 仅隐藏 load_more
+                self._set_state(history_tree=replace(self._state.history_tree, has_more=False))
+            return
+
+        new_rows = self._build_history_tree_rows(df)
+        if append:
+            merged_rows = self._state.history_tree.rows + new_rows
+        else:
+            merged_rows = new_rows
+        self._set_state(
+            history_tree=replace(
+                self._state.history_tree,
+                rows=merged_rows,
+                offset=offset + len(df) * 5,
+                has_more=len(df) >= 5,
+            )
+        )
+
+    @staticmethod
+    def _build_history_tree_rows(df: pd.DataFrame) -> tuple[HistoryTreeRow, ...]:
+        """从 DataFrame 构建历史树行 (不依赖 I18n, 日期格式化内聚到 VM).
+
+        策略名 strategy_name 为 raw key, View 渲染时调 translate_strategy_name 翻译 (§3.2).
+        """
         # Group by trade_date -> {date: [{run_id, strategy_name, cnt}, ...]}
-        tree = {}
+        tree: dict[str, list[dict]] = {}
         for _, row in df.iterrows():
             date = str(row["trade_date"])
-            if date not in tree:
-                tree[date] = []
-            tree[date].append(
-                {"run_id": row["run_id"], "strategy_name": row["strategy_name"], "cnt": int(row["cnt"])},  # type: ignore[untyped]
+            tree.setdefault(date, []).append(
+                {
+                    "run_id": row["run_id"],
+                    "strategy_name": row["strategy_name"],
+                    "cnt": int(row["cnt"]),
+                }
             )
-        return tree
+        rows: list[HistoryTreeRow] = []
+        for date_str, strategies in tree.items():
+            display_date, d_key = ScreenerViewModel._format_history_date(date_str)
+            total_cnt = sum(s["cnt"] for s in strategies)
+            rows.append(
+                HistoryTreeRow(
+                    display_date=display_date,
+                    d_key=d_key,
+                    total_cnt=total_cnt,
+                    strategies=tuple(strategies),
+                )
+            )
+        return tuple(rows)
+
+    @staticmethod
+    def _format_history_date(date_str) -> tuple[str, str]:
+        """格式化历史树日期: 返回 (display_date, internal_key).
+
+        纯函数不依赖 I18n, 与 View 中同名函数保持一致行为 (Task 3.2 内聚到 VM).
+        """
+        if isinstance(date_str, (datetime.date, datetime.datetime)):
+            display = date_str.strftime("%Y-%m-%d")
+            key = display
+        else:
+            s = str(date_str)
+            display = f"{s[:4]}-{s[4:6]}-{s[6:]}" if len(s) == 8 and s.isdigit() else s
+            key = s
+        return display, key
 
     async def load_history_data(self, trade_date: str, strategy_name: str | None = None, run_id: str | None = None):  # type: ignore[untyped]
-        """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name."""
-        cache = CacheManager()
-        df = await cache.get_history_records(trade_date, strategy_name, run_id)
-        if df is not None and not df.empty:
-            self._full_results = df
-        else:
-            self._full_results = pd.DataFrame()
-        if df is not None and not df.empty and "ai_score" in df.columns:
-            sort_column = "ai_score"
-        else:
-            sort_column = None
-        self._update_pagination(page_no=1)
-        self._set_state(
-            page_no=1,
-            sort_column=sort_column,
-            sort_ascending=False,
-            data_version=self._state.data_version + 1,
-        )
+        """Load historical screening records for a specific run_id, or fall back to trade_date/strategy_name.
+
+        Task 3.2: VM 内聚 loading 管理 (View 不再 set_progress_visible).
+        """
+        self._set_state(loading=True)
+        try:
+            cache = CacheManager()
+            df = await cache.get_history_records(trade_date, strategy_name, run_id)
+            if df is not None and not df.empty:
+                self._full_results = df
+            else:
+                self._full_results = pd.DataFrame()
+            if df is not None and not df.empty and "ai_score" in df.columns:
+                sort_column = "ai_score"
+            else:
+                sort_column = None
+            self._update_pagination(page_no=1)
+            self._set_state(
+                page_no=1,
+                loading=False,
+                sort_column=sort_column,
+                sort_ascending=False,
+                data_version=self._state.data_version + 1,
+            )
+        except asyncio.CancelledError:
+            self._set_state(loading=False)
+            raise
+        except Exception:
+            self._set_state(loading=False)
+            raise
 
     def get_export_data(self):
         """Get the current results DataFrame for export"""
