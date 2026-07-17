@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 from urllib.parse import unquote_plus, urlparse
 
 import pytest
+import pytest_asyncio
 
 # Session 级 keyring mock — 隔离 E2E 测试对宿主机 keyring 的污染
 # 必须在任何可能 import keyring 的项目模块之前生效（参考 tests/conftest.py 的 _MOCK_KEYRING）
@@ -187,7 +188,7 @@ _assert_columns_subset("INDEX_DAILY_COLUMNS", INDEX_DAILY_COLUMNS, IndexDaily)
 _assert_columns_subset("SYNC_STATUS_COLUMNS", SYNC_STATUS_COLUMNS, SyncStatus)
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def e2e_playwright():
     from playwright.async_api import async_playwright
 
@@ -195,7 +196,7 @@ async def e2e_playwright():
         yield p
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def e2e_browser(e2e_playwright):
     # 启动期断言 canvaskit.wasm 本地存在（route handler 离线化依赖此文件）
     wasm_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / "canvaskit.wasm"
@@ -747,7 +748,7 @@ async def _seed_e2e_data() -> None:
         await conn.close()
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def seed_e2e_data():
     """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。"""
     await _seed_e2e_data()
@@ -814,12 +815,15 @@ def wizard_app(tmp_path_factory):
     _terminate(proc)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def e2e_page(e2e_browser, flet_app: AppServer, request):
     """Function 级 Page：每用例独立 BrowserContext + Page，无跨用例状态污染。
 
     性能优化：删除 theme_switch + 消除硬等待 + CI 分级 multiplier。
     CanvasKit 加载 (~8.5s) 每用例发生，但可靠性优先于速度。
+
+    loop_scope=session：与 PR #179 强制测试用 session loop 对齐，避免 function-loop
+    fixture 访问 session-loop-bound e2e_browser 时跨 loop hang。
     """
     fp = await _make_page(e2e_browser, flet_app, request, check_db_error=True)
     if request.node.get_closest_marker("slow"):
@@ -835,7 +839,7 @@ async def e2e_page(e2e_browser, flet_app: AppServer, request):
     await _teardown_page(fp, request, failed=failed)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(loop_scope="session")
 async def wizard_page(e2e_browser, wizard_app: AppServer, request):
     """Function 级 Page（向导测试）：每用例独立 context，无状态污染。"""
     fp = await _make_page(e2e_browser, wizard_app, request)
