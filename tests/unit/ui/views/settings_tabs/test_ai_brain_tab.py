@@ -184,19 +184,21 @@ class TestAIBrainTabR9Compliance:
         assert "logger.critical(api_key" not in source
 
     def test_on_llm_test_connection_does_not_log_api_key(self) -> None:
-        """_on_llm_test_connection 仅 forward api_key 给 AIService.test_connection,
+        """AIBrainSettingsViewModel.test_connection 仅 forward api_key 给 AIService.test_connection,
         不在任何日志/异常中暴露 api_key 明文。
 
-        通过调用 helper 并让它抛异常, 验证异常消息不含 api_key 明文。
+        Phase 3.2 P1-1: _on_llm_test_connection 下沉为 VM 静态 command
+        (ui.viewmodels.ai_brain_settings_view_model.AIBrainSettingsViewModel.test_connection)。
+        通过调用 command 并让它抛异常, 验证异常消息不含 api_key 明文。
         """
-        from ui.views.settings_tabs.ai_brain_tab import _on_llm_test_connection
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         secret = "sk-super-secret-key-12345"
         with patch("services.ai_service.AIService") as mock_service:
             mock_service.test_connection = AsyncMock(side_effect=RuntimeError("connection failed"))
             with pytest.raises(RuntimeError, match="connection failed"):
                 asyncio.run(
-                    _on_llm_test_connection(
+                    AIBrainSettingsViewModel.test_connection(
                         provider="openai",
                         model="gpt-4",
                         base_url="https://api.openai.com",
@@ -1099,17 +1101,21 @@ class TestDoSaveAISettingsExceptionPhase:
 
 
 class TestOnLLMTestConnection:
-    """_on_llm_test_connection: 成功/异常/CancelledError。"""
+    """AIBrainSettingsViewModel.test_connection: 成功/异常/CancelledError。
+
+    Phase 3.2 P1-1: _on_llm_test_connection 下沉为 VM 静态 command
+    (ui.viewmodels.ai_brain_settings_view_model.AIBrainSettingsViewModel.test_connection)。
+    """
 
     def test_success_path(self) -> None:
         """成功: AIService.test_connection 返回 dict。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_llm_test_connection
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.ai_service.AIService") as mock_service:
             expected = {"success": True, "message": "ok"}
             mock_service.test_connection = AsyncMock(return_value=expected)
             result = asyncio.run(
-                _on_llm_test_connection(
+                AIBrainSettingsViewModel.test_connection(
                     provider="openai",
                     model="gpt-4",
                     base_url="https://api.openai.com",
@@ -1120,14 +1126,14 @@ class TestOnLLMTestConnection:
             mock_service.test_connection.assert_called_once()
 
     def test_exception_propagates(self) -> None:
-        """AIService.test_connection 抛 Exception → 传播 (helper 不吞没)。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_llm_test_connection
+        """AIService.test_connection 抛 Exception → 传播 (command 不吞没)。"""
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.ai_service.AIService") as mock_service:
             mock_service.test_connection = AsyncMock(side_effect=RuntimeError("connection boom"))
             with pytest.raises(RuntimeError, match="connection boom"):
                 asyncio.run(
-                    _on_llm_test_connection(
+                    AIBrainSettingsViewModel.test_connection(
                         provider="openai",
                         model="gpt-4",
                         base_url="https://api.openai.com",
@@ -1136,14 +1142,14 @@ class TestOnLLMTestConnection:
                 )
 
     def test_cancelled_error_propagates(self) -> None:
-        """R2: CancelledError 传播 (helper 不捕获, 直接 forward)。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_llm_test_connection
+        """R2: CancelledError 传播 (command 不捕获, 直接 forward)。"""
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.ai_service.AIService") as mock_service:
             mock_service.test_connection = AsyncMock(side_effect=asyncio.CancelledError())
             with pytest.raises(asyncio.CancelledError):
                 asyncio.run(
-                    _on_llm_test_connection(
+                    AIBrainSettingsViewModel.test_connection(
                         provider="openai",
                         model="gpt-4",
                         base_url="https://api.openai.com",
@@ -1153,78 +1159,86 @@ class TestOnLLMTestConnection:
 
 
 class TestOnReloadAIService:
-    """_on_reload_ai_service: 成功/异常/CancelledError。"""
+    """AIBrainSettingsViewModel.reload_service: 成功/异常/CancelledError。
+
+    Phase 3.2 P1-1: _on_reload_ai_service 下沉为 VM 静态 command
+    (ui.viewmodels.ai_brain_settings_view_model.AIBrainSettingsViewModel.reload_service)。
+    """
 
     def test_success_path(self) -> None:
         """成功: AIService().reload_config 完成。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_reload_ai_service
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.ai_service.AIService") as mock_ai_cls:
             mock_inst = MagicMock()
             mock_inst.reload_config = AsyncMock(return_value=None)
             mock_ai_cls.return_value = mock_inst
-            asyncio.run(_on_reload_ai_service())
+            asyncio.run(AIBrainSettingsViewModel.reload_service())
             mock_inst.reload_config.assert_called_once()
 
     def test_exception_propagates(self) -> None:
         """AIService().reload_config 抛 Exception → 传播。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_reload_ai_service
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.ai_service.AIService") as mock_ai_cls:
             mock_inst = MagicMock()
             mock_inst.reload_config = AsyncMock(side_effect=RuntimeError("reload boom"))
             mock_ai_cls.return_value = mock_inst
             with pytest.raises(RuntimeError, match="reload boom"):
-                asyncio.run(_on_reload_ai_service())
+                asyncio.run(AIBrainSettingsViewModel.reload_service())
 
     def test_cancelled_error_propagates(self) -> None:
         """R2: CancelledError 传播。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_reload_ai_service
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.ai_service.AIService") as mock_ai_cls:
             mock_inst = MagicMock()
             mock_inst.reload_config = AsyncMock(side_effect=asyncio.CancelledError())
             mock_ai_cls.return_value = mock_inst
             with pytest.raises(asyncio.CancelledError):
-                asyncio.run(_on_reload_ai_service())
+                asyncio.run(AIBrainSettingsViewModel.reload_service())
 
 
 class TestOnVerifyLocalModel:
-    """_on_verify_local_model: 成功/异常/CancelledError。"""
+    """AIBrainSettingsViewModel.verify_local_model: 成功/异常/CancelledError。
+
+    Phase 3.2 P1-1: _on_verify_local_model 下沉为 VM 静态 command
+    (ui.viewmodels.ai_brain_settings_view_model.AIBrainSettingsViewModel.verify_local_model)。
+    """
 
     def test_success_path(self) -> None:
         """成功: LocalModelManager.get_instance + load_model 返回 True。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_verify_local_model
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.local_model_manager.LocalModelManager") as mock_lmm:
             mock_inst = MagicMock()
             mock_inst.load_model = AsyncMock(return_value=True)
             mock_lmm.get_instance = AsyncMock(return_value=mock_inst)
-            result = asyncio.run(_on_verify_local_model("/fake/path.gguf", {"n_threads": 4}))
+            result = asyncio.run(AIBrainSettingsViewModel.verify_local_model("/fake/path.gguf", {"n_threads": 4}))
             assert result is True
             mock_inst.load_model.assert_called_once_with("/fake/path.gguf", {"n_threads": 4}, is_verification=True)
 
     def test_exception_propagates(self) -> None:
         """load_model 抛 Exception → 传播。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_verify_local_model
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.local_model_manager.LocalModelManager") as mock_lmm:
             mock_inst = MagicMock()
             mock_inst.load_model = AsyncMock(side_effect=RuntimeError("load boom"))
             mock_lmm.get_instance = AsyncMock(return_value=mock_inst)
             with pytest.raises(RuntimeError, match="load boom"):
-                asyncio.run(_on_verify_local_model("/fake/path.gguf", {}))
+                asyncio.run(AIBrainSettingsViewModel.verify_local_model("/fake/path.gguf", {}))
 
     def test_cancelled_error_propagates(self) -> None:
         """R2: CancelledError 传播。"""
-        from ui.views.settings_tabs.ai_brain_tab import _on_verify_local_model
+        from ui.viewmodels.ai_brain_settings_view_model import AIBrainSettingsViewModel
 
         with patch("services.local_model_manager.LocalModelManager") as mock_lmm:
             mock_inst = MagicMock()
             mock_inst.load_model = AsyncMock(side_effect=asyncio.CancelledError())
             mock_lmm.get_instance = AsyncMock(return_value=mock_inst)
             with pytest.raises(asyncio.CancelledError):
-                asyncio.run(_on_verify_local_model("/fake/path.gguf", {}))
+                asyncio.run(AIBrainSettingsViewModel.verify_local_model("/fake/path.gguf", {}))
 
 
 # ============================================================================
