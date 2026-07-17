@@ -8,11 +8,11 @@
 - 月度统计表格
 
 变更要点（Phase 3.2.6）：
-- 旧命令式 Container 子类 → ``@ft.component def BacktestResultPanel(result, chart_min_height)``
-- 纯展示组件（接收 result/chart_min_height props），按 project_memory 责任分层原则
+- 旧命令式 Container 子类 → ``@ft.component def BacktestResultPanel(result)``
+- 纯展示组件（接收 result props），按 project_memory 责任分层原则
   用 ``use_state`` 管理 trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
 - i18n 通过 ``ft.use_state(get_observable_state)`` 订阅自动重渲染
-- 移除命令式生命周期回调、手动 update、手动 locale 刷新、set_result/set_chart_min_height 方法
+- 移除命令式生命周期回调、手动 update、手动 locale 刷新、set_result 方法
 - 消费方 BacktestView 通过重新实例化推送 props（过渡期，Task 3.6.3 BacktestView 声明式
   重写后改为父组件 state 驱动）
 - 提取模块级纯函数（颜色判断/metric_card/各子构建器），可独立单测
@@ -206,7 +206,7 @@ def _build_empty_content() -> ft.Column:
     )
 
 
-def _build_nav_chart(result: BacktestResult | None, chart_min_height: int | None) -> ft.Container:
+def _build_nav_chart(result: BacktestResult | None) -> ft.Container:
     if not result or result.nav_curve.is_empty():
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_nav_data"), color=AppColors.TEXT_SECONDARY),
@@ -234,8 +234,6 @@ def _build_nav_chart(result: BacktestResult | None, chart_min_height: int | None
         padding=16,
         expand=True,
     )
-    if chart_min_height is not None:
-        container.height = chart_min_height
     return container
 
 
@@ -302,9 +300,19 @@ def _build_trades_table(
 
     pagination = ft.Row(
         [
-            ft.IconButton(ft.Icons.NAVIGATE_BEFORE, on_click=_prev_page, disabled=trades_page == 0),
+            ft.IconButton(
+                ft.Icons.NAVIGATE_BEFORE,
+                on_click=_prev_page,
+                disabled=trades_page == 0,
+                tooltip=I18n.get("common_prev_page"),
+            ),
             page_info,
-            ft.IconButton(ft.Icons.NAVIGATE_NEXT, on_click=_next_page, disabled=trades_page >= total_pages - 1),
+            ft.IconButton(
+                ft.Icons.NAVIGATE_NEXT,
+                on_click=_next_page,
+                disabled=trades_page >= total_pages - 1,
+                tooltip=I18n.get("common_next_page"),
+            ),
         ],
         alignment=ft.MainAxisAlignment.CENTER,
         spacing=8,
@@ -331,7 +339,7 @@ def _build_trades_table(
     )
 
 
-def _build_ic_chart(result: BacktestResult | None, chart_min_height: int | None) -> ft.Container:
+def _build_ic_chart(result: BacktestResult | None) -> ft.Container:
     if not result or len(result.ic_series) == 0:
         return ft.Container(
             content=ft.Text(I18n.get("backtest_no_ic_data"), color=AppColors.TEXT_SECONDARY),
@@ -361,8 +369,6 @@ def _build_ic_chart(result: BacktestResult | None, chart_min_height: int | None)
         padding=16,
         expand=True,
     )
-    if chart_min_height is not None:
-        container.height = chart_min_height
     return container
 
 
@@ -420,7 +426,6 @@ def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
 
 def _build_content(
     result: BacktestResult,
-    chart_min_height: int | None,
     trades_page: int,
     set_trades_page: Callable[[int], None],
     selected_tab: int,
@@ -458,9 +463,9 @@ def _build_content(
                         ft.TabBarView(
                             expand=True,
                             controls=[
-                                _build_nav_chart(result, chart_min_height),
+                                _build_nav_chart(result),
                                 _build_trades_table(result, trades_page, set_trades_page),
-                                _build_ic_chart(result, chart_min_height),
+                                _build_ic_chart(result),
                                 _build_monthly_table(result),
                             ],
                         ),
@@ -476,19 +481,17 @@ def _build_content(
 @ft.component
 def BacktestResultPanel(
     result: BacktestResult | None = None,
-    chart_min_height: int | None = None,
 ) -> ft.Container:
     """回测结果展示面板（声明式）。
 
     CLAUDE.md §3.2 MVVM + §3.3 声明式范式：
-    - 纯展示组件（接收 result/chart_min_height props），用 ``use_state`` 管理
+    - 纯展示组件（接收 result props），用 ``use_state`` 管理
       trades_page/selected_tab（UI 局部状态），不建 VM（YAGNI）
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-    - 无 page ref / 生命周期回调 / 手动刷新 / set_result / set_chart_min_height
+    - 无 page ref / 生命周期回调 / 手动刷新 / set_result
 
     Args:
         result: 回测结果（None 时显示空状态）
-        chart_min_height: 图表区最小高度（None 时不设置）
     """
     # --- Subscribe to i18n changes (auto-rerender on locale switch) ---
     ft.use_state(get_observable_state)
@@ -502,7 +505,6 @@ def BacktestResultPanel(
     else:
         content = _build_content(
             result,
-            chart_min_height,
             trades_page,
             set_trades_page,
             selected_tab,

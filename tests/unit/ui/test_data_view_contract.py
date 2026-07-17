@@ -1318,10 +1318,8 @@ class TestTableViewerTabEventHandlers:
 
         page.show_toast.assert_called_once()
 
-    @patch("ui.views.data_view.ThreadPoolManager")
     def test_export_with_data_writes_csv(
         self,
-        mock_tp_cls,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
@@ -1330,12 +1328,9 @@ class TestTableViewerTabEventHandlers:
         """_export_csv: 非空 DataFrame + save_file 返回路径 → 写 CSV + show_toast(success)。"""
         from ui.views.data_view import TableViewerTab
 
-        mock_tp = MagicMock()
-        mock_tp_cls.return_value = mock_tp
-        mock_tp.run_async = AsyncMock(return_value=None)
-
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame({"ts_code": ["000001"], "name": ["测试"]})
+        vm.write_csv = AsyncMock(return_value=None)
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)
@@ -1853,10 +1848,8 @@ class TestTableViewerTabAsyncErrorPaths:
         btn_next = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
         btn_next.on_click(MagicMock())
 
-    @patch("ui.views.data_view.ThreadPoolManager")
     def test_export_csv_write_failure_shows_error_toast(
         self,
-        mock_tp_cls,
         mock_i18n_state,
         mock_app_colors_state,
         mock_metadata,
@@ -1865,12 +1858,9 @@ class TestTableViewerTabAsyncErrorPaths:
         """_export_csv: 文件写入失败 → show_toast(error) (data_export_fail)。"""
         from ui.views.data_view import TableViewerTab
 
-        mock_tp = MagicMock()
-        mock_tp_cls.return_value = mock_tp
-        mock_tp.run_async = AsyncMock(side_effect=RuntimeError("disk full"))
-
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
         vm._current_data = pd.DataFrame({"ts_code": ["000001"]})
+        vm.write_csv = AsyncMock(side_effect=RuntimeError("disk full"))
         component = make_component(TableViewerTab, vm=vm)
         page = _make_fake_page()
         result, page = _mount(component, page=page)

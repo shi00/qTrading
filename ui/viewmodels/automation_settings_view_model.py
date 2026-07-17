@@ -18,8 +18,9 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.thread_pool import TaskType, ThreadPoolManager
 
@@ -44,7 +45,7 @@ class AutomationSettingsState:
     is_saving: bool = False
 
 
-class AutomationSettingsViewModel:
+class AutomationSettingsViewModel(ObservableViewModelMixin[AutomationSettingsState]):
     """AutomationTab/NotificationsTab 配置编排 ViewModel。
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -61,33 +62,6 @@ class AutomationSettingsViewModel:
         self._state = AutomationSettingsState()
         self._subscribers: list[Callable[[AutomationSettingsState], None]] = []
         self._load_config_to_state()
-
-    # --- State snapshot + subscribe/_notify ---
-
-    @property
-    def state(self) -> AutomationSettingsState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[AutomationSettingsState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
-
-    def dispose(self) -> None:
-        self._subscribers.clear()
 
     # --- Config loading ---
 

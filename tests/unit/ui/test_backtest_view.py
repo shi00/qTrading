@@ -38,13 +38,14 @@ class TestBacktestViewDeclarativeContract:
     def test_no_page_parameter(self):
         """声明式组件无 page 参数（page 通过 ft.context.page 访问）。"""
         params = list(inspect.signature(BacktestView).parameters.keys())
-        assert params == [], f"BacktestView 不应有参数，实际: {params}"
+        assert "page" not in params, "BacktestView 不应接收 page 参数"
+        assert "page_ref" not in params, "BacktestView 不应接收 page_ref 参数"
 
     def test_source_has_ft_component_decorator(self):
         """源码必须有 @ft.component 装饰器。"""
         src = _source_text()
         assert "@ft.component" in src
-        assert "def BacktestView() -> ft.Container:" in src
+        assert "def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:" in src
 
     def test_uses_use_viewmodel(self):
         """必须通过 use_viewmodel 消费 BacktestViewModel。"""

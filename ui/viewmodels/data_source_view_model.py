@@ -12,17 +12,19 @@ VM 不感知 locale: i18n 消息用 Message (key + params) 透传.
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from utils.config_handler import ConfigHandler
 from utils.error_classifier import classify_error
+from utils.thread_pool import TaskType, ThreadPoolManager
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
 from data.external.tushare_client import TushareClient
 from services.ai_service import AIService
 from services.task_manager import AppTask, TaskManager, TaskStatus
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +102,7 @@ class DataSourceState:
     cache_cleared_version: int = 0
 
 
-class DataSourceViewModel:
+class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     """ViewModel for DataSourceTab — manages data source business logic.
 
     L771 合规: state 字段全部用 frozen dataclass / Message,
@@ -133,31 +135,27 @@ class DataSourceViewModel:
         # --- Snack seq counter (内部计数, 确保 SnackRow.seq 递增) ---
         self._snack_seq = 0
 
-    # ------------------------------------------------------------------
-    # State / subscribe / notify
-    # ------------------------------------------------------------------
+        # --- TaskManager 订阅 (Phase 3.1: 从 View 下沉到 VM, 内部行为) ---
+        # _tm_callback 持有订阅 callback 引用, dispose 时用于 unsubscribe
+        self._tm_callback: Callable[[list[AppTask]], None] | None = None
+        self._subscribe_to_task_manager()
 
-    @property
-    def state(self) -> DataSourceState:
-        return self._state
+    def _subscribe_to_task_manager(self) -> None:
+        """订阅 TaskManager 任务状态更新 (内部行为, View 不感知).
 
-    def subscribe(self, callback: Callable[[DataSourceState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
+        Phase 3.1: 原 View 的 _setup_tm_subscription/_cleanup_tm_subscription 下沉到 VM,
+        VM 构造时自动订阅, dispose 时取消订阅.
+        """
+        if self._tm_callback is not None:
+            return
+        self._tm_callback = self.handle_task_update
+        self._tm.subscribe(self._tm_callback)
 
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
+    def _unsubscribe_from_task_manager(self) -> None:
+        """取消 TaskManager 订阅 (dispose 时调用)."""
+        if self._tm_callback is not None:
+            self._tm.unsubscribe(self._tm_callback)
+            self._tm_callback = None
 
     def _cancel_all_active_tasks(self):
         """取消所有活跃任务（防孤儿），再清 _active_task_ids。
@@ -174,11 +172,12 @@ class DataSourceViewModel:
         self._active_task_ids.clear()
 
     def dispose(self):
-        """清理资源：先取消所有活跃任务（防孤儿），再清引用与状态。
+        """清理资源：先取消订阅 + 取消活跃任务（防孤儿），再清引用与状态。
 
         cancellable=False 任务（如 cache_clear）的 cancel_task 是 no-op（TaskManager 记 warning），
         任务将继续运行至完成——属设计意图（不可取消任务应原子完成）。
         """
+        self._unsubscribe_from_task_manager()
         self._cancel_all_active_tasks()
         self._subscribers.clear()
         self._state = DataSourceState()
@@ -510,18 +509,35 @@ class DataSourceViewModel:
 
     # --- Config Operations ---
 
-    def save_tushare_token(self, token: str):
-        """Save Tushare token to config and update client."""
+    def get_history_years(self) -> int:
+        """读取历史数据年限配置 (供 View 渲染初始值).
+
+        Phase 3.1: 从 View 下沉 (原 View 直接调 ConfigHandler.get_init_history_years).
+        """
+        return ConfigHandler.get_init_history_years()
+
+    async def save_tushare_token(self, token: str) -> None:
+        """异步保存 Tushare token 到配置并更新客户端 (R16: IO offload via ThreadPoolManager).
+
+        Phase 3.1: 从 View 下沉 (原 View 用 ThreadPoolManager.run_async 包 sync VM 方法).
+        """
         token = token.strip()
         if not token:
             return
+        await ThreadPoolManager().run_async(TaskType.IO, self._save_tushare_token_sync, token)
+
+    def _save_tushare_token_sync(self, token: str) -> None:
+        """同步写入 token (供 ThreadPoolManager 调度, R16 IO offload)."""
         ConfigHandler.save_token(token)
         client = TushareClient()
         client.set_token(token)
 
-    def set_history_years(self, years: int):
-        """Save history years config."""
-        ConfigHandler.set_init_history_years(years)
+    async def set_history_years(self, years: int) -> None:
+        """异步保存历史年限配置 (R16: IO offload via ThreadPoolManager).
+
+        Phase 3.1: 从 View 下沉 (原 View 用 ThreadPoolManager.run_async 包 sync VM 方法).
+        """
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_init_history_years, years)
 
     # --- Task State Management ---
 

@@ -16,7 +16,7 @@
   View 渲染直接从 state 读取, 无 dual-track (移除 use_state 快照 + use_effect 拉取)
 - snack 瞬态通知用 ``use_effect`` 监听 ``state.snack.seq`` 触发 show_snack_callback
 - cache_cleared 瞬态信号用 ``use_effect`` 监听 ``state.cache_cleared_version`` 广播 PubSub
-- TaskManager 订阅用 ``use_effect(setup, [], cleanup=cleanup)``
+- TaskManager 订阅下沉到 VM (Phase 3.1: VM 构造时订阅, dispose 时取消; View 不感知)
 - AlertDialog 用 ``use_state(open)`` + ``ft.use_dialog()`` 条件渲染
 - 异步任务用 ``page.run_task``, R2 CancelledError 必须 raise (不被 except Exception 捕获)
 """
@@ -27,7 +27,7 @@ from collections.abc import Callable
 
 import flet as ft
 
-from services.task_manager import AppTask, TaskManager, TaskStatus
+from services.task_manager import TaskStatus
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
 from ui.components.health_report_dialog import HealthReportDialog, HealthScanDialog
 from ui.components.settings_widgets import (
@@ -44,11 +44,9 @@ from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
-from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +241,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     # --- Async handlers (R2: except Exception 不捕获 CancelledError) ---
     async def _do_tushare_save(token: str) -> None:
         try:
-            await ThreadPoolManager().run_async(TaskType.IO, vm.save_tushare_token, token)
+            await vm.save_tushare_token(token)
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_msg_saved"), color=AppColors.SUCCESS)
         except asyncio.CancelledError:
@@ -260,7 +258,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     async def _do_history_years_change(new_val: str) -> None:
         try:
             val = int(new_val)
-            await ThreadPoolManager().run_async(TaskType.IO, vm.set_history_years, val)
+            await vm.set_history_years(val)
             if show_snack_callback:
                 show_snack_callback(I18n.get("common_saved"), color=AppColors.SUCCESS)
         except asyncio.CancelledError:
@@ -444,28 +442,6 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         page = _get_page()
         if page is not None and callback is not None:
             page.run_task(callback)
-
-    # --- TaskManager 订阅 (use_effect + cleanup) ---
-    tm_ref = ft.use_ref(lambda: TaskManager())
-    tm = tm_ref.current
-    assert tm is not None
-
-    # 用 ref 持久化 task_update callback, 保证 subscribe/unsubscribe 引用同一函数
-    task_update_cb_ref = ft.use_ref(lambda: None)
-
-    def _setup_tm_subscription() -> None:
-        def _on_task_update(current_tasks: list[AppTask]) -> None:
-            vm.handle_task_update(current_tasks)
-
-        task_update_cb_ref.current = _on_task_update
-        tm.subscribe(_on_task_update)
-
-    def _cleanup_tm_subscription() -> None:
-        if task_update_cb_ref.current is not None:
-            tm.unsubscribe(task_update_cb_ref.current)
-            task_update_cb_ref.current = None
-
-    ft.use_effect(_setup_tm_subscription, dependencies=[], cleanup=_cleanup_tm_subscription)
 
     # --- Mount: recover stale state + reload tushare config ---
     def _on_mount() -> None:
@@ -778,7 +754,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         disabled=actions_disabled and not (state.is_syncing and state.init_sync_cancellable),
     )
 
-    years_value = str(ConfigHandler.get_init_history_years())
+    years_value = str(vm.get_history_years())
     history_years_dropdown = ft.Dropdown(
         label=I18n.get("settings_history_range"),
         value=years_value,

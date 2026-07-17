@@ -1,4 +1,4 @@
-"""ai_brain_tab — 声明式组件 (Phase E.1 + Task 5.2 Settings VM 下沉).
+"""ai_brain_tab — 声明式组件 (Phase E.1 + Task 5.2 + Phase 3.2 P1-1).
 
 从命令式容器子类重写为 ``@ft.component`` 函数组件范式
 (CLAUDE.md §3.2 MVVM, §3.3 声明式 UI).
@@ -10,13 +10,15 @@
 - AIBrainSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
   构造注入 3 个子 VM (复用现有 config panel VM, 不再包一层薄 VM, §1.3 拒绝过度抽象),
   收敛 ConfigHandler/ThreadPoolManager 业务编排 (AI 调优参数 + 三阶段保存状态机)
+- Phase 3.2 P1-1: AIService/LocalModelManager/ThreadPoolManager 业务编排全部下沉到 VM
+  (test_connection/reload_service/verify_local_model 静态 command + MD5 检查整合进
+  save_ai_settings); View 不再 lazy import 任何业务对象, 仅调 save_ai_settings() 并据
+  state.save_state/state.warning_message 展示反馈
 - 消费已声明式 LLMConfigPanel/LocalModelConfigPanel/FailoverConfigPanel (函数调用, vm props 推送)
 - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 订阅自动重渲染
 - save_state 从 ai_settings_state.save_state 派生 (声明式自动重渲染)
 - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
 - 异步保存: ``page.run_task`` 调度; R2 CancelledError 显式 raise
-- View 不再直接写 ConfigHandler / 编排 ThreadPoolManager (Task 5.2 DoD);
-  MD5 检查为 UI 反馈逻辑保留在 View (只读访问 LocalModelManager, 不编排业务流程)
 """
 
 import asyncio
@@ -80,40 +82,6 @@ def _validate_prompt_or_warn(prompt: str, show_snack: Callable) -> bool:
     return True
 
 
-async def _on_llm_test_connection(
-    provider: str,
-    model: str,
-    base_url: str,
-    api_key: str,
-    **kwargs,
-) -> dict:
-    """LLM 连接测试回调（注入 LLMConfigPanelViewModel/FailoverConfigPanelViewModel）。"""
-    from services.ai_service import AIService
-
-    return await AIService.test_connection(
-        provider=provider,
-        model=model,
-        base_url=base_url,
-        api_key=api_key,
-        **kwargs,
-    )
-
-
-async def _on_reload_ai_service() -> None:
-    """重载 AIService 配置回调（注入 LLMConfigPanelViewModel）。"""
-    from services.ai_service import AIService
-
-    await AIService().reload_config()
-
-
-async def _on_verify_local_model(model_path: str, config: dict) -> bool:
-    """验证本地模型回调（注入 LocalModelConfigPanelViewModel）。"""
-    from services.local_model_manager import LocalModelManager
-
-    manager = await LocalModelManager.get_instance()
-    return await manager.load_model(model_path, config, is_verification=True)
-
-
 def _show_saved_snack(show_snack: Callable) -> None:
     """配置保存成功 snack（注入 LLM/failover/local_model VM 的 on_save 回调）。"""
     show_snack(I18n.get("settings_verify_success"), color=AppColors.SUCCESS)
@@ -134,13 +102,15 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     - AIBrainSettingsViewModel 通过 ``use_viewmodel(factory=)`` 内部模式实例化 (Task 5.2),
       构造注入 3 个子 VM (复用 save_config/get_current_config API), 收敛
       ConfigHandler/ThreadPoolManager 业务编排 (验证/保存/重载状态机)
+    - Phase 3.2 P1-1: 子 VM 业务回调 (test_connection/reload_service/verify_local_model)
+      注入 AIBrainSettingsViewModel 静态 command; View 不再 lazy import 业务对象
     - 消费已声明式 LLMConfigPanel/LocalModelConfigPanel/FailoverConfigPanel (函数调用, vm props)
     - i18n/theme 通过 ``ft.use_state(*.get_observable_state)`` 自动重渲染
     - save_state 从 ai_settings_state.save_state 派生 (声明式自动重渲染)
     - page 访问: ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 异步保存: ``page.run_task`` 调度, R2 CancelledError 显式 raise
-    - View 不再直接写 ConfigHandler / 编排 ThreadPoolManager (Task 5.2 DoD);
-      MD5 检查为 UI 反馈逻辑保留在 View (只读访问 LocalModelManager, 不编排业务流程)
+    - View 仅调 ai_settings_vm.save_ai_settings() 并据 state.save_state/
+      state.warning_message 展示反馈 (业务编排全部下沉到 VM)
 
     Args:
         show_snack_callback: 消费方(SettingsView)传入的 snackbar 触发函数
@@ -151,22 +121,23 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- 3 子 VM (内部模式: hook 实例化 + dispose on unmount) ---
     # VM 工厂仅首次渲染调用一次 (use_viewmodel 内部 use_ref 持久化)
+    # Phase 3.2 P1-1: 业务回调注入 AIBrainSettingsViewModel 静态 command (View 不再 lazy import)
     _llm_state, llm_vm = use_viewmodel(
         factory=lambda: LLMConfigPanelViewModel(
-            on_test_connection=_on_llm_test_connection,
-            on_reload_service=_on_reload_ai_service,
+            on_test_connection=AIBrainSettingsViewModel.test_connection,
+            on_reload_service=AIBrainSettingsViewModel.reload_service,
             on_save=lambda: _show_saved_snack(show_snack_callback),
         )
     )
     _failover_state, failover_vm = use_viewmodel(
         factory=lambda: FailoverConfigPanelViewModel(
-            on_test_connection=_on_llm_test_connection,
+            on_test_connection=AIBrainSettingsViewModel.test_connection,
             on_save=lambda: _show_saved_snack(show_snack_callback),
         )
     )
     _local_state, local_vm = use_viewmodel(
         factory=lambda: LocalModelConfigPanelViewModel(
-            on_verify_model=_on_verify_local_model,
+            on_verify_model=AIBrainSettingsViewModel.verify_local_model,
             on_save=lambda: _show_saved_snack(show_snack_callback),
         )
     )
@@ -180,70 +151,40 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         )
     )
 
-    # --- Pure UI state (从 VM.state 读取初始值, use_state 持久化本地输入态) ---
-    max_candidates_value, set_max_candidates = ft.use_state(ai_settings_state.max_candidates_value)
-    min_turnover_value, set_min_turnover = ft.use_state(ai_settings_state.min_turnover_value)
-    ai_concurrency_value, set_ai_concurrency = ft.use_state(ai_settings_state.ai_concurrency_value)
-    news_concurrency_value, set_news_concurrency = ft.use_state(ai_settings_state.news_concurrency_value)
-    ai_prompt_value, set_ai_prompt = ft.use_state(ai_settings_state.ai_prompt_value)
-    news_prompt_value, set_news_prompt = ft.use_state(ai_settings_state.news_prompt_value)
+    # --- Pure UI state (VM state 是唯一真值源, 无 use_state 本地副本) ---
 
     # --- 异步保存 (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_save_ai_settings() -> None:
         """保存 AI 配置 (云端 LLM + 本地模型 + 调优参数).
 
-        通过 AIBrainSettingsViewModel.save_ai_settings() 完成三阶段保存状态机
-        (验证 → 持久化 → 重载), View 仅负责 UI 反馈 (snack) 与 MD5 检查显示。
-        R2: CancelledError 显式 raise。
+        Phase 3.2 P1-1: View 仅调 ai_settings_vm.save_ai_settings() 并据
+        ai_settings_vm.state.save_state / state.warning_message 展示反馈;
+        业务编排 (含 MD5 检查) 全部下沉到 VM。R2: CancelledError 显式 raise。
         """
-        from services.local_model_manager import LocalModelManager
-        from utils.thread_pool import TaskType, ThreadPoolManager
-
         UILogger.log_action("AIBrainTab", "Click", "btn_save_ai")
 
         # Prompt 验证 (UI 反馈逻辑, 保留在 View)
-        if not _validate_prompt_or_warn(ai_prompt_value, show_snack_callback):
+        if not _validate_prompt_or_warn(ai_settings_state.ai_prompt_value, show_snack_callback):
             return
-        if not _validate_prompt_or_warn(news_prompt_value, show_snack_callback):
+        if not _validate_prompt_or_warn(ai_settings_state.news_prompt_value, show_snack_callback):
             return
-
-        # 同步本地输入态到 VM state (声明式: VM state 是 SSOT)
-        ai_settings_vm.set_max_candidates_value(max_candidates_value)
-        ai_settings_vm.set_min_turnover_value(min_turnover_value)
-        ai_settings_vm.set_ai_concurrency_value(ai_concurrency_value)
-        ai_settings_vm.set_news_concurrency_value(news_concurrency_value)
-        ai_settings_vm.set_ai_prompt_value(ai_prompt_value)
-        ai_settings_vm.set_news_prompt_value(news_prompt_value)
 
         try:
-            success = await ai_settings_vm.save_ai_settings()
-            if not success:
-                # VM 内部已设置 save_state=SAVE_ERROR, 此处仅 UI 反馈
+            await ai_settings_vm.save_ai_settings()
+            # VM 内部已完成三阶段保存 + MD5 检查, 据 state 反馈 UI
+            # (异步流程中读 ai_settings_vm.state 拿最新值, 非 use_viewmodel 快照)
+            current_state = ai_settings_vm.state
+            if current_state.save_state == SAVE_ERROR:
                 show_snack_callback(I18n.get("settings_save_failed"), color=AppColors.ERROR)
-                return
-
-            # 保存成功后的 UI 反馈: 模型文件 MD5 检查显示 snack
-            # NOTE(lazy): MD5 检查为 UI 反馈逻辑保留在 View, 只读访问 LocalModelManager. ceiling: 仅本地模型保存场景. upgrade: 若 MD5 检查业务化需下沉到 VM.
-            local_config = local_vm.get_current_config()
-            local_path = local_config.get("model_path", "")
-            if local_path:
-                show_snack_callback(I18n.get("ai_verifying_model"))
-                local_mgr = await LocalModelManager.get_instance()
-                loaded_md5 = local_mgr.get_loaded_model_md5()
-                new_md5 = await ThreadPoolManager().run_async(
-                    TaskType.IO,
-                    LocalModelManager.calculate_file_md5,
-                    local_path,
-                )
-                if loaded_md5 and new_md5 and loaded_md5 != new_md5:
+            elif current_state.save_state == SAVE_SUCCESS:
+                # warning_message 非空表示 MD5 检查发现模型文件变化 (VM 已写入 i18n key)
+                if current_state.warning_message:
                     show_snack_callback(
-                        I18n.get("ai_local_model_changed"),
+                        I18n.get(current_state.warning_message),
                         color=AppColors.WARNING,
                     )
                 else:
                     show_snack_callback(I18n.get("settings_snack_ai_saved"))
-            else:
-                show_snack_callback(I18n.get("settings_snack_ai_saved"))
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
@@ -273,84 +214,84 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_save_ai_settings)
 
     def _on_reset_ai_prompt(_e: ft.ControlEvent) -> None:
-        set_ai_prompt(DEFAULT_AI_PROMPT)
+        ai_settings_vm.set_ai_prompt_value(DEFAULT_AI_PROMPT)
         show_snack_callback(I18n.get("settings_snack_prompt_reset"))
 
     def _on_reset_news_prompt(_e: ft.ControlEvent) -> None:
-        set_news_prompt(DEFAULT_NEWS_PROMPT)
+        ai_settings_vm.set_news_prompt_value(DEFAULT_NEWS_PROMPT)
         show_snack_callback(I18n.get("settings_snack_prompt_reset"))
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     ai_max_candidates_input = ft.TextField(
         label=I18n.get("settings_max_candidates"),
-        value=max_candidates_value,
+        value=ai_settings_state.max_candidates_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=30),
         tooltip=I18n.get("settings_hint_ai_cost"),
-        on_change=lambda e: set_max_candidates(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_max_candidates_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     strategy_min_turnover_input = ft.TextField(
         label=I18n.get("settings_min_turnover"),
-        value=min_turnover_value,
+        value=ai_settings_state.min_turnover_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=2.0),
         tooltip=I18n.get("settings_hint_turnover"),
-        on_change=lambda e: set_min_turnover(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_min_turnover_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_concurrency_input = ft.TextField(
         label=I18n.get("settings_ai_concurrency"),
-        value=ai_concurrency_value,
+        value=ai_settings_state.ai_concurrency_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=5),
         tooltip=I18n.get("settings_hint_ai_model"),
-        on_change=lambda e: set_ai_concurrency(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_ai_concurrency_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_news_concurrency_input = ft.TextField(
         label=I18n.get("settings_ai_news_concurrency"),
-        value=news_concurrency_value,
+        value=ai_settings_state.news_concurrency_value,
         width=_INPUT_WIDTH_SMALL,
         keyboard_type=ft.KeyboardType.NUMBER,
         hint_text=I18n.get("ai_hint_default").format(val=1),
         tooltip=I18n.get("settings_hint_ai_news_concurrency"),
-        on_change=lambda e: set_news_concurrency(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_news_concurrency_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_prompt_input = ft.TextField(
         label=I18n.get("settings_ai_prompt"),
-        value=ai_prompt_value,
+        value=ai_settings_state.ai_prompt_value,
         multiline=True,
         min_lines=5,
         max_lines=15,
         text_size=_FONT_SIZE_BODY,
         hint_text=I18n.get("settings_ai_prompt_hint"),
-        on_change=lambda e: set_ai_prompt(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_ai_prompt_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
     )
     ai_news_prompt_input = ft.TextField(
         label=I18n.get("settings_news_prompt"),
-        value=news_prompt_value,
+        value=ai_settings_state.news_prompt_value,
         multiline=True,
         min_lines=3,
         max_lines=10,
         text_size=_FONT_SIZE_BODY,
         hint_text=I18n.get("settings_news_prompt_hint"),
-        on_change=lambda e: set_news_prompt(e.control.value),
+        on_change=lambda e: ai_settings_vm.set_news_prompt_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,

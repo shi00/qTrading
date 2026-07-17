@@ -14,7 +14,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from utils.config_handler import ConfigHandler
 from utils.correlation import ensure_correlation_id
@@ -22,6 +22,7 @@ from utils.error_classifier import classify_error
 from utils.thread_pool import TaskType, ThreadPoolManager
 from data.data_processor import DataProcessor
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +154,10 @@ class OnboardingState:
     schedule_enabled: bool = True
     schedule_time: str = "16:30"
     normalized_schedule_time: str = "16:30"
+    init_history_years: int = 3
 
 
-class OnboardingViewModel:
+class OnboardingViewModel(ObservableViewModelMixin[OnboardingState]):
     """ViewModel for OnboardingWizard — MVVM-003 fix.
 
     Panel operations are injected as Callable via bind() to avoid
@@ -181,34 +183,8 @@ class OnboardingViewModel:
         self.on_complete: Callable[[], Awaitable[None]] | None = None
 
         # --- State snapshot + subscribers ---
-        self._state: OnboardingState = OnboardingState()
         self._subscribers: list[Callable[[OnboardingState], None]] = []
-
-    # ------------------------------------------------------------------
-    # State / subscribe / notify
-    # ------------------------------------------------------------------
-
-    @property
-    def state(self) -> OnboardingState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[OnboardingState], None]) -> Callable[[], None]:
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
+        self._load_config_to_state()
 
     # ------------------------------------------------------------------
     # Properties (compat with existing View tests, Phase 4 will remove setters)
@@ -253,6 +229,27 @@ class OnboardingViewModel:
         return self._state.normalized_schedule_time
 
     # ------------------------------------------------------------------
+    # Config loading (参照 SystemSettingsViewModel._load_config_to_state 范式)
+    # ------------------------------------------------------------------
+
+    def _load_config_to_state(self) -> None:
+        """从 ConfigHandler 加载配置到 state（同步, 仅在 __init__ 调用一次）。
+
+        读取 auto_update_time / init_history_years，避免 View 直接调用 ConfigHandler。
+        保留 hasattr 守卫以兼容 ConfigHandler.get_init_history_years 缺失场景。
+        """
+        auto_update_time = ConfigHandler.get_auto_update_time()
+        init_history_years = (
+            ConfigHandler.get_init_history_years() if hasattr(ConfigHandler, "get_init_history_years") else 3
+        )
+        self._schedule_time = auto_update_time
+        self._state = OnboardingState(
+            schedule_time=auto_update_time,
+            normalized_schedule_time=auto_update_time,
+            init_history_years=init_history_years,
+        )
+
+    # ------------------------------------------------------------------
     # bind / dispose
     # ------------------------------------------------------------------
 
@@ -278,6 +275,10 @@ class OnboardingViewModel:
             logger.warning(
                 "[OnboardingVM] dispose() called while sync in progress; callbacks cleared, DataProcessor will self-complete"
             )
+        # 取消可能正在进行的本地模型验证 (sync classmethod, safe no-op if no active verification)
+        from services.local_model_manager import LocalModelManager
+
+        LocalModelManager.cancel_verification_if_active()
         self.fn_validate_database = None
         self.fn_validate_token = None
         self.fn_validate_cloud_ai = None
@@ -398,6 +399,26 @@ class OnboardingViewModel:
             schedule_time=time_str,
             normalized_schedule_time=time_str,
         )
+
+    async def save_language(self, new_locale: str) -> bool:
+        """保存语言配置到 ConfigHandler（IO offload via ThreadPoolManager, R16）。
+
+        Returns:
+            True 保存成功; False 保存失败 (ConfigHandler 返回 False 或 IO 异常)。
+        Raises:
+            asyncio.CancelledError: 取消时显式 raise (R2)。
+        """
+        try:
+            success = await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_locale, new_locale)
+            if not success:
+                logger.warning("[OnboardingVM] set_locale returned False for locale=%s", new_locale)
+                return False
+            return True
+        except asyncio.CancelledError:
+            raise  # R2: 必须传播
+        except Exception as ex:
+            logger.error("[OnboardingVM] Save language failed: %s", ex, exc_info=True)
+            return False
 
     def _set_validation_in_progress(self, in_progress: bool):
         self.validation_in_progress = in_progress

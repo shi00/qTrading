@@ -21,6 +21,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -54,7 +55,7 @@ class LocalModelConfigState:
     status_type: str = "info"  # "success" / "error" / "warning" / "info"
 
 
-class LocalModelConfigPanelViewModel:
+class LocalModelConfigPanelViewModel(ObservableViewModelMixin[LocalModelConfigState]):
     """ViewModel for LocalModelConfigPanel.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -86,38 +87,6 @@ class LocalModelConfigPanelViewModel:
         self._subscribers: list[Callable[[LocalModelConfigState], None]] = []
         # 同步初始化 state（从 ConfigHandler 加载配置）
         self._load_config_to_state()
-
-    # --- State snapshot + subscribe/_notify ---
-
-    @property
-    def state(self) -> LocalModelConfigState:
-        """View 只读 state snapshot，不可变。"""
-        return self._state
-
-    def subscribe(self, callback: Callable[[LocalModelConfigState], None]) -> Callable[[], None]:
-        """订阅 state 变化，返回退订函数。"""
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        """state 变化后调所有订阅者，传入新 snapshot。"""
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        """Update state fields and notify subscribers."""
-        self._state = replace(self._state, **changes)
-        self._notify()
-
-    def dispose(self) -> None:
-        """Cleanup resources."""
-        self._subscribers.clear()
 
     # --- Config loading ---
 

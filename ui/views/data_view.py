@@ -31,10 +31,10 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.data_explorer_view_model import DataExplorerViewModel, SqlResultRow, TableRow
+from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -164,12 +164,24 @@ def _ceil_div(n: int, d: int) -> int:
 
 
 @ft.component
-def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
+def TableViewerTab(
+    vm: DataExplorerViewModel,
+    active: bool = True,
+    viewport: ViewportState | None = None,
+) -> ft.Column:
     """Tab 1: 可视化表浏览器 (声明式).
 
     通过 ``use_viewmodel(vm=)`` 外部模式订阅 VM state 变化触发重渲染。
     FilePicker 通过 ``use_ref`` + ``use_effect`` 注册到 ``page.services``。
+
+    Args:
+        vm: 外部传入的 DataExplorerViewModel (由 DataExplorerView 实例化并共享)。
+        active: 当前 tab 是否激活 (控制副作用执行)。
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
+    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
+    _ = viewport
     # --- 订阅 VM state (外部模式) ---
     state, _ = use_viewmodel(vm=vm)
 
@@ -192,6 +204,8 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
     def _setup_file_picker() -> None:
+        if not active:
+            return
         page = _get_page()
         if page is not None and file_picker not in page.services:
             page.services.append(file_picker)
@@ -201,7 +215,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
         if page is not None and file_picker in page.services:
             page.services.remove(file_picker)
 
-    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
+    ft.use_effect(_setup_file_picker, dependencies=[active], cleanup=_cleanup_file_picker)
 
     # --- 异步加载逻辑 (R2: except Exception 不捕获 CancelledError) ---
     async def _load_schema_and_data() -> None:
@@ -219,6 +233,8 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                 page.show_toast(I18n.get("data_err_load_schema"), "error")
 
     async def _init_tables() -> None:
+        if not active:
+            return
         if state.tables_loaded:
             return
         try:
@@ -234,7 +250,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                 page.show_toast(I18n.get("data_err_load_schema"), "error")
 
     # tables_loaded 变化时触发 (mount + cache_cleared stale 重载)
-    ft.use_effect(_init_tables, dependencies=[state.tables_loaded])
+    ft.use_effect(_init_tables, dependencies=[state.tables_loaded, active])
 
     # --- 异步 handler (供 page.run_task 调度) ---
     async def _do_table_change(new_table: str) -> None:
@@ -318,10 +334,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
             )
             if filepath:
                 try:
-                    await ThreadPoolManager().run_async(
-                        TaskType.CPU,
-                        lambda: df.to_csv(filepath, index=False, encoding="utf-8-sig"),
-                    )
+                    await vm.write_csv(df, filepath)
                     filename = os.path.basename(filepath)
                     msg = I18n.get("data_export_success", file=filename)
                     page = _get_page()
@@ -595,6 +608,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                     ft.Icons.CHEVRON_LEFT,
                     on_click=_on_prev_page,
                     disabled=is_loading or state.current_page <= 1,
+                    tooltip=I18n.get("common_prev_page"),
                 ),
                 ft.Text(
                     I18n.get("data_page_num").format(
@@ -606,6 +620,7 @@ def TableViewerTab(vm: DataExplorerViewModel) -> ft.Column:
                     ft.Icons.CHEVRON_RIGHT,
                     on_click=_on_next_page,
                     disabled=is_loading or state.current_page >= total_pages,
+                    tooltip=I18n.get("common_next_page"),
                 ),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -825,7 +840,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
 
 
 @ft.component
-def DataExplorerView() -> ft.Container:
+def DataExplorerView(active: bool = True, viewport: ViewportState | None = None) -> ft.Container:
     """数据浏览器主视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -834,6 +849,11 @@ def DataExplorerView() -> ft.Container:
     - PubSub 通过 ``use_effect(setup, [], cleanup=cleanup)`` 订阅/退订
     - page 访问用 ``ft.context.page`` (try/except 守卫), 不持有 page 引用
     - 子 Tab 通过 ``use_viewmodel(vm=)`` 外部模式订阅同一 VM
+
+    Args:
+        active: 当前 tab 是否激活 (控制副作用执行)。
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)。
     """
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     _state, vm = use_viewmodel(factory=lambda: DataExplorerViewModel())
@@ -852,6 +872,8 @@ def DataExplorerView() -> ft.Container:
             logger.debug("[DataExplorerView] Cache cleared - will reload data on next view")
 
     async def _setup_pubsub() -> None:
+        if not active:
+            return
         try:
             page = ft.context.page
             if page is not None:
@@ -867,7 +889,7 @@ def DataExplorerView() -> ft.Container:
         except RuntimeError:
             pass
 
-    ft.use_effect(_setup_pubsub, dependencies=[], cleanup=_cleanup_pubsub)
+    ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
 
     # --- 事件 handler ---
     def _on_tab_changed(e: ft.ControlEvent) -> None:
@@ -895,7 +917,7 @@ def DataExplorerView() -> ft.Container:
                 tab_bar,
                 ft.TabBarView(
                     expand=True,
-                    controls=[TableViewerTab(vm=vm), SQLConsoleTab(vm=vm)],
+                    controls=[TableViewerTab(vm=vm, active=active, viewport=viewport), SQLConsoleTab(vm=vm)],
                 ),
             ],
         ),

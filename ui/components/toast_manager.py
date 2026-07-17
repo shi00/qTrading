@@ -404,6 +404,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                     icon_size=16,
                     icon_color=ft.Colors.ON_SURFACE_VARIANT,
                     on_click=_on_dismiss_click,
+                    tooltip=I18n.get("common_close"),
                 ),
             ],
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,

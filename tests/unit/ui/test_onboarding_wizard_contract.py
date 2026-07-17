@@ -430,6 +430,7 @@ class _FakeOnboardingState:
     schedule_enabled: bool = True
     schedule_time: str = "16:30"
     normalized_schedule_time: str = "16:30"
+    init_history_years: int = 3
 
 
 class _FakeOnboardingViewModel:
@@ -450,6 +451,7 @@ class _FakeOnboardingViewModel:
         self.skip_step = AsyncMock()
         self.start_sync = AsyncMock()
         self.skip_sync = AsyncMock()
+        self.save_language = AsyncMock(return_value=True)
 
     @property
     def state(self) -> _FakeOnboardingState:
@@ -589,8 +591,8 @@ def mock_onboarding_vms(monkeypatch):
     - DatabaseConfigPanelViewModel / TushareConfigPanelViewModel /
       LLMConfigPanelViewModel / LocalModelConfigPanelViewModel → _FakePanelViewModel
 
-    同时 mock ConfigHandler 方法（避免文件 IO）和
-    LocalModelManager.cancel_verification_if_active（避免 unmount cleanup 副作用）。
+    Phase 3.4 后 view 不再直接调用 ConfigHandler/ThreadPoolManager/LocalModelManager，
+    相关 mock 由 VM 层 fixture 承担（见 test_onboarding_view_model.py）。
     """
     # 确保 ui.views.onboarding_wizard 模块已加载（monkeypatch.setattr 需要模块属性存在）
     import ui.views.onboarding_wizard  # noqa: F401
@@ -622,22 +624,6 @@ def mock_onboarding_vms(monkeypatch):
     monkeypatch.setattr(
         "ui.views.onboarding_wizard.LocalModelConfigPanelViewModel",
         lambda *a, **kw: fake_local_model_vm,
-    )
-
-    monkeypatch.setattr("ui.views.onboarding_wizard.ConfigHandler.get_auto_update_time", lambda: "16:30")
-    monkeypatch.setattr("ui.views.onboarding_wizard.ConfigHandler.get_init_history_years", lambda: 3)
-
-    # Mock ThreadPoolManager 避免 _do_language_change 触发真实线程池
-    mock_tp = MagicMock()
-    mock_tp.run_async = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        "ui.views.onboarding_wizard.ThreadPoolManager",
-        MagicMock(return_value=mock_tp),
-    )
-
-    monkeypatch.setattr(
-        "services.local_model_manager.LocalModelManager.cancel_verification_if_active",
-        MagicMock(),
     )
 
     return {

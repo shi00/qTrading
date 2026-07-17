@@ -9,6 +9,7 @@ import pandas as pd
 from data.data_processor import DataProcessor
 from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.sanitizers import DataSanitizer
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ class HomeState:
     market_stale: bool = False
 
 
-class HomeViewModel:
+class HomeViewModel(ObservableViewModelMixin[HomeState]):
     """
     ViewModel for HomeView.
     Handles data fetching, state management, and service subscriptions.
@@ -97,30 +98,13 @@ class HomeViewModel:
         # Concurrency Control
         self._load_generation = 0  # Prevent race conditions
 
-    @property
-    def state(self) -> HomeState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[HomeState], None]) -> Callable[[], None]:
-        """订阅 state 变更,返回取消订阅函数。"""
-        self._subscribers.append(callback)
-
-        def unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return unsubscribe
-
     def _notify(self) -> None:
-        for cb in self._subscribers:
+        """覆盖 _notify: 用 try/except 包裹 subscriber 调用, 不让单个异常中断通知。"""
+        for cb in list(self._subscribers):
             try:
                 cb(self._state)
             except Exception as e:
                 logger.warning("[HomeVM] Subscriber error: %s", e, exc_info=True)
-
-    def _set_state(self, **changes: Any) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     def init(self) -> None:
         """Initialize subscriptions (无回调参数,View 通过 subscribe 订阅 state)。"""
@@ -128,13 +112,13 @@ class HomeViewModel:
         MarketDataService().add_listener(self._on_market_service_update)
 
     def dispose(self) -> None:
-        """Cleanup subscriptions"""
+        """覆盖 dispose: 移除 service listener, 再清订阅者。"""
         try:
             NewsSubscriptionService().remove_listener(self._on_news_service_update)
             MarketDataService().remove_listener(self._on_market_service_update)
         except Exception as e:
             logger.warning("[HomeVM] Dispose error: %s", e, exc_info=True)
-        self._subscribers.clear()
+        super().dispose()
 
     # --- Service Event Handlers ---
 

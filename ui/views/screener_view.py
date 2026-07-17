@@ -33,9 +33,9 @@ from ui.i18n import I18n, translate_strategy_name, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.screener_view_model import ScreenerViewModel, StreamCard
+from ui.views.viewport_state import ViewportState
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
-from utils.thread_pool import TaskType, ThreadPoolManager
 from utils.time_utils import get_now
 
 logger = logging.getLogger(__name__)
@@ -221,7 +221,11 @@ def _format_history_date(date_str) -> tuple[str, str]:
 
 
 @ft.component
-def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
+def ScreenerView(
+    initial_strategy: str | None = None,
+    active: bool = True,
+    viewport: ViewportState | None = None,
+) -> ft.Container:
     """选股视图 (声明式).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -234,7 +238,11 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
 
     Args:
         initial_strategy: 深度链接策略 key (可选, 策略加载后自动执行)
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)
     """
+    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
+    _ = viewport
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     state, vm = use_viewmodel(factory=lambda: ScreenerViewModel())
 
@@ -259,6 +267,8 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     file_picker = ft.use_ref(lambda: ft.FilePicker()).current
 
     def _setup_file_picker() -> None:
+        if not active:
+            return
         page = _get_page()
         if page is not None and file_picker not in page.services:
             page.services.append(file_picker)
@@ -268,28 +278,34 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         if page is not None and file_picker in page.services:
             page.services.remove(file_picker)
 
-    ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
+    ft.use_effect(_setup_file_picker, dependencies=[active], cleanup=_cleanup_file_picker)
 
     # --- PubSub (TaskManager) 订阅/退订 ---
 
     def _setup_task_manager() -> None:
+        if not active:
+            return
         vm.subscribe_task_manager()
 
     def _cleanup_task_manager() -> None:
         vm.unsubscribe_task_manager()
 
-    ft.use_effect(_setup_task_manager, dependencies=[], cleanup=_cleanup_task_manager)
+    ft.use_effect(_setup_task_manager, dependencies=[active], cleanup=_cleanup_task_manager)
 
     # --- 策略加载 (mount 时执行一次, R.2.6.1: VM.load_strategies 内聚) ---
 
     async def _load_strategies_async() -> None:
+        if not active:
+            return
         vm.load_strategies()
 
-    ft.use_effect(_load_strategies_async, dependencies=[])
+    ft.use_effect(_load_strategies_async, dependencies=[active])
 
     # --- 深度链接 (策略加载后执行 pending_strategy) ---
 
     async def _execute_pending_strategy() -> None:
+        if not active:
+            return
         if not state.strategies_loaded or not pending_strategy:
             return
         key = pending_strategy
@@ -318,7 +334,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
         except Exception as e:
             logger.error("[ScreenerView] Pending strategy execution failed: %s", e, exc_info=True)
 
-    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy])
+    ft.use_effect(_execute_pending_strategy, dependencies=[state.strategies_loaded, pending_strategy, active])
 
     # --- 事件 handler ---
 
@@ -505,11 +521,10 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
             vm.update_strategy_desc(state.selected_strategy, params=dict(params_ref.current or {}))
 
     async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
+        # Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
+        # vm.reset_strategy_prompt (返回 base_prompt 字符串), View 仅更新 UI state + 展示反馈.
         try:
-            from utils.config_handler import ConfigHandler
-
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, None)
-            new_val = str(await ThreadPoolManager().run_async(TaskType.IO, vm.get_base_prompt, strat))
+            new_val = await vm.reset_strategy_prompt(strat)
             _update_param("ai_system_prompt", new_val)
             page = _get_page()
             if page is not None and hasattr(page, "show_toast"):
@@ -523,25 +538,25 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                 page.show_toast(I18n.get("sys_snack_save_err"), "error")
 
     async def _do_save_prompt_async(strat: str) -> None:
+        # Phase 3.3: validate_prompt + ConfigHandler.set_strategy_prompt 下沉到
+        # vm.save_strategy_prompt (返回 (success, error_key)), View 仅展示反馈.
         try:
-            from utils.config_handler import ConfigHandler
-            from utils.prompt_guard import MAX_PROMPT_LENGTH, validate_prompt
-
             prompt_val = params_ref.current.get("ai_system_prompt", "") or ""
-            is_valid, warning = validate_prompt(prompt_val)
-            if not is_valid:
-                page = _get_page()
-                if page is not None and hasattr(page, "show_toast"):
-                    msg = I18n.get(warning, warning)
-                    if warning == "prompt_err_length":
-                        msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                    page.show_toast(f"⚠ {msg}", "warning")
-                return
-            await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strat, prompt_val)
-            UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
+            success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
+            if page is None or not hasattr(page, "show_toast"):
+                return
+            if success:
+                UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
                 page.show_toast(I18n.get("ai_settings_saved"), "success")
+            else:
+                from utils.prompt_guard import MAX_PROMPT_LENGTH
+
+                assert error_key is not None  # validate_prompt 失败时返回 (False, warning)
+                msg = I18n.get(error_key, error_key)
+                if error_key == "prompt_err_length":
+                    msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
+                page.show_toast(f"⚠ {msg}", "warning")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -1082,7 +1097,11 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
     pagination_row = ft.Row(
         [
             ft.IconButton(
-                ft.Icons.CHEVRON_LEFT, on_click=_on_prev_page, icon_color=AppColors.PRIMARY, disabled=page_no <= 1
+                ft.Icons.CHEVRON_LEFT,
+                on_click=_on_prev_page,
+                icon_color=AppColors.PRIMARY,
+                disabled=page_no <= 1,
+                tooltip=I18n.get("screener_page_prev"),
             ),
             ft.Text(
                 I18n.get("screener_page_info").format(current=page_no, total=total_pages), color=AppColors.TEXT_PRIMARY
@@ -1092,6 +1111,7 @@ def ScreenerView(initial_strategy: str | None = None) -> ft.Container:
                 on_click=_on_next_page,
                 icon_color=AppColors.PRIMARY,
                 disabled=page_no >= total_pages,
+                tooltip=I18n.get("screener_page_next"),
             ),
             ft.Container(width=20),
             ft.Dropdown(

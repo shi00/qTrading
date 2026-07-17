@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 
 from data.cache.cache_manager import CacheManager
@@ -21,6 +21,7 @@ from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig, BacktestResult
 from strategies.base_strategy import get_strategy_registry
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class BacktestState:
         )
 
 
-class BacktestViewModel:
+class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
     """
     回测 ViewModel（V1 声明式范式）。
 
@@ -113,29 +114,6 @@ class BacktestViewModel:
         self._task_id: str | None = None
         self._state: BacktestState = BacktestState()
         self._subscribers: list[Callable[[BacktestState], None]] = []
-
-    @property
-    def state(self) -> BacktestState:
-        return self._state
-
-    def subscribe(self, callback: Callable[[BacktestState], None]) -> Callable[[], None]:
-        """订阅状态变更。返回取消订阅函数。"""
-        self._subscribers.append(callback)
-
-        def _unsubscribe() -> None:
-            if callback in self._subscribers:
-                self._subscribers.remove(callback)
-
-        return _unsubscribe
-
-    def _notify(self) -> None:
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
-
-    def _set_state(self, **changes) -> None:
-        self._state = replace(self._state, **changes)
-        self._notify()
 
     def dispose(self):
         """清理资源：先取消运行中任务（防孤儿），再清引用与状态。"""

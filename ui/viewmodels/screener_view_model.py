@@ -18,6 +18,7 @@ from data.persistence.review_manager import ReviewManager
 from services.task_manager import TaskManager
 from strategies.all_strategies import StrategyManager
 from ui.viewmodels import Message
+from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ class ScreenerState:
     history_tree: HistoryTreeState = field(default_factory=HistoryTreeState)
 
 
-class ScreenerViewModel:
+class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
     """ViewModel for ScreenerView.
 
     MVVM + declarative rendering paradigm (CLAUDE.md §3.2):
@@ -172,11 +173,6 @@ class ScreenerViewModel:
 
     # --- State snapshot + subscribe/_notify (§3.0.1) ---
 
-    @property
-    def state(self) -> ScreenerState:
-        """View 只读 state snapshot，不可变。"""
-        return self._state
-
     def subscribe(self, callback: Callable[[ScreenerState], None]) -> Callable[[], None]:
         """订阅 state 变化，返回退订函数。同时捕获 main loop（hook 在主循环注册）。"""
         self._subscribers.append(callback)
@@ -190,12 +186,6 @@ class ScreenerViewModel:
                 self._subscribers.remove(callback)
 
         return _unsubscribe
-
-    def _notify(self) -> None:
-        """state 变化后调所有订阅者，传入新 snapshot。"""
-        snapshot = self._state
-        for cb in list(self._subscribers):
-            cb(snapshot)
 
     def _set_state(self, **changes) -> None:
         """Update state fields and notify subscribers."""
@@ -310,6 +300,52 @@ class ScreenerViewModel:
         from strategies.strategy_prompts import get_base_prompt
 
         return get_base_prompt(strategy_key)
+
+    async def reset_strategy_prompt(self, strategy_key: str) -> str:
+        """重置策略 prompt 为默认值 (Phase 3.3: 从 View 迁入, 内聚到 VM).
+
+        通过 ``ConfigHandler.set_strategy_prompt(strategy_key, None)`` 清除用户覆盖,
+        然后返回基础 prompt 字符串供 View 更新 UI state.
+
+        Args:
+            strategy_key: 策略 key
+
+        Returns:
+            基础 prompt 字符串
+
+        Raises:
+            Exception: ConfigHandler 失败时抛出 (View 负责展示错误)
+        """
+        from utils.config_handler import ConfigHandler
+
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, None)
+        # get_base_prompt 内部调 ConfigHandler.get_strategy_prompt / get_ai_system_prompt (load_config IO),
+        # 需 ThreadPoolManager 包装 (R16).
+        return str(await ThreadPoolManager().run_async(TaskType.IO, self.get_base_prompt, strategy_key))
+
+    async def save_strategy_prompt(self, strategy_key: str, prompt: str) -> tuple[bool, str | None]:
+        """保存策略 prompt (Phase 3.3: 从 View 迁入, 内聚到 VM).
+
+        内部完成 ``validate_prompt`` + ``ConfigHandler.set_strategy_prompt`` 编排.
+
+        Args:
+            strategy_key: 策略 key
+            prompt: 用户输入的 prompt 字符串
+
+        Returns:
+            (success, error_key): 成功时 (True, None); 失败时 (False, error_key) 其中
+            error_key 为 i18n key (如 ``prompt_err_length`` / ``prompt_err_injection``)
+        """
+        from utils.prompt_guard import validate_prompt
+
+        is_valid, warning = validate_prompt(prompt)
+        if not is_valid:
+            return False, warning
+
+        from utils.config_handler import ConfigHandler
+
+        await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_strategy_prompt, strategy_key, prompt)
+        return True, None
 
     def get_column_alias(self, table_name: str | None, col: str) -> str:
         """获取列别名 (Task 5.1: 从 View 迁入, 内聚到 VM).

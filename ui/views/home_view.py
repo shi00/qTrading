@@ -29,6 +29,7 @@ from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC
 from ui.theme import AppColors
 from ui.viewmodels.home_view_model import HomeViewModel
+from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
@@ -37,7 +38,11 @@ logger = logging.getLogger(__name__)
 
 
 @ft.component
-def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
+def HomeView(
+    on_run_strategy: Callable[[], None] | None = None,
+    active: bool = True,
+    viewport: ViewportState | None = None,
+) -> ft.Container:
     """Home dashboard view (declarative).
 
     CLAUDE.md §3.2 MVVM + §3.3 use_viewmodel hook:
@@ -49,9 +54,13 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
     Args:
         on_run_strategy: 保留参数兼容 app_layout 命令式调用 (Phase F.4 重写后移除);
             当前 HomeView 不使用此回调 (与原命令式实现一致 —— 参数被存储但从未调用)
+        viewport: AppLayout 下发的窗口尺寸快照 (Phase 6.2 P2-1);
+            当前未使用 (YAGNI, 后续任务改造内部布局时消费)
     """
     # 兼容 app_layout 命令式调用, 当前不使用 (原命令式实现亦未调用)
     _ = on_run_strategy
+    # Phase 6.2 P2-1: 接收 viewport 但当前未使用 (后续任务消费)
+    _ = viewport
 
     # --- VM (内部模式: hook 实例化 + 卸载时 dispose) ---
     state, vm = use_viewmodel(HomeViewModel)
@@ -97,6 +106,8 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
             logger.error("[HomeView] Load failed: %s", DataSanitizer.sanitize_error(exc))
 
     async def _init_and_load() -> None:
+        if not active:
+            return
         try:
             vm.init()  # 添加 service listener (use_viewmodel cleanup 时 vm.dispose() 移除)
             await vm.init_data()
@@ -109,6 +120,8 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
     # --- PubSub 订阅/退订 (Phase 3.0.3 模式) ---
 
     async def _setup_pubsub() -> None:
+        if not active:
+            return
         try:
             page = ft.context.page
             if page is not None:
@@ -124,10 +137,10 @@ def HomeView(on_run_strategy: Callable[[], None] | None = None) -> ft.Container:
         except RuntimeError:
             pass
 
-    ft.use_effect(_setup_pubsub, dependencies=[], cleanup=_cleanup_pubsub)
+    ft.use_effect(_setup_pubsub, dependencies=[active], cleanup=_cleanup_pubsub)
 
     # --- 初始加载 (mount 时执行一次) ---
-    ft.use_effect(_init_and_load, dependencies=[])
+    ft.use_effect(_init_and_load, dependencies=[active])
 
     # --- 渲染 (直接从 state 读取, 无 dual-track) ---
 
