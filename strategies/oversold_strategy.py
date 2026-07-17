@@ -19,6 +19,93 @@ from utils.thread_pool import TaskType, ThreadPoolManager
 logger = logging.getLogger(__name__)
 
 
+def _compute_rsi_filter(
+    history_pdf: pd.DataFrame,
+    snapshot_df: pd.DataFrame,
+    end_date_obj: datetime.date,
+    rsi_period: int,
+    rsi_threshold: float,
+    vol_ratio_threshold: float,
+) -> pd.DataFrame:
+    """Synchronous CPU-only RSI filter pipeline.
+
+    Runs inside ThreadPoolManager CPU pool to avoid blocking the Flet event loop (R16).
+    Combines pl.from_pandas / lazy graph build / collect / to_pandas / merge / sort_values
+    into a single offloaded callable.
+    """
+    history_pdf = history_pdf.copy()
+
+    for col in history_pdf.select_dtypes(include=["Int64"]).columns:
+        history_pdf[col] = history_pdf[col].astype("float64")
+
+    df = pl.from_pandas(history_pdf)
+
+    # CRITICAL: Must sort chronologically BEFORE any window operations like .last()
+    # because the underlying SQL query (get_daily_quotes) does not guarantee ORDER BY.
+    df_lazy = df.lazy().sort(["ts_code", "trade_date"])
+
+    if df["trade_date"].dtype == pl.Date:
+        end_date_value = end_date_obj
+    elif df["trade_date"].dtype == pl.Datetime:
+        end_date_value = datetime.datetime.combine(end_date_obj, datetime.time())
+    else:
+        end_date_value = end_date_obj.strftime("%Y%m%d")
+
+    # Calculate QFQ Close (前复权收盘价)
+    if "adj_factor" in df.columns:
+        qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
+        qfq_close_expr = (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close")
+        qfq_vol_expr = (
+            pl.when(pl.col("qfq_ratio") > 0)
+            .then(pl.col("vol") / pl.col("qfq_ratio"))
+            .otherwise(pl.col("vol"))
+            .alias("qfq_vol")
+        )
+        df_lazy = df_lazy.with_columns([qfq_ratio]).with_columns([qfq_close_expr, qfq_vol_expr])
+    else:
+        df_lazy = df_lazy.with_columns([pl.col("close").alias("qfq_close"), pl.col("vol").alias("qfq_vol")])
+
+    # Calculate Dynamic RSI
+    rsi_col_name = f"rsi_{rsi_period}"
+    rsi_expr = TechnicalAnalysis.get_rsi_expr(
+        col_name="qfq_close",
+        period=rsi_period,
+        alias=rsi_col_name,
+    )
+    vol_ratio_expr = (
+        pl.when(pl.col("qfq_vol").rolling_mean(5).over("ts_code") > 0)
+        .then(pl.col("qfq_vol") / pl.col("qfq_vol").rolling_mean(5).over("ts_code"))
+        .otherwise(None)
+        .alias("vol_ratio_5d")
+    )
+
+    result_lf = (
+        df_lazy.with_columns(
+            [
+                rsi_expr.over("ts_code"),
+                vol_ratio_expr,
+                pl.col("close").count().over("ts_code").alias("day_count"),
+            ],
+        )
+        .filter(pl.col("trade_date") == end_date_value)
+        .filter(pl.col("day_count") >= rsi_period * 2)
+        .filter(pl.col(rsi_col_name) < rsi_threshold)
+        .filter(pl.col("vol_ratio_5d") >= float(vol_ratio_threshold))
+    )
+
+    result_df = result_lf.collect()
+
+    if result_df.height == 0:
+        return pd.DataFrame()
+
+    # Join with snapshot
+    rsi_pdf = result_df.select(["ts_code", rsi_col_name, "vol_ratio_5d"]).to_pandas()
+    final_df = pd.merge(snapshot_df, rsi_pdf, on="ts_code", how="inner")
+
+    # Sort by RSI ascending (most oversold first)
+    return final_df.sort_values(rsi_col_name, ascending=True)
+
+
 @register_strategy("oversold")
 class OversoldStrategy(BaseStrategy, AIStrategyMixin):
     """
@@ -274,83 +361,25 @@ class OversoldStrategy(BaseStrategy, AIStrategyMixin):
                 logger.warning("[OversoldStrategy] No historical data found.")
                 return pd.DataFrame()
 
-            history_pdf = history_pdf.copy()
-
-            for col in history_pdf.select_dtypes(include=["Int64"]).columns:
-                history_pdf[col] = history_pdf[col].astype("float64")
-
-            df = pl.from_pandas(history_pdf)
-
-            # CRITICAL: Must sort chronologically BEFORE any window operations like .last()
-            # because the underlying SQL query (get_daily_quotes) does not guarantee ORDER BY.
-            df_lazy = df.lazy().sort(["ts_code", "trade_date"])
-
-            if df["trade_date"].dtype == pl.Date:
-                end_date_value = end_date_obj
-            elif df["trade_date"].dtype == pl.Datetime:
-                end_date_value = datetime.datetime.combine(end_date_obj, datetime.time())
-            else:
-                end_date_value = end_date_obj.strftime("%Y%m%d")
-
-            # Calculate QFQ Close (前复权收盘价)
-            if "adj_factor" in df.columns:
-                qfq_ratio = qfq_ratio_expr("adj_factor", "ts_code")
-                qfq_close_expr = (pl.col("close") * pl.col("qfq_ratio")).alias("qfq_close")
-                qfq_vol_expr = (
-                    pl.when(pl.col("qfq_ratio") > 0)
-                    .then(pl.col("vol") / pl.col("qfq_ratio"))
-                    .otherwise(pl.col("vol"))
-                    .alias("qfq_vol")
-                )
-                df_lazy = df_lazy.with_columns([qfq_ratio]).with_columns([qfq_close_expr, qfq_vol_expr])
-            else:
-                df_lazy = df_lazy.with_columns([pl.col("close").alias("qfq_close"), pl.col("vol").alias("qfq_vol")])
-
-            # Calculate Dynamic RSI
-            rsi_col_name = f"rsi_{rsi_period}"
-            rsi_expr = TechnicalAnalysis.get_rsi_expr(
-                col_name="qfq_close",
-                period=rsi_period,
-                alias=rsi_col_name,
-            )
-            vol_ratio_expr = (
-                pl.when(pl.col("qfq_vol").rolling_mean(5).over("ts_code") > 0)
-                .then(pl.col("qfq_vol") / pl.col("qfq_vol").rolling_mean(5).over("ts_code"))
-                .otherwise(None)
-                .alias("vol_ratio_5d")
-            )
-
-            result_lf = (
-                df_lazy.with_columns(
-                    [
-                        rsi_expr.over("ts_code"),
-                        vol_ratio_expr,
-                        pl.col("close").count().over("ts_code").alias("day_count"),
-                    ],
-                )
-                .filter(pl.col("trade_date") == end_date_value)
-                .filter(pl.col("day_count") >= rsi_period * 2)
-                .filter(pl.col(rsi_col_name) < rsi_threshold)
-                .filter(pl.col("vol_ratio_5d") >= float(vol_ratio_threshold))
-            )
-
-            # Offload CPU-intensive collect + conversion to thread pool
-            # to avoid blocking the Flet event loop during full-market RSI screening
-            result_df = await ThreadPoolManager().run_async(
+            # Offload CPU-intensive Polars pipeline (from_pandas + lazy graph + collect +
+            # to_pandas + merge + sort_values) to the CPU thread pool as a single sync
+            # callable to avoid blocking the Flet event loop (R16).
+            final_df = await ThreadPoolManager().run_async(
                 TaskType.CPU,
-                lambda: result_lf.collect(),
+                _compute_rsi_filter,
+                history_pdf,
+                snapshot_df,
+                end_date_obj,
+                rsi_period,
+                rsi_threshold,
+                vol_ratio_threshold,
             )
 
-            if result_df.height == 0:
+            if final_df.empty:
                 logger.info("[OversoldStrategy] No stocks found matching RSI criteria.")
                 return pd.DataFrame()
 
-            # Join with snapshot
-            rsi_pdf = result_df.select(["ts_code", rsi_col_name, "vol_ratio_5d"]).to_pandas()
-            final_df = pd.merge(snapshot_df, rsi_pdf, on="ts_code", how="inner")
-
-            # Sort by RSI ascending (most oversold first)
-            return final_df.sort_values(rsi_col_name, ascending=True)
+            return final_df
 
         except QualityGateError:
             raise
