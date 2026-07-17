@@ -236,22 +236,15 @@ class TestBuildNavChart:
     def test_build_nav_chart_with_data(self, sample_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(sample_result, None)
+            container = _build_nav_chart(sample_result)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, fch.LineChart)
 
-    def test_build_nav_chart_with_min_height(self, sample_result: BacktestResult) -> None:
-        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(sample_result, 300)
-
-        assert container.height == 300
-
     def test_build_nav_chart_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(empty_result, None)
+            container = _build_nav_chart(empty_result)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -259,7 +252,7 @@ class TestBuildNavChart:
     def test_build_nav_chart_no_result(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_nav_chart(None, None)
+            container = _build_nav_chart(None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -325,22 +318,15 @@ class TestBuildIcChart:
     def test_build_ic_chart_with_data(self, sample_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(sample_result, None)
+            container = _build_ic_chart(sample_result)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, fch.BarChart)
 
-    def test_build_ic_chart_with_min_height(self, sample_result: BacktestResult) -> None:
-        with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
-            mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(sample_result, 300)
-
-        assert container.height == 300
-
     def test_build_ic_chart_empty(self, empty_result: BacktestResult) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(empty_result, None)
+            container = _build_ic_chart(empty_result)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)
@@ -348,7 +334,7 @@ class TestBuildIcChart:
     def test_build_ic_chart_no_result(self) -> None:
         with patch("ui.components.backtest.backtest_result_panel.I18n.get") as mock_i18n:
             mock_i18n.return_value = "mock_text"
-            container = _build_ic_chart(None, None)
+            container = _build_ic_chart(None)
 
         assert isinstance(container, ft.Container)
         assert isinstance(container.content, ft.Text)

@@ -137,9 +137,6 @@ def BacktestView(active: bool = True) -> ft.Container:
         color=ft.Colors.WHITE,
     )
 
-    # NOTE(lazy): chart_min_height 固定为 None（移除窗口尺寸命令式回调）。
-    # 图表容器 expand=True 自动填充，丢失紧凑模式(240)/标准模式(360)的高度切换。
-    # ceiling: 窗口尺寸响应式重设计. upgrade: app_layout 声明式重写已完成(Phase G.1), page 尺寸响应式 state 待独立任务实现.
     return ft.Container(
         content=ft.Column(
             [
@@ -150,7 +147,7 @@ def BacktestView(active: bool = True) -> ft.Container:
                 ft.Container(height=16),
                 ResizableSplitter(
                     left_content=BacktestConfigPanel(on_run_backtest=_on_run_backtest),
-                    right_content=BacktestResultPanel(result=state.result, chart_min_height=None),
+                    right_content=BacktestResultPanel(result=state.result),
                     config_key="ui_splitter_backtest_config",
                     default_width=360,
                     min_width=280,

@@ -158,7 +158,7 @@ def SettingsView(active: bool = True) -> ft.Container:
             tab_buttons,
             alignment=ft.MainAxisAlignment.START,
             spacing=10,
-            scroll=ft.ScrollMode.HIDDEN,
+            scroll=ft.ScrollMode.AUTO,
         ),
         padding=ft.Padding.only(bottom=10),
     )

@@ -592,14 +592,14 @@ class TestStatusRendering:
         assert bars[0].value == 0.5
 
     def test_result_passed_to_result_panel(self, backtest_view_env) -> None:
-        """state.result → BacktestResultPanel(result=state.result, chart_min_height=None)."""
+        """state.result → BacktestResultPanel(result=state.result)."""
         env = backtest_view_env
         fake_vm = env["fake_vm"]
         fake_result = MagicMock(name="test_result")
         fake_vm._set_state(result=fake_result)
         _rerender(env)
 
-        env["mod"].BacktestResultPanel.assert_called_with(result=fake_result, chart_min_height=None)
+        env["mod"].BacktestResultPanel.assert_called_with(result=fake_result)
 
     def test_status_color_mapping_error(self, backtest_view_env) -> None:
         """status_color="error" → status_text.color = _STATUS_COLOR_MAP["error"] = AppColors.ERROR."""
