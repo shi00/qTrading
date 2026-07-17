@@ -51,8 +51,22 @@ def _mock_i18n():
 
 
 @pytest.fixture
-def vm():
-    """Vanilla ViewModel with no deps injected."""
+def vm(monkeypatch):
+    """Vanilla ViewModel with no deps injected.
+
+    Mock ConfigHandler.get_init_history_years / get_auto_update_time 以隔离
+    test_infra_history_config.py 的真实配置文件污染 (pre-existing flaky:
+    该测试调用 ConfigHandler.set_init_history_years(5) 持久化污染 config.json,
+    导致本测试 vm.state.init_history_years == 5 != OnboardingState() 默认 3).
+    """
+    monkeypatch.setattr(
+        "ui.viewmodels.onboarding_view_model.ConfigHandler.get_init_history_years",
+        staticmethod(lambda: 3),
+    )
+    monkeypatch.setattr(
+        "ui.viewmodels.onboarding_view_model.ConfigHandler.get_auto_update_time",
+        staticmethod(lambda: "16:30"),
+    )
     return OnboardingViewModel()
 
 
