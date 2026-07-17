@@ -55,7 +55,7 @@ def use_viewmodel[T: _ViewModelProtocol](
        OnboardingWizard/AIBrainTab 实例化，需调用 ``save_config``/``verify_token``）。
        外部 VM 生命周期由消费方管理，hook 永远不 dispose。
 
-    契约（对齐 CONTRIBUTING.md「MVVM 表现层」+ 方案 §3.0.3）：
+    契约（对齐 docs/patterns/mvvm.md + 方案 §3.0.3）：
     - 首次渲染：``factory()`` 实例化 VM（内部模式）或直接使用 ``vm``（外部模式），
       ``vm.subscribe(set_state)`` 注册
     - ``_notify`` 触发：VM 遍历订阅者调 ``callback(self.state)``，hook 注册的
