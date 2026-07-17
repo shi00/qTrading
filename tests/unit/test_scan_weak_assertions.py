@@ -553,3 +553,150 @@ class TestMainIntegration:
         rc = main(["--path", str(tmp_path)])
         # advisory 模式退出码 0（仅警告）
         assert rc == 0
+
+
+# ============================================================================
+# 扩展规则（Task 2.3 新增 4 条）
+# ============================================================================
+
+
+class TestWeakCalledFlag:
+    """规则 ①：assert m.called is True / assert m.called。
+
+    Mock.called 是裸布尔标志，不验证调用参数。
+    """
+
+    def test_detects_assert_mock_called_is_true(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    m = Mock()\n    m()\n    assert m.called is True\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_called_flag" for i in issues)
+
+    def test_detects_assert_mock_called_alone(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    m = Mock()\n    m()\n    assert m.called\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_called_flag" for i in issues)
+
+    def test_ignores_assert_with_call_args(self, tmp_path):
+        """assert m.call_args is not None 不算弱断言（验了 call_args 属性）。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    m = Mock()\n    m(1, 2)\n    assert m.call_args is not None\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_called_flag" for i in issues)
+
+
+class TestWeakCallCount:
+    """规则 ②：assert len(mock.calls) >= 1 / assert len(mock.call_args_list) >= 1。
+
+    仅验证调用次数，不验证参数。
+    """
+
+    def test_detects_assert_len_mock_calls_ge_1(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    m = Mock()\n    m()\n    assert len(m.calls) >= 1\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_call_count" for i in issues)
+
+    def test_detects_assert_len_mock_call_args_list(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    m = Mock()\n    m()\n    assert len(m.call_args_list) >= 1\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_call_count" for i in issues)
+
+    def test_ignores_assert_len_with_content_check(self, tmp_path):
+        """assert len(m.call_args_list) == 2 + 后续断言 call_args 不算弱断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    m = Mock()\n    m(1)\n    m(2)\n    assert len(m.call_args_list) == 2\n    assert m.call_args_list[0] == call(1)\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_call_count" for i in issues)
+
+
+class TestWeakRaisesOnly:
+    """规则 ③：pytest.raises(SomeError) 后无进一步断言。
+
+    仅验证抛异常不验 message/type 细节。
+    """
+
+    def test_detects_pytest_raises_no_further_assert(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    with pytest.raises(ValueError):\n        func()\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_raises_only" for i in issues)
+
+    def test_ignores_pytest_raises_with_match(self, tmp_path):
+        """pytest.raises(ValueError, match=...) 不算弱断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    with pytest.raises(ValueError, match='invalid'):\n        func()\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_raises_only" for i in issues)
+
+    def test_ignores_pytest_raises_with_exception_info_check(self, tmp_path):
+        """with pytest.raises(...) as exc_info: + assert str(exc_info.value) 不算弱断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    with pytest.raises(ValueError) as exc_info:\n        func()\n    assert 'invalid' in str(exc_info.value)\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_raises_only" for i in issues)
+
+
+class TestWeakPrint:
+    """规则 ④：print(...) 替代断言。
+
+    测试中用 print 输出而非 assert 验证，属弱断言。
+    """
+
+    def test_detects_print_in_test_function(self, tmp_path):
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    result = func()\n    print(result)\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_print" for i in issues)
+
+    def test_ignores_print_in_non_test_function(self, tmp_path):
+        """非 test_ 开头函数中的 print 不算弱断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def helper():\n    print('debug')\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_print" for i in issues)
+
+    def test_ignores_print_with_assert_following(self, tmp_path):
+        """print 后紧跟 assert 的不算弱断言（print 仅作调试输出）。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    result = func()\n    print(result)\n    assert result == 1\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_print" for i in issues)
