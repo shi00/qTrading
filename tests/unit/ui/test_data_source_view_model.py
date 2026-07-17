@@ -711,21 +711,37 @@ class TestDataSourceViewModelRecoverStaleState:
 
 
 class TestDataSourceViewModelSaveToken:
-    def test_saves_valid_token(self, bound_vm):
-        with patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc:
-            bound_vm.save_tushare_token("abc123")
+    async def test_saves_valid_token(self, bound_vm):
+        with (
+            patch("ui.viewmodels.data_source_view_model.TushareClient") as mock_tc,
+            patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+        ):
+            # ThreadPoolManager.run_async 直接调用 func (不经线程池, 便于同步验证)
+            async def _fake_run_async(task_type, func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = _fake_run_async
+            await bound_vm.save_tushare_token("abc123")
             mock_tc.assert_called_once()
             mock_tc.return_value.set_token.assert_called_with("abc123")
 
-    def test_skips_empty_token(self, bound_vm):
-        bound_vm.save_tushare_token("  ")
+    async def test_skips_empty_token(self, bound_vm):
+        await bound_vm.save_tushare_token("  ")
         # Should not raise and should not call ConfigHandler
 
 
 class TestDataSourceViewModelSetHistoryYears:
-    def test_sets_years(self, bound_vm):
-        with patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch:
-            bound_vm.set_history_years(3)
+    async def test_sets_years(self, bound_vm):
+        with (
+            patch("ui.viewmodels.data_source_view_model.ConfigHandler") as mock_ch,
+            patch("ui.viewmodels.data_source_view_model.ThreadPoolManager") as mock_tpm,
+        ):
+            # ThreadPoolManager.run_async 直接调用 func (不经线程池, 便于同步验证)
+            async def _fake_run_async(task_type, func, *args, **kwargs):
+                return func(*args, **kwargs)
+
+            mock_tpm.return_value.run_async = _fake_run_async
+            await bound_vm.set_history_years(3)
             mock_ch.set_init_history_years.assert_called_with(3)
 
 
