@@ -192,21 +192,29 @@ class TestStrategyExampleSignature:
         )
 
     def test_claude_uses_tuple_not_list(self):
-        """CLAUDE.md or CONTRIBUTING.md strategy example should use tuple, not list for required_context_keys."""
+        """CLAUDE.md or strategy template doc should use tuple, not list for required_context_keys."""
+        strategy_template_path = ROOT / "docs" / "patterns" / "strategy-template.md"
         content = _read(CLAUDE_PATH) + "\n" + _read(ROOT / "CONTRIBUTING.md")
+        if strategy_template_path.exists():
+            content += "\n" + _read(strategy_template_path)
         # Should use tuple syntax
         assert "required_context_keys: tuple[str, ...]" in content, (
-            "CLAUDE.md or CONTRIBUTING.md should use 'tuple[str, ...]' for required_context_keys"
+            "CLAUDE.md, CONTRIBUTING.md, or docs/patterns/strategy-template.md should use 'tuple[str, ...]' for required_context_keys"
         )
         # Should not use list syntax
         wrong_pattern = r"required_context_keys\s*=\s*\["
         assert not re.search(wrong_pattern, content), (
-            "CLAUDE.md or CONTRIBUTING.md should not use list syntax for required_context_keys (should be tuple)"
+            "should not use list syntax for required_context_keys (should be tuple)"
         )
 
 
-class TestNoDeadDocsLinks:
-    """审计报告 P0: 被跟踪 markdown 不得引用 docs/ 路径（docs/ 被 .gitignore 排除，不推送）。"""
+class TestTrackedDocsLinksResolve:
+    """审计报告 P0: 被跟踪 markdown 中指向 docs/ 的链接目标必须存在。
+
+    docs/ 已从 .gitignore 移除，转为正式文档目录；引用 docs/ 路径的链接
+    应解析到真实存在的文件，避免死链。沿用 check_relative_dead_links 逻辑：
+    扫描 markdown 链接 [text](url)，跳过外部链接与 fenced code block。
+    """
 
     # CHANGELOG.md 由 release-please 自动生成，不纳入手动检查
     TRACKED_MD_FILES = [
@@ -220,21 +228,34 @@ class TestNoDeadDocsLinks:
     ]
 
     @pytest.mark.parametrize("doc_path", TRACKED_MD_FILES)
-    def test_no_docs_path_reference(self, doc_path):
-        """被跟踪 markdown 不得引用 docs/ 路径（docs/ 被 .gitignore 排除，不推送）。"""
+    def test_docs_links_resolve(self, doc_path):
+        """被跟踪 markdown 中指向 docs/ 的链接目标必须存在（沿用 check_relative_dead_links 逻辑）。"""
         content = _read(doc_path)
-        # 覆盖行内链接 (docs/、(./docs/、(../docs/、(/docs/ 与 Windows 反斜杠
-        inline_pattern = r"\((?:\./|\.\./|/)?docs[/\\]"
-        # 覆盖引用式链接 [ref]: docs/ 或 [ref]: ./docs/ 等
-        ref_pattern = r"^\s*\[[^\]]+\]:\s*(?:\./|\.\./|/)?docs[/\\]"
-        for i, line in enumerate(content.splitlines(), 1):
-            assert not re.search(inline_pattern, line), (
-                f"{doc_path.name}:{i} references docs/ path which is gitignored "
-                f"(dead link for external readers): {line.strip()!r}"
-            )
-            assert not re.search(ref_pattern, line), (
-                f"{doc_path.name}:{i} references docs/ path via reference link: {line.strip()!r}"
-            )
+        link_pattern = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+        in_code_block = False
+        for line_no, line in enumerate(content.splitlines(), 1):
+            if line.lstrip().startswith("```"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+            for m in link_pattern.finditer(line):
+                url = m.group(2).strip()
+                # 忽略外部链接
+                if url.startswith(("http://", "https://", "mailto:")):
+                    continue
+                # 解析路径部分（去掉锚点），同文件锚点链接跳过
+                path_part = url.split("#", 1)[0]
+                if not path_part:
+                    continue
+                # 从 source_doc 所在目录解析相对路径
+                target = (doc_path.parent / path_part).resolve()
+                # 只检查指向 docs/ 目录的链接
+                try:
+                    target.relative_to(ROOT / "docs")
+                except ValueError:
+                    continue
+                assert target.exists(), f"{doc_path.name}:{line_no}: 指向 docs/ 的死链 '{url}' (目标 '{target}' 不存在)"
 
 
 class TestCoverageSourceConsistency:
@@ -622,3 +643,114 @@ class TestDocsConsistencyScriptExtensions:
 
         errors = check_flet_version_drift()
         assert any("0.85.3" in e for e in errors), f"Should detect 0.85.3 near 'flet': {errors}"
+
+
+class TestRedlinesYamlConsistency:
+    """C5 第二阶段 3b: redlines.yml 机器可读映射一致性校验 (ADR-0003 推翻 3b 决策后落地)。
+
+    校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致:
+    - YAML 解析成功 + 含 redlines key
+    - 每条红线含 5 字段 (id/title/description/enforcement/human_review_required)
+    - R 编号连续 append-only (R1~R18, 无缺号/重号/跳号)
+    - CLAUDE.md §3.1 表格行数 = yml 条目数
+    - 构造缺 R15 的 yml 验证检测
+    """
+
+    def test_redlines_yaml_file_exists(self):
+        """docs/governance/redlines.yml 文件存在 (ADR-0003 决策落地前置)."""
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        assert REDLINES_YAML_PATH.exists(), f"redlines.yml should exist at {REDLINES_YAML_PATH}"
+
+    def test_redlines_yaml_parses_successfully(self):
+        """redlines.yml 可被 yaml.safe_load 解析,且含 redlines key (list)."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        assert isinstance(data, dict), f"redlines.yml 顶层应为 dict, 实际 {type(data)}"
+        assert "redlines" in data, "redlines.yml 顶层应含 'redlines' key"
+        assert isinstance(data["redlines"], list), f"'redlines' 应为 list, 实际 {type(data['redlines'])}"
+        assert len(data["redlines"]) > 0, "'redlines' 不应为空"
+
+    def test_redline_fields_complete(self):
+        """每条红线含 5 个必填字段: id/title/description/enforcement/human_review_required."""
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        required_fields = {"id", "title", "description", "enforcement", "human_review_required"}
+        for i, entry in enumerate(data["redlines"]):
+            missing = required_fields - set(entry.keys())
+            assert not missing, f"redlines[{i}] 缺字段: {missing}, 实际字段: {set(entry.keys())}"
+
+    def test_redline_ids_are_sequential_append_only(self):
+        """R 编号连续 append-only: R1, R2, ..., R_N, 无缺号/重号/跳号."""
+        import re
+
+        import yaml
+
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        ids = [entry["id"] for entry in data["redlines"]]
+        # 校验格式: R\d+
+        id_pattern = re.compile(r"^R(\d+)$")
+        parsed_nums = []
+        for rid in ids:
+            m = id_pattern.match(rid)
+            assert m, f"R 编号格式错误: {rid} (应为 R\\d+)"
+            parsed_nums.append(int(m.group(1)))
+        # 校验无重号
+        assert len(parsed_nums) == len(set(parsed_nums)), f"R 编号有重号: {parsed_nums}"
+        # 校验连续 append-only: 1, 2, ..., N
+        expected = list(range(1, len(parsed_nums) + 1))
+        assert parsed_nums == expected, f"R 编号不连续 append-only: 期望 {expected}, 实际 {parsed_nums}"
+
+    def test_redlines_count_matches_claude_md_section_3_1_table(self):
+        """CLAUDE.md §3.1 红线表行数 = redlines.yml 条目数.
+
+        CLAUDE.md §3.1 表格中以 ``| R`` 开头的行计为红线行.
+        """
+        import yaml
+
+        from check_docs_consistency import CLAUDE_PATH, REDLINES_YAML_PATH
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        yml_count = len(data["redlines"])
+
+        claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
+        # 提取 §3.1 红线表: 以 "| R" 开头 (markdown 表格行)
+        # 格式: "| R1 | **架构越界** | ... |"
+        r_lines = [line for line in claude_content.splitlines() if re.match(r"^\|\s*R\d+\s*\|", line)]
+        assert len(r_lines) == yml_count, f"CLAUDE.md §3.1 表格行数 {len(r_lines)} != redlines.yml 条目数 {yml_count}"
+
+    def test_check_redlines_yaml_consistency_passes(self):
+        """check_redlines_yaml_consistency() 在当前 redlines.yml 状态下应返回空错误列表."""
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        errors = check_redlines_yaml_consistency()
+        assert errors == [], "redlines.yml consistency check failed:\n  " + "\n  ".join(errors)
+
+    def test_detects_missing_r15_in_yaml(self, tmp_path, monkeypatch):
+        """构造缺 R15 的 yml, check_redlines_yaml_consistency() 应报错 (append-only 守护)."""
+        import yaml
+
+        from check_docs_consistency import check_redlines_yaml_consistency
+
+        # 从真实 redlines.yml 读取并删除 R15, 写入临时 yml
+        from check_docs_consistency import REDLINES_YAML_PATH
+
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+        data["redlines"] = [r for r in data["redlines"] if r["id"] != "R15"]
+        tmp_yml = tmp_path / "redlines_missing_r15.yml"
+        tmp_yml.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+        # monkeypatch 路径常量指向临时 yml
+        monkeypatch.setattr("check_docs_consistency.REDLINES_YAML_PATH", tmp_yml)
+
+        errors = check_redlines_yaml_consistency()
+        assert len(errors) > 0, "Should detect missing R15, got no errors"
+        assert any("R15" in e for e in errors), f"Errors should mention R15, got: {errors}"

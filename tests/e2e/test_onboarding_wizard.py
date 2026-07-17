@@ -123,7 +123,7 @@ async def test_wizard_db_validation_failure(wizard_page):
 
 # Tech debt: P3-WinE2E-Skip — Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题。
 # 单层 skipif 装饰器足够（移除函数内重复 pytest.skip），非 Windows 平台 + 集成测试覆盖成功路径。
-# 详见 CONTRIBUTING.md「已知架构技术债」P3-WinE2E-Skip。
+# 详见 docs/debt/known-technical-debt.md P3-WinE2E-Skip。
 @pytest.mark.skipif(
     sys.platform == "win32",
     reason="Windows Flet/Playwright CanvasKit textbox 渲染 + 向导状态隔离问题 (P3-WinE2E-Skip)",

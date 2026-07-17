@@ -1,4 +1,4 @@
-"""Onboarding Wizard ViewModel/Service 集成测试 — Task 6.1 (P3-WinE2E-Skip).
+"""Onboarding Wizard ViewModel/Service 集成测试 — Task 6.1 (P3-WinE2E-Skip, 见 docs/debt/known-technical-debt.md).
 
 替代 Windows E2E skip 路径（test_wizard_db_validation_success），提供非跳过的自动化测试覆盖。
 覆盖 OnboardingViewModel + DatabaseConfigPanelViewModel + DatabaseConfigService（mock）集成：

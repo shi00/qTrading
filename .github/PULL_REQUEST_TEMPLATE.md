@@ -48,8 +48,8 @@ Relates to #XXX
 - [ ] CLAUDE.md 架构、单例、策略规范同步对齐
 - [ ] CONTRIBUTING.md 流程、安装命令、测试步骤同步
 - [ ] SECURITY.md 支持版本、依赖CVE更新
-- [ ] man/ 专题文档（flet-best-practices / database-account-separation / table-partitioning-strategy）按变更同步
-- [ ] 依赖版本变化时，man/flet-best-practices.md 等专项文档已复核（Owner/复核触发器见文档头部）
+- [ ] docs/flet/ 子文档（v1-api-constraints / project-differences / upgrade-checklist / api-verification-template / accessibility-baseline）与 man/ 其他专题（database-account-separation / table-partitioning-strategy）按变更同步
+- [ ] 依赖版本变化时，docs/flet/ 等专项文档已复核（Owner/复核触发器见文档头部；man/flet-best-practices.md 已改为 stub 指向 docs/flet/）
 - [ ] CHANGELOG.md 由release-please自动生成，无手动修改
 
 ## ✅ 提交前自检清单（强制全部核对）

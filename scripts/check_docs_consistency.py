@@ -1,21 +1,24 @@
-"""文档一致性检查（C5 第一阶段 + 第二阶段 3a）。
+"""文档一致性检查（C5 第一阶段 + 第二阶段 3a + 3b）。
 
 检查项：
-1. Markdown 锚点死链校验：扫描 CLAUDE.md、CONTRIBUTING.md、man/flet-best-practices.md 中带 `#anchor` 的 markdown 链接，
+1. Markdown 锚点死链校验：扫描 CLAUDE.md、CONTRIBUTING.md、man/flet-best-practices.md 中带 `#anchor` 的 markdown 链接,
    确认目标标题存在（支持同文件 `#anchor` 与跨文件 `./file.md#anchor`）。
 2. CLAUDE.md 顶部版本与 pyproject.toml `[project].version` 一致。
 3. 文档中"项目使用 N 个 pre-commit hook"的数量与 `.pre-commit-config.yaml` 本地 hook 数量一致。
-4. NOTE(lazy) 三要素格式检查：扫描所有 .py 文件中的 `NOTE(lazy):` 标记，
+4. NOTE(lazy) 三要素格式检查：扫描所有 .py 文件中的 `NOTE(lazy):` 标记,
    校验后续块内是否含 `ceiling:` 与 `upgrade:` 两个关键字（CLAUDE.md §3.3 要求）。
 5. Flet 版本漂移检查：扫描治理文档中 Flet 关键词附近的具体补丁版本号
    （CLAUDE.md §3.2「文档 SHALL NOT 硬编码 Flet 补丁版本号」）。
 6. 相对链接死链检查：扫描受检 markdown 中不含锚点的相对路径链接，确认目标文件存在。
+7. redlines.yml 一致性检查：校验 docs/governance/redlines.yml 与 CLAUDE.md §3.1 红线表一致
+   （R 编号 append-only / 连续 / 条目数匹配，见 ADR-0003）。
 
 退出码：0 通过，1 失败。供 pre-commit `docs-consistency` hook 与 pytest 契约测试调用。
 
-第二阶段扩展（未实现，登记于 CONTRIBUTING.md 已知技术债）：
-- 红线 R1~R17 编号 append-only 检查。
-- "强制状态"与实际 hook / CI job 的映射检查。
+第二阶段扩展：
+- 3a NOTE(lazy) 三要素检查（已实现：check_note_lazy_format()）。
+- 3b 红线 R1~R18 编号 append-only 检查（已实现：check_redlines_yaml_consistency()，见 ADR-0003）。
+- 3c "强制状态"与实际 hook / CI job 的映射检查（仍不做，见 docs/debt/known-technical-debt.md）。
 """
 
 from __future__ import annotations
@@ -39,15 +42,32 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
-FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"
+FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"  # 现为 stub，链接到 docs/flet/
+FLET_V1_API_CONSTRAINTS_PATH = ROOT / "docs" / "flet" / "v1-api-constraints.md"
+FLET_PROJECT_DIFFERENCES_PATH = ROOT / "docs" / "flet" / "project-differences.md"
+FLET_UPGRADE_CHECKLIST_PATH = ROOT / "docs" / "flet" / "upgrade-checklist.md"
+FLET_API_VERIFICATION_TEMPLATE_PATH = ROOT / "docs" / "flet" / "api-verification-template.md"
+FLET_ACCESSIBILITY_BASELINE_PATH = ROOT / "docs" / "flet" / "accessibility-baseline.md"
+KNOWN_TECHNICAL_DEBT_PATH = ROOT / "docs" / "debt" / "known-technical-debt.md"
+REDLINES_YAML_PATH = ROOT / "docs" / "governance" / "redlines.yml"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 
+# docs/flet/ 子文档清单（Phase 2.5 迁移后 Flet 内容分散于此）
+FLET_DOCS_PATHS: list[Path] = [
+    FLET_BEST_PRACTICES_PATH,
+    FLET_V1_API_CONSTRAINTS_PATH,
+    FLET_PROJECT_DIFFERENCES_PATH,
+    FLET_UPGRADE_CHECKLIST_PATH,
+    FLET_API_VERIFICATION_TEMPLATE_PATH,
+    FLET_ACCESSIBILITY_BASELINE_PATH,
+]
+
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
-CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, FLET_BEST_PRACTICES_PATH]
+CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS, KNOWN_TECHNICAL_DEBT_PATH]
 
 # Flet 版本漂移检查范围（治理文档）
-FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, FLET_BEST_PRACTICES_PATH]
+FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
 
 # Flet 包名（用于从 pyproject.toml 提取锁定版本）
 _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts")
@@ -397,6 +417,106 @@ def check_flet_version_drift() -> list[str]:
     return errors
 
 
+# redlines.yml 字段完整性校验常量
+REDLINE_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {"id", "title", "description", "enforcement", "human_review_required"}
+)
+# R 编号格式正则: R1 ~ R999 (append-only, 不复用废弃编号)
+REDLINE_ID_PATTERN = re.compile(r"^R(\d+)$")
+# CLAUDE.md §3.1 红线表行匹配: 以 `| R\d+ |` 开头的 markdown 表格行
+CLAUDE_REDLINE_TABLE_ROW_PATTERN = re.compile(r"^\|\s*R\d+\s*\|")
+
+
+def check_redlines_yaml_consistency() -> list[str]:
+    """检查项 7：redlines.yml 与 CLAUDE.md §3.1 红线表一致性（ADR-0003 决策落地）。
+
+    校验:
+    1. redlines.yml 可被 yaml.safe_load 解析, 顶层为 dict, 含 "redlines" key (list)
+    2. 每条红线含 5 字段: id/title/description/enforcement/human_review_required
+    3. id 格式为 R\\d+, 连续 append-only (R1, R2, ..., R_N, 无缺号/重号/跳号)
+    4. CLAUDE.md §3.1 红线表行数 (以 ``| R\\d+ |`` 开头的行) = yml 条目数
+
+    退出码: 0 通过, 1 失败 (返回非空 errors 列表)。
+    """
+    errors: list[str] = []
+
+    if not REDLINES_YAML_PATH.exists():
+        errors.append(f"redlines.yml 不存在: {REDLINES_YAML_PATH}")
+        return errors
+
+    try:
+        import yaml  # 延迟 import: PyYAML 是 transitive 依赖, 避免未安装时影响其他检查
+    except ImportError:
+        errors.append("PyYAML 未安装, 无法解析 redlines.yml (检查 requirements*.txt)")
+        return errors
+
+    try:
+        data = yaml.safe_load(REDLINES_YAML_PATH.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        errors.append(f"redlines.yml YAML 解析失败: {e}")
+        return errors
+
+    if not isinstance(data, dict):
+        errors.append(f"redlines.yml 顶层应为 dict, 实际 {type(data).__name__}")
+        return errors
+
+    if "redlines" not in data:
+        errors.append("redlines.yml 顶层应含 'redlines' key")
+        return errors
+
+    redlines = data["redlines"]
+    if not isinstance(redlines, list):
+        errors.append(f"'redlines' 应为 list, 实际 {type(redlines).__name__}")
+        return errors
+
+    # 校验 2: 字段完整性
+    for i, entry in enumerate(redlines):
+        if not isinstance(entry, dict):
+            errors.append(f"redlines[{i}] 应为 dict, 实际 {type(entry).__name__}")
+            continue
+        missing = REDLINE_REQUIRED_FIELDS - set(entry.keys())
+        if missing:
+            errors.append(f"redlines[{i}] 缺字段: {sorted(missing)}")
+
+    # 校验 3: id 格式 + 连续 append-only
+    parsed_nums: list[int] = []
+    for i, entry in enumerate(redlines):
+        if not isinstance(entry, dict) or "id" not in entry:
+            continue
+        rid = entry["id"]
+        m = REDLINE_ID_PATTERN.match(str(rid))
+        if not m:
+            errors.append(f"redlines[{i}] id 格式错误: {rid} (应为 R\\d+)")
+            continue
+        parsed_nums.append(int(m.group(1)))
+
+    # 无重号
+    if len(parsed_nums) != len(set(parsed_nums)):
+        duplicates = sorted({n for n in parsed_nums if parsed_nums.count(n) > 1})
+        errors.append(f"redlines.yml R 编号有重号: {duplicates}")
+
+    # 连续 append-only: 1, 2, ..., N (无缺号/跳号)
+    if parsed_nums:
+        expected_set = set(range(1, len(parsed_nums) + 1))
+        actual_set = set(parsed_nums)
+        missing_nums = sorted(expected_set - actual_set)
+        extra_nums = sorted(actual_set - expected_set)
+        if missing_nums:
+            missing_ids = [f"R{n}" for n in missing_nums]
+            errors.append(f"redlines.yml R 编号缺号 (append-only 违规): 缺 {missing_ids}")
+        if extra_nums:
+            extra_ids = [f"R{n}" for n in extra_nums]
+            errors.append(f"redlines.yml R 编号超出连续范围: 多 {extra_ids}")
+
+    # 校验 4: CLAUDE.md §3.1 表格行数 = yml 条目数
+    claude_content = CLAUDE_PATH.read_text(encoding="utf-8")
+    r_lines = [line for line in claude_content.splitlines() if CLAUDE_REDLINE_TABLE_ROW_PATTERN.match(line)]
+    if len(r_lines) != len(redlines):
+        errors.append(f"CLAUDE.md §3.1 表格行数 {len(r_lines)} != redlines.yml 条目数 {len(redlines)}")
+
+    return errors
+
+
 def main() -> int:
     """运行全部检查，返回退出码。"""
     all_errors: list[str] = []
@@ -406,6 +526,7 @@ def main() -> int:
     all_errors.extend(check_precommit_hook_count())
     all_errors.extend(check_flet_version_drift())
     all_errors.extend(check_note_lazy_format())
+    all_errors.extend(check_redlines_yaml_consistency())
 
     if all_errors:
         print("[FAIL] 文档一致性检查失败：", file=sys.stderr)
@@ -415,7 +536,7 @@ def main() -> int:
 
     print(
         "[PASS] 文档一致性检查通过（锚点死链 / 相对链接死链 / 版本一致 / "
-        "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素）"
+        "pre-commit hook 数量 / Flet 版本漂移 / NOTE(lazy) 三要素 / redlines.yml 一致性）"
     )
     return 0
 

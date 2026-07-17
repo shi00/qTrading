@@ -1,0 +1,127 @@
+# 红线机器可读映射 (CLAUDE.md §3.1 表格的 YAML 镜像)
+#
+# 来源决策: ADR-0003 (推翻「3b 过度工程不做」决策)
+# 格式决策: ADR-0004 (YAML vs JSON/TOML/Python file)
+# 校验脚本: scripts/check_docs_consistency.py::check_redlines_yaml_consistency()
+# 契约测试: tests/unit/test_docs_consistency.py::TestRedlinesYamlConsistency
+#
+# 字段说明:
+#   id: 红线编号 (append-only, 不复用废弃编号, 连续 R1~R18)
+#   title: 红线标题 (对应 CLAUDE.md §3.1 表格「红线」列)
+#   description: 红线说明 (对应 CLAUDE.md §3.1 表格「说明」列)
+#   enforcement: 强制状态 (对应 CLAUDE.md §3.1 表格「强制状态」列)
+#   human_review_required: 是否需要人工评审 (true 当且仅当 enforcement 含「仅人工评审」)
+#
+# 修改规则:
+#   - 新增 R19+ 时必须同步 CLAUDE.md §3.1 表格, 否则 check_redlines_yaml_consistency() 报错
+#   - 禁止删除或复用已废弃编号 (append-only)
+#   - 字段变更 (如新增字段) 需同步更新契约测试
+
+redlines:
+  - id: R1
+    title: 架构越界
+    description: "core/ 导入任何其他层模块；data/ 导入 services/strategies/ui/；services/ 导入 strategies/ui/；strategies/ 导入 ui/"
+    enforcement: "pre-commit（import-linter 4 条契约）"
+    human_review_required: false
+
+  - id: R2
+    title: 异常吞没
+    description: "吞没 asyncio.CancelledError (必须 raise 以配合优雅停机)"
+    enforcement: "CI-test（全量，asyncio 相关测试）"
+    human_review_required: false
+
+  - id: R3
+    title: 模糊压制
+    description: "使用 # type: ignore 时不带 [reason] 注释 (pre-commit 强制拦截)"
+    enforcement: "pre-commit"
+    human_review_required: false
+
+  - id: R4
+    title: SQL 注入
+    description: "在 asyncpg 原生查询中使用 %s 占位符 (必须用 $1, $2, ...)"
+    enforcement: "pre-commit（check_redlines.py）"
+    human_review_required: false
+
+  - id: R5
+    title: 僵尸引擎操作
+    description: "在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 EngineDisposedError)"
+    enforcement: "仅人工评审"
+    human_review_required: true
+
+  - id: R6
+    title: 过时类型注解
+    description: "使用 Union[X, Y] / Optional[X] (必须使用 X | Y / X | None)"
+    enforcement: "ruff"
+    human_review_required: false
+
+  - id: R7
+    title: 测试状态污染
+    description: "单例未隔离 (单元测试由 tests/unit/conftest.py 的 _reset_all_singletons autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 singleton_state 上下文管理器)"
+    enforcement: "CI-test（全量，conftest.py autouse fixture）"
+    human_review_required: false
+
+  - id: R8
+    title: 废弃 API
+    description: "使用 _write_db(is_many=True) 进行批量写入 (会发 DeprecationWarning，必须用 _save_upsert())"
+    enforcement: "CI-test（全量，DeprecationWarning 检测）"
+    human_review_required: false
+
+  - id: R9
+    title: 敏感信息泄露
+    description: "日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 DataSanitizer 脱敏)"
+    enforcement: "安全扫描 + 仅人工评审"
+    human_review_required: true
+
+  - id: R10
+    title: 硬编码密钥
+    description: "在代码或测试中硬编码 API Key / DB 密码 (必须从 keyring 或环境变量读取)"
+    enforcement: "安全扫描 + 仅人工评审"
+    human_review_required: true
+
+  - id: R11
+    title: 跨循环复用同步原语
+    description: "直接将 asyncio.Event/Lock 作为类属性 (必须通过 get_loop_local() 获取以绑定当前循环)"
+    enforcement: "仅人工评审"
+    human_review_required: true
+
+  - id: R12
+    title: 未注册数据表
+    description: "新增表只改 models.py 而不更新 data/data_dictionary.py 的 TABLE_DEFINITIONS"
+    enforcement: "pre-commit（check_redlines.py）"
+    human_review_required: false
+
+  - id: R13
+    title: 未注册 DAO
+    description: "新增 DAO 不在 CacheManager.__init__ 中实例化、不在 _create_engine 中更新 .engine 引用"
+    enforcement: "pre-commit（check_redlines.py，部分覆盖：__init__ 注册已检查，_create_engine engine 引用更新未自动检查）"
+    human_review_required: false
+
+  - id: R14
+    title: 未注册策略
+    description: "新增策略不使用 @register_strategy(\"key\") 装饰器"
+    enforcement: "pre-commit（check_redlines.py）"
+    human_review_required: false
+
+  - id: R15
+    title: 未注册单例
+    description: "新增单例不使用 @register_singleton 装饰器、不实现 _reset_singleton"
+    enforcement: "pre-commit（check_redlines.py）"
+    human_review_required: false
+
+  - id: R16
+    title: UI 阻塞主循环
+    description: "在 Flet 事件处理器中同步执行 IO/CPU 密集任务 (必须 await ThreadPoolManager.run_async() 提交)"
+    enforcement: "可自动化待实现（AST 检查，暂缓：误报风险高）"
+    human_review_required: false
+
+  - id: R17
+    title: 保留字作字段
+    description: "禁止使用数字开头、包含特殊字符或 SQL 保留字作为表名或列名（必须使用 ORM name= 属性映射，禁止拼接该列名的裸 SQL）"
+    enforcement: "仅人工评审"
+    human_review_required: true
+
+  - id: R18
+    title: 未隔离开发
+    description: "新特性、重构、跨多文件修改任务未启用 git worktree 隔离即在主工作区开发（豁免：单文件文档纯改、单行修复、bug 复现脚本、.worktrees/ 内已有隔离）"
+    enforcement: "仅人工评审"
+    human_review_required: true
