@@ -101,15 +101,16 @@ line-ending = "auto"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"
-log_cli = true
+log_cli = false
 log_cli_level = "INFO"
 log_level = "DEBUG"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
+testpaths = ["tests"]
 filterwarnings = [
     "ignore::DeprecationWarning:pytest_asyncio.plugin",
 ]
-addopts = "--durations=20 --durations-min=1.0"
+addopts = "--durations=20 --durations-min=1.0 -n auto --dist=loadgroup --timeout=300 --strict-markers"
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",
