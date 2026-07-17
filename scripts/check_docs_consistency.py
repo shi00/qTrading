@@ -39,15 +39,30 @@ ROOT = Path(__file__).resolve().parent.parent
 
 CLAUDE_PATH = ROOT / "CLAUDE.md"
 CONTRIBUTING_PATH = ROOT / "CONTRIBUTING.md"
-FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"
+FLET_BEST_PRACTICES_PATH = ROOT / "man" / "flet-best-practices.md"  # 现为 stub，链接到 docs/flet/
+FLET_V1_API_CONSTRAINTS_PATH = ROOT / "docs" / "flet" / "v1-api-constraints.md"
+FLET_PROJECT_DIFFERENCES_PATH = ROOT / "docs" / "flet" / "project-differences.md"
+FLET_UPGRADE_CHECKLIST_PATH = ROOT / "docs" / "flet" / "upgrade-checklist.md"
+FLET_API_VERIFICATION_TEMPLATE_PATH = ROOT / "docs" / "flet" / "api-verification-template.md"
+FLET_ACCESSIBILITY_BASELINE_PATH = ROOT / "docs" / "flet" / "accessibility-baseline.md"
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PRECOMMIT_PATH = ROOT / ".pre-commit-config.yaml"
 
+# docs/flet/ 子文档清单（Phase 2.5 迁移后 Flet 内容分散于此）
+FLET_DOCS_PATHS: list[Path] = [
+    FLET_BEST_PRACTICES_PATH,
+    FLET_V1_API_CONSTRAINTS_PATH,
+    FLET_PROJECT_DIFFERENCES_PATH,
+    FLET_UPGRADE_CHECKLIST_PATH,
+    FLET_API_VERIFICATION_TEMPLATE_PATH,
+    FLET_ACCESSIBILITY_BASELINE_PATH,
+]
+
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
-CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, FLET_BEST_PRACTICES_PATH]
+CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
 
 # Flet 版本漂移检查范围（治理文档）
-FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, FLET_BEST_PRACTICES_PATH]
+FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]
 
 # Flet 包名（用于从 pyproject.toml 提取锁定版本）
 _FLET_PACKAGES = ("flet", "flet-desktop", "flet-charts")

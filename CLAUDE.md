@@ -168,7 +168,7 @@
 - 涉及数据库 schema 变更必须生成 Alembic 迁移，并至少验证 `upgrade head` + `alembic check`；CI 会继续验证 `downgrade base` → `upgrade head`。
 - 错误处理必须使用 `classify_error()` + `classify_severity()` 进行分类，并按严重度选择日志级别；涉及外部 IO (Tushare / LiteLLM / DB) 的方法必须挂 `@log_async_operation(threshold_ms=PerfThreshold.XXX)` 或 `@track_performance()` 以触发慢操作告警。
 - **复用优先（避免重复造轮子）**：实现功能前必须先搜索确认项目内是否已有可复用代码；优先采用业界稳定开源库，而非自行实现；禁止对成熟库功能做无谓封装。
-- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [CONTRIBUTING.md「V1 声明式 UI 开发规范」](./CONTRIBUTING.md#v1-声明式-ui-开发规范)。
+- **UI 模型（强制）**：采用 MVVM + 声明式渲染复合范式。**View** = `@ft.component` 声明式组件，`View = f(ViewModel.state)`，禁止持有业务状态/`did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`。**ViewModel** = 纯状态+命令层，禁止 import flet/持有 Flet 控件/调 `page.update()`/`control.update()`/感知 locale，暴露不可变 state snapshot 与 command 方法（异步命令返回 coroutine）。**桥接**：View 经项目统一 `use_viewmodel(factory) -> (state, commands)` hook 消费 ViewModel（契约见 [CONTRIBUTING.md「MVVM 表现层」](./CONTRIBUTING.md#mvvm-表现层)）；i18n locale 由独立状态源驱动，VM 只产出 i18n key，View 按当前 locale 渲染。所有 UI 代码必须遵守 [docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」](./docs/flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
@@ -224,5 +224,5 @@ app → 编排所有层，仅被 main.py 调用
 | Git 工作流与分支策略（GitHub Flow + worktree 隔离、分支命名、原子提交、Squash Merge） | 「Git 工作流与分支策略」 |
 | 常用开发与测试命令 / 交付前 DoD / 变更类型→最小验证子集 | 「常用开发与测试命令」 |
 | 完整技术栈表 / 完整目录结构 / 同层合并原则 | 「AI 助手方法论与项目概览」 |
-| 已知架构技术债 / Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | 对应小节 |
-| Flet V1 项目差异与升级清单（man/flet-best-practices.md） | 「Flet V1 项目差异与升级清单」 |
+| 已知架构技术债 / Flet V1 API 约束（适用版本从 `pyproject.toml` 读取） / 升级协同机制 | [docs/flet/](./docs/flet/) 子文档 |
+| Flet V1 项目差异与升级清单（docs/flet/） | [docs/flet/](./docs/flet/) 子文档 |
