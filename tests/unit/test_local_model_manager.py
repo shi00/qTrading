@@ -116,7 +116,7 @@ class TestPersistentWorkerEnsureWorker:
 
             result = mgr._ensure_worker("/new/model.gguf", {"n_threads": 4})
             assert result is True
-            mgr._shutdown_worker_locked.assert_called_once()
+            mgr._shutdown_worker_locked.assert_called_once_with()
 
     def test_ensure_worker_returns_true_on_process_start(self):
         mgr = LocalModelManager()
@@ -155,7 +155,7 @@ class TestPersistentWorkerEnsureWorker:
             result = await mgr._await_worker_ready()
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_returns_true_on_ready(self):
@@ -184,7 +184,7 @@ class TestPersistentWorkerEnsureWorker:
             result = await mgr._await_worker_ready(timeout=1)
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_respects_cancel_event(self):
@@ -199,7 +199,7 @@ class TestPersistentWorkerEnsureWorker:
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=1)
             assert result is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_no_result_queue(self):
@@ -247,7 +247,7 @@ class TestPersistentWorkerShutdownWorker:
 
         mgr._shutdown_worker()
 
-        mock_proc.terminate.assert_called_once()
+        mock_proc.terminate.assert_called_once_with()
 
     def test_shutdown_worker_kills_if_terminate_fails(self):
         mgr = LocalModelManager()
@@ -264,7 +264,7 @@ class TestPersistentWorkerShutdownWorker:
 
         mgr._shutdown_worker()
 
-        mock_proc.kill.assert_called_once()
+        mock_proc.kill.assert_called_once_with()
 
     def test_shutdown_worker_noop_if_no_proc(self):
         mgr = LocalModelManager()
@@ -279,7 +279,7 @@ class TestPersistentWorkerShutdownWorker:
         mgr = LocalModelManager()
         with patch.object(mgr, "_shutdown_worker") as mock_sw:
             mgr.unload_model()
-            mock_sw.assert_called_once()
+            mock_sw.assert_called_once_with(force=False)
 
     def test_unload_model_force_propagates(self):
         mgr = LocalModelManager()
@@ -302,7 +302,7 @@ class TestPersistentWorkerShutdownWorker:
         mgr._shutdown_worker(force=True)
 
         mock_req_queue.put.assert_not_called()
-        mock_proc.terminate.assert_called_once()
+        mock_proc.terminate.assert_called_once_with()
         mock_proc.kill.assert_not_called()
 
     def test_shutdown_worker_force_kills_if_terminate_fails(self):
@@ -320,8 +320,8 @@ class TestPersistentWorkerShutdownWorker:
         mgr._shutdown_worker(force=True)
 
         mock_req_queue.put.assert_not_called()
-        mock_proc.terminate.assert_called_once()
-        mock_proc.kill.assert_called_once()
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.kill.assert_called_once_with()
 
 
 class TestPersistentWorkerModelReuse:
@@ -409,8 +409,9 @@ class TestLocalModelManagerRunInference:
     async def test_no_llama_cpp(self):
         with patch("services.local_model_manager._HAS_LLAMA_CPP", False):
             mgr = LocalModelManager()
-            with pytest.raises(ImportError):
+            with pytest.raises(ImportError, match="llama-cpp-python not installed") as exc_info:
                 await mgr.run_inference("test prompt")
+            assert isinstance(exc_info.value, ImportError)
 
     @pytest.mark.asyncio
     async def test_no_model_configured(self):
@@ -628,10 +629,11 @@ class TestLocalModelManagerRunInferenceWithModel:
                 mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
-                with pytest.raises(LocalInferenceTimeoutError):
+                with pytest.raises(LocalInferenceTimeoutError, match=r"Local inference timed out \(1s\)") as exc_info:
                     await mgr.run_inference("test prompt")
+                assert isinstance(exc_info.value, LocalInferenceTimeoutError)
 
-                mgr._shutdown_worker.assert_called_once()
+                mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_run_inference_error_response(self):
@@ -872,10 +874,11 @@ class TestLocalModelManagerSubprocessCleanup:
                 mgr._worker_proc = MagicMock(spec=_RealProcess)
                 mgr._worker_proc.is_alive.return_value = True
 
-                with pytest.raises(LocalInferenceTimeoutError):
+                with pytest.raises(LocalInferenceTimeoutError, match=r"Local inference timed out \(1s\)") as exc_info:
                     await mgr.run_inference("test prompt")
+                assert isinstance(exc_info.value, LocalInferenceTimeoutError)
 
-                mgr._shutdown_worker.assert_called_once()
+                mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_worker_exits_without_result(self):
@@ -927,14 +930,16 @@ class TestLocalInferenceTimeoutErrorType:
     def test_can_be_raised_and_caught(self):
         from services.local_model_manager import LocalInferenceTimeoutError
 
-        with pytest.raises(LocalInferenceTimeoutError):
+        with pytest.raises(LocalInferenceTimeoutError, match="test timeout") as exc_info:
             raise LocalInferenceTimeoutError("test timeout")
+        assert isinstance(exc_info.value, LocalInferenceTimeoutError)
 
     def test_caught_by_runtime_error(self):
         from services.local_model_manager import LocalInferenceTimeoutError
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="test timeout") as exc_info:
             raise LocalInferenceTimeoutError("test timeout")
+        assert isinstance(exc_info.value, LocalInferenceTimeoutError)
 
 
 class TestSentinelEqualityComparison:
@@ -981,7 +986,7 @@ class TestCancelEventInterruptsInference:
             ):
                 with pytest.raises(RuntimeError, match="Inference cancelled"):
                     await mgr.run_inference("test prompt")
-                mgr._shutdown_worker.assert_called_once()
+                mgr._shutdown_worker.assert_called_once_with()
 
 
 class TestLoadModelClearsCancelEvent:
@@ -1048,7 +1053,7 @@ class TestShutdownWorkerLockedNoDeadlock:
 
             mgr._ensure_worker("/path/to/model.gguf", {})
 
-            mock_locked.assert_called_once()
+            mock_locked.assert_called_once_with()
             mock_public.assert_not_called()
 
     def test_shutdown_worker_delegates_to_locked(self):
@@ -1059,7 +1064,7 @@ class TestShutdownWorkerLockedNoDeadlock:
 
         with patch.object(mgr, "_shutdown_worker_locked") as mock_locked:
             mgr._shutdown_worker()
-            mock_locked.assert_called_once()
+            mock_locked.assert_called_once_with(force=False)
 
 
 class TestAwaitWorkerReadyPolling:
@@ -1078,7 +1083,7 @@ class TestAwaitWorkerReadyPolling:
             result = await mgr._await_worker_ready(timeout=0.5)
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_worker_crash_with_exitcode_logged(self):
@@ -1112,7 +1117,7 @@ class TestAwaitWorkerReadyPolling:
             result = await mgr._await_worker_ready()
             assert result is False
             assert mgr._worker_ready is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_ready_status_sets_worker_ready(self):
@@ -1140,7 +1145,7 @@ class TestAwaitWorkerReadyPolling:
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=10)
             assert result is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_worker_crash_with_residual_result(self):
@@ -1305,7 +1310,7 @@ class TestRunInferenceWorkerNotReady:
 
                 result = await mgr.run_inference("test prompt")
                 assert result == "result"
-                mgr._await_worker_ready.assert_called_once()
+                mgr._await_worker_ready.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_worker_not_ready_await_fails(self):
@@ -1358,7 +1363,7 @@ class TestResetSingleton:
         mock_instance = MagicMock(spec=LocalModelManager)
         LocalModelManager._instance = mock_instance
         LocalModelManager._reset_singleton()
-        mock_instance._shutdown_worker.assert_called_once()
+        mock_instance._shutdown_worker.assert_called_once_with()
         assert LocalModelManager._instance is None
 
 
@@ -1395,7 +1400,7 @@ class TestPersistentWorkerImportFailure:
         with patch("importlib.import_module", side_effect=ImportError("no module")):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
 
-        mock_res_queue.put.assert_called_once()
+        mock_res_queue.put.assert_called_once()  # noqa: weak-assertion result 含非确定性 traceback；参数已由后续 call_args 断言验证
         call_args = mock_res_queue.put.call_args[0][0]
         assert call_args[0] == "error"
         assert "llama-cpp-python import failed" in call_args[1]
@@ -1408,7 +1413,7 @@ class TestPersistentWorkerImportFailure:
         with patch("importlib.import_module", side_effect=AttributeError("no attr")):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
 
-        mock_res_queue.put.assert_called_once()
+        mock_res_queue.put.assert_called_once()  # noqa: weak-assertion result 含非确定性 traceback；参数已由后续 call_args 断言验证
         call_args = mock_res_queue.put.call_args[0][0]
         assert call_args[0] == "error"
 
@@ -1427,7 +1432,7 @@ class TestPersistentWorkerModelLoadFailure:
         with patch("importlib.import_module", return_value=mock_llama_module):
             _persistent_worker("/path/to/model.gguf", {}, mock_req_queue, mock_res_queue)
 
-        mock_res_queue.put.assert_called_once()
+        mock_res_queue.put.assert_called_once()  # noqa: weak-assertion result 含非确定性 traceback；参数已由后续 call_args 断言验证
         call_args = mock_res_queue.put.call_args[0][0]
         assert call_args[0] == "error"
         assert "Model load failed" in call_args[1]
@@ -1556,7 +1561,7 @@ class TestAwaitWorkerReadyOsAndTimeoutErrors:
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=0.1)
             assert result is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_await_worker_ready_timeout_error(self):
@@ -1569,7 +1574,7 @@ class TestAwaitWorkerReadyOsAndTimeoutErrors:
         with patch.object(mgr, "_shutdown_worker"):
             result = await mgr._await_worker_ready(timeout=0.1)
             assert result is False
-            mgr._shutdown_worker.assert_called_once()
+            mgr._shutdown_worker.assert_called_once_with()
 
 
 class TestRunInferenceWorkerDiesDuringPolling:
@@ -1876,7 +1881,7 @@ class TestLocalModelVerificationMode:
                 with pytest.raises(RuntimeError, match="failed to start"):
                     await mgr.run_inference("test prompt")
                 assert mgr._verification_mode is False
-                mock_unload.assert_called_once()
+                mock_unload.assert_called_once_with()
 
     def test_commit_verification_clears_flag(self):
         """commit_verification 后 _verification_mode=False，模型仍保留。"""
@@ -1895,7 +1900,7 @@ class TestLocalModelVerificationMode:
         with patch.object(mgr, "unload_model") as mock_unload:
             mgr.cancel_verification()
             assert mgr._verification_mode is False
-            mock_unload.assert_called_once()
+            mock_unload.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_verify_same_model_already_loaded(self):
