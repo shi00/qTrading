@@ -423,7 +423,13 @@ jobs:
           E2E_ARTIFACT_DIR: "e2e-artifacts"
           E2E_TIMEOUT_MULTIPLIER: "2.0"
         run: |
-          python -m pytest tests/e2e/ -v --tb=short --junitxml=junit-e2e.xml --reruns 2 --reruns-delay 5
+          # Run E2E tests serially (-n 1) to avoid PostgreSQL connection contention.
+          # Root cause of worker crashes in setup phase (run 29664725583):
+          # 4 xdist workers concurrently init_db / run migrations / probe DB on the
+          # same shared test_astock database, causing extreme slowness (27s SELECT)
+          # and eventual worker termination (node down: Not properly terminated).
+          # Serial execution trades ~5min extra wall time for stability.
+          python -m pytest tests/e2e/ -n 1 -v --tb=long --junitxml=junit-e2e.xml --reruns 2 --reruns-delay 5
 
       - name: Sanitize E2E artifacts
         if: always()
