@@ -474,13 +474,13 @@ class TestDataProcessor(unittest.TestCase):
 
         with (
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_latest_trade_date",
                 new_callable=AsyncMock,
                 return_value="20230103",
             ),
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_trade_dates",
                 new_callable=AsyncMock,
                 return_value=mock_trade_dates,
@@ -506,13 +506,13 @@ class TestDataProcessor(unittest.TestCase):
 
         with (
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_latest_trade_date",
                 new_callable=AsyncMock,
                 return_value="20230104",
             ),
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_trade_dates",
                 new_callable=AsyncMock,
                 return_value=mock_trade_dates_2,
@@ -548,13 +548,13 @@ class TestDataProcessor(unittest.TestCase):
 
         with (
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_latest_trade_date",
                 new_callable=AsyncMock,
                 return_value="20230119",
             ),
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_trade_dates",
                 new_callable=AsyncMock,
                 return_value=dates_3,
@@ -596,13 +596,13 @@ class TestDataProcessor(unittest.TestCase):
 
         with (
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_latest_trade_date",
                 new_callable=AsyncMock,
                 return_value="20230103",
             ),
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_trade_dates",
                 new_callable=AsyncMock,
                 return_value=mock_trade_dates,
@@ -648,13 +648,13 @@ class TestDataProcessor(unittest.TestCase):
 
         with (
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_latest_trade_date",
                 new_callable=AsyncMock,
                 return_value="20230103",
             ),
             patch.object(
-                self.processor,
+                self.processor.trade_calendar,
                 "get_trade_dates",
                 new_callable=AsyncMock,
                 return_value=mock_trade_dates,
@@ -1487,7 +1487,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_sync_daily_auto_resolves_date(self):
         """Test sync_daily_market_snapshot calls get_latest_trade_date when date is None"""
         with patch.object(
-            self.processor,
+            self.processor.trade_calendar,
             "get_latest_trade_date",
             new_callable=AsyncMock,
             return_value=datetime.date(2023, 1, 3),
