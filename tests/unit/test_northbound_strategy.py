@@ -283,6 +283,6 @@ class TestNorthboundFlowStrategy:
             "data_processor": _make_dp(),
         }
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run:
-            mock_run.side_effect = asyncio.CancelledError()
-            with pytest.raises(asyncio.CancelledError):
+            mock_run.side_effect = asyncio.CancelledError("test cancel northbound")
+            with pytest.raises(asyncio.CancelledError, match="test cancel northbound"):
                 await strat.filter(ctx)
