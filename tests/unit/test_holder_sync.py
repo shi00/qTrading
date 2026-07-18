@@ -1090,8 +1090,9 @@ class TestHolderSyncRunEngineDisposedError:
             raise EngineDisposedError("Engine disposed")
 
         strategy._sync_stk_holdernumber = mock_sync
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._run_impl()
+        assert "disposed" in str(exc_info.value)
 
 
 # =============================================================================
@@ -1111,8 +1112,9 @@ class TestR5EngineDisposedReraises:
         ctx.api = MagicMock()
         ctx.api.get_stk_holdernumber = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._sync_stk_holdernumber("20240331")
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_one_table_reraises(self):
@@ -1121,8 +1123,9 @@ class TestR5EngineDisposedReraises:
         save_func = AsyncMock()
         api_func = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._sync_one_table(api_func, save_func, "test_table", "20240331")
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_reraises_in_api_call(self):
@@ -1157,8 +1160,9 @@ class TestR5EngineDisposedReraises:
         ctx.api.get_share_float = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._sync_share_float()
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_stk_holdertrade_reraises(self):
@@ -1168,8 +1172,9 @@ class TestR5EngineDisposedReraises:
         ctx.api.get_stk_holdertrade = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._sync_stk_holdertrade()
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_get_existing_top10_ts_codes_reraises(self):
@@ -1178,8 +1183,9 @@ class TestR5EngineDisposedReraises:
         ctx.cache = MagicMock()
         ctx.cache.get_existing_top10_ts_codes = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._get_existing_top10_ts_codes("20240331")
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_save_top10_checkpoint_reraises(self):
@@ -1189,8 +1195,9 @@ class TestR5EngineDisposedReraises:
         ctx.cache.save_top10_holders = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._save_top10_checkpoint(dfs, "20240331")
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_top10_holders_reraises_in_iteration(self):
@@ -1202,8 +1209,9 @@ class TestR5EngineDisposedReraises:
         ctx.api.get_top10_holders = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._sync_top10_holders("20240331")
+        assert "disposed" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_sync_pledge_stat_permission_recording_engine_disposed(self):
@@ -1264,8 +1272,9 @@ class TestR2CancelledErrorReraises:
             raise asyncio.CancelledError()
 
         strategy._sync_stk_holdernumber = mock_sync
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await strategy._run_impl()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestRunImplFullSuccessPaths:
@@ -1325,8 +1334,9 @@ class TestRunImplSystemSeverityReraises:
             raise MemoryError("system down")
 
         strategy._sync_stk_holdernumber = mock_sync
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._run_impl()
+        assert "system down" in str(exc_info.value)
 
 
 class TestTushareAPIPermissionPaths:
@@ -1497,11 +1507,12 @@ class TestLogSyncErrorSeverityBranches:
         """system severity（MemoryError）必须 raise（在 except 上下文中）。"""
         ctx = MagicMock()
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             try:
                 raise MemoryError("oom")
             except Exception as e:
                 strategy._log_sync_error("test_table", "20240331", e)
+        assert "oom" in str(exc_info.value)
 
     def test_recoverable_severity_warns(self):
         """recoverable severity（OSError with network）应走 warning 分支，不 raise。"""
@@ -1588,8 +1599,9 @@ class TestGetExistingTop10TsCodesSeverityBranches:
         ctx.cache = MagicMock()
         ctx.cache.get_existing_top10_ts_codes = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._get_existing_top10_ts_codes("20240331")
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_recoverable_severity_returns_empty(self):
@@ -1623,8 +1635,9 @@ class TestSaveTop10CheckpointSeverityBranches:
         ctx.cache.save_top10_holders = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
         dfs = [pd.DataFrame({"ts_code": ["000001.SZ"], "holder_name": ["Test"]})]
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._save_top10_checkpoint(dfs, "20240331")
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_recoverable_severity_returns_false(self):
@@ -1659,8 +1672,9 @@ class TestSyncOneTableSeverityBranches:
         save_func = AsyncMock()
         api_func = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._sync_one_table(api_func, save_func, "test_table", "20240331")
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_recoverable_severity_returns_minus_one(self):
@@ -1694,8 +1708,9 @@ class TestSyncPledgeStatSeverityBranches:
         ctx.api.get_pledge_stat = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._sync_pledge_stat()
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_api_recoverable_severity_continues_retry(self):
@@ -1727,8 +1742,9 @@ class TestSyncPledgeStatSeverityBranches:
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(side_effect=MemoryError("oom"))
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._sync_pledge_stat()
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_outer_recoverable_severity_returns_minus_one(self):
@@ -1760,8 +1776,9 @@ class TestSyncShareFloatSeverityBranches:
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(side_effect=MemoryError("oom"))
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._sync_share_float()
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_outer_recoverable_severity_returns_minus_one(self):
@@ -1791,8 +1808,9 @@ class TestSyncStkHoldertradeSeverityBranches:
         ctx.api = MagicMock()
         strategy = HolderSyncStrategy(ctx)
         strategy._get_effective_trade_date = AsyncMock(side_effect=MemoryError("oom"))
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._sync_stk_holdertrade()
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_outer_recoverable_severity_returns_minus_one(self):
@@ -1826,8 +1844,9 @@ class TestSyncTop10HoldersSystemSeverityAndRateLimit:
         ctx.api.get_top10_holders = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
         strategy._get_existing_top10_ts_codes = AsyncMock(return_value=set())
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._sync_top10_holders("20240331")
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_rate_limit_hits_counted_across_variants(self):
@@ -2160,8 +2179,9 @@ class TestGetEffectiveTradeDateSeverityBranches:
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=MemoryError("oom"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy._get_effective_trade_date()
+        assert "oom" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_recoverable_severity_falls_back(self):
@@ -2180,8 +2200,9 @@ class TestGetEffectiveTradeDateSeverityBranches:
         ctx.processor = MagicMock()
         ctx.processor.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=EngineDisposedError("disposed"))
         strategy = HolderSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy._get_effective_trade_date()
+        assert "disposed" in str(exc_info.value)
 
 
 class TestRunImplRecoverableErrorPath:
