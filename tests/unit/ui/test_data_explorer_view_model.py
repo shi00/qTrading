@@ -8,6 +8,7 @@ VM 改造后(CLAUDE.md §3.2 + CONTRIBUTING.md L771):
 
 import asyncio
 import functools
+import inspect
 from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
@@ -48,7 +49,7 @@ def mock_tp(mock_db):
         if isinstance(func, functools.partial):
             return func()
         # Handle direct method calls with args
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
         return func(*args, **kwargs)
 

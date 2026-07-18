@@ -17,6 +17,7 @@
 """
 
 import asyncio
+import inspect
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -614,7 +615,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(save_btn.on_click, _make_event())
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ()
 
     def test_on_reset_ai_prompt_sets_default_prompt(self, ai_brain_tab_env) -> None:

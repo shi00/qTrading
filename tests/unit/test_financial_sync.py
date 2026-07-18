@@ -1079,13 +1079,7 @@ class TestFinancialSyncCounterLockLoopLocal:
         def _run_sync_in_fresh_loop():
             ctx = make_ctx()
             strategy = FinancialSyncStrategy(ctx)
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return loop.run_until_complete(strategy.run(force=True))
-            finally:
-                loop.close()
-                asyncio.set_event_loop(None)
+            return asyncio.run(strategy.run(force=True))
 
         # First run in a fresh loop - binds a lock instance to that loop
         # via get_loop_local("financial_counter_lock", ...).

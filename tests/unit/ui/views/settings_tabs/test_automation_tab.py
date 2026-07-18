@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import inspect
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -544,7 +545,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(switch.on_change, _make_event(True))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == (True,)
 
     def test_on_schedule_time_change_invokes_run_task(self, automation_tab_env) -> None:
@@ -556,7 +557,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(dropdown.on_select, _make_event("17:00"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("17:00",)
 
     def test_on_ai_concept_toggle_invokes_run_task(self, automation_tab_env) -> None:
@@ -568,7 +569,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(switch.on_change, _make_event(True))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == (True,)
 
     def test_on_ai_concept_time_change_invokes_run_task(self, automation_tab_env) -> None:
@@ -583,7 +584,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(ai_time_dropdown.on_select, _make_event("20:00"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("20:00",)
 
     def test_on_ai_concept_engine_change_invokes_run_task(self, automation_tab_env) -> None:
@@ -595,7 +596,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(dropdown.on_select, _make_event("search_pro"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("search_pro",)
 
     def test_on_news_toggle_invokes_run_task(self, notifications_tab_env) -> None:
@@ -607,7 +608,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(switch.on_change, _make_event(False))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == (False,)
 
     def test_on_interval_change_invokes_run_task(self, notifications_tab_env) -> None:
@@ -619,7 +620,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(dropdown.on_select, _make_event("60"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("60",)
 
 

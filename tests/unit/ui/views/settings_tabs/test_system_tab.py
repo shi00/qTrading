@@ -12,6 +12,7 @@
 """
 
 import asyncio
+import inspect
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -565,7 +566,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(dropdowns[0].on_select, _make_event("en_US"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("en_US",)
 
     def test_on_theme_change_invokes_run_task(self, system_tab_env) -> None:
@@ -577,7 +578,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(dropdowns[1].on_select, _make_event("light"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("light",)
 
     def test_on_log_level_change_invokes_run_task(self, system_tab_env) -> None:
@@ -589,7 +590,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(dropdowns[2].on_select, _make_event("DEBUG"))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("DEBUG",)
 
     def test_on_save_concurrency_invokes_run_task(self, system_tab_env) -> None:
@@ -601,7 +602,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(buttons[0].on_click, _make_event())
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert len(args) == 1
 
     def test_on_save_db_pool_invokes_run_task(self, system_tab_env) -> None:
@@ -613,7 +614,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(buttons[2].on_click, _make_event())
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert len(args) == 3
 
     def test_on_save_thread_pool_invokes_run_task(self, system_tab_env) -> None:
@@ -625,7 +626,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(buttons[1].on_click, _make_event())
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert len(args) == 2
 
     def test_on_save_no_proxy_invokes_run_task(self, system_tab_env) -> None:
@@ -637,7 +638,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(buttons[3].on_click, _make_event())
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert len(args) == 1
 
     def test_on_export_diagnostics_invokes_run_task(self, system_tab_env) -> None:
@@ -650,7 +651,7 @@ class TestEventHandlersPageAvailable:
 
         _invoke(diag_button.on_click, _make_event())
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ()
 
     def test_on_language_change_no_value_returns_early(self, system_tab_env) -> None:

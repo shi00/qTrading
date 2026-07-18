@@ -16,6 +16,7 @@ test_screener_view_spike.py 验证 spike 可行性, 本文件补充运行时测�
 
 import asyncio
 import datetime
+import inspect
 from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -879,7 +880,7 @@ class TestOnSort:
         _invoke(on_sort, "close", True)
 
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
         assert args == ("close", True)
 
     def test_sort_success(self, screener_view_env) -> None:
