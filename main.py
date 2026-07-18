@@ -14,7 +14,7 @@ from utils.logger import setup_logging
 from utils.proxy_manager import ProxyManager
 from utils.sanitizers import DataSanitizer
 from data.cache.cache_manager import CacheManager
-from ui.components.toast_manager import ToastManager
+from ui.components.toast_manager import ToastManager, ToastManagerView
 from ui.theme import apply_page_theme
 from app.bootstrap import mask_sensitive
 from app.startup_controller import StartupController
@@ -272,6 +272,7 @@ async def main(page: ft.Page):
     apply_page_theme(page)
 
     page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
+    page.overlay.append(ToastManagerView())  # type: ignore[attr-defined]  # [reason: ToastManagerView 为声明式组件，需挂载到 page.overlay 才能渲染 toast，ft.Page 类型存根无 overlay 属性]
 
     def show_toast(message, type="info"):
         page.toast.show(message, type)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]

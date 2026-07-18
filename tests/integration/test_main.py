@@ -63,6 +63,7 @@ class _DummyPage:
         self.padding = 0
         self.toast = None
         self.controls = []
+        self.overlay = []
         self.current_dialog = None
         self.updated_count = 0
         self.run_task_calls = []
@@ -161,6 +162,7 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
+    monkeypatch.setattr(app_main, "ToastManagerView", lambda: MagicMock())
     # WindowEventType must be a string "close" so SimpleNamespace(type="close") matches
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
     monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
