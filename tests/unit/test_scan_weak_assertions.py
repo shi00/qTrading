@@ -107,6 +107,43 @@ class TestScanFile:
 
 
 # ============================================================================
+# scan_directory：目录与单文件路径支持
+# ============================================================================
+
+
+class TestScanDirectory:
+    """scan_directory 对目录与单文件路径的扫描行为。
+
+    回归覆盖：``--path <single_file>`` 模式应能扫描该文件，
+    而非返回空列表（root.rglob 对文件路径返回空迭代器的 bug 修复）。
+    """
+
+    def test_scan_directory_scans_subdir_test_files(self, tmp_path):
+        """目录模式：rglob 递归扫描所有 test_*.py。"""
+        _write_test_file(tmp_path, "test_a.py", "def test_a():\n    assert True\n")
+        _write_test_file(tmp_path, "sub/test_b.py", "def test_b():\n    assert 1\n")
+        issues = scan_directory(tmp_path)
+        assert len(issues) == 2
+
+    def test_scan_directory_handles_single_file_path(self, tmp_path):
+        """单文件模式：root 为文件时应直接扫描该文件，不返回空列表。
+
+        Regression: ``Path.rglob`` 对文件路径返回空迭代器，
+        导致 ``--path tests/unit/x.py`` 报告 0 处弱断言。
+        """
+        f = _write_test_file(tmp_path, "test_x.py", "def test_a():\n    assert True\n")
+        issues = scan_directory(f)
+        assert len(issues) == 1
+        assert issues[0].rel_path == "test_x.py"
+
+    def test_scan_directory_single_file_preserves_filename_as_rel_path(self, tmp_path):
+        """单文件模式：rel_path 使用文件名（不报绝对路径）。"""
+        f = _write_test_file(tmp_path, "test_unique.py", "def test_a():\n    assert True\n")
+        issues = scan_directory(f)
+        assert issues[0].rel_path == "test_unique.py"
+
+
+# ============================================================================
 # 白名单（行内 noqa）
 # ============================================================================
 

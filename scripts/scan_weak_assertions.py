@@ -358,8 +358,17 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
 
 
 def scan_directory(root: Path) -> list[WeakAssertion]:
-    """扫描目录下所有 test_*.py 文件，返回 WeakAssertion 列表（rel_path 相对 root）。"""
+    """扫描目录或单个文件，返回 WeakAssertion 列表（rel_path 相对 root）。
+
+    支持两种 ``root`` 形式：
+    - 目录：``rglob("test_*.py")`` 递归扫描所有 test_*.py。
+    - 单文件：直接扫描该文件（``--path tests/unit/x.py`` 模式）。
+      ``Path.rglob`` 对文件路径返回空迭代器，需显式分发。
+    """
     results: list[WeakAssertion] = []
+    if root.is_file():
+        results.extend(scan_file(root, rel_path=root.name))
+        return results
     for filepath in root.rglob("test_*.py"):
         try:
             rel = filepath.relative_to(root).as_posix()
