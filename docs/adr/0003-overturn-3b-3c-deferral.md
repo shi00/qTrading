@@ -45,3 +45,15 @@ CONTRIBUTING.md 历史版本「已知架构技术债」表第一条 P3 记录了
 - **维持 3b/3c 都不做**：拒绝。upgrade 触发条件已满足（CI 自动化专项迭代）；继续靠人工评审守护红线编号漂移风险不可控。
 - **3b/3c 都做**：拒绝。3c 强制状态字段语义复杂，机器校验需大量特例，收益成本比不及 3b；YAGNI 原则下推迟 3c。
 - **只做 3c 不做 3b**：拒绝。3b（编号 append-only）比 3c（强制状态映射）更基础、收益更直接；优先级 3b > 3c。
+
+## Errata / 勘误
+
+> 2026-07-19 追加
+
+Decision 3 中"docs/debt/known-technical-debt.md 第一条 P3 条目更新为「3a 已落地，3b 已落地（见 ADR-0003），3c 仍不做」"所指的"第一条 P3 条目"为决策时点（2026-07-17）的 doc-lint 自动化第二阶段条目。
+
+该条目后因 3a/3b/3c 全部落地完成（3a 由 Phase 5 落地、3b 由本 ADR 落地、3c 由 ADR-0005 落地），已于 2026-07-19 从 `docs/debt/known-technical-debt.md` 清理（符合 CLAUDE.md §3.3「已解决事项不再列入本表」原则，详见 `.trae/specs/revise-tech-debt-records-v3/`）。
+
+当前 `docs/debt/known-technical-debt.md` 第一条 P3 条目为"strategies/ 层 except Exception 已标记 NOTE(lazy)"，与本 ADR 决策无直接关联。读者如需查阅 doc-lint 历史决策记录，请直接阅读本 ADR 与 ADR-0005，无需在 `known-technical-debt.md` 中查找。
+
+本勘误仅说明引用失效原因，不修改 Decision 3 原文（遵守 ADR append-only 不可变性原则）。
