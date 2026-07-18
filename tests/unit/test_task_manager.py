@@ -22,7 +22,7 @@ def _cleanup_coroutines():
     mgr = TaskManager._instance
     if mgr and hasattr(mgr, "_loop") and isinstance(mgr._loop, MagicMock):
         for call in mgr._loop.call_soon_threadsafe.call_args_list:
-            if call.args and len(call.args) > 1 and asyncio.iscoroutine(call.args[1]):
+            if call.args and len(call.args) > 1 and inspect.iscoroutine(call.args[1]):
                 call.args[1].close()
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import inspect
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -469,12 +470,8 @@ class _FakeDataExplorerViewModel:
 
 def _run_async_coro(coro: Any) -> None:
     """同步执行 coroutine。"""
-    if asyncio.iscoroutine(coro):
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(coro)
-        finally:
-            loop.close()
+    if inspect.iscoroutine(coro):
+        asyncio.run(coro)
 
 
 def _make_fake_page() -> FakePage:
@@ -483,7 +480,7 @@ def _make_fake_page() -> FakePage:
 
     def _run_task(fn: Any, *args: Any, **kwargs: Any) -> None:
         result = fn(*args, **kwargs)
-        if asyncio.iscoroutine(result):
+        if inspect.iscoroutine(result):
             _run_async_coro(result)
 
     page.run_task = MagicMock(side_effect=_run_task)  # type: ignore[method-assign]

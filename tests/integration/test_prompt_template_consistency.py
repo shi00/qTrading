@@ -8,7 +8,7 @@ P1-15 fix (rewritten): 测试 prompt_validator DataDeclaration 完整性 + promp
 3. 每条 prompt 模板不含静态数据枚举
 """
 
-import asyncio
+import inspect
 import logging
 
 import pytest
@@ -71,7 +71,7 @@ class TestPromptTemplateConsistency:
         for decl in declarations:
             try:
                 result = decl.injector()
-                if asyncio.iscoroutine(result):
+                if inspect.iscoroutine(result):
                     result = await result
                 # Level 2: 不仅验证不抛异常，还验证返回 True
                 if result is not True:

@@ -805,11 +805,11 @@ class TestAIConceptTagSync:
 
         _asyncio.create_task(_set_cancel())
 
-        start = _asyncio.get_event_loop().time()
+        start = _asyncio.get_running_loop().time()
         with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
         assert isinstance(exc_info.value, _asyncio.CancelledError)
-        elapsed = _asyncio.get_event_loop().time() - start
+        elapsed = _asyncio.get_running_loop().time() - start
         # 应在 ~2 秒内（_AI_TAG_CANCEL_POLL_INTERVAL）响应，而不是等 10 秒
         assert elapsed < 3.0, f"取消响应时间 {elapsed}s 超过 3 秒阈值，未满足 2 秒检查要求"
 
@@ -861,9 +861,9 @@ class TestAIConceptTagSync:
         ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=_fast_llm)
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        start = _asyncio.get_event_loop().time()
+        start = _asyncio.get_running_loop().time()
         result = await strategy.run(batch_size=10)
-        elapsed = _asyncio.get_event_loop().time() - start
+        elapsed = _asyncio.get_running_loop().time() - start
 
         # 正常完成，未触发取消
         assert result.status == SyncStatus.SUCCESS.value
@@ -901,9 +901,9 @@ class TestAIConceptTagSync:
         ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=_slow_then_complete_llm)
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        start = _asyncio.get_event_loop().time()
+        start = _asyncio.get_running_loop().time()
         result = await strategy.run(batch_size=10)
-        elapsed = _asyncio.get_event_loop().time() - start
+        elapsed = _asyncio.get_running_loop().time() - start
 
         # 应在 ~2.5s 完成（1 次 TimeoutError + 第 2 次立即返回）
         assert result.status == SyncStatus.SUCCESS.value
@@ -1688,9 +1688,9 @@ class TestSearchEnginePropagation:
         ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=_slow_then_complete_llm)
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        start = _asyncio.get_event_loop().time()
+        start = _asyncio.get_running_loop().time()
         result = await strategy.run(batch_size=10)
-        elapsed = _asyncio.get_event_loop().time() - start
+        elapsed = _asyncio.get_running_loop().time() - start
 
         # 验证经历了 TimeoutError 重试路径
         assert 2.0 <= elapsed < 4.0, f"应经历 1 次 TimeoutError 后完成，实际 {elapsed}s"

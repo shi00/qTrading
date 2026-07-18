@@ -28,7 +28,7 @@ from utils.sanitizers import DataSanitizer
 
 @pytest.fixture
 def log_capture():
-    """替代 caplog，兼容 pytest-asyncio event_loop_policy fixture"""
+    """替代 caplog，兼容 pytest-asyncio pytest_asyncio_loop_factories hook"""
     logger = logging.getLogger()
     handler = logging.Handler()
     records = []

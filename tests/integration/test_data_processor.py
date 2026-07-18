@@ -381,8 +381,8 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_get_stock_history_prefers_latest_closed_trade_date(self):
         """盘中读取历史行情时，应以最近闭市日作为结束日。"""
         fixed_now = datetime.datetime(2026, 3, 9, 10, 0, 0)
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2026, 3, 6))
-        self.processor.get_trade_dates = AsyncMock(
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2026, 3, 6))
+        self.processor.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[
                 datetime.date(2026, 3, 4),
                 datetime.date(2026, 3, 5),
@@ -394,7 +394,7 @@ class TestDataProcessor(unittest.TestCase):
         with patch("data.data_processor.get_now", return_value=fixed_now):
             await self.processor.get_stock_history("000001.SZ", days=2)
 
-        self.processor.get_trade_dates.assert_awaited_once_with(
+        self.processor.trade_calendar.get_trade_dates.assert_awaited_once_with(
             start_date=datetime.date(2026, 3, 2),
             end_date=datetime.date(2026, 3, 6),
         )
@@ -893,7 +893,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""
         self.processor._quality_tier = 3
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame({"pe": [10], "trade_date": ["20230101"]}),
         )
@@ -932,7 +932,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context_resolves_trade_date_from_data(self):
         """当缓存 trade_date 缺失时，应从 screening_data 的唯一 trade_date 推导"""
         self.processor._quality_tier = 3
-        self.processor.get_latest_trade_date = AsyncMock(return_value=None)
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
@@ -973,7 +973,7 @@ class TestDataProcessor(unittest.TestCase):
     ):
         """无显式 trade_date 时，应优先使用交易日服务的最近闭市日而不是库里最大日期。"""
         self.processor._quality_tier = 3
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230106")
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
@@ -1141,7 +1141,7 @@ class TestDataProcessor(unittest.TestCase):
         cst = ZoneInfo("Asia/Shanghai")
         fixed_now = dt.datetime(2025, 12, 1, tzinfo=cst)
 
-        self.processor.get_latest_trade_date = AsyncMock(return_value=dt.date(2025, 12, 1))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=dt.date(2025, 12, 1))
 
         # Mock stock basic
         stocks = [f"{i:06d}.SZ" for i in range(1, 6)]
@@ -1234,7 +1234,7 @@ class TestDataProcessor(unittest.TestCase):
         stocks = [f"{i:06d}.SZ" for i in range(1, 4)]
         cal_dates = pd.bdate_range(anchor_date - datetime.timedelta(days=14), anchor_date).strftime("%Y%m%d").tolist()
 
-        self.processor.get_latest_trade_date = AsyncMock(return_value=anchor_date)
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=anchor_date)
         self.mock_cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * len(stocks)}),
         )
@@ -1415,7 +1415,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_run_quality_scan_cancellation(self):
         """Test run_quality_scan respects cancellation"""
         stocks = [f"{i:06d}.SZ" for i in range(1, 20)]
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
         self.mock_cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {"ts_code": stocks, "list_status": ["L"] * len(stocks)},

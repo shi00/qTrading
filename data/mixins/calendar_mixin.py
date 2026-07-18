@@ -2,7 +2,8 @@
 CalendarMixin — Facade Proxy for TradeCalendarService.
 
 This mixin now delegates all calendar operations to TradeCalendarService.
-It exists for backward compatibility and will emit deprecation warnings.
+Only ``ensure_trade_cal`` is retained as a facade; other calendar operations
+should be invoked directly on ``self.trade_calendar``.
 
 Expected host class attributes: trade_calendar (TradeCalendarService)
 """
@@ -10,7 +11,6 @@ Expected host class attributes: trade_calendar (TradeCalendarService)
 from __future__ import annotations
 
 import logging
-import warnings
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,42 +23,11 @@ class CalendarMixin:
     """
     Facade proxy for TradeCalendarService.
 
-    This mixin provides backward compatibility by delegating to trade_calendar.
-    All methods emit DeprecationWarning to encourage direct usage.
-
     Expects the host class to provide:
         self.trade_calendar: TradeCalendarService
     """
 
     trade_calendar: TradeCalendarService
-
-    async def get_latest_trade_date(self, *, allow_fallback: bool = False):
-        """
-        Get absolute latest trading date (today or previous trading day).
-
-        .. deprecated::
-            Use `await dp.trade_calendar.get_latest_trade_date()` instead.
-        """
-        warnings.warn(
-            "Use dp.trade_calendar.get_latest_trade_date() instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.trade_calendar.get_latest_trade_date(allow_fallback=allow_fallback)
-
-    async def get_trade_dates(self, start_date, end_date):
-        """
-        Get list of trade dates between start and end (inclusive).
-
-        .. deprecated::
-            Use `await dp.trade_calendar.get_trade_dates()` instead.
-        """
-        warnings.warn(
-            "Use dp.trade_calendar.get_trade_dates() instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.trade_calendar.get_trade_dates(start_date, end_date)
 
     async def ensure_trade_cal(self, end_date, required_start_date=None):
         """

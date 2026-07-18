@@ -7,6 +7,7 @@ UI 只从内存缓存读取，类似 NewsSubscriptionService 架构。
 
 import asyncio
 import datetime
+import inspect
 import logging
 import math
 import threading
@@ -289,7 +290,7 @@ class MarketDataService:
             prev_date_val = self.trade_calendar.get_prev_trade_date(eval_date)
             if isinstance(prev_date_val, datetime.date):
                 prev_date = prev_date_val
-            elif asyncio.iscoroutine(prev_date_val):
+            elif inspect.iscoroutine(prev_date_val):
                 prev_date = await prev_date_val
             else:
                 prev_date = None

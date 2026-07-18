@@ -149,7 +149,7 @@ class TestDataProcessorSyncDailyMarket:
     @pytest.mark.asyncio
     async def test_sync_daily_market_snapshot_no_date(self):
         dp = _make_dp()
-        dp.get_latest_trade_date = AsyncMock(return_value="20240614")
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value="20240614")
         dp.strategies["historical"].sync_daily_market_snapshot = AsyncMock()
         dp.get_screening_data = AsyncMock(return_value=pd.DataFrame())
         await dp.sync_daily_market_snapshot()
@@ -388,7 +388,7 @@ class TestDataProcessorPrepareMarketData:
     @pytest.mark.asyncio
     async def test_latest_not_today(self):
         dp = _make_dp()
-        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 13))
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 13))
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             result = await dp.prepare_market_data()
             assert result == datetime.date(2024, 6, 13)
@@ -397,7 +397,7 @@ class TestDataProcessorPrepareMarketData:
     async def test_latest_is_today_cached(self):
         dp = _make_dp()
         today = datetime.date(2024, 6, 14)
-        dp.get_latest_trade_date = AsyncMock(return_value=today)
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=today)
         dp.cache.get_latest_trade_date = AsyncMock(return_value=today)
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             result = await dp.prepare_market_data()
@@ -484,8 +484,10 @@ class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
     async def test_with_end_date_string(self):
         dp = _make_dp()
-        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
+        )
         dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         await dp.get_stock_history("000001.SZ", days=365, end_date="20240614")
         dp.cache.get_daily_quotes.assert_called_once()
@@ -493,8 +495,10 @@ class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
     async def test_with_end_date_date(self):
         dp = _make_dp()
-        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
+        )
         dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         await dp.get_stock_history("000001.SZ", end_date=datetime.date(2024, 6, 14))
         dp.cache.get_daily_quotes.assert_called_once()
@@ -502,8 +506,10 @@ class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
     async def test_no_end_date(self):
         dp = _make_dp()
-        dp.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
-        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2024, 6, 14))
+        dp.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
+        )
         dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             await dp.get_stock_history("000001.SZ")
@@ -512,8 +518,10 @@ class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
     async def test_end_date_exception_fallback(self):
         dp = _make_dp()
-        dp.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
-        dp.get_trade_dates = AsyncMock(return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)])
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(side_effect=Exception("error"))
+        dp.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
+        )
         dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             await dp.get_stock_history("000001.SZ")

@@ -118,18 +118,14 @@ class FakeProcessor(HealthCheckMixin):
         self._quality_tier = None
         self._health_cache = {"time": 0, "data": None}
         self.trade_calendar = MagicMock()
+        self.trade_calendar.get_latest_trade_date = AsyncMock(return_value="20240614")
+        self.trade_calendar.get_trade_dates = AsyncMock(return_value=["20240101", "20240614"])
 
     def is_cancelled(self):
         return False
 
     def clear_cancel(self):
         pass
-
-    async def get_latest_trade_date(self):
-        return "20240614"
-
-    async def get_trade_dates(self, start_date=None, end_date=None):
-        return ["20240101", "20240614"]
 
 
 class TestAssignBasicTier:
@@ -279,7 +275,7 @@ class TestCheckDataHealth:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return []
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         result = await proc.check_data_health()
         assert result["status"] in ("red", "yellow", "green")
 
@@ -309,7 +305,7 @@ class TestCheckDataHealth:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -548,7 +544,7 @@ class TestCheckDataHealthExtended:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -573,7 +569,7 @@ class TestCheckDataHealthExtended:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -898,8 +894,8 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_latest_trade_date():
             return None
 
-        proc.get_trade_dates = fake_get_trade_dates
-        proc.get_latest_trade_date = fake_get_latest_trade_date
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_latest_trade_date = fake_get_latest_trade_date
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -927,7 +923,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -955,7 +951,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
 
         mock_tc = MagicMock()
         mock_tc.trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614"]}))
@@ -971,7 +967,7 @@ class TestCheckDataHealthDeepBranches:
     async def test_api_extends_gold_standard(self):
         proc = FakeProcessor()
         proc._health_cache = {"time": 0, "data": None}
-        proc.cache.get_cached_trade_dates = AsyncMock(return_value={"20240610"})
+        proc.cache.get_cached_trade_dates = AsyncMock(return_value={datetime.date(2024, 6, 10)})
         proc.cache.check_comprehensive_health = AsyncMock(
             return_value={
                 "tables": {"financial_reports": {"ratio": 0.9}},
@@ -986,9 +982,9 @@ class TestCheckDataHealthDeepBranches:
         proc.cache.get_field_completeness = AsyncMock(return_value={"eps": 0.9})
 
         async def fake_get_trade_dates(start_date=None, end_date=None):
-            return ["20240101", "20240613"]
+            return [datetime.date(2024, 1, 1), datetime.date(2024, 6, 13)]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
 
         mock_tc = MagicMock()
         mock_tc.trade_cal = AsyncMock(return_value=pd.DataFrame({"cal_date": ["20240614"]}))
@@ -1021,7 +1017,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1048,7 +1044,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1075,7 +1071,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1104,7 +1100,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1131,7 +1127,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1158,7 +1154,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             with patch(
@@ -1189,7 +1185,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1216,7 +1212,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1243,7 +1239,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1269,7 +1265,7 @@ class TestCheckDataHealthDeepBranches:
         async def fake_get_trade_dates(start_date=None, end_date=None):
             return ["20240101", "20240614"]
 
-        proc.get_trade_dates = fake_get_trade_dates
+        proc.trade_calendar.get_trade_dates = fake_get_trade_dates
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
             result = await proc.check_data_health()
@@ -1469,7 +1465,7 @@ class TestRunQualityScanDeepBranches:
         async def fake_get_latest_trade_date():
             return datetime.datetime(2024, 6, 14)
 
-        proc.get_latest_trade_date = fake_get_latest_trade_date
+        proc.trade_calendar.get_latest_trade_date = fake_get_latest_trade_date
 
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
@@ -1513,7 +1509,7 @@ class TestRunQualityScanDeepBranches:
         async def fake_get_latest_trade_date():
             return datetime.date(2024, 6, 14)
 
-        proc.get_latest_trade_date = fake_get_latest_trade_date
+        proc.trade_calendar.get_latest_trade_date = fake_get_latest_trade_date
 
         with patch("data.mixins.health_mixin.get_now") as mock_now:
             mock_now.return_value = datetime.datetime(2024, 6, 14)
@@ -1643,7 +1639,7 @@ class TestRunQualityScanDeepBranches:
         async def fake_get_latest_trade_date():
             raise Exception("date error")
 
-        proc.get_latest_trade_date = fake_get_latest_trade_date
+        proc.trade_calendar.get_latest_trade_date = fake_get_latest_trade_date
         basics = pd.DataFrame(
             {
                 "ts_code": [f"{i:06d}.SZ" for i in range(1, 10)],

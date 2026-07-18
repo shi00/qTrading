@@ -107,6 +107,7 @@ class TestAsyncioExceptionHandler:
 
     def test_exception_logs_critical(self, caplog: pytest.LogCaptureFixture) -> None:
         """有异常时应记录 CRITICAL"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
         loop = asyncio.new_event_loop()
         context = {
             "exception": ValueError("async error"),
@@ -122,6 +123,7 @@ class TestAsyncioExceptionHandler:
 
     def test_cancelled_error_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         """CancelledError 应记录 WARNING"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
         loop = asyncio.new_event_loop()
         context = {
             "exception": asyncio.CancelledError(),
@@ -138,6 +140,7 @@ class TestAsyncioExceptionHandler:
 
     def test_no_exception_logs_message(self, caplog: pytest.LogCaptureFixture) -> None:
         """无异常时应记录 message"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
         loop = asyncio.new_event_loop()
         context = {
             "message": "asyncio error without exception",
@@ -152,6 +155,7 @@ class TestAsyncioExceptionHandler:
 
     def test_keyboard_interrupt_logs_info(self, caplog: pytest.LogCaptureFixture) -> None:
         """KeyboardInterrupt 应记录 INFO"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
         loop = asyncio.new_event_loop()
         context = {
             "exception": KeyboardInterrupt(),
@@ -221,6 +225,7 @@ class TestInstallAndRestore:
     @pytest.mark.asyncio
     async def test_install_asyncio_handler(self) -> None:
         """应为指定 loop 安装 handler"""
+        # NOTE(lazy): Uses asyncio.new_event_loop() to create a loop for testing _asyncio_exception_handler. ceiling: Python 3.16 removes asyncio.new_event_loop. upgrade: When Python 3.16 is adopted, refactor to use asyncio.Runner or a loop_factory-based approach.
         loop = asyncio.new_event_loop()
 
         try:
