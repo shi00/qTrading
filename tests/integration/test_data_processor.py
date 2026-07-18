@@ -225,6 +225,10 @@ class TestDataProcessor(unittest.TestCase):
             # Pre-market Wednesday - should be Tuesday 20231024
             self.assertEqual(date_obj, datetime.date(2023, 10, 24))
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    # filterwarnings: 直接调用 CalendarMixin facade（DataProcessor.get_latest_trade_date）
+    # 验证 TradeCalendarService 业务逻辑；facade 弃用警告为 incidental 噪声，
+    # facade 弃用契约由 tests/unit/test_calendar_mixin.py 单测覆盖。
     def test_get_latest_trade_date_weekday_pre_market(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekday_pre_market())
 
@@ -264,6 +268,8 @@ class TestDataProcessor(unittest.TestCase):
             date_obj = await self.processor.get_latest_trade_date()
             self.assertEqual(date_obj, datetime.date(2023, 10, 25))
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_latest_trade_date_weekday_pre_market 注释。
     def test_get_latest_trade_date_weekday_post_market(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekday_post_market())
 
@@ -300,6 +306,8 @@ class TestDataProcessor(unittest.TestCase):
             date_obj = await self.processor.get_latest_trade_date()
             self.assertEqual(date_obj, datetime.date(2023, 10, 27))
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_latest_trade_date_weekday_pre_market 注释。
     def test_get_latest_trade_date_weekend(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekend())
 
@@ -316,6 +324,8 @@ class TestDataProcessor(unittest.TestCase):
         # No cache mock calls should have been made (cache hit)
         self.mock_cache.get_trade_cal.assert_not_called()
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_latest_trade_date_weekday_pre_market 注释。
     def test_get_latest_trade_date_ttl_cache(self):
         asyncio.run(self.async_test_get_latest_trade_date_ttl_cache())
 
@@ -336,6 +346,9 @@ class TestDataProcessor(unittest.TestCase):
             ],
         )
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    # filterwarnings: 直接调用 CalendarMixin facade（DataProcessor.get_trade_dates），
+    # 验证 TradeCalendarService 业务逻辑；facade 弃用警告为 incidental 噪声。
     def test_get_trade_dates(self):
         asyncio.run(self.async_test_get_trade_dates())
 
@@ -360,6 +373,8 @@ class TestDataProcessor(unittest.TestCase):
             ],
         )
 
+    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_trade_dates 注释。
     def test_get_trade_dates_fallback(self):
         asyncio.run(self.async_test_get_trade_dates_fallback())
 
