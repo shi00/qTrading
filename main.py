@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Callable
+from typing import Any
 
 import flet as ft
 
@@ -49,6 +50,37 @@ def CloseConfirmDialog(
             ft.TextButton(I18n.get("common_confirm"), on_click=on_confirm),
         ],
         actions_alignment=ft.MainAxisAlignment.END,
+    )
+
+
+@ft.component
+def RootView(
+    controller: StartupController,
+    bridge: _StartupBridge,
+    run_task_fn: Callable[..., Any],
+) -> ft.Stack:
+    """应用根组件: StartupView + ToastManagerView 共享同一 renderer context.
+
+    CLAUDE.md §3.2 MVVM + 声明式 UI: ``ToastManagerView`` 为 ``@ft.component``,
+    调用时需 ``current_renderer()`` contextvar (Flet V1 ``@ft.component`` 装饰器
+    在 ``component_decorator.py`` 内强制检查)。``page.overlay.append(ToastManagerView())``
+    在 ``page.render()`` 之外执行会触发 ``RuntimeError: No current renderer is set``。
+
+    本根组件通过 ``ft.Stack`` 将 ``ToastManagerView`` 与 ``StartupView`` 一起在
+    ``page.render(RootView, ...)`` 内渲染, 共享同一 renderer。``ToastManagerView``
+    返回的 ``ft.Container`` 继承 ``LayoutControl``, 其 ``right=20, bottom=20``
+    属性作为 Stack 子项绝对定位, 视觉等价于原 ``page.overlay`` 挂载。
+    """
+    return ft.Stack(
+        [
+            StartupView(
+                controller=controller,
+                bridge=bridge,
+                run_task_fn=run_task_fn,
+            ),
+            ToastManagerView(),
+        ],
+        expand=True,
     )
 
 
@@ -137,7 +169,6 @@ async def main(page: ft.Page):
     apply_page_theme(page)
 
     page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
-    page.overlay.append(ToastManagerView())  # type: ignore[attr-defined]  # [reason: ToastManagerView 为声明式组件，需挂载到 page.overlay 才能渲染 toast，ft.Page 类型存根无 overlay 属性]
 
     def show_toast(message, type="info"):
         page.toast.show(message, type)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
@@ -163,7 +194,7 @@ async def main(page: ft.Page):
     )
 
     page.render(
-        StartupView,
+        RootView,
         controller=controller,
         bridge=bridge,
         run_task_fn=page.run_task,
