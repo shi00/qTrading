@@ -15,7 +15,7 @@ import inspect
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import flet as ft
 import pandas as pd
@@ -1330,11 +1330,8 @@ class TestTableViewerTabEventHandlers:
         # 验证 export_data 被调用 (默认 current_page_only=True)
         export_call = next(c for c in vm.method_calls if c[0] == "export_data")
         assert export_call[1] == {"current_page_only": True}
-        # 验证 write_excel 被调用 (而非 write_csv)
-        vm.write_excel.assert_called_once()
-        call_args = vm.write_excel.call_args
-        # 第一个位置参数是 DataFrame, 第二个是 filepath
-        assert call_args[0][1] == filepath
+        # 验证 write_excel 被调用 (而非 write_csv) 且 filepath 正确
+        vm.write_excel.assert_called_once_with(ANY, filepath)
         # 验证成功 toast
         toast_args = page.show_toast.call_args
         assert toast_args[0][1] == "success"

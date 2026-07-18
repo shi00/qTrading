@@ -27,11 +27,9 @@ def test_system_severity_calls_critical(
 
     log_exception_with_severity(e, context="general", operation_label="test_op", logger_=mock_logger)
 
-    mock_logger.critical.assert_called_once()
+    mock_logger.critical.assert_called_once_with("[%s] (%s): %s", "test_op", "test_code", "sanitized", exc_info=True)
     mock_logger.warning.assert_not_called()
     mock_logger.error.assert_not_called()
-    _, kwargs = mock_logger.critical.call_args
-    assert kwargs.get("exc_info") is True
 
 
 @patch("app.error_logging.DataSanitizer.sanitize_error")
@@ -52,11 +50,9 @@ def test_recoverable_severity_calls_warning(
 
     log_exception_with_severity(e, context="general", operation_label="test_op", logger_=mock_logger)
 
-    mock_logger.warning.assert_called_once()
+    mock_logger.warning.assert_called_once_with("[%s] (%s): %s", "test_op", "test_code", "sanitized", exc_info=True)
     mock_logger.critical.assert_not_called()
     mock_logger.error.assert_not_called()
-    _, kwargs = mock_logger.warning.call_args
-    assert kwargs.get("exc_info") is True
 
 
 @patch("app.error_logging.DataSanitizer.sanitize_error")
@@ -77,11 +73,9 @@ def test_operational_severity_calls_error(
 
     log_exception_with_severity(e, context="general", operation_label="test_op", logger_=mock_logger)
 
-    mock_logger.error.assert_called_once()
+    mock_logger.error.assert_called_once_with("[%s] (%s): %s", "test_op", "test_code", "sanitized", exc_info=True)
     mock_logger.critical.assert_not_called()
     mock_logger.warning.assert_not_called()
-    _, kwargs = mock_logger.error.call_args
-    assert kwargs.get("exc_info") is True
 
 
 @patch("app.error_logging.DataSanitizer.sanitize_error")
@@ -102,7 +96,7 @@ def test_unknown_severity_falls_back_to_error(
 
     log_exception_with_severity(e, context="general", operation_label="test_op", logger_=mock_logger)
 
-    mock_logger.error.assert_called_once()
+    mock_logger.error.assert_called_once_with("[%s] (%s): %s", "test_op", "test_code", "sanitized", exc_info=True)
     mock_logger.critical.assert_not_called()
     mock_logger.warning.assert_not_called()
 
@@ -124,7 +118,9 @@ def test_default_logger_used_when_logger_not_provided(
     with patch("app.error_logging.logger") as mock_module_logger:
         log_exception_with_severity(e, context="general", operation_label="test_op")
 
-        mock_module_logger.error.assert_called_once()
+        mock_module_logger.error.assert_called_once_with(
+            "[%s] (%s): %s", "test_op", "test_code", "sanitized", exc_info=True
+        )
 
 
 @patch("app.error_logging.DataSanitizer.sanitize_error")
