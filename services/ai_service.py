@@ -1947,13 +1947,13 @@ class AIService:
             {"success": bool, "message": str, "usage": dict}
         """
         if not api_key:
-            return {"success": False, "message": "API Key is empty"}
+            return {"success": False, "message": "llm_test_need_key"}
 
         if not model:
-            return {"success": False, "message": "Model ID is empty"}
+            return {"success": False, "message": "llm_test_need_model"}
 
         if not LITELLM_AVAILABLE:
-            return {"success": False, "message": "LiteLLM not installed"}
+            return {"success": False, "message": "llm_err_litellm_not_installed"}
 
         try:
             test_config = {
