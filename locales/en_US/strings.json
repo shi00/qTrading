@@ -467,6 +467,7 @@
     "llm_test_failed": "✗ Connection failed",
     "llm_test_need_key": "Please enter API Key first",
     "llm_testing_in_progress": "Connection test in progress, please wait...",
+    "llm_err_litellm_not_installed": "LiteLLM not installed, AI features unavailable",
     "llm_err_auth_failed": "Invalid or expired API Key, please check your key",
     "llm_err_forbidden": "Access denied, please check account permissions or balance",
     "llm_err_not_found": "API endpoint not found, please check Base URL",
