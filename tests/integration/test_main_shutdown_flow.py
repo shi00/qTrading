@@ -50,6 +50,7 @@ class _DummyPage:
         self.padding = 0
         self.toast = None
         self.controls = []
+        self.overlay = []
         self.current_dialog = None
         self.updated_count = 0
 
@@ -162,6 +163,9 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
+    # Task 2.1 引入 page.overlay.append(ToastManagerView())，ToastManagerView 为 @ft.component
+    # 声明式组件，调用需 renderer context；测试环境无 renderer，mock 为 MagicMock 避免 RuntimeError
+    monkeypatch.setattr(app_main, "ToastManagerView", lambda: MagicMock())
     # WindowEventType must be a string "close" so SimpleNamespace(type="close") matches
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
     monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
@@ -361,6 +365,9 @@ async def test_window_close_logs_dialog_state_transitions(monkeypatch):
     page = _DummyPage()
     logger_spy = _LoggerSpy()
     monkeypatch.setattr(app_main, "logger", logger_spy)
+    # 重构后 "Request to show close confirm dialog." 日志由 app.window_lifecycle 模块的
+    # logger 输出（WindowDialogManager._show_close_confirm_dialog 内部触发）
+    monkeypatch.setattr("app.window_lifecycle.logger", logger_spy)
 
     ui_logger_spy = MagicMock()
     monkeypatch.setattr(app_main.UILogger, "log_action", ui_logger_spy)
