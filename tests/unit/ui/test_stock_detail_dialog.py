@@ -1081,4 +1081,4 @@ class TestStockDetailDialogComponent:
         # on_dismiss 类型为 Optional[ControlEventHandler]，测试上下文保证非 None
         assert dialog.on_dismiss is not None
         dialog.on_dismiss(None)
-        on_close.assert_called_once()
+        on_close.assert_called_once_with()

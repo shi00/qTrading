@@ -219,11 +219,11 @@ class TestSetupWindowGeometry:
         page.window.center_exc = RuntimeError("center boom")
         with patch("app.window_lifecycle.log_exception_with_severity") as mock_log:
             await setup_window_geometry(page, is_web_mode=False)
-            mock_log.assert_called_once()
-            args, kwargs = mock_log.call_args
-            assert isinstance(args[0], RuntimeError)
-            assert kwargs["context"] == "general"
-            assert "center" in kwargs["operation_label"].lower()
+            mock_log.assert_called_once_with(
+                page.window.center_exc,
+                context="general",
+                operation_label="Main window center failed",
+            )
 
 
 # ============================================================================
@@ -451,10 +451,11 @@ class TestPerformWindowShutdown:
                 page,
                 is_web_mode_fn=lambda: False,
             )
-            mock_log.assert_called_once()
-            args, kwargs = mock_log.call_args
-            assert isinstance(args[0], RuntimeError)
-            assert "destroy" in kwargs["operation_label"].lower()
+            mock_log.assert_called_once_with(
+                page.window.destroy_exc,
+                context="general",
+                operation_label="Main window destroy failed",
+            )
         # 即使 destroy 失败，cleanup_ok=True 仍 cancel_watchdog 并返回 True
         assert coordinator.cancel_watchdog_calls == 1
 
@@ -515,9 +516,11 @@ class TestPerformUpgradeExit:
                 page,
                 is_web_mode_fn=lambda: False,
             )
-            mock_log.assert_called_once()
-            kwargs = mock_log.call_args.kwargs
-            assert "upgrade" in kwargs["operation_label"].lower()
+            mock_log.assert_called_once_with(
+                page.window.destroy_exc,
+                context="general",
+                operation_label="Main window destroy failed during upgrade exit",
+            )
         assert coordinator.force_exit_codes == [1]
 
 
