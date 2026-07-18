@@ -290,7 +290,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def sync_daily_market_snapshot(self, trade_date=None, force=False):
         """Delegated to HistoricalSyncStrategy"""
         if trade_date is None:
-            trade_date = await self.get_latest_trade_date()
+            trade_date = await self.trade_calendar.get_latest_trade_date()
         if trade_date is None:
             logger.error(
                 "[DataProcessor] sync_daily_market_snapshot | All calendar sources unavailable. "
@@ -673,7 +673,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def prepare_market_data(self):
         now = get_now()
         today_date = now.date()
-        latest = await self.get_latest_trade_date()
+        latest = await self.trade_calendar.get_latest_trade_date()
         if latest is None:
             logger.error(
                 "[DataProcessor] prepare_market_data | All calendar sources unavailable. Syncing today as last resort.",
@@ -876,9 +876,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             years = ConfigHandler.get_init_history_years()
             end_date = get_now().date()
             rough_start = (get_now() - datetime.timedelta(days=365 * years + 30)).date()
-            cal_success = await self.ensure_trade_cal(
+            cal_success = await self.trade_calendar.ensure_calendar_range(
+                rough_start,
                 end_date,
-                required_start_date=rough_start,
             )
             if not cal_success:
                 logger.error(
@@ -974,7 +974,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
     async def get_stock_history(self, ts_code, days=365, end_date=None):
         try:
             if end_date is None:
-                latest_closed_trade_date = await self.get_latest_trade_date()
+                latest_closed_trade_date = await self.trade_calendar.get_latest_trade_date()
                 if isinstance(latest_closed_trade_date, datetime.datetime):
                     end = latest_closed_trade_date.date()
                 elif isinstance(latest_closed_trade_date, datetime.date):
@@ -998,7 +998,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
         rough_start = end - datetime.timedelta(days=int(days * 2.0))
-        all_dates = await self.get_trade_dates(start_date=rough_start, end_date=end)
+        all_dates = await self.trade_calendar.get_trade_dates(start_date=rough_start, end_date=end)
         start = all_dates[-days] if len(all_dates) >= days else (all_dates[0] if all_dates else rough_start)
         return await self.cache.get_daily_quotes(
             ts_code=ts_code,
@@ -1078,7 +1078,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
 
         context_trade_date = trade_date
         if context_trade_date is None:
-            latest_closed_trade_date = await self.get_latest_trade_date()
+            latest_closed_trade_date = await self.trade_calendar.get_latest_trade_date()
             context_trade_date = self._normalize_context_trade_date(latest_closed_trade_date)
             if context_trade_date is None:
                 cache_date = await self.cache.get_latest_trade_date()
