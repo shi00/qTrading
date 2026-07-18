@@ -9,7 +9,7 @@
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
-R16（UI 阻塞主循环）因 AST 检查误报风险高暂未实现，登记于 CONTRIBUTING.md 已知技术债。
+R16（UI 阻塞主循环）因 AST 检查误报风险高暂未实现，登记于 docs/debt/known-technical-debt.md 已知技术债（CONTRIBUTING.md 仅保留入口索引）。
 """
 
 from __future__ import annotations
