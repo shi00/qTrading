@@ -718,7 +718,7 @@ class TestTableViewerTabComponentBody:
         mock_app_colors_state,
         mock_metadata,
     ):
-        """PopupMenuButton 包含导出当前页/导出全部两个菜单项。"""
+        """PopupMenuButton 包含导出当前页/导出全部/导出 Excel 三个菜单项。"""
         from ui.views.data_view import TableViewerTab
 
         vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
@@ -727,7 +727,7 @@ class TestTableViewerTabComponentBody:
 
         popup_menus = _find_by_type(result, ft.PopupMenuButton)
         assert len(popup_menus) == 1
-        assert len(popup_menus[0].items) == 2
+        assert len(popup_menus[0].items) == 3
 
     def test_unmount_does_not_dispose_vm(
         self,
@@ -1297,6 +1297,88 @@ class TestTableViewerTabEventHandlers:
 
         export_call = next(c for c in vm.method_calls if c[0] == "export_data")
         assert export_call[1] == {"current_page_only": False}
+
+    def test_on_export_excel_triggers_export_excel(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        tmp_path,
+    ):
+        """_on_export_excel → _export_data("excel") → vm.export_data + vm.write_excel (xlsx)。"""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm._current_data = pd.DataFrame({"ts_code": ["000001"], "name": ["测试"]})
+        vm.write_excel = AsyncMock(return_value=None)
+        component = make_component(TableViewerTab, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+
+        # Mock FilePicker.save_file 返回 xlsx 路径
+        filepath = str(tmp_path / "test.xlsx")
+        for svc in page.services:
+            if isinstance(svc, ft.FilePicker):
+
+                async def _fake_save_file(**kwargs: Any) -> str:
+                    return filepath
+
+                svc.save_file = _fake_save_file  # type: ignore[method-assign]
+                break
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        # items[2] 是"导出 Excel"菜单项
+        popup_menus[0].items[2].on_click(MagicMock())
+
+        # 验证 export_data 被调用 (默认 current_page_only=True)
+        export_call = next(c for c in vm.method_calls if c[0] == "export_data")
+        assert export_call[1] == {"current_page_only": True}
+        # 验证 write_excel 被调用 (而非 write_csv)
+        vm.write_excel.assert_called_once()
+        call_args = vm.write_excel.call_args
+        # 第一个位置参数是 DataFrame, 第二个是 filepath
+        assert call_args[0][1] == filepath
+        # 验证成功 toast
+        toast_args = page.show_toast.call_args
+        assert toast_args[0][1] == "success"
+
+    def test_export_excel_save_file_uses_xlsx_extension(
+        self,
+        mock_i18n_state,
+        mock_app_colors_state,
+        mock_metadata,
+        tmp_path,
+    ):
+        """_export_data("excel"): save_file 的 allowed_extensions 为 ["xlsx"]。"""
+        from ui.views.data_view import TableViewerTab
+
+        vm = _FakeDataExplorerViewModel(state=_FakeDataExplorerState(table_columns=("ts_code",), tables_loaded=True))
+        vm._current_data = pd.DataFrame({"ts_code": ["000001"]})
+        vm.write_excel = AsyncMock(return_value=None)
+        component = make_component(TableViewerTab, vm=vm)
+        page = _make_fake_page()
+        result, page = _mount(component, page=page)
+
+        captured_kwargs: dict[str, Any] = {}
+        filepath = str(tmp_path / "test.xlsx")
+        for svc in page.services:
+            if isinstance(svc, ft.FilePicker):
+
+                async def _fake_save_file(**kwargs: Any) -> str:
+                    captured_kwargs.update(kwargs)
+                    return filepath
+
+                svc.save_file = _fake_save_file  # type: ignore[method-assign]
+                break
+
+        popup_menus = _find_by_type(result, ft.PopupMenuButton)
+        popup_menus[0].items[2].on_click(MagicMock())
+
+        # 验证 allowed_extensions 为 ["xlsx"]
+        assert captured_kwargs.get("allowed_extensions") == ["xlsx"]
+        # 验证 default_filename 后缀为 .xlsx
+        file_name = captured_kwargs.get("file_name", "")
+        assert file_name.endswith(".xlsx")
 
     def test_export_empty_data_shows_toast(
         self,

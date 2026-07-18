@@ -316,6 +316,7 @@
     "data_filter_val": "Value",
     "data_export_current": "Export Page",
     "data_export_all": "Export All (CSV)",
+    "data_export_excel": "Export Excel",
     "data_tab_viewer": "Table Viewer",
     "data_tab_sql": "SQL Console",
     "data_page_num": "Page {current} / {total}",

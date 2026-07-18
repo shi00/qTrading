@@ -247,6 +247,7 @@
     "data_filter_val": "值",
     "data_export_current": "导出当前页",
     "data_export_all": "导出全部 (CSV)",
+    "data_export_excel": "导出 Excel",
     "data_tab_viewer": "表格查看器",
     "data_page_num": "第 {current} 页 / 共 {total} 页",
     "data_total_rows": "共 {count} 条记录",
