@@ -349,27 +349,10 @@ class BaseDao:
         self,
         sql: typing.Any,
         params: typing.Any = None,
-        is_many: typing.Any = False,
         suppress_errors: bool = False,
         conn: typing.Any = None,
     ):
-        """Execute a single SQL statement. For bulk operations, use _save_upsert.
-
-        Note: is_many=True does NOT use executemany — it passes the full params
-        list to exec_driver_sql. Prefer _save_upsert for batch inserts/updates.
-
-        .. deprecated::
-            The ``is_many`` parameter is deprecated and will be removed in a
-            future version. Use ``_save_upsert`` for batch operations.
-        """
-        if is_many:
-            import warnings
-
-            warnings.warn(
-                "_write_db(is_many=True) is deprecated. Use _save_upsert for batch operations.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+        """Execute a single SQL statement. For bulk operations, use _save_upsert."""
         if self.engine is None:
             raise RuntimeError(
                 f"[{self.__class__.__name__}] Engine not initialized. Call CacheManager.init_db() first."
@@ -383,18 +366,12 @@ class BaseDao:
                 f"Call CacheManager.init_db() to reinitialize."
             )
 
-        if is_many and not params:
-            return 0
-
         if params:
-            if is_many:
-                params = [tuple(self._convert_param_for_asyncpg(p) for p in row) for row in params]
-            else:
-                params = (
-                    tuple(self._convert_param_for_asyncpg(p) for p in params)
-                    if not isinstance(params, tuple)
-                    else tuple(self._convert_param_for_asyncpg(p) for p in params)
-                )
+            params = (
+                tuple(self._convert_param_for_asyncpg(p) for p in params)
+                if not isinstance(params, tuple)
+                else tuple(self._convert_param_for_asyncpg(p) for p in params)
+            )
 
         await self._get_maintenance_event().wait()
 
@@ -431,7 +408,7 @@ class BaseDao:
                     sql[:200],
                 )
 
-            return len(params) if is_many and params else 1
+            return 1
         except asyncio.CancelledError:
             logger.warning(
                 "[%s] Write cancelled during shutdown.",

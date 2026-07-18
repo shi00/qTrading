@@ -15,6 +15,7 @@
 
 import asyncio
 import contextlib
+import inspect
 from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
@@ -872,15 +873,12 @@ class TestTierApiPanelR2CancelledErrorPropagation:
 
         def _sync_run_task(fn, *args, **kwargs):
             result = fn(*args, **kwargs)
-            if asyncio.iscoroutine(result):
-                loop = asyncio.new_event_loop()
+            if inspect.iscoroutine(result):
                 try:
-                    loop.run_until_complete(result)
+                    asyncio.run(result)
                 except asyncio.CancelledError:
                     # R2 守卫验证: CancelledError 应从 _run_tier_change/_run_probe 传播到此
                     state["cancelled"] = True
-                finally:
-                    loop.close()
 
         # NOTE(lazy): 直接赋值普通函数, 不用 MagicMock(side_effect=...), 避免 CancelledError
         # 传播时 MagicMock 在 pytest traceback formatting 阶段触发 _truncate_recursive_traceback

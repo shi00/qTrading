@@ -417,6 +417,7 @@ class TestBuildHealthSummaryContent:
 import asyncio  # noqa: E402
 from dataclasses import dataclass, replace  # noqa: E402
 from typing import Any  # noqa: E402
+import inspect  # noqa: E402
 
 from services.task_manager import TaskStatus  # noqa: E402
 from tests.unit.ui.component_renderer import (  # noqa: E402
@@ -563,12 +564,8 @@ class _FakeTushareConfigPanelViewModel:
 
 def _run_async_coro(coro: Any) -> None:
     """同步执行 coroutine (用于 page.run_task 调度的异步任务)。"""
-    if asyncio.iscoroutine(coro):
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(coro)
-        finally:
-            loop.close()
+    if inspect.iscoroutine(coro):
+        asyncio.run(coro)
 
 
 def _make_fake_page() -> FakePage:
@@ -577,7 +574,7 @@ def _make_fake_page() -> FakePage:
 
     def _run_task(fn: Any, *args: Any, **kwargs: Any) -> None:
         result = fn(*args, **kwargs)
-        if asyncio.iscoroutine(result):
+        if inspect.iscoroutine(result):
             _run_async_coro(result)
 
     page.run_task = MagicMock(side_effect=_run_task)  # type: ignore[method-assign]
@@ -743,7 +740,9 @@ def _mock_data_source_deps(monkeypatch):
     # ThreadPoolManager mock: 直接调用函数 (同步/async), 不经线程池
     class _FakeThreadPoolManager:
         async def run_async(self, task_type, func, *args, **kwargs):
-            if asyncio.iscoroutinefunction(func):
+            import inspect
+
+            if inspect.iscoroutinefunction(func):
                 return await func(*args, **kwargs)
             return func(*args, **kwargs)
 

@@ -3,6 +3,7 @@ import os
 import shutil
 import sys
 import tempfile
+import typing
 from collections.abc import Iterator
 from contextlib import contextmanager
 from urllib.parse import quote_plus
@@ -20,11 +21,19 @@ except ImportError:
 import pytest
 
 
-@pytest.fixture(scope="session")
-def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
-    if sys.platform == "win32":
-        return asyncio.WindowsSelectorEventLoopPolicy()
-    return asyncio.DefaultEventLoopPolicy()
+def pytest_asyncio_loop_factories() -> dict[str, typing.Callable[[], asyncio.AbstractEventLoop]]:
+    """Pytest-asyncio 1.4.0 hook: return mapping of factory name -> loop factory callable.
+
+    Replaces the deprecated event_loop_policy fixture. Returns a factory that creates
+    a new event loop instance directly, bypassing the deprecated asyncio policy system.
+
+    pytest-asyncio uses this hook to create event loops for async tests. When only one
+    factory is returned, test names are unchanged (no parametrization).
+
+    Windows 上强制 SelectorEventLoop（与原 WindowsSelectorEventLoopPolicy 等价）；
+    非 Windows 平台 SelectorEventLoop 即默认 event loop。
+    """
+    return {"default": asyncio.SelectorEventLoop}
 
 
 @contextmanager

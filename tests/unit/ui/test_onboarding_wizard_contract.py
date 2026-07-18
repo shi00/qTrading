@@ -405,6 +405,7 @@ class TestCreateOverviewCard:
 # ============================================================================
 
 import asyncio
+import inspect
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -540,12 +541,8 @@ def _make_fake_page() -> FakePage:
 
     def _run_task(coro_func: Any, *args: Any, **kwargs: Any) -> None:
         coro = coro_func(*args, **kwargs)
-        if asyncio.iscoroutine(coro):
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(coro)
-            finally:
-                loop.close()
+        if inspect.iscoroutine(coro):
+            asyncio.run(coro)
 
     page.run_task = _run_task  # type: ignore[method-assign]
     page.show_toast = MagicMock()  # type: ignore[method-assign]

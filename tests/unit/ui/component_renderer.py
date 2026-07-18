@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -57,12 +58,8 @@ class FakeSession:
         else:
             result = hook.setup()
         # async effect：在新事件循环中同步执行返回的 coroutine
-        if asyncio.iscoroutine(result):
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(result)
-            finally:
-                loop.close()
+        if inspect.iscoroutine(result):
+            asyncio.run(result)
 
     def patch_control(self, *args: Any, **kwargs: Any) -> None:  # noqa: ARG002
         pass

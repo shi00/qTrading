@@ -606,7 +606,7 @@ class TestToastCardSetup:
 
         assert page.run_task.called
         handler = page.run_task.call_args.args[0]
-        assert asyncio.iscoroutinefunction(handler)
+        assert inspect.iscoroutinefunction(handler)
 
     def test_setup_registers_task(self):
         """setup 调用 _register_task 注册 run_task 返回的 task。"""

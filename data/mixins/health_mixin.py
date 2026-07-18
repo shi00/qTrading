@@ -2,8 +2,7 @@
 HealthCheckMixin — Extracted from DataProcessor (P2-M1).
 
 Provides data health diagnostics and quality tier evaluation.
-Expected host class attributes: cache, is_cancelled(), clear_cancel(),
-                                 get_latest_trade_date(), get_trade_dates()
+Expected host class attributes: cache, trade_calendar, is_cancelled(), clear_cancel()
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from utils.time_utils import get_now, parse_date, to_yyyymmdd_str
 
 if TYPE_CHECKING:
     from data.cache.cache_manager import CacheManager
+    from data.domain_services.trade_calendar_service import TradeCalendarService
 
 logger = logging.getLogger(__name__)
 
@@ -113,13 +113,13 @@ class HealthCheckMixin:
 
     Expects the host class to provide:
         self.cache: CacheManager
+        self.trade_calendar: TradeCalendarService
         self.is_cancelled() -> bool
         self.clear_cancel() -> None
-        self.get_latest_trade_date() -> str
-        self.get_trade_dates(start, end) -> list
     """
 
     # Type hints for IDE support (resolved at runtime via DataProcessor)
+    trade_calendar: TradeCalendarService
     cache: CacheManager
     _quality_tier: int | None
     _health_cache: dict
@@ -320,7 +320,7 @@ class HealthCheckMixin:
             return self._health_cache["data"]
 
         try:
-            end_date = await self.get_latest_trade_date()  # type: ignore[attr-defined]
+            end_date = await self.trade_calendar.get_latest_trade_date()
             if end_date is None:
                 logger.warning("[DataProcessor] HealthCheck | No trade date available, using today.")
                 end_date = get_now().date()
@@ -332,7 +332,7 @@ class HealthCheckMixin:
             years = ConfigHandler.get_init_history_years()
             # Use a safe 2.0 multiplier for trade-days to natural-days conversion
             rough_start = (end_date_obj - datetime.timedelta(days=int(250 * years * 2.0))).date()
-            all_dates = await self.get_trade_dates(  # type: ignore[attr-defined]
+            all_dates = await self.trade_calendar.get_trade_dates(
                 start_date=rough_start,
                 end_date=end_date,
             )
@@ -341,7 +341,7 @@ class HealthCheckMixin:
             else:
                 start_date = all_dates[0] if all_dates else (end_date_obj - datetime.timedelta(days=365 * years)).date()
 
-            official_dates = await self.get_trade_dates(start_date, end_date)  # type: ignore[attr-defined]
+            official_dates = await self.trade_calendar.get_trade_dates(start_date, end_date)
 
             if not official_dates:
                 return {"status": "red", "msg": I18n.get("health_err_calendar")}
@@ -383,10 +383,10 @@ class HealthCheckMixin:
                 try:
                     from utils.time_utils import parse_date as _pd
 
-                    _pd(api_latest_official)
+                    api_latest_date = _pd(api_latest_official).date()
                     local_latest_str = str(official_dates[-1]) if official_dates else ""
                     if local_latest_str and api_latest_official > local_latest_str:
-                        gold_standard_dates = official_dates + [api_latest_official]
+                        gold_standard_dates = official_dates + [api_latest_date]
                         logger.info(
                             "[DataProcessor] Health | P1-7: API extends official dates from %s to %s",
                             local_latest_str,
@@ -396,7 +396,7 @@ class HealthCheckMixin:
                     pass
 
             lag_days = 0
-            if gold_standard_dates and (not local_dates or gold_standard_dates[-1] > last_local):
+            if gold_standard_dates and (last_local is None or gold_standard_dates[-1] > last_local):
                 if local_dates and last_local:
                     lag_days = len([d for d in gold_standard_dates if d > last_local])
                 else:
@@ -655,7 +655,7 @@ class HealthCheckMixin:
             # Align deep-scan recency to the latest closed trade date to avoid
             # intraday false negatives before the market close snapshot exists.
             try:
-                latest_closed_trade_date = await self.get_latest_trade_date()  # type: ignore[attr-defined]
+                latest_closed_trade_date = await self.trade_calendar.get_latest_trade_date()
                 if isinstance(latest_closed_trade_date, datetime.datetime):
                     end_date_obj = latest_closed_trade_date.date()
                 elif isinstance(latest_closed_trade_date, datetime.date):

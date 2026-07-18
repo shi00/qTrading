@@ -5,6 +5,7 @@ import os
 import random
 import subprocess
 import sys
+import typing
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -213,14 +214,16 @@ async def e2e_browser(e2e_playwright):
     await browser.close()
 
 
-@pytest.fixture(scope="session")
-def event_loop_policy():
-    # 覆盖 tests/conftest.py 中的 event_loop_policy（使用 WindowsSelectorEventLoopPolicy）。
-    # E2E 测试需要 WindowsProactorEventLoopPolicy：Flet 子进程启动 (subprocess.Popen) 与
-    # Playwright 异步驱动在 Windows 上依赖 Proactor 事件循环，Selector 不支持子进程。
+def pytest_asyncio_loop_factories() -> dict[str, typing.Callable[[], asyncio.AbstractEventLoop]]:
+    """Pytest-asyncio 1.4.0 hook for E2E tests: use ProactorEventLoop on Windows.
+
+    覆盖 tests/conftest.py 中的 pytest_asyncio_loop_factories hook（使用 SelectorEventLoop）。
+    E2E 测试需要 ProactorEventLoop：Flet 子进程启动 (subprocess.Popen) 与
+    Playwright 异步驱动在 Windows 上依赖 Proactor 事件循环，Selector 不支持子进程。
+    """
     if sys.platform == "win32":
-        return asyncio.WindowsProactorEventLoopPolicy()
-    return asyncio.DefaultEventLoopPolicy()
+        return {"proactor": asyncio.ProactorEventLoop}
+    return {"default": asyncio.SelectorEventLoop}
 
 
 @pytest.hookimpl(hookwrapper=True)

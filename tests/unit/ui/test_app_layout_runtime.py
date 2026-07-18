@@ -15,6 +15,7 @@ _await_run_task_handler + asyncio.run 异步 handler).
 """
 
 import asyncio
+import inspect
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -231,7 +232,7 @@ class TestOnNavChange:
 
         _invoke(nav_rail.on_change, _make_event(selected_index=1))
         handler, args, _ = _await_run_task_handler(page)
-        assert asyncio.iscoroutinefunction(handler), "handler 必须为协程函数"
+        assert inspect.iscoroutinefunction(handler), "handler 必须为协程函数"
         assert args == (1,), f"应传 selected=1, 实际 args={args}"
 
 

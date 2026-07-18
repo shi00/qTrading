@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -412,7 +413,7 @@ class ShutdownCoordinator:
         if toast is not None and hasattr(toast, "stop_all"):
             try:
                 res = toast.stop_all()
-                if asyncio.iscoroutine(res):
+                if inspect.iscoroutine(res):
                     await res
                 logger.info("[Shutdown]   - Toast Manager stopped.")
             except Exception as e:

@@ -1,6 +1,7 @@
 """main.py 测试 - 覆盖窗口/对话框/disconnect管理等场景"""
 
 import asyncio
+import inspect
 import os
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
@@ -241,10 +242,10 @@ class TestMainWindowDestroyError:
                 import asyncio
 
                 try:
-                    loop = asyncio.get_event_loop()
-                    if asyncio.iscoroutine(coro):
+                    loop = asyncio.get_running_loop()
+                    if inspect.iscoroutine(coro):
                         loop.create_task(coro)
-                    elif asyncio.iscoroutinefunction(coro):
+                    elif inspect.iscoroutinefunction(coro):
                         loop.create_task(coro(*args))
                 except RuntimeError:
                     pass

@@ -145,3 +145,105 @@ async def test_detail_dialog_open_close(e2e_page):
     # timeout 单位为毫秒，TIMEOUTS.INTERACTION=8000ms（8s）足够等待对话框关闭动画
     pe_locator = e2e_page.page.get_by_text(pe_label, exact=False)
     await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)
+
+
+@pytest.mark.xfail(
+    reason="Flet Web FilePicker.save_file 使用浏览器 File System Access API "
+    "(window.showSaveFilePicker) 打开原生保存对话框，不触发 Playwright download 事件。"
+    "源码层面需改用 anchor.download 或 blob URL 下载方式才能被 Playwright 捕获，"
+    "或测试侧需 mock FilePicker 验证调用参数。当前两种方案均未实现，测试超时 → xfail。",
+    strict=False,
+)
+async def test_export_screener_results_csv(e2e_page):
+    """测试：点击导出按钮触发 CSV 文件下载。
+
+    用 Playwright ``expect_download`` 捕获下载事件，断言：
+    1. 文件名包含 ``screener_results_`` 前缀（screener_view._on_export_click 约定）
+    2. 文件名以 ``.csv`` 结尾（allowed_extensions=["csv"]）
+    3. 文件名包含日期戳（``%Y%m%d_%H%M%S`` 格式）
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # 用 expect_download 捕获下载事件（不依赖真实 sleep）
+    # timeout 单位为毫秒，SCREEN_RESULT=30000ms（30s）足够等待导出按钮 → 下载触发
+    async with e2e_page.page.expect_download(timeout=TIMEOUTS.SCREEN_RESULT) as download_info:
+        await screener.click_export(timeout_ms=TIMEOUTS.INTERACTION)
+
+    download = await download_info.value
+    filename = download.suggested_filename
+
+    # 断言文件名约定（screener_view.py: default_filename = f"screener_results_{timestamp}.csv"）
+    assert filename.startswith("screener_results_"), f"文件名前缀不符: {filename}"
+    assert filename.endswith(".csv"), f"文件名扩展名不符: {filename}"
+    # 日期戳格式: YYYYMMDD_HHMMSS（8位日期 + 下划线 + 6位时间）
+    date_stamp = filename.removeprefix("screener_results_").removesuffix(".csv")
+    assert len(date_stamp) == 15 and date_stamp[8] == "_", f"日期戳格式不符: {filename}"
+    assert date_stamp.replace("_", "").isdigit(), f"日期戳非数字: {filename}"
+
+
+@pytest.mark.xfail(
+    reason="Flet Web FilePicker.save_file 使用浏览器 File System Access API "
+    "(window.showSaveFilePicker) 打开原生保存对话框，不触发 Playwright download 事件。"
+    "源码层面需改用 anchor.download 或 blob URL 下载方式才能被 Playwright 捕获，"
+    "或测试侧需 mock FilePicker 验证调用参数。当前两种方案均未实现，测试超时 → xfail。"
+    "注：Excel 导出功能已由 Task 4.1-4.4 实现（screener_view._on_export_excel_click），"
+    "但 FilePicker.save_file 的 Playwright 捕获限制同样影响 Excel 导出按钮 → xfail。",
+    strict=False,
+)
+async def test_export_screener_results_excel(e2e_page):
+    """测试：点击 Excel 导出按钮触发 Excel 文件下载。
+
+    期望行为（DoD）：导出按钮支持 Excel 格式，文件名以 ``.xlsx`` 结尾。
+    当前状态：Task 4.4 已实现 Excel 导出（``screener_view._on_export_excel_click`` +
+    ``DataExplorerViewModel.write_excel`` + openpyxl），UI 新增独立 Excel 导出按钮。
+    但 Flet Web FilePicker.save_file 无法触发 Playwright download 事件
+    （技术债 P3-UI-Source-Bugs ⑥），测试无法捕获下载事件 → xfail。
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # 用 expect_download 捕获下载事件（Excel 导出按钮触发）
+    async with e2e_page.page.expect_download(timeout=TIMEOUTS.SCREEN_RESULT) as download_info:
+        await screener.click_export(timeout_ms=TIMEOUTS.INTERACTION)
+
+    download = await download_info.value
+    filename = download.suggested_filename
+
+    # 期望 Excel 文件（.xlsx 结尾）
+    assert filename.endswith(".xlsx"), f"文件名扩展名不符（期望 .xlsx）: {filename}"
+
+
+async def test_detail_dialog_outside_click_close(e2e_page):
+    """测试：点击对话框外部 → 验证对话框关闭。
+
+    期望行为（DoD）：点击对话框外部区域关闭对话框。
+    当前状态：Task 5.1 已修复 ``stock_detail_dialog.py`` 中 ``ft.AlertDialog(modal=False)``
+    + ``on_dismiss=_close`` 回调（commit 91f9006c），点击对话框外部应触发 on_dismiss 关闭对话框。
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # 点击行打开对话框
+    await screener.click_row_by_text("平安银行", timeout_ms=TIMEOUTS.INTERACTION)
+
+    # 验证对话框打开：等待 PE 标签出现
+    pe_label = I18n.get("detail_pe")
+    await screener.expect_text(pe_label, timeout_ms=TIMEOUTS.INTERACTION)
+
+    # 点击对话框外部（页面左上角，远离对话框中心）
+    await e2e_page.page.mouse.click(10, 10)
+
+    # 期望对话框关闭：等待 PE 标签消失（modal=False + on_dismiss 应触发关闭）
+    # timeout 用 TIMEOUTS.INTERACTION（8s）足够等待对话框关闭动画
+    pe_locator = e2e_page.page.get_by_text(pe_label, exact=False)
+    await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)
