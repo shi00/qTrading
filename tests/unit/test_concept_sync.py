@@ -144,7 +144,9 @@ class TestAKShareConceptSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added > 0
-        ctx.cache.stock_dao.upsert_em_concepts.assert_called()
+        assert ctx.cache.stock_dao.upsert_em_concepts.call_count == 1
+        records = ctx.cache.stock_dao.upsert_em_concepts.call_args.args[0]
+        assert len(records) == 4  # 2 板块 × 2 成分股
 
     @pytest.mark.asyncio
     async def test_cancel_returns_cancelled(self):
@@ -284,8 +286,9 @@ class TestAKShareConceptSync:
         client.get_concept_constituents = AsyncMock(side_effect=_asyncio.CancelledError())
 
         strategy = AKShareConceptSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run()
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_engine_disposed_in_constituents_skips_retry(self):
@@ -330,8 +333,9 @@ class TestAKShareConceptSync:
         client.get_concept_constituents = AsyncMock(return_value=_make_constituents_df())
 
         strategy = AKShareConceptSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy.run()
+        assert isinstance(exc_info.value, MemoryError)
 
 
 # --- LimitListSyncStrategy ---
@@ -350,8 +354,11 @@ class TestLimitListSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added > 0
-        ctx.cache.stock_dao.clear_today_limit_concepts.assert_called_once()
-        ctx.cache.stock_dao.upsert_limit_concepts.assert_called_once()
+        ctx.cache.stock_dao.clear_today_limit_concepts.assert_called_once_with()
+        upsert_args = ctx.cache.stock_dao.upsert_limit_concepts.call_args.args[0]
+        assert len(upsert_args) == 2
+        assert upsert_args[0]["ts_code"] == "000001.SZ"
+        assert upsert_args[1]["ts_code"] == "600000.SH"
 
     @pytest.mark.asyncio
     async def test_cancel_returns_cancelled(self):
@@ -498,8 +505,9 @@ class TestLimitListSync:
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(trade_date="20240614")
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_system_level_error_propagates(self):
@@ -514,8 +522,9 @@ class TestLimitListSync:
         ctx.api.get_limit_list = AsyncMock(side_effect=PermissionError("denied"))
 
         strategy = LimitListSyncStrategy(ctx)
-        with pytest.raises(PermissionError):
+        with pytest.raises(PermissionError) as exc_info:
             await strategy.run(trade_date="20240614")
+        assert isinstance(exc_info.value, PermissionError)
 
 
 # --- AIConceptTagSyncStrategy ---
@@ -546,9 +555,13 @@ class TestAIConceptTagSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         assert result.added > 0
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once_with(
+            [
+                {"ts_code": "000001.SZ", "concepts": ["锂电池", "新能源车"]},
+            ]
+        )
         # R3 fix: 验证 T5 清理被调用
-        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()
+        ctx.cache.stock_dao.delete_expired_failures.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_skip_when_no_llm(self):
@@ -642,8 +655,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(return_value=[])
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, EngineDisposedError)
 
     @pytest.mark.asyncio
     async def test_retry_queue_priority_loading(self):
@@ -708,8 +722,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.upsert_ai_concept_failure = AsyncMock(side_effect=EngineDisposedError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, EngineDisposedError)
 
     @pytest.mark.asyncio
     async def test_clear_failure_propagates_engine_disposed(self):
@@ -727,8 +742,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.clear_ai_concept_failure = AsyncMock(side_effect=EngineDisposedError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, EngineDisposedError)
 
     @pytest.mark.asyncio
     async def test_cancel_event_set_during_iter_breaks_loop(self):
@@ -790,8 +806,9 @@ class TestAIConceptTagSync:
         _asyncio.create_task(_set_cancel())
 
         start = _asyncio.get_event_loop().time()
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
         elapsed = _asyncio.get_event_loop().time() - start
         # 应在 ~2 秒内（_AI_TAG_CANCEL_POLL_INTERVAL）响应，而不是等 10 秒
         assert elapsed < 3.0, f"取消响应时间 {elapsed}s 超过 3 秒阈值，未满足 2 秒检查要求"
@@ -812,7 +829,8 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
+        assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_std"
 
     @pytest.mark.asyncio
     async def test_cancellable_llm_call_completes_within_poll_interval(self):
@@ -851,7 +869,8 @@ class TestAIConceptTagSync:
         assert result.status == SyncStatus.SUCCESS.value
         assert elapsed < 2.0, f"应在 2s 轮询间隔内完成，实际 {elapsed}s"
         assert not cancel_event.is_set()
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
+        assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_std"
 
     @pytest.mark.asyncio
     async def test_cancellable_llm_call_multiple_timeouts_then_completes(self):
@@ -890,7 +909,8 @@ class TestAIConceptTagSync:
         assert result.status == SyncStatus.SUCCESS.value
         assert 2.0 <= elapsed < 4.0, f"应经历 1 次 TimeoutError 后完成，实际 {elapsed}s"
         assert not cancel_event.is_set()
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
+        assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_std"
 
     @pytest.mark.asyncio
     async def test_cancellable_llm_call_propagates_non_cancel_exception(self):
@@ -920,7 +940,11 @@ class TestAIConceptTagSync:
         assert result.status == SyncStatus.PARTIAL.value
         assert len(result.errors) > 0
         # 错题本应被写入
-        ctx.cache.stock_dao.upsert_ai_concept_failure.assert_called_once()
+        ctx.cache.stock_dao.upsert_ai_concept_failure.assert_called_once_with(
+            "000001.SZ",
+            "平安银行",
+            "bad request",
+        )
 
     @pytest.mark.asyncio
     async def test_llm_returns_non_json_string_persists_dummy_concept(self):
@@ -944,7 +968,7 @@ class TestAIConceptTagSync:
 
         assert result.status == SyncStatus.SUCCESS.value
         # 验证 upsert_ai_concepts 收到 concepts=[] 的 entry
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        assert ctx.cache.stock_dao.upsert_ai_concepts.call_count == 1
         entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
         assert len(entries) == 1
         assert entries[0]["concepts"] == []
@@ -968,7 +992,7 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        assert ctx.cache.stock_dao.upsert_ai_concepts.call_count == 1
         entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
         assert entries[0]["concepts"] == ["锂电池", "光伏"]
 
@@ -989,7 +1013,7 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        assert ctx.cache.stock_dao.upsert_ai_concepts.call_count == 1
         entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
         assert entries[0]["concepts"] == []
 
@@ -1015,7 +1039,7 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        assert ctx.cache.stock_dao.upsert_ai_concepts.call_count == 1
         entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
         # None 被 if c 过滤，不会变成 "None"
         assert entries[0]["concepts"] == ["概念1", "概念2"]
@@ -1037,7 +1061,7 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        assert ctx.cache.stock_dao.upsert_ai_concepts.call_count == 1
         entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
         # parsed 是 list 不是 dict，concepts 保持 []
         assert entries[0]["concepts"] == []
@@ -1057,7 +1081,7 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.upsert_ai_concepts.assert_called_once()
+        assert ctx.cache.stock_dao.upsert_ai_concepts.call_count == 1
         entries = ctx.cache.stock_dao.upsert_ai_concepts.call_args.args[0]
         assert entries[0]["concepts"] == []
 
@@ -1077,7 +1101,7 @@ class TestAIConceptTagSync:
 
         # 主流程仍应成功（清理失败不影响主流程）
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()
+        ctx.cache.stock_dao.delete_expired_failures.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_t5_clear_expired_failures_cancelled_propagates(self):
@@ -1092,8 +1116,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.delete_expired_failures = AsyncMock(side_effect=_asyncio.CancelledError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_t5_clear_expired_failures_engine_disposed_propagates(self):
@@ -1108,8 +1133,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.delete_expired_failures = AsyncMock(side_effect=EngineDisposedError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, EngineDisposedError)
 
     @pytest.mark.asyncio
     async def test_l3_cancel_event_with_llm_exception(self):
@@ -1156,8 +1182,9 @@ class TestAIConceptTagSync:
         start = _time.monotonic()
         strategy = AIConceptTagSyncStrategy(ctx)
         try:
-            with pytest.raises(_asyncio.CancelledError):
+            with pytest.raises(_asyncio.CancelledError) as exc_info:
                 await strategy.run(batch_size=10)
+            assert isinstance(exc_info.value, _asyncio.CancelledError)
         finally:
             cancel_task.cancel()
             with contextlib.suppress(_asyncio.CancelledError):
@@ -1185,7 +1212,7 @@ class TestAIConceptTagSync:
 
         # retry 队列加载失败，但 fresh 拉取成功，主流程仍 SUCCESS
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.get_stocks_without_ai_concepts.assert_called_once()
+        ctx.cache.stock_dao.get_stocks_without_ai_concepts.assert_called_once_with(10, [])
 
     @pytest.mark.asyncio
     async def test_retry_queue_loading_cancelled_propagates(self):
@@ -1196,8 +1223,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.get_ai_concept_failures_for_retry = AsyncMock(side_effect=_asyncio.CancelledError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_fresh_pending_loading_fails_degrades(self):
@@ -1226,8 +1254,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.get_stocks_without_ai_concepts = AsyncMock(side_effect=_asyncio.CancelledError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_cancel_via_cancelled_flag_in_loop(self):
@@ -1255,7 +1284,8 @@ class TestAIConceptTagSync:
 
         assert result.status == SyncStatus.CANCELLED.value
         # 只调用了 1 次 LLM（第二只股票在循环开始时被 _cancelled 跳过）
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
+        assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_std"
 
     @pytest.mark.asyncio
     async def test_cancel_after_loop_before_upsert(self):
@@ -1325,8 +1355,9 @@ class TestAIConceptTagSync:
         ctx.ai_service.chat_with_web_search = AsyncMock(side_effect=EngineDisposedError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, EngineDisposedError)
 
     @pytest.mark.asyncio
     async def test_failure_persist_cancelled_propagates(self):
@@ -1342,8 +1373,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.upsert_ai_concept_failure = AsyncMock(side_effect=_asyncio.CancelledError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_failure_persist_generic_exception_degrades(self):
@@ -1381,8 +1413,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.clear_ai_concept_failure = AsyncMock(side_effect=_asyncio.CancelledError())
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_clear_failure_generic_exception_degrades(self):
@@ -1415,7 +1448,7 @@ class TestAIConceptTagSync:
         result = await strategy.run(batch_size=10)
 
         assert result.status == SyncStatus.SUCCESS.value
-        ctx.cache.stock_dao.delete_expired_failures.assert_called_once()
+        ctx.cache.stock_dao.delete_expired_failures.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_outer_system_level_error_propagates(self):
@@ -1432,8 +1465,9 @@ class TestAIConceptTagSync:
         ctx.cache.stock_dao.upsert_ai_concepts = AsyncMock(side_effect=MemoryError("out of memory"))
 
         strategy = AIConceptTagSyncStrategy(ctx)
-        with pytest.raises(MemoryError):
+        with pytest.raises(MemoryError) as exc_info:
             await strategy.run(batch_size=10)
+        assert isinstance(exc_info.value, MemoryError)
 
     @pytest.mark.asyncio
     async def test_outer_operational_error_returns_failed(self):
@@ -1500,8 +1534,9 @@ class TestCancellableLlmCallOuterCancel:
         await _asyncio.sleep(0.5)  # 等待进入 while 循环
         task.cancel()  # 外层取消（非 cancel_event 路径）
 
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await task
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
     @pytest.mark.asyncio
     async def test_outer_cancel_with_llm_task_raising_non_cancel_exception(self):
@@ -1541,8 +1576,9 @@ class TestCancellableLlmCallOuterCancel:
         await _asyncio.sleep(0.5)
         task.cancel()  # 外层取消
 
-        with pytest.raises(_asyncio.CancelledError):
+        with pytest.raises(_asyncio.CancelledError) as exc_info:
             await task
+        assert isinstance(exc_info.value, _asyncio.CancelledError)
 
 
 # --- search_engine 配置透传 ---
@@ -1570,7 +1606,7 @@ class TestSearchEnginePropagation:
         strategy = AIConceptTagSyncStrategy(ctx)
         await strategy.run(batch_size=10)
 
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
         assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_pro"
 
     @pytest.mark.asyncio
@@ -1595,7 +1631,7 @@ class TestSearchEnginePropagation:
         strategy = AIConceptTagSyncStrategy(ctx)
         await strategy.run(batch_size=10)
 
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
         assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_pro"
 
     @pytest.mark.asyncio
@@ -1617,7 +1653,7 @@ class TestSearchEnginePropagation:
         strategy = AIConceptTagSyncStrategy(ctx)
         await strategy.run(batch_size=10)
 
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
         assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_std"
 
     @pytest.mark.asyncio
@@ -1660,7 +1696,7 @@ class TestSearchEnginePropagation:
         assert 2.0 <= elapsed < 4.0, f"应经历 1 次 TimeoutError 后完成，实际 {elapsed}s"
         assert result.status == SyncStatus.SUCCESS.value
         # 关键断言：search_engine 仍为 config 配置的 "search_pro"，未被默认值覆盖
-        ctx.ai_service.chat_with_web_search.assert_called_once()
+        assert ctx.ai_service.chat_with_web_search.call_count == 1
         assert ctx.ai_service.chat_with_web_search.call_args.kwargs["search_engine"] == "search_pro"
 
 
@@ -1686,8 +1722,9 @@ class TestEngineDisposedPropagation:
         client.get_concept_constituents = AsyncMock(return_value=_make_constituents_df())
 
         strategy = AKShareConceptSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run()
+        assert isinstance(exc_info.value, EngineDisposedError)
 
     @pytest.mark.asyncio
     async def test_limit_list_propagates_engine_disposed(self):
@@ -1701,5 +1738,6 @@ class TestEngineDisposedPropagation:
         ctx.api.get_limit_list = AsyncMock(return_value=_make_limit_list_df())
 
         strategy = LimitListSyncStrategy(ctx)
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError) as exc_info:
             await strategy.run(trade_date="20240614")
+        assert isinstance(exc_info.value, EngineDisposedError)

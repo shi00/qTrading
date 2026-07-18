@@ -34,14 +34,18 @@ class TestSyncIntegrityConfig:
         }
 
     def test_validation_rejects_out_of_range(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             SyncIntegrityConfig(quality_threshold=101)
-        with pytest.raises(ValidationError):
+        assert "quality_threshold" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             SyncIntegrityConfig(quality_threshold=-1)
-        with pytest.raises(ValidationError):
+        assert "quality_threshold" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             SyncIntegrityConfig(quotes_tolerance_ratio=1.5)
-        with pytest.raises(ValidationError):
+        assert "quotes_tolerance_ratio" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             SyncIntegrityConfig(max_retry_days_per_sync=0)
+        assert "max_retry_days_per_sync" in str(exc_info.value)
 
 
 class TestAppConfig:
@@ -76,39 +80,49 @@ class TestAppConfig:
 
     def test_config_version_invalid_zero(self):
         """config_version < 1 校验失败"""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(config_version=0)
+        assert "config_version" in str(exc_info.value)
 
     def test_config_version_invalid_negative(self):
         """config_version 负数校验失败"""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(config_version=-1)
+        assert "config_version" in str(exc_info.value)
 
     def test_field_validation_db_port(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(db_port=0)
-        with pytest.raises(ValidationError):
+        assert "db_port" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(db_port=70000)
+        assert "db_port" in str(exc_info.value)
 
     def test_field_validation_log_level(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(log_level="VERBOSE")
+        assert "log_level" in str(exc_info.value)
 
     def test_field_validation_theme_name(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(theme_name="blue")
+        assert "theme_name" in str(exc_info.value)
 
     def test_field_validation_locale(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(locale="fr")
-        with pytest.raises(ValidationError):
+        assert "locale" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(locale="zh_TW")
+        assert "locale" in str(exc_info.value)
 
     def test_field_validation_time_format(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(auto_update_time="25:00")
-        with pytest.raises(ValidationError):
+        assert "auto_update_time" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(ai_concept_schedule_time="abc")
+        assert "ai_concept_schedule_time" in str(exc_info.value)
 
     def test_extra_allow_dynamic_keys(self):
         cfg = AppConfig.model_validate(
@@ -414,12 +428,14 @@ class TestTusharePointTier:
             assert cfg.tushare_point_tier == tier
 
     def test_point_tier_rejects_unknown(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(tushare_point_tier="platinum")
+        assert "tushare_point_tier" in str(exc_info.value)
 
     def test_sync_max_concurrent_heavy_rejects_above_8(self):
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(sync_max_concurrent_heavy=9)
+        assert "sync_max_concurrent_heavy" in str(exc_info.value)
 
     def test_sync_full_batch_size_default(self):
         """Phase 2C：sync_full_batch_size 默认 200。"""
@@ -428,7 +444,9 @@ class TestTusharePointTier:
 
     def test_sync_full_batch_size_rejects_out_of_range(self):
         """Phase 2C：sync_full_batch_size 超出 [10, 500] 应校验失败。"""
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(sync_full_batch_size=9)
-        with pytest.raises(ValidationError):
+        assert "sync_full_batch_size" in str(exc_info.value)
+        with pytest.raises(ValidationError) as exc_info:
             AppConfig(sync_full_batch_size=501)
+        assert "sync_full_batch_size" in str(exc_info.value)

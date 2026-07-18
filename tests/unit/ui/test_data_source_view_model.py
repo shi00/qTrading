@@ -288,7 +288,8 @@ class TestDataSourceViewModelCheckHealth:
         assert _count_transitions(snapshots, lambda s: s.health_checking, initial=False) >= 2
 
     async def test_check_health_error(self, bound_vm, snapshots, mock_processor, mock_task_manager):
-        mock_processor.check_data_health = AsyncMock(side_effect=RuntimeError("DB down"))
+        db_down_error = RuntimeError("DB down")
+        mock_processor.check_data_health = AsyncMock(side_effect=db_down_error)
 
         await bound_vm.check_health()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
@@ -302,7 +303,7 @@ class TestDataSourceViewModelCheckHealth:
             with pytest.raises(RuntimeError, match="DB down"):
                 await factory(task_id="task_123")
 
-            mock_classify.assert_called_once()
+            mock_classify.assert_called_once_with(db_down_error, context="general")
             # health_error emitted as Message (VM 不感知 locale, 透传 i18n key + params)
             assert bound_vm.state.health_error is not None
             assert bound_vm.state.health_error.key == "common_op_fail"
@@ -317,8 +318,9 @@ class TestDataSourceViewModelCheckHealth:
         await bound_vm.check_health()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await factory(task_id="task_123")
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         # cancelled: health_checking transitioned to False, no result/error emitted
         assert snapshots[-1].health_checking is False
@@ -353,8 +355,9 @@ class TestDataSourceViewModelFullDailySync:
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await factory(task_id="task_123")
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
         assert bound_vm.state.is_syncing is False
@@ -366,7 +369,7 @@ class TestDataSourceViewModelFullDailySync:
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="Network error"):
             await factory(task_id="task_123")
 
         _assert_snack(bound_vm, snapshots, "common_op_fail", "error")
@@ -395,7 +398,7 @@ class TestDataSourceViewModelFullDailySync:
 
         bound_vm.execute_full_daily_sync()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
             await factory(task_id="task_123")
         # 副作用验证：CancelledError 被外层 except 捕获后应触发 snack warning
         _assert_snack(bound_vm, snapshots, "settings_msg_sync_cancelled", "warning")
@@ -417,7 +420,12 @@ class TestDataSourceViewModelAiConceptRebuild:
         # 验证通过 get_cancel_event 访问器获取取消事件（P0-2 取消链路）
         mock_task_manager.get_cancel_event.assert_called_once_with("task_123")
         # 验证 manual_trigger=True + cancel_event + ai_service 参数正确传递
-        mock_processor.run_ai_concept_tagging.assert_called_once()
+        mock_processor.run_ai_concept_tagging.assert_awaited_once_with(
+            task_id="task_123",
+            cancel_event=mock_task_manager.get_cancel_event.return_value,
+            manual_trigger=True,
+            ai_service=bound_vm._ai_service,
+        )
         kwargs = mock_processor.run_ai_concept_tagging.call_args.kwargs
         assert kwargs.get("manual_trigger") is True
         assert kwargs.get("cancel_event") is mock_task_manager.get_cancel_event.return_value
@@ -429,8 +437,9 @@ class TestDataSourceViewModelAiConceptRebuild:
         bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await factory(task_id="task_123")
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         assert bound_vm.state.is_syncing is False
         assert bound_vm.state.active_key is None
@@ -445,7 +454,7 @@ class TestDataSourceViewModelAiConceptRebuild:
         mock_task_manager.update_progress = MagicMock(return_value=False)
         bound_vm.execute_ai_concept_rebuild()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
             await factory(task_id="task_123")
         # 验证后续的 processor 调用未执行（早退生效）
         mock_processor.run_ai_concept_tagging.assert_not_called()
@@ -461,7 +470,7 @@ class TestDataSourceViewModelHealthCheckT8:
         mock_task_manager.update_progress = MagicMock(return_value=False)
         await bound_vm.check_health()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
             await factory(task_id="task_123")
         # 验证后续 processor.check_data_health 未执行
         mock_processor.check_data_health.assert_not_called()
@@ -499,7 +508,7 @@ class TestDataSourceViewModelClearCache:
         bound_vm.execute_clear_cache()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="DB error"):
             await factory(task_id="task_123")
 
         _assert_snack(bound_vm, snapshots, "ds_clean_fail", "error")
@@ -535,8 +544,9 @@ class TestDataSourceViewModelInitHistorical:
         bound_vm.execute_init_historical_data()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await factory(task_id="task_123")
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         assert any(s.init_sync_final_status == TaskStatus.CANCELLED for s in snapshots)
 
@@ -546,7 +556,7 @@ class TestDataSourceViewModelInitHistorical:
         bound_vm.execute_init_historical_data()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="ds_init_fail_fmt"):
             await factory(task_id="task_123")
 
         assert any(s.init_sync_final_status == TaskStatus.FAILED for s in snapshots)
@@ -558,7 +568,7 @@ class TestDataSourceViewModelInitHistorical:
         bound_vm.execute_init_historical_data()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="ds_init_fail_generic"):
             await factory(task_id="task_123")
 
         assert any(s.init_sync_final_status == TaskStatus.FAILED for s in snapshots)
@@ -576,7 +586,7 @@ class TestDataSourceViewModelInitHistorical:
         bound_vm.execute_init_historical_data()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
             await factory(task_id="task_123")
 
         assert any(s.init_sync_final_status == TaskStatus.CANCELLED for s in snapshots)
@@ -590,7 +600,7 @@ class TestDataSourceViewModelInitHistorical:
         bound_vm.execute_init_historical_data()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError, match="ds_init_fail_generic"):
             await factory(task_id="task_123")
 
         assert any(s.init_sync_final_status == TaskStatus.FAILED for s in snapshots)
@@ -622,7 +632,7 @@ class TestDataSourceViewModelInitHistorical:
 
         bound_vm.execute_init_historical_data()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
             await factory(task_id="task_123")
         # 验证 initialize_system 被调用但内部未完成（CancelledError 中断）
         mock_processor.initialize_system.assert_awaited_once()
@@ -722,7 +732,7 @@ class TestDataSourceViewModelSaveToken:
 
             mock_tpm.return_value.run_async = _fake_run_async
             await bound_vm.save_tushare_token("abc123")
-            mock_tc.assert_called_once()
+            mock_tc.assert_called_once_with()
             mock_tc.return_value.set_token.assert_called_with("abc123")
 
     async def test_skips_empty_token(self, bound_vm):
@@ -802,7 +812,7 @@ class TestDataSourceViewModelCoverageFill:
         mock_task_manager.update_progress = MagicMock(side_effect=[True, False])
         await bound_vm.check_health()
         factory = _capture_coroutine_factory(mock_task_manager.submit_task)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError, match="task cancelled by user"):
             await factory(task_id="task_123")
         # 第二次早退, _emit_health_result 未调用
         assert bound_vm.state.health_result is None
@@ -866,7 +876,7 @@ class TestDataSourceViewModelCoverageFill:
         await factory(task_id="task_123")
 
         # update_progress 被以 progress=0 调用, 未抛 ZeroDivisionError
-        mock_task_manager.update_progress.assert_called_once()
+        mock_task_manager.update_progress.assert_called_once_with("task_123", 0, "zero-total-step")
         progress_arg = mock_task_manager.update_progress.call_args.args[1]
         assert progress_arg == 0
 
