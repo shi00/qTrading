@@ -274,7 +274,12 @@ class TestConfigPanelsIntegration:
 class TestDatabaseConfigServiceMigrations:
     """Tests for DatabaseConfigService migration methods"""
 
-    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+    pytestmark = [
+        pytest.mark.integration,
+        pytest.mark.database,
+        pytest.mark.migration,
+        pytest.mark.xdist_group("migration"),
+    ]
 
     @pytest_asyncio.fixture(autouse=True)
     async def isolated_db(self):
@@ -405,7 +410,12 @@ class TestDatabaseConfigServiceMigrations:
 class TestDatabaseConfigPanelSaveConfig:
     """Tests for DatabaseConfigPanelViewModel.save_config with table creation"""
 
-    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+    pytestmark = [
+        pytest.mark.integration,
+        pytest.mark.database,
+        pytest.mark.migration,
+        pytest.mark.xdist_group("migration"),
+    ]
 
     @pytest_asyncio.fixture(autouse=True)
     async def isolated_db(self):
@@ -503,7 +513,12 @@ class TestOnboardingWizardDatabaseValidation:
     契约：通过 VM.save_config 作为 fn_validate_database 调用。
     """
 
-    pytestmark = [pytest.mark.integration, pytest.mark.database, pytest.mark.migration]
+    pytestmark = [
+        pytest.mark.integration,
+        pytest.mark.database,
+        pytest.mark.migration,
+        pytest.mark.xdist_group("migration"),
+    ]
 
     @pytest_asyncio.fixture(autouse=True)
     async def isolated_db(self):
