@@ -751,10 +751,60 @@ async def _seed_e2e_data() -> None:
         await conn.close()
 
 
+@pytest_asyncio.fixture(scope="session", loop_scope="session", autouse=True)
+async def _ensure_e2e_db() -> None:
+    """确保 E2E worker 的 ``test_astock_<worker>`` DB 存在。
+
+    等价 ``tests/integration/conftest.py`` 的 ``_ensure_test_db``，
+    因 conftest 作用域规则不对 ``tests/e2e/`` 生效（integration 的
+    ``_ensure_test_db`` + ``db_schema_ready`` autouse fixture 仅对
+    ``tests/integration/`` 子目录生效），此处显式调用以补齐 E2E 路径。
+
+    根因 1（主因）：E2E 强制用 ProactorEventLoop（``pytest_asyncio_loop_factories``
+    hook，subprocess.Popen + Playwright 需要），但 asyncpg 的 socket I/O 与
+    Proactor 的 IOCP 模型不兼容，抛 ``ConnectionDoesNotExistError``。
+
+    根因 2（协同因）：``_seed_e2e_data`` 只调 ``DatabaseMigrator.init_db``（建 schema），
+    不创建 DB 本身。worker 若只跑 E2E，``test_astock_<worker>`` DB 永远不会被创建。
+
+    修复：在独立线程中用 ``SelectorEventLoop`` 跑 ``_ensure_test_db``，避开
+    ProactorEventLoop + asyncpg 兼容性问题。``asyncio.to_thread`` 在当前
+    ProactorEventLoop 中调度，函数体在 default executor 线程中执行；新线程
+    显式创建 ``SelectorEventLoop``（不修改全局 event_loop_policy，避免污染主线程）。
+    """
+    from tests.integration.conftest import _ensure_test_db
+
+    def _run_in_selector_loop() -> None:
+        loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_ensure_test_db())
+        finally:
+            loop.close()
+
+    await asyncio.to_thread(_run_in_selector_loop)
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def seed_e2e_data():
-    """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。"""
-    await _seed_e2e_data()
+async def seed_e2e_data(_ensure_e2e_db: None):
+    """Session 级数据库播种：在所有 E2E 测试之前注入基准数据。
+
+    显式依赖 ``_ensure_e2e_db`` 保证 DB 已创建（避免隐式时序脆弱性）。
+
+    与 ``_ensure_e2e_db`` 同样在独立线程中用 ``SelectorEventLoop`` 跑：
+    ``_seed_e2e_data`` 内部调用 ``DatabaseMigrator.init_db``（SQLAlchemy async
+    engine + asyncpg driver）和 ``asyncpg.connect``，均受根因 1（ProactorEventLoop
+    + asyncpg 不兼容）影响，必须在 ``SelectorEventLoop`` 中执行。
+    """
+    logger.info("[E2E Seeding] start _seed_e2e_data in SelectorEventLoop thread")
+
+    def _run_in_selector_loop() -> None:
+        loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_seed_e2e_data())
+        finally:
+            loop.close()
+
+    await asyncio.to_thread(_run_in_selector_loop)
     yield
 
 
