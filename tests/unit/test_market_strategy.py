@@ -149,7 +149,7 @@ class TestVolumeBreakoutStrategy:
             "check_dependencies",
             return_value={"status": "ready", "missing_keys": [], "missing_tables": []},
         ):
-            with pytest.raises(RuntimeError):
+            with pytest.raises(RuntimeError):  # noqa: weak-assertion 缺失列守卫：验证 PolarsBaseStrategy.filter 对缺失列抛 RuntimeError，raises 本身即充分断言
                 await strategy.filter(context)
 
     def test_sort_descending_by_pct_chg(self) -> None:
@@ -198,7 +198,7 @@ class TestVolumeBreakoutStrategy:
         ):
             with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run:
                 mock_run.side_effect = asyncio.CancelledError("test cancel")
-                with pytest.raises(asyncio.CancelledError):
+                with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 守卫：验证 CancelledError 不被 except Exception 吞没，raises 本身即充分断言
                     await strategy.filter(context)
 
     def test_pct_chg_min_ge_max_auto_adjusts(self) -> None:

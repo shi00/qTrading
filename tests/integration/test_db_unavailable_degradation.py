@@ -113,7 +113,7 @@ class TestSyncDBDisconnectDegradation(TestDatabaseBase):
         self.cache._disposed = True
 
         with caplog.at_level(logging.WARNING, logger=__name__):
-            with pytest.raises(EngineDisposedError):
+            with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：raises 后续 caplog.text 已验证日志，scanner 跨 with 块识别受限
                 await _sync_wrapper_save_daily_quotes(self.cache, _make_daily_quotes_df())
 
         # 验证 wrapper 执行了 except 块（日志记录了降级）
@@ -166,7 +166,7 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         await self.cache.save_stock_basic(_make_stock_basic_df())
         await self.cache.save_daily_quotes(_make_daily_quotes_df())
         self.cache._disposed = True
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：验证 disposed 时读路径抛 EngineDisposedError，raises 本身即充分断言
             await self.cache.get_screening_data(trade_date=_RECENT.strftime("%Y%m%d"))
 
     async def test_ui_degradation_wrapper_catches_and_returns_flag(self, caplog):
@@ -207,7 +207,7 @@ class TestDBUnavailableReadCacheDegradation(TestDatabaseBase):
         self.cache._disposed = True
 
         # CacheManager 读会抛 EngineDisposedError
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError):  # noqa: weak-assertion R5 守卫：raises 后续 independent_engine 已验证缓存命中，scanner 跨块识别受限
             await self.cache.get_stock_basic()
 
         # 独立 engine（同一 DB）可读到数据 — 缓存命中

@@ -284,5 +284,5 @@ class TestNorthboundFlowStrategy:
         }
         with patch.object(ThreadPoolManager, "run_async", new_callable=AsyncMock) as mock_run:
             mock_run.side_effect = asyncio.CancelledError()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 守卫：验证 CancelledError 不被 except Exception 吞没，raises 本身即充分断言
                 await strat.filter(ctx)
