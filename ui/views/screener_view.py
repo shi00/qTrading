@@ -386,8 +386,13 @@ def ScreenerView(
         if page is not None:
             page.run_task(_on_sort, col_id, new_asc)
 
-    async def _on_export_click(e: ft.ControlEvent) -> None:
-        UILogger.log_action("ScreenerView", "Click", "btn_export")
+    async def _do_export(format_: str) -> None:
+        """Export current results to CSV or Excel.
+
+        Args:
+            format_: "csv" or "excel"
+        """
+        UILogger.log_action("ScreenerView", "Click", f"btn_export_{format_}")
         df = vm.get_export_data()
         if df is None:
             page = _get_page()
@@ -395,17 +400,21 @@ def ScreenerView(
                 page.show_toast(I18n.get("data_export_no_data"), "error")
             return
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-        default_filename = f"screener_results_{timestamp}.csv"
+        ext = "csv" if format_ == "csv" else "xlsx"
+        default_filename = f"screener_results_{timestamp}.{ext}"
         filepath = await file_picker.save_file(
             dialog_title=I18n.get("data_export_save_title"),
             file_name=default_filename,
-            allowed_extensions=["csv"],
+            allowed_extensions=[ext],
         )
         if not filepath:
             return
         # Task 3.2: export_disabled 改为派生 (state.total_items == 0), 不再手动 set
         try:
-            path, error = await vm.export_results(filepath)
+            if format_ == "csv":
+                path, error = await vm.export_results(filepath)
+            else:
+                path, error = await vm.export_results_excel(filepath)
             page = _get_page()
             if path:
                 filename = os.path.basename(filepath)
@@ -413,16 +422,23 @@ def ScreenerView(
                     page.show_toast(I18n.get("data_export_success", file=filename), "success")
             elif page is not None and hasattr(page, "show_toast"):
                 page.show_toast(I18n.get("data_export_fail"), "error")
+        except asyncio.CancelledError:
+            raise
         except Exception as ex:
             logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
             page = _get_page()
             if page is not None and hasattr(page, "show_toast"):
                 page.show_toast(I18n.get("data_export_fail"), "error")
 
-    def _on_export_click_sync(e: ft.ControlEvent) -> None:
+    def _on_export_csv_click(e: ft.ControlEvent) -> None:
         page = _get_page()
         if page is not None:
-            page.run_task(_on_export_click, e)
+            page.run_task(_do_export, "csv")
+
+    def _on_export_excel_click(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_export, "excel")
 
     def _on_page_size_change(e: ft.ControlEvent) -> None:
         try:
@@ -1069,7 +1085,15 @@ def ScreenerView(
     export_btn = ft.Button(
         content=I18n.get("screener_export"),
         icon=ft.Icons.DOWNLOAD,
-        on_click=_on_export_click_sync,
+        on_click=_on_export_csv_click,
+        disabled=export_btn_disabled,
+        style=AppStyles.outline_button(),
+        height=45,
+    )
+    export_excel_btn = ft.Button(
+        content=I18n.get("data_export_excel"),
+        icon=ft.Icons.TABLE_VIEW,
+        on_click=_on_export_excel_click,
         disabled=export_btn_disabled,
         style=AppStyles.outline_button(),
         height=45,
@@ -1078,7 +1102,7 @@ def ScreenerView(
     right_controls = ft.Column(
         [
             status_row,
-            ft.Row([export_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
+            ft.Row([export_btn, export_excel_btn, run_btn], spacing=15, alignment=ft.MainAxisAlignment.END),
         ],
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         horizontal_alignment=ft.CrossAxisAlignment.END,

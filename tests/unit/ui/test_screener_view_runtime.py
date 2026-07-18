@@ -267,6 +267,7 @@ class _FakeScreenerViewModel:
         self._export_data: pd.DataFrame | None = None
         self._current_page_data: pd.DataFrame | None = None
         self._export_result: tuple = ("/path/to/file.csv", None)
+        self._export_excel_result: tuple = ("/path/to/file.xlsx", None)
         self.run_strategy_mock = MagicMock()
         self.sort_data_mock = MagicMock()
         self.strategy_mgr = MagicMock()
@@ -439,6 +440,10 @@ class _FakeScreenerViewModel:
     async def export_results(self, filepath: str) -> tuple:
         self.method_calls.append(f"export_results:{filepath}")
         return self._export_result
+
+    async def export_results_excel(self, filepath: str) -> tuple:
+        self.method_calls.append(f"export_results_excel:{filepath}")
+        return self._export_excel_result
 
 
 # ============================================================================
@@ -1177,6 +1182,67 @@ class TestOnExportClick:
         assert str(san_args[0]) == "export crash"
         # show_toast 被调用 (error)
         page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error")
+
+
+class TestOnExportExcelClick:
+    """_on_export_excel_click: Excel 导出路径, 验证 vm.export_results_excel 调用 + save_file allowed_extensions=["xlsx"]."""
+
+    def test_excel_export_calls_export_results_excel(self, screener_view_env) -> None:
+        """点击 Excel 导出按钮 → 调用 vm.export_results_excel(filepath)."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        fake_vm._export_data = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        fake_vm._export_excel_result = ("/path/to/file.xlsx", None)
+        _rerender(env)
+
+        file_picker = next(s for s in page.services if isinstance(s, ft.FilePicker))
+        file_picker.save_file = AsyncMock(return_value="/path/to/file.xlsx")
+
+        page.run_task.reset_mock()
+        page.show_toast.reset_mock()
+        buttons = _get_buttons(env)
+        # 定位 Excel 按钮 (i18n[data_export_excel] 含 "excel" 关键词)
+        excel_btn = next(b for b in buttons if isinstance(b, ft.Button) and "data_export_excel" in str(b.content))
+        _invoke(excel_btn.on_click, _make_event())
+
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        # 验证 vm.export_results_excel 被调用, 且 filepath 正确
+        assert "export_results_excel:/path/to/file.xlsx" in fake_vm.method_calls
+        # 验证未误调 CSV 导出方法
+        assert not any(c.startswith("export_results:") for c in fake_vm.method_calls)
+        # 成功 toast
+        page.show_toast.assert_called_once_with("i18n[data_export_success]", "success")
+
+    def test_excel_export_uses_xlsx_extension(self, screener_view_env) -> None:
+        """Excel 导出 → file_picker.save_file 的 allowed_extensions=["xlsx"]."""
+        env = screener_view_env
+        fake_vm = env["fake_vm"]
+        page = env["page"]
+
+        fake_vm._export_data = pd.DataFrame({"ts_code": ["000001.SZ"]})
+        fake_vm._export_excel_result = ("/path/to/file.xlsx", None)
+        _rerender(env)
+
+        file_picker = next(s for s in page.services if isinstance(s, ft.FilePicker))
+        file_picker.save_file = AsyncMock(return_value="/path/to/file.xlsx")
+
+        page.run_task.reset_mock()
+        buttons = _get_buttons(env)
+        excel_btn = next(b for b in buttons if isinstance(b, ft.Button) and "data_export_excel" in str(b.content))
+        _invoke(excel_btn.on_click, _make_event())
+
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        # 验证 save_file 调用参数: allowed_extensions=["xlsx"]
+        save_file_kwargs = file_picker.save_file.call_args.kwargs
+        assert save_file_kwargs["allowed_extensions"] == ["xlsx"]
+        # 默认文件名应为 .xlsx 后缀
+        assert save_file_kwargs["file_name"].endswith(".xlsx")
 
 
 # ============================================================================
