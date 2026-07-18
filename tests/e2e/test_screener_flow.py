@@ -76,3 +76,72 @@ async def test_screener_pagination_info(e2e_page):
     # 验证页码信息文本（结果加载完成后渲染）
     page_info = I18n.get("screener_page_info").format(current=1, total=1)
     await screener.expect_text(page_info, timeout_ms=TIMEOUTS.INTERACTION)
+
+
+async def test_screener_sort_by_column(e2e_page):
+    """测试：点击列头后表格按对应列升序/降序排序。
+
+    点击 ``pct_chg`` 列头后，列头出现 ↑（升序）→ 再次点击出现 ↓（降序）。
+    通过列头箭头标记验证排序状态切换（virtual_table.PaginatedTable 渲染约定）。
+    种子数据仅 1 行结果，无法验证排序前后行序变化，但可验证排序触发。
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # 列头文本格式: "pct_chg (涨跌幅)"（MetaDataManager.get_column_alias 渲染约定）
+    col_label = f"pct_chg ({I18n.get('col_pct_chg')})"
+
+    # 第一次点击 → 升序 (↑)，virtual_table.next_sort_state 新列默认升序
+    await screener.click_column_header(col_label, timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.expect_text(f"{col_label} ↑", timeout_ms=TIMEOUTS.FAST)
+
+    # 第二次点击 → 降序 (↓)，next_sort_state 翻转方向
+    await screener.click_column_header(col_label, timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.expect_text(f"{col_label} ↓", timeout_ms=TIMEOUTS.FAST)
+
+
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
+async def test_detail_dialog_open_close(e2e_page):
+    """测试：点击行打开详情对话框，验证关键字段渲染，点击关闭按钮关闭对话框。
+
+    验证项：
+    1. 点击表格行 → 对话框打开
+    2. 验证 ts_code/name/close/PE/PB 等字段标签渲染（StockDetailDialog 渲染约定）
+    3. 点击"关闭"按钮 → 对话框隐藏
+
+    flaky 注记：xdist 并行运行时偶发 worker 崩溃（隔离运行稳定 PASS），
+    用 pytest-rerunfailures 自动重跑 2 次（间隔 1s）以吸收基础设施抖动。
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # 点击行（通过行内唯一文本"平安银行"定位）
+    await screener.click_row_by_text("平安银行", timeout_ms=TIMEOUTS.INTERACTION)
+
+    # 验证对话框打开：等待详情字段标签出现
+    # stock_detail_dialog.py: _build_content 渲染 detail_pe/detail_pb/detail_price 等标签
+    pe_label = I18n.get("detail_pe")  # "PE(TTM)"
+    pb_label = I18n.get("detail_pb")  # "PB"
+    price_label = I18n.get("detail_price")  # "现价"
+    valuation_section = I18n.get("detail_sec_valuation")  # "估值指标"
+
+    await screener.expect_text(valuation_section, timeout_ms=TIMEOUTS.INTERACTION)
+    await screener.expect_text(pe_label, timeout_ms=TIMEOUTS.FAST)
+    await screener.expect_text(pb_label, timeout_ms=TIMEOUTS.FAST)
+    await screener.expect_text(price_label, timeout_ms=TIMEOUTS.FAST)
+
+    # 点击关闭按钮（stock_detail_dialog.py: actions=[TextButton(I18n.get("common_close"))]）
+    close_text = I18n.get("common_close")  # "关闭"
+    await screener.page.click_button(close_text, timeout_ms=TIMEOUTS.INTERACTION)
+
+    # 验证对话框关闭：等待详情字段标签消失（DOM 移除或隐藏）
+    # 用 Playwright locator.wait_for(state="hidden") 替代固定 sleep
+    # timeout 单位为毫秒，TIMEOUTS.INTERACTION=8000ms（8s）足够等待对话框关闭动画
+    pe_locator = e2e_page.page.get_by_text(pe_label, exact=False)
+    await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)
