@@ -202,7 +202,9 @@ oauthlib==3.3.1 ; sys_platform != 'emscripten'
 openai==2.45.0
     # via litellm
 openpyxl==3.1.5
-    # via akshare
+    # via
+    #   astockscreener (pyproject.toml)
+    #   akshare
 packaging==26.2
     # via
     #   huggingface-hub
