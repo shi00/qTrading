@@ -7,6 +7,7 @@ Covers:
 - Legacy run_doubao_tagging has been removed.
 """
 
+import asyncio
 import threading
 
 import pytest
@@ -175,3 +176,77 @@ class TestRunAIConceptTagging:
             )
 
             assert dp.context.cancel_event is cancel_event
+
+    @pytest.mark.asyncio
+    async def test_akshare_exception_logged_as_failed(self):
+        """覆盖 L394-401: AKShare sync 抛 Exception 时记录 failed"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        mock_result = _make_sync_result(status="success", added=0)
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
+            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
+        ):
+            MockAKShare.return_value.run = AsyncMock(side_effect=Exception("akshare boom"))
+            MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
+            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
+            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+        assert "akshare=failed" in result
+        assert "limit_list=success" in result
+
+    @pytest.mark.asyncio
+    async def test_limit_list_exception_logged_as_failed(self):
+        """覆盖 L407-414: LimitList sync 抛 Exception 时记录 failed"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        mock_result = _make_sync_result(status="success", added=0)
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
+            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
+        ):
+            MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
+            MockLimitList.return_value.run = AsyncMock(side_effect=Exception("limit boom"))
+            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
+            result = await dp.run_ai_concept_tagging(manual_trigger=False)
+        assert "akshare=success" in result
+        assert "limit_list=failed" in result
+
+    @pytest.mark.asyncio
+    async def test_ai_tag_exception_logged_as_failed(self):
+        """覆盖 L422-429: AIConceptTag sync 抛 Exception 时记录 failed"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        mock_result = _make_sync_result(status="success", added=0)
+        ai_service_mock = MagicMock()
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
+            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
+        ):
+            MockAKShare.return_value.run = AsyncMock(return_value=mock_result)
+            MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
+            MockAITag.return_value.run = AsyncMock(side_effect=Exception("ai boom"))
+            result = await dp.run_ai_concept_tagging(
+                manual_trigger=True,
+                ai_service=ai_service_mock,
+            )
+        assert "ai_tag=failed" in result
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_propagates_not_swallowed(self):
+        """R2 红线验证: asyncio.CancelledError 必须传播，不可被 except Exception 吞没"""
+        dp = _make_dp()
+        dp.clear_cancel()
+        mock_result = _make_sync_result(status="success", added=0)
+        with (
+            patch("data.sync.concept_sync.AKShareConceptSyncStrategy") as MockAKShare,
+            patch("data.sync.concept_sync.LimitListSyncStrategy") as MockLimitList,
+            patch("data.sync.concept_sync.AIConceptTagSyncStrategy") as MockAITag,
+        ):
+            MockAKShare.return_value.run = AsyncMock(side_effect=asyncio.CancelledError())
+            MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
+            MockAITag.return_value.run = AsyncMock(return_value=mock_result)
+            with pytest.raises(asyncio.CancelledError):
+                await dp.run_ai_concept_tagging(manual_trigger=False)

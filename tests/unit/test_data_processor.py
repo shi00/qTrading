@@ -403,6 +403,18 @@ class TestDataProcessorPrepareMarketData:
             result = await dp.prepare_market_data()
             assert result == today
 
+    @pytest.mark.asyncio
+    async def test_calendar_unavailable_falls_back_to_today(self):
+        """覆盖 L677-682: latest is None 时 sync_daily_market_snapshot(today) 并返回 today"""
+        dp = _make_dp()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        dp.sync_daily_market_snapshot = AsyncMock()
+        today = datetime.date(2024, 6, 14)
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await dp.prepare_market_data()
+        assert result == today
+        dp.sync_daily_market_snapshot.assert_called_once_with(today)
+
 
 class TestDataProcessorGetMarketOverview:
     @pytest.mark.asyncio
@@ -479,6 +491,16 @@ class TestDataProcessorGetMarketOverview:
         assert result["indices"][2]["color"] == "grey"
         dp.api.get_index_daily.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_calendar_unavailable_returns_empty_dict(self):
+        """覆盖 L700-705: latest_date is None 时返回 {}"""
+        dp = _make_dp()
+        dp.trade_calendar = MagicMock()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            result = await dp.get_market_overview()
+        assert result == {}
+
 
 class TestDataProcessorGetStockHistory:
     @pytest.mark.asyncio
@@ -526,6 +548,23 @@ class TestDataProcessorGetStockHistory:
         with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
             await dp.get_stock_history("000001.SZ")
             dp.cache.get_daily_quotes.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_latest_trade_date_none_falls_back_to_today(self):
+        """覆盖 L984-989: latest_closed_trade_date is None 时 end = get_now().date()"""
+        dp = _make_dp()
+        dp.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
+        dp.trade_calendar.get_trade_dates = AsyncMock(
+            return_value=[datetime.date(2024, 1, 2), datetime.date(2024, 6, 14)]
+        )
+        dp.cache.get_daily_quotes = AsyncMock(return_value=pd.DataFrame())
+        with patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)):
+            await dp.get_stock_history("000001.SZ")
+        dp.cache.get_daily_quotes.assert_called_once_with(
+            ts_code="000001.SZ",
+            start_date=datetime.date(2024, 1, 2),
+            end_date=datetime.date(2024, 6, 14),
+        )
 
 
 class TestDataProcessorRunDailyUpdate:
@@ -774,6 +813,26 @@ class TestDataProcessorInitializeSystem:
             mock_i18n.get.side_effect = lambda k, **kw: k
             result = await dp.initialize_system()
             assert result is None
+
+    @pytest.mark.asyncio
+    async def test_unexpected_exception_reraised(self):
+        """覆盖 L963-971: except Exception as e: ... raise（异常向上传播）"""
+        dp = _make_dp()
+        dp.sync_stock_basic = AsyncMock(return_value=5)
+        dp.sync_concepts = AsyncMock(return_value=3)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
+        dp.strategies["historical"].run = AsyncMock(side_effect=RuntimeError("unexpected"))
+        dp.clear_cancel()
+        with (
+            patch("data.data_dictionary.validate_schema_definitions"),
+            patch("data.data_processor.I18n") as mock_i18n,
+            patch("data.data_processor.ConfigHandler") as mock_ch,
+            patch("data.data_processor.get_now", return_value=datetime.datetime(2024, 6, 14)),
+        ):
+            mock_i18n.get.side_effect = lambda k, **kw: k
+            mock_ch.get_init_history_years.return_value = 1
+            with pytest.raises(RuntimeError, match="unexpected"):
+                await dp.initialize_system()
 
 
 class TestDataProcessorCancelControl:
