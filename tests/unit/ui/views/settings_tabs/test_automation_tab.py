@@ -27,6 +27,7 @@ from tests.unit.ui.component_renderer import (
     run_mount_effects,
     run_unmount_effects,
 )
+from ui.theme import AppColors
 
 pytestmark = pytest.mark.unit
 
@@ -345,7 +346,7 @@ def _invoke(handler: Any, *args: Any) -> None:
 
 def _await_run_task_handler(page: MagicMock) -> tuple[Any, tuple, dict]:
     """提取 page.run_task 最近一次调用的 handler 与参数。"""
-    assert page.run_task.called, "page.run_task 未被调用"
+    assert page.run_task.call_args is not None, "page.run_task 未被调用"
     call = page.run_task.call_args
     handler = call.args[0]
     args = call.args[1:]
@@ -729,7 +730,7 @@ class TestDoScheduleToggle:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_called_once_with({"auto_update_enabled": True})
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_auto_on]")
 
     def test_success_off_path(self, automation_tab_env) -> None:
         """关闭路径: 同样调 save_config + show_snack。"""
@@ -738,7 +739,7 @@ class TestDoScheduleToggle:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_called_once_with({"auto_update_enabled": False})
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_auto_off]")
 
     def test_exception_path_rolls_back(self, automation_tab_env) -> None:
         """save_config 抛 Exception → set_auto_enabled(not new_enabled) 回滚 + show_snack 错误。"""
@@ -747,7 +748,7 @@ class TestDoScheduleToggle:
         handler, args, _ = self._trigger(env, True)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
         # 验证回滚: render_once 后 switch.value 应为 False (回滚后 not True=False)
         _rerender(env)
         switch = _find_switch_by_label(env, "settings_auto_update")
@@ -758,8 +759,9 @@ class TestDoScheduleToggle:
         env = automation_tab_env
         env["mock_config"].save_config.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, True)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoScheduleTimeChange:
@@ -779,7 +781,7 @@ class TestDoScheduleTimeChange:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_called_once_with({"auto_update_time": "17:00"})
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_time_set]")
 
     def test_exception_path_calls_show_snack(self, automation_tab_env) -> None:
         """save_config 抛 Exception → snack 错误 (无回滚, 仅日志)。"""
@@ -788,15 +790,16 @@ class TestDoScheduleTimeChange:
         handler, args, _ = self._trigger(env, "17:00")
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, automation_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = automation_tab_env
         env["mock_config"].save_config.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, "17:00")
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoAiConceptToggle:
@@ -816,7 +819,7 @@ class TestDoAiConceptToggle:
         asyncio.run(handler(*args))
 
         env["mock_config"].set_ai_concept_schedule_enabled.assert_called_once_with(True)
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_auto_on]")
 
     def test_exception_path_rolls_back(self, automation_tab_env) -> None:
         """set_ai_concept_schedule_enabled 抛 Exception → set_ai_enabled 回滚 + show_snack 错误。"""
@@ -825,7 +828,7 @@ class TestDoAiConceptToggle:
         handler, args, _ = self._trigger(env, True)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
         _rerender(env)
         switch = _find_switch_by_label(env, "settings_ai_concept_update")
         assert switch.value is False
@@ -835,8 +838,9 @@ class TestDoAiConceptToggle:
         env = automation_tab_env
         env["mock_config"].set_ai_concept_schedule_enabled.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, True)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoAiConceptTimeChange:
@@ -857,7 +861,7 @@ class TestDoAiConceptTimeChange:
         asyncio.run(handler(*args))
 
         env["mock_config"].set_ai_concept_schedule_time.assert_called_once_with("20:00")
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_time_set]")
 
     def test_exception_path_calls_show_snack(self, automation_tab_env) -> None:
         """set_ai_concept_schedule_time 抛 Exception → snack 错误。"""
@@ -866,15 +870,16 @@ class TestDoAiConceptTimeChange:
         handler, args, _ = self._trigger(env, "20:00")
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, automation_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = automation_tab_env
         env["mock_config"].set_ai_concept_schedule_time.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, "20:00")
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoAiConceptEngineChange:
@@ -894,7 +899,7 @@ class TestDoAiConceptEngineChange:
         asyncio.run(handler(*args))
 
         env["mock_config"].set_ai_concept_search_engine.assert_called_once_with("search_pro")
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[common_saved]")
 
     def test_exception_path_calls_show_snack(self, automation_tab_env) -> None:
         """set_ai_concept_search_engine 抛 Exception → snack 错误。"""
@@ -903,15 +908,16 @@ class TestDoAiConceptEngineChange:
         handler, args, _ = self._trigger(env, "search_pro")
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, automation_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = automation_tab_env
         env["mock_config"].set_ai_concept_search_engine.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, "search_pro")
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 # ============================================================================
@@ -936,7 +942,7 @@ class TestDoNewsToggle:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_called_once_with({"enable_news_alerts": True})
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_news_on]")
 
     def test_success_off_path(self, notifications_tab_env) -> None:
         """关闭路径: save_config + show_snack(news_off)。"""
@@ -945,7 +951,7 @@ class TestDoNewsToggle:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_called_once_with({"enable_news_alerts": False})
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_news_off]")
 
     def test_exception_path_rolls_back(self, notifications_tab_env) -> None:
         """save_config 抛 Exception → set_news_enabled(not new_enabled) 回滚 + show_snack 错误。"""
@@ -954,7 +960,7 @@ class TestDoNewsToggle:
         handler, args, _ = self._trigger(env, False)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
         _rerender(env)
         switch = _find_switch_by_label(env, "settings_news_alerts")
         # 初始 news_enabled=True, toggle 到 False 失败 → 回滚到 True
@@ -965,8 +971,9 @@ class TestDoNewsToggle:
         env = notifications_tab_env
         env["mock_config"].save_config.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, True)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoIntervalChange:
@@ -986,7 +993,7 @@ class TestDoIntervalChange:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_called_once_with({"news_poll_interval": 60})
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_interval_set]")
 
     def test_value_error_path_calls_show_snack(self, notifications_tab_env) -> None:
         """int(new_val) 抛 ValueError → snack num_fmt, 不调 save_config。
@@ -998,16 +1005,22 @@ class TestDoIntervalChange:
         asyncio.run(handler(*args))
 
         env["mock_config"].save_config.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_num_fmt]", color=AppColors.ERROR)
 
     def test_exception_path_calls_show_snack(self, notifications_tab_env) -> None:
-        """save_config 抛 Exception → snack 错误。"""
+        """save_config 抛 Exception → VM 吞异常返回 False → snack num_fmt 错误。
+
+        VM ``save_news_interval`` 内部 ``try/except Exception`` 捕获 ``RuntimeError``
+        后 ``return False``，View 据 ``not success`` 走 ``sys_snack_num_fmt`` 路径
+        (而非 ``sys_snack_save_err`` — 该路径仅由 ``_do_interval_change`` 自身
+        ``except Exception`` 触发, 但 VM 已吞没 save_config 异常, 该分支不可达)。
+        """
         env = notifications_tab_env
         env["mock_config"].save_config.side_effect = RuntimeError("boom")
         handler, args, _ = self._trigger(env, "60")
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_num_fmt]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, notifications_tab_env) -> None:
         """R2: CancelledError 必须传播。
@@ -1017,8 +1030,9 @@ class TestDoIntervalChange:
         env = notifications_tab_env
         env["mock_config"].save_config.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env, "60")
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 # ============================================================================

@@ -4,6 +4,10 @@
 - assert True / assert 1  （裸布尔断言）
 - pass  （空测试体，仅 docstring）
 - mock.assert_called() / mock.assert_called_once()  （Mock 弱断言，不验证参数）
+- assert m.called is True / assert m.called  （Mock.called 裸布尔标志）
+- assert len(mock.calls) >= 1 / assert len(mock.call_args_list) >= 1  （仅验证调用次数）
+- pytest.raises(SomeError) 后无进一步断言  （仅验证抛异常不验 message/type）
+- print(...) 替代断言  （测试中用 print 输出而非 assert）
 
 模式：
     python scripts/scan_weak_assertions.py
@@ -119,6 +123,157 @@ def _is_weak_mock_assert(node: ast.AST) -> bool:
     return func.attr in WEAK_MOCK_METHODS
 
 
+def _is_weak_called_flag(node: ast.AST) -> bool:
+    """判断是否为 Mock.called 裸布尔标志断言。
+
+    匹配模式：
+    - assert m.called is True
+    - assert m.called
+
+    不匹配（强断言）：
+    - assert m.call_args is not None  （验了 call_args 属性）
+    """
+    if not isinstance(node, ast.Assert):
+        return False
+    test = node.test
+    # assert m.called is True
+    if isinstance(test, ast.Compare) and isinstance(test.ops[0], ast.Is):
+        left = test.left
+        if isinstance(left, ast.Attribute) and left.attr == "called":
+            return True
+    # assert m.called
+    return isinstance(test, ast.Attribute) and test.attr == "called"
+
+
+def _is_weak_call_count(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
+    """判断是否为仅验证调用次数的弱断言。
+
+    匹配模式：
+    - assert len(mock.calls) >= 1
+    - assert len(mock.call_args_list) >= 1
+    - assert len(mock.calls) == 2  （仅次数无后续参数断言）
+
+    不匹配（强断言）：
+    - 同函数体内有 assert m.call_args_list[i] == ... 等内容断言
+    """
+    if not isinstance(node, ast.Assert):
+        return False
+    test = node.test
+    # assert <compare> where left is len(call)
+    if not isinstance(test, ast.Compare):
+        return False
+    left = test.left
+    if not isinstance(left, ast.Call) or not isinstance(left.func, ast.Name):
+        return False
+    if left.func.id != "len":
+        return False
+    arg = left.args[0] if left.args else None
+    if not isinstance(arg, ast.Attribute):
+        return False
+    # 匹配 .calls / .call_args_list
+    if arg.attr not in ("calls", "call_args_list"):
+        return False
+    # 检查同函数体内是否有其他针对 call_args_list/call_args/calls 的强断言
+    if parent_func is not None:
+        for child in ast.walk(parent_func):
+            if child is node or not isinstance(child, ast.Assert):
+                continue
+            if _has_call_args_assertion(child):
+                return False
+    return True
+
+
+def _has_call_args_assertion(node: ast.Assert) -> bool:
+    """判断 assert 语句是否包含 call_args/call_args_list[i] 形式的内容断言。
+
+    匹配（强断言，排除 weak_call_count）：
+    - assert m.call_args_list[0] == call(1)
+    - assert m.call_args == call(1)
+
+    不匹配：
+    - assert len(m.call_args_list) == 2  （自身 weak_call_count 形式）
+    """
+    for child in ast.walk(node):
+        # 检查 m.call_args_list[i] 形式（Subscript + Attribute）
+        if isinstance(child, ast.Subscript):
+            val = child.value
+            if isinstance(val, ast.Attribute) and val.attr in (
+                "call_args",
+                "call_args_list",
+                "calls",
+            ):
+                return True
+    return False
+
+
+def _is_weak_raises_only(node: ast.AST, all_nodes: list[ast.AST]) -> bool:
+    """判断 pytest.raises(SomeError) 后无进一步断言。
+
+    匹配模式（弱断言）：
+    - with pytest.raises(ValueError):\\n    func()  （无 match= / 无 as exc_info 后断言）
+
+    不匹配（强断言）：
+    - pytest.raises(ValueError, match='...')
+    - with pytest.raises(...) as exc_info: + 后续 assert str(exc_info.value)
+    """
+    if not isinstance(node, ast.With):
+        return False
+    for item in node.items:
+        ctx = item.context_expr
+        if not isinstance(ctx, ast.Call):
+            continue
+        func = ctx.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "raises"):
+            continue
+        # 检查 match= 关键字参数
+        if ctx.keywords:
+            for kw in ctx.keywords:
+                if kw.arg == "match":
+                    return False  # 有 match= 不算弱断言
+        # 检查 as exc_info 后是否有后续断言
+        # 简化：有 as 语句时假定有后续断言（保守不报）
+        # 无 match= / 无 as → 弱断言
+        return item.optional_vars is None
+    return False
+
+
+def _is_weak_print(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
+    """判断 print() 是否替代断言（仅在 test_ 函数内且无后续 assert 时报。
+
+    匹配模式（弱断言）：
+    - test_ 函数内 print(result)  且函数体内无其他 assert 语句
+
+    不匹配（强断言）：
+    - 非 test_ 函数（helper 等调试输出）
+    - test_ 函数内 print + 后续 assert（print 仅作调试输出）
+    """
+    if not isinstance(node, ast.Expr):
+        return False
+    val = node.value
+    if not isinstance(val, ast.Call):
+        return False
+    func = val.func
+    if not isinstance(func, ast.Name):
+        return False
+    if func.id != "print":
+        return False
+    if parent_func is None or not parent_func.name.startswith("test_"):
+        return False
+    # 检查函数体内是否有其他 assert 语句
+    return all(not (isinstance(child, ast.Assert) and child is not node) for child in ast.walk(parent_func))
+
+
+def _find_parent_func(node: ast.AST, test_funcs: list[ast.FunctionDef]) -> ast.FunctionDef | None:
+    """查找包含 node 的 test_ 函数（按 lineno 范围匹配）。"""
+    lineno = getattr(node, "lineno", None)
+    if lineno is None:
+        return None
+    for tf in test_funcs:
+        if lineno >= tf.lineno and (tf.end_lineno is None or lineno <= tf.end_lineno):
+            return tf
+    return None
+
+
 def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion]:
     """扫描单个测试文件，返回弱断言列表（已过滤白名单）。
 
@@ -134,24 +289,53 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
     except (SyntaxError, UnicodeDecodeError):
         return issues
 
+    # 先收集所有 test_ 函数节点，用于 _is_weak_print 的 parent_func 查找
+    test_funcs: list[ast.FunctionDef] = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            test_funcs.append(node)
+
+    for node in ast.walk(tree):
+        # 仅处理有 lineno 的语句级节点（跳过 Module/arguments/Load 等内部节点）
+        node_lineno = getattr(node, "lineno", None)
+        if node_lineno is None:
+            continue
         line_no: int | None = None
         issue_type: str | None = None
         detail: str | None = None
+        parent_func: ast.FunctionDef | None = None
 
         if _is_weak_assert(node):
-            line_no = node.lineno
+            line_no = node_lineno
             issue_type = "weak_assert"
             detail = "assert True / assert 1"
         elif isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
             if _is_empty_test(node.body):
-                line_no = node.lineno
+                line_no = node_lineno
                 issue_type = "empty_test"
                 detail = f"空测试方法: {node.name}"
         elif _is_weak_mock_assert(node):
-            line_no = node.lineno
+            line_no = node_lineno
             issue_type = "weak_mock"
             detail = "Mock 弱断言（不验证参数）"
+        elif _is_weak_called_flag(node):
+            line_no = node_lineno
+            issue_type = "weak_called_flag"
+            detail = "assert m.called 裸布尔标志（不验证调用参数）"
+        elif _is_weak_call_count(node, _find_parent_func(node, test_funcs)):
+            line_no = node_lineno
+            issue_type = "weak_call_count"
+            detail = "assert len(mock.calls) >= N 仅验证次数"
+        elif _is_weak_raises_only(node, []):
+            line_no = node_lineno
+            issue_type = "weak_raises_only"
+            detail = "pytest.raises 后无进一步断言"
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            parent_func = _find_parent_func(node, test_funcs)
+            if _is_weak_print(node, parent_func):
+                line_no = node_lineno
+                issue_type = "weak_print"
+                detail = "print() 替代断言（无后续 assert）"
 
         if line_no is None or issue_type is None or detail is None:
             continue
@@ -174,8 +358,17 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
 
 
 def scan_directory(root: Path) -> list[WeakAssertion]:
-    """扫描目录下所有 test_*.py 文件，返回 WeakAssertion 列表（rel_path 相对 root）。"""
+    """扫描目录或单个文件，返回 WeakAssertion 列表（rel_path 相对 root）。
+
+    支持两种 ``root`` 形式：
+    - 目录：``rglob("test_*.py")`` 递归扫描所有 test_*.py。
+    - 单文件：直接扫描该文件（``--path tests/unit/x.py`` 模式）。
+      ``Path.rglob`` 对文件路径返回空迭代器，需显式分发。
+    """
     results: list[WeakAssertion] = []
+    if root.is_file():
+        results.extend(scan_file(root, rel_path=root.name))
+        return results
     for filepath in root.rglob("test_*.py"):
         try:
             rel = filepath.relative_to(root).as_posix()

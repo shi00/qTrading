@@ -369,7 +369,9 @@ class TestQuoteDaoCheckDataExists:
             )
             result = await dao.check_data_exists("20240615", tables=["daily_quotes"])
             assert result is True
-            dao._read_db_select.assert_called_once()
+            call_args = dao._read_db_select.call_args
+            assert isinstance(call_args[0][0], sa.Select)
+            assert call_args[1] == {"suppress_errors": True}
 
     @pytest.mark.asyncio
     async def test_missing_data(self):
@@ -859,7 +861,10 @@ class TestQuoteDaoCoverageGaps:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_limit_list(start_date="20240101", end_date="20240630")
         assert result is not None
-        dao._read_db.assert_called_once()
+        dao._read_db.assert_called_once_with(
+            "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE 1=1 AND trade_date>=$1 AND trade_date<=$2 ORDER BY trade_date, ts_code",
+            ["20240101", "20240630"],
+        )
 
     @pytest.mark.asyncio
     async def test_get_suspend_d_with_date_range(self):
@@ -867,7 +872,10 @@ class TestQuoteDaoCoverageGaps:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_suspend_d(start_date="20240101", end_date="20240630")
         assert result is not None
-        dao._read_db.assert_called_once()
+        dao._read_db.assert_called_once_with(
+            "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE 1=1 AND trade_date>=$1 AND trade_date<=$2 ORDER BY trade_date, ts_code",
+            ["20240101", "20240630"],
+        )
 
     @pytest.mark.asyncio
     async def test_get_suspend_d_with_trade_date(self):
@@ -875,7 +883,10 @@ class TestQuoteDaoCoverageGaps:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_suspend_d(trade_date="20240615")
         assert result is not None
-        dao._read_db.assert_called_once()
+        dao._read_db.assert_called_once_with(
+            "SELECT ts_code, trade_date, suspend_timing, suspend_type FROM suspend_d WHERE trade_date=$1",
+            ["20240615"],
+        )
 
     @pytest.mark.asyncio
     async def test_get_index_daily_range_chunked(self):
@@ -991,7 +1002,7 @@ class TestQuoteDaoGetBlockTradeRange:
         result = await dao.get_block_trade_range("20240601", "20240615")
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
-        dao._read_db.assert_called_once()
+        assert dao._read_db.call_count == 1
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "trade_date >= $1" in sql
@@ -1014,7 +1025,10 @@ class TestQuoteDaoGetTopListRange:
         result = await dao.get_top_list_range("20240601", "20240615")
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
-        dao._read_db.assert_called_once()
+        dao._read_db.assert_called_once_with(
+            "SELECT * FROM top_list WHERE trade_date >= $1 AND trade_date <= $2",
+            ["20240601", "20240615"],
+        )
 
     @pytest.mark.asyncio
     async def test_empty_result(self):
@@ -1033,7 +1047,7 @@ class TestQuoteDaoGetMoneyflowRange:
         result = await dao.get_moneyflow_range("20240601", "20240615")
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
-        dao._read_db.assert_called_once()
+        assert dao._read_db.call_count == 1
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "trade_date >= $1" in sql
@@ -1056,7 +1070,7 @@ class TestQuoteDaoGetNorthboundRange:
         result = await dao.get_northbound_range("20240601", "20240615")
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
-        dao._read_db.assert_called_once()
+        assert dao._read_db.call_count == 1
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "trade_date >= $1" in sql
@@ -1079,7 +1093,7 @@ class TestQuoteDaoGetLimitListWithTradeDate:
         result = await dao.get_limit_list(trade_date="20240615")
         assert isinstance(result, pd.DataFrame)
         assert "ts_code" in result.columns
-        dao._read_db.assert_called_once()
+        assert dao._read_db.call_count == 1
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "trade_date=$1" in sql
@@ -1090,7 +1104,10 @@ class TestQuoteDaoGetLimitListWithTradeDate:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_limit_list()
         assert isinstance(result, pd.DataFrame)
-        dao._read_db.assert_called_once()
+        dao._read_db.assert_called_once_with(
+            "SELECT ts_code, trade_date, limit_type, name, close, pct_chg FROM limit_list WHERE 1=1 ORDER BY trade_date, ts_code",
+            [],
+        )
 
 
 class TestQuoteDaoGetBlockTradeNoParams:
@@ -1100,7 +1117,7 @@ class TestQuoteDaoGetBlockTradeNoParams:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_block_trade()
         assert isinstance(result, pd.DataFrame)
-        dao._read_db.assert_called_once()
+        assert dao._read_db.call_count == 1
         call_args = dao._read_db.call_args
         sql = call_args[0][0]
         assert "WHERE 1=1" in sql
@@ -1147,7 +1164,11 @@ class TestQuoteDaoGetDailyQuotesNoParams:
         dao._read_db = AsyncMock(return_value=pd.DataFrame({"ts_code": ["000001.SZ"]}))
         result = await dao.get_daily_quotes()
         assert isinstance(result, pd.DataFrame)
-        dao._read_db.assert_called_once()
+        dao._read_db.assert_called_once_with(
+            "SELECT ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor FROM daily_quotes WHERE 1=1",
+            [],
+            suppress_errors=True,
+        )
 
 
 class TestQuoteDaoGetIndexDailyWithTradeDate:
@@ -1183,42 +1204,42 @@ class TestQuoteDaoEngineDisposedErrorPropagation:
     async def test_check_data_exists_propagates_engine_disposed(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.check_data_exists("20240615", tables=["daily_quotes"], raise_on_error=False)
 
     @pytest.mark.asyncio
     async def test_get_expected_stock_count_propagates_engine_disposed(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_expected_stock_count("20240615")
 
     @pytest.mark.asyncio
     async def test_get_cached_dates_for_table_propagates_engine_disposed(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_cached_dates_for_table("daily_quotes")
 
     @pytest.mark.asyncio
     async def test_get_bulk_table_counts_propagates_engine_disposed(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db_select = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_bulk_table_counts("daily_quotes", "20240101", "20240131")
 
     @pytest.mark.asyncio
     async def test_get_bulk_expected_stock_counts_propagates_engine_disposed(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_bulk_expected_stock_counts("20240101", "20240131")
 
     @pytest.mark.asyncio
     async def test_get_field_completeness_propagates_engine_disposed(self):
         dao = QuoteDao(MagicMock(spec=AsyncEngine))
         dao._read_db = AsyncMock(side_effect=EngineDisposedError("disposed"))
-        with pytest.raises(EngineDisposedError):
+        with pytest.raises(EngineDisposedError, match="disposed"):
             await dao.get_field_completeness("20240615")
 
     @pytest.mark.asyncio
@@ -1236,7 +1257,7 @@ class TestQuoteDaoEngineDisposedErrorPropagation:
                 dao.get_bulk_expected_stock_counts = AsyncMock(return_value={datetime.date(2024, 1, 15): 100})
                 dao.get_bulk_table_counts = AsyncMock(return_value={})
                 dao.get_field_completeness = AsyncMock(side_effect=EngineDisposedError("disposed"))
-                with pytest.raises(EngineDisposedError):
+                with pytest.raises(EngineDisposedError, match="disposed"):
                     await dao.get_bulk_sync_quality_scores("20240115", "20240115")
 
     @pytest.mark.asyncio

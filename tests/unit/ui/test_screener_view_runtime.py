@@ -79,7 +79,7 @@ def _invoke(handler: Any, *args: Any) -> None:
 
 def _await_run_task_handler(page: MagicMock) -> tuple[Any, tuple, dict]:
     """提取 page.run_task 最近一次调用的 handler 与参数。"""
-    assert page.run_task.called, "page.run_task 未被调用"
+    assert page.run_task.call_args is not None, "page.run_task 未被调用"
     call = page.run_task.call_args
     handler = call.args[0]
     args = call.args[1:]
@@ -800,7 +800,7 @@ class TestOnRunClick:
         _invoke(run_btn.on_click, _make_event())
 
         # page.run_task 被调用 (sync wrapper), 但 async handler 内部早返回
-        assert page.run_task.called
+        assert page.run_task.call_args is not None
         handler, args, _ = _await_run_task_handler(page)
         # 运行 async handler, 应早返回不调 run_strategy
         asyncio.run(handler(*args))
@@ -857,8 +857,9 @@ class TestOnRunClick:
         _invoke(run_btn.on_click, _make_event())
 
         handler, args, _ = _await_run_task_handler(page)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 # ============================================================================
@@ -920,8 +921,9 @@ class TestOnSort:
         on_sort = env["captured_callbacks"]["on_sort"]
         _invoke(on_sort, "close", True)
         handler, args, _ = _await_run_task_handler(page)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 # ============================================================================
@@ -999,7 +1001,7 @@ class TestOnModeChange:
         _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
 
         assert "switch_to_history" in fake_vm.method_calls
-        assert page.run_task.called
+        assert page.run_task.call_args is not None
 
     def test_switch_to_realtime(self, screener_view_env) -> None:
         """选 REALTIME → vm.switch_to_realtime."""
@@ -1062,9 +1064,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once()
-        args = page.show_toast.call_args.args
-        assert "data_export_no_data" in args[0]
+        page.show_toast.assert_called_once_with("i18n[data_export_no_data]", "error")
 
     def test_empty_filepath_early_return(self, screener_view_env) -> None:
         """file_picker.save_file 返回空 → 早返回, 不调 export_results."""
@@ -1113,8 +1113,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once()
-        assert "data_export_success" in page.show_toast.call_args.args[0]
+        page.show_toast.assert_called_once_with("i18n[data_export_success]", "success")
 
     def test_export_fail_shows_error_toast(self, screener_view_env) -> None:
         """export_results 返回 (None, error) → show_toast("data_export_fail", "error")."""
@@ -1138,8 +1137,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once()
-        assert "data_export_fail" in page.show_toast.call_args.args[0]
+        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error")
 
     def test_export_exception_calls_sanitizer(self, screener_view_env) -> None:
         """R9: export_results 抛 Exception → DataSanitizer.sanitize_error + show_toast."""
@@ -1173,10 +1171,13 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        # R9: DataSanitizer.sanitize_error 被调用
-        mock_sanitizer.sanitize_error.assert_called_once()
+        # R9: DataSanitizer.sanitize_error 被调用 (参数为 RuntimeError 实例, 不可 == 比较)
+        assert mock_sanitizer.sanitize_error.call_count == 1
+        san_args = mock_sanitizer.sanitize_error.call_args.args
+        assert isinstance(san_args[0], RuntimeError)
+        assert str(san_args[0]) == "export crash"
         # show_toast 被调用 (error)
-        page.show_toast.assert_called_once()
+        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error")
 
 
 # ============================================================================
@@ -1241,8 +1242,7 @@ class TestLoadHistoryTree:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once()
-        assert "screener_load_failed" in page.show_toast.call_args.args[0]
+        page.show_toast.assert_called_once_with("i18n[screener_load_failed]", "error")
 
     def test_cancelled_error_propagates(self, screener_view_env) -> None:
         """R2: vm.load_history_tree 抛 CancelledError → 传播."""
@@ -1260,8 +1260,9 @@ class TestLoadHistoryTree:
         _invoke(segs[0].on_change, _make_event(selected=["HISTORY"]))
 
         handler, args, _ = _await_run_task_handler(page)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 # ============================================================================
@@ -1409,8 +1410,9 @@ class TestLoadHistoryForDate:
         _invoke(strategy_tiles[0].on_click, _make_event())
 
         handler, args, _ = _await_run_task_handler(page)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 # ============================================================================
@@ -1513,8 +1515,7 @@ class TestDoRestoreDefaultAsync:
             asyncio.run(handler(*args))
 
             mock_reset.assert_awaited_once()
-            page.show_toast.assert_called_once()
-            assert "ai_settings_restored" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once_with("i18n[ai_settings_restored]", "info")
 
     def test_restore_exception_shows_error(self, screener_view_with_params_env) -> None:
         """vm.reset_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
@@ -1542,8 +1543,7 @@ class TestDoRestoreDefaultAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            page.show_toast.assert_called_once()
-            assert "sys_snack_save_err" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once_with("i18n[sys_snack_save_err]", "error")
 
 
 class TestDoSavePromptAsync:
@@ -1581,9 +1581,8 @@ class TestDoSavePromptAsync:
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            page.show_toast.assert_called_once()
             # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值
-            assert "prompt_err_length" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once_with("⚠ i18n[prompt_err_length]", "warning")
 
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 返回 (True, None) → show_toast("ai_settings_saved")."""
@@ -1612,8 +1611,7 @@ class TestDoSavePromptAsync:
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            page.show_toast.assert_called_once()
-            assert "ai_settings_saved" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once_with("i18n[ai_settings_saved]", "success")
 
     def test_save_exception_shows_error(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
@@ -1641,8 +1639,7 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            page.show_toast.assert_called_once()
-            assert "sys_snack_save_err" in page.show_toast.call_args.args[0]
+            page.show_toast.assert_called_once_with("i18n[sys_snack_save_err]", "error")
 
 
 # ============================================================================

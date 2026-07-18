@@ -2,6 +2,9 @@ import datetime
 from datetime import date, timedelta
 
 import pandas as pd
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 _TODAY = date.today()
 _RECENT = _TODAY - timedelta(days=1)
@@ -13,7 +16,6 @@ from data.constants import (
     TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
 )
 from tests.integration.test_infra_base import TestDatabaseBase
-import pytest
 
 pytestmark = pytest.mark.integration
 
@@ -34,11 +36,33 @@ class TestCacheManager(TestDatabaseBase):
         )
 
         saved_count = await self.cache.save_stock_basic(df)
-        self.assertEqual(saved_count, 1)
+        assert saved_count == 1
 
         result_df = await self.cache.get_stock_basic()
-        self.assertEqual(len(result_df), 1)
-        self.assertEqual(result_df.iloc[0]["name"], "PingAn")
+        assert len(result_df) == 1
+        assert result_df.iloc[0]["name"] == "PingAn"
+
+    async def test_stock_basic_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_stock_basic 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked stock_dao failure")
+
+        monkeypatch.setattr(self.cache.stock_dao, "save_stock_basic", _raise)
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "symbol": ["000001"],
+                "name": ["PingAn"],
+                "area": ["Shenzhen"],
+                "industry": ["Bank"],
+                "market": ["Main"],
+                "list_date": ["19910403"],
+            },
+        )
+        with pytest.raises(RuntimeError, match="mocked stock_dao failure"):
+            await self.cache.save_stock_basic(df)
 
     async def test_daily_quotes(self):
         """Test daily quotes operations"""
@@ -62,14 +86,41 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_daily_quotes(df)
 
         res = await self.cache.get_daily_quotes(ts_code="000001.SZ")
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["close"], 10.5)
+        assert len(res) == 1
+        assert res.iloc[0]["close"] == 10.5
 
-        date = await self.cache.get_latest_trade_date()
-        self.assertEqual(date, _RECENT)
+        latest = await self.cache.get_latest_trade_date()
+        assert latest == _RECENT
 
         dates = await self.cache.get_cached_trade_dates()
-        self.assertIn(_RECENT, dates)
+        assert _RECENT in dates
+
+    async def test_daily_quotes_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_daily_quotes 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked quote_dao failure")
+
+        monkeypatch.setattr(self.cache.quote_dao, "save_daily_quotes", _raise)
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [_RECENT.strftime("%Y%m%d")],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.5],
+                "pre_close": [10.0],
+                "change": [0.5],
+                "pct_chg": [5.0],
+                "vol": [1000],
+                "amount": [10000],
+                "adj_factor": [1.0],
+            },
+        )
+        with pytest.raises(RuntimeError, match="mocked quote_dao failure"):
+            await self.cache.save_daily_quotes(df)
 
     async def test_daily_indicators(self):
         """Test daily indicators operations"""
@@ -97,11 +148,42 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_daily_indicators(df)
 
         dates = await self.cache.get_cached_indicator_dates()
-        self.assertIn(_RECENT, dates)
+        assert _RECENT in dates
 
         res = await self.cache.get_latest_indicators(_RECENT)
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["pe"], 10.0)
+        assert len(res) == 1
+        assert res.iloc[0]["pe"] == 10.0
+
+    async def test_daily_indicators_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_daily_indicators 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked market_dao failure")
+
+        monkeypatch.setattr(self.cache.market_dao, "save_daily_indicators", _raise)
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [_RECENT.strftime("%Y%m%d")],
+                "pe": [10.0],
+                "pe_ttm": [9.5],
+                "pb": [1.2],
+                "total_mv": [100000],
+                "circ_mv": [50000],
+                "ps": [1.0],
+                "ps_ttm": [1.0],
+                "dv_ratio": [2.0],
+                "dv_ttm": [2.0],
+                "total_share": [1000],
+                "float_share": [1000],
+                "free_share": [1000],
+                "turnover_rate": [1.0],
+                "turnover_rate_f": [1.0],
+            },
+        )
+        with pytest.raises(RuntimeError, match="mocked market_dao failure"):
+            await self.cache.save_daily_indicators(df)
 
     async def test_latest_indicators_default_is_quote_aligned(self):
         """默认最新指标日期应与行情表最新日期对齐，避免前视偏差。"""
@@ -143,9 +225,9 @@ class TestCacheManager(TestDatabaseBase):
 
         res = await self.cache.get_latest_indicators()
 
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["trade_date"], _RECENT)
-        self.assertEqual(res.iloc[0]["pe"], 10.0)
+        assert len(res) == 1
+        assert res.iloc[0]["trade_date"] == _RECENT
+        assert res.iloc[0]["pe"] == 10.0
 
     async def test_financial_reports(self):
         """Test financial reports operations"""
@@ -176,8 +258,42 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_financial_reports(df)
 
         res = await self.cache.get_cached_financial_records()
-        self.assertEqual(len(res), 1)
-        self.assertIn(("000001.SZ", _RECENT), res)
+        assert len(res) == 1
+        assert ("000001.SZ", _RECENT) in res
+
+    async def test_financial_reports_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_financial_reports 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked financial_dao failure")
+
+        monkeypatch.setattr(self.cache.financial_dao, "save_financial_reports", _raise)
+
+        df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "end_date": [_RECENT.strftime("%Y%m%d")],
+                "ann_date": [_RECENT.strftime("%Y%m%d")],
+                "report_type": ["1"],
+                "roe": [15.5],
+                "total_revenue": [50000],
+                "revenue": [50000],
+                "n_income": [1000],
+                "n_income_attr_p": [1000],
+                "total_assets": [100000],
+                "total_liab": [50000],
+                "total_hldr_eqy_exc_min_int": [50000],
+                "roe_dt": [15.0],
+                "grossprofit_margin": [20.0],
+                "netprofit_margin": [10.0],
+                "debt_to_assets": [50.0],
+                "or_yoy": [5.0],
+                "netprofit_yoy": [5.0],
+                "goodwill": [0.0],
+            },
+        )
+        with pytest.raises(RuntimeError, match="mocked financial_dao failure"):
+            await self.cache.save_financial_reports(df)
 
     async def test_moneyflow_northbound(self):
         """Test moneyflow and northbound data"""
@@ -213,22 +329,62 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_northbound(nb_df)
 
         res_mf = await self.cache.get_moneyflow(_RECENT)
-        self.assertEqual(res_mf.iloc[0]["buy_md_amount"], 100)
+        assert res_mf.iloc[0]["buy_md_amount"] == 100
 
         res_latest_nb = await self.cache.get_latest_northbound()
-        self.assertEqual(len(res_latest_nb), 1)
-        self.assertEqual(res_latest_nb.iloc[0]["ratio"], 5.5)
+        assert len(res_latest_nb) == 1
+        assert res_latest_nb.iloc[0]["ratio"] == 5.5
+
+    async def test_moneyflow_northbound_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_moneyflow 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked quote_dao moneyflow failure")
+
+        monkeypatch.setattr(self.cache.quote_dao, "save_moneyflow", _raise)
+
+        mf_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [_RECENT.strftime("%Y%m%d")],
+                "buy_md_amount": [100],
+                "buy_sm_vol": [100],
+                "buy_sm_amount": [100],
+                "sell_sm_amount": [100],
+                "sell_md_amount": [100],
+                "buy_lg_amount": [100],
+                "sell_lg_amount": [100],
+                "buy_elg_amount": [100],
+                "sell_elg_amount": [100],
+                "net_mf_vol": [100],
+                "net_mf_amount": [100],
+            },
+        )
+        with pytest.raises(RuntimeError, match="mocked quote_dao moneyflow failure"):
+            await self.cache.save_moneyflow(mf_df)
 
     async def test_sync_status(self):
         """Test sync status operations"""
         await self.cache.update_sync_status("test_table", _RECENT, 100)
 
         status = await self.cache.get_sync_status("test_table")
-        self.assertEqual(status["record_count"], 100)  # type: ignore[index]
-        self.assertEqual(status["status"], "success")  # type: ignore[index]
+        assert isinstance(status, dict)
+        assert status["record_count"] == 100
+        assert status["status"] == "success"
 
         all_status = await self.cache.get_sync_status()
-        self.assertFalse(all_status.empty)  # type: ignore[union-attr]
+        assert isinstance(all_status, pd.DataFrame) and not all_status.empty
+
+    async def test_sync_status_error_path(self, monkeypatch):
+        """DAO 异常应通过 update_sync_status 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked sync_dao failure")
+
+        monkeypatch.setattr(self.cache.sync_dao, "update_sync_status", _raise)
+
+        with pytest.raises(RuntimeError, match="mocked sync_dao failure"):
+            await self.cache.update_sync_status("test_table", _RECENT, 100)
 
     async def test_get_screening_data(self):
         """Test complex join for screening data"""
@@ -311,17 +467,189 @@ class TestCacheManager(TestDatabaseBase):
 
         df = await self.cache.get_screening_data(trade_date=_RECENT)
 
-        self.assertFalse(df.empty)
+        assert not df.empty
         row = df.iloc[0]
-        self.assertEqual(row["ts_code"], "600519.SH")
-        self.assertEqual(row["close"], 10.0)
-        self.assertEqual(row["pe_ttm"], 8.0)
-        self.assertEqual(row["roe"], 12.0)
+        assert row["ts_code"] == "600519.SH"
+        assert row["close"] == 10.0
+        assert row["pe_ttm"] == 8.0
+        assert row["roe"] == 12.0
+
+    async def test_get_screening_data_error_path(self, monkeypatch):
+        """DAO 异常应通过 get_screening_data 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked screener_dao failure")
+
+        monkeypatch.setattr(self.cache.screener_dao, "get_screening_data", _raise)
+
+        with pytest.raises(RuntimeError, match="mocked screener_dao failure"):
+            await self.cache.get_screening_data(trade_date=_RECENT)
+
+    async def test_get_screening_data_nonexistent_trade_date(self):
+        """trade_date 不存在时应返回空 DataFrame。"""
+        stock_basic = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "symbol": ["600519"],
+                "name": ["Moutai"],
+                "area": ["Gz"],
+                "industry": ["Liquor"],
+                "market": ["Main"],
+                "list_date": ["20000101"],
+                "list_status": ["L"],
+            },
+        )
+        daily_quotes = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "trade_date": [_RECENT],
+                "close": [10.0],
+                "pct_chg": [1.0],
+                "open": [10],
+                "high": [11],
+                "low": [9],
+                "pre_close": [9.9],
+                "vol": [100],
+                "amount": [1000],
+                "change": [0.1],
+                "adj_factor": [1],
+            },
+        )
+
+        await self.cache.save_stock_basic(stock_basic)
+        await self.cache.save_daily_quotes(daily_quotes)
+
+        nonexistent_date = _TODAY - timedelta(days=100)
+        df = await self.cache.get_screening_data(trade_date=nonexistent_date)
+        assert df.empty
+
+    async def test_get_screening_data_multi_stock_join(self):
+        """多股票 join 应返回所有匹配股票。"""
+        stock_basic = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "000858.SZ"],
+                "symbol": ["600519", "000858"],
+                "name": ["Moutai", "Wuliangye"],
+                "area": ["Gz", "Yibin"],
+                "industry": ["Liquor", "Liquor"],
+                "market": ["Main", "Main"],
+                "list_date": ["20000101", "19980427"],
+                "list_status": ["L", "L"],
+            },
+        )
+        daily_quotes = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "000858.SZ"],
+                "trade_date": [_RECENT, _RECENT],
+                "close": [10.0, 20.0],
+                "pct_chg": [1.0, 2.0],
+                "open": [10, 20],
+                "high": [11, 21],
+                "low": [9, 19],
+                "pre_close": [9.9, 19.9],
+                "vol": [100, 200],
+                "amount": [1000, 2000],
+                "change": [0.1, 0.2],
+                "adj_factor": [1, 1],
+            },
+        )
+        daily_ind = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "000858.SZ"],
+                "trade_date": [_RECENT, _RECENT],
+                "pe_ttm": [8.0, 15.0],
+                "pe": [8, 15],
+                "pb": [1, 2],
+                "ps": [1, 2],
+                "ps_ttm": [1, 2],
+                "dv_ratio": [1, 2],
+                "dv_ttm": [1, 2],
+                "total_mv": [100, 200],
+                "circ_mv": [100, 200],
+                "total_share": [100, 200],
+                "float_share": [100, 200],
+                "free_share": [100, 200],
+                "turnover_rate": [1, 2],
+                "turnover_rate_f": [1, 2],
+            },
+        )
+        fina = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH", "000858.SZ"],
+                "end_date": [datetime.date(2022, 12, 31), datetime.date(2022, 12, 31)],
+                "ann_date": [_RECENT, _RECENT],
+                "report_type": ["1", "1"],
+                "roe": [12.0, 18.0],
+                "total_revenue": [100, 200],
+                "revenue": [100, 200],
+                "n_income": [10, 20],
+                "n_income_attr_p": [10, 20],
+                "total_assets": [100, 200],
+                "total_liab": [50, 100],
+                "total_hldr_eqy_exc_min_int": [50, 100],
+                "roe_dt": [12, 18],
+                "grossprofit_margin": [10, 15],
+                "netprofit_margin": [10, 15],
+                "debt_to_assets": [0.5, 0.5],
+                "or_yoy": [1, 2],
+                "netprofit_yoy": [1, 2],
+                "goodwill": [0, 0],
+            },
+        )
+
+        await self.cache.save_stock_basic(stock_basic)
+        await self.cache.save_daily_quotes(daily_quotes)
+        await self.cache.save_daily_indicators(daily_ind)
+        await self.cache.save_financial_reports(fina)
+
+        df = await self.cache.get_screening_data(trade_date=_RECENT)
+        assert len(df) == 2
+        assert set(df["ts_code"]) == {"600519.SH", "000858.SZ"}
+
+    async def test_get_screening_data_missing_financial_fields(self):
+        """字段缺失（无 daily_indicators / financial_reports）时仍返回结果，对应字段为 NULL。"""
+        stock_basic = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "symbol": ["600519"],
+                "name": ["Moutai"],
+                "area": ["Gz"],
+                "industry": ["Liquor"],
+                "market": ["Main"],
+                "list_date": ["20000101"],
+                "list_status": ["L"],
+            },
+        )
+        daily_quotes = pd.DataFrame(
+            {
+                "ts_code": ["600519.SH"],
+                "trade_date": [_RECENT],
+                "close": [10.0],
+                "pct_chg": [1.0],
+                "open": [10],
+                "high": [11],
+                "low": [9],
+                "pre_close": [9.9],
+                "vol": [100],
+                "amount": [1000],
+                "change": [0.1],
+                "adj_factor": [1],
+            },
+        )
+
+        await self.cache.save_stock_basic(stock_basic)
+        await self.cache.save_daily_quotes(daily_quotes)
+
+        df = await self.cache.get_screening_data(trade_date=_RECENT)
+        assert len(df) == 1
+        row = df.iloc[0]
+        assert row["ts_code"] == "600519.SH"
+        assert row["close"] == 10.0
+        assert pd.isna(row["roe"])
+        assert pd.isna(row["pe_ttm"])
 
     async def test_screening_history(self):
         """Test screening history saving and updating"""
-        from sqlalchemy import text
-
         sql = text("""INSERT INTO screening_history
                  (run_id, trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
                  VALUES (:run_id, :trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
@@ -345,11 +673,11 @@ class TestCacheManager(TestDatabaseBase):
             )
 
         history = await self.cache.get_screening_history("value")
-        self.assertEqual(len(history), 1)
-        self.assertEqual(history.iloc[0]["ts_code"], "000001.SZ")
+        assert len(history) == 1
+        assert history.iloc[0]["ts_code"] == "000001.SZ"
 
         pending = await self.cache.get_pending_reviews()
-        self.assertEqual(len(pending), 1)
+        assert len(pending) == 1
         record_id = pending[0]["id"]
 
         await self.cache.screener_dao.update_prediction_result(
@@ -364,15 +692,145 @@ class TestCacheManager(TestDatabaseBase):
         )
 
         history_updated = await self.cache.get_screening_history("value")
-        self.assertEqual(history_updated.iloc[0]["t1_price"], 11.0)
+        assert history_updated.iloc[0]["t1_price"] == 11.0
+
+    async def test_screening_history_error_path(self, monkeypatch):
+        """DAO 异常应通过 get_screening_history 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked screener_dao history failure")
+
+        monkeypatch.setattr(self.cache.screener_dao, "get_screening_history", _raise)
+
+        with pytest.raises(RuntimeError, match="mocked screener_dao history failure"):
+            await self.cache.get_screening_history("value")
+
+    async def test_screening_history_duplicate_run_id(self):
+        """重复 (run_id, ts_code) 应触发唯一约束违反。"""
+        sql = text("""INSERT INTO screening_history
+                 (run_id, trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
+                 VALUES (:run_id, :trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
+
+        record = {
+            "run_id": "RUN_DUP",
+            "trade_date": _RECENT,
+            "strategy_name": "value",
+            "ts_code": "000001.SZ",
+            "name": "PA",
+            "close": 10.0,
+            "pct_chg": 1.0,
+            "ai_score": 0,
+            "ai_reason": "",
+        }
+
+        async with self.cache.engine.begin() as conn:
+            await conn.execute(sql, [record])
+
+        with pytest.raises(IntegrityError):
+            async with self.cache.engine.begin() as conn:
+                await conn.execute(sql, [record])
+
+    async def test_screening_history_empty_strategy_name(self):
+        """空 strategy_name (NULL) 应触发 NOT NULL 约束违反。"""
+        sql = text("""INSERT INTO screening_history
+                 (run_id, trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
+                 VALUES (:run_id, :trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
+
+        with pytest.raises(IntegrityError):
+            async with self.cache.engine.begin() as conn:
+                await conn.execute(
+                    sql,
+                    [
+                        {
+                            "run_id": "RUN_NULL",
+                            "trade_date": _RECENT,
+                            "strategy_name": None,
+                            "ts_code": "000001.SZ",
+                            "name": "PA",
+                            "close": 10.0,
+                            "pct_chg": 1.0,
+                            "ai_score": 0,
+                            "ai_reason": "",
+                        }
+                    ],
+                )
+
+    async def test_screening_history_long_strategy_name(self):
+        """超长 strategy_name (>255) 应被接受（String 无长度限制）。"""
+        sql = text("""INSERT INTO screening_history
+                 (run_id, trade_date, strategy_name, ts_code, name, close, pct_chg, ai_score, ai_reason)
+                 VALUES (:run_id, :trade_date, :strategy_name, :ts_code, :name, :close, :pct_chg, :ai_score, :ai_reason)""")
+
+        long_name = "x" * 256
+        async with self.cache.engine.begin() as conn:
+            await conn.execute(
+                sql,
+                [
+                    {
+                        "run_id": "RUN_LONG",
+                        "trade_date": _RECENT,
+                        "strategy_name": long_name,
+                        "ts_code": "000001.SZ",
+                        "name": "PA",
+                        "close": 10.0,
+                        "pct_chg": 1.0,
+                        "ai_score": 0,
+                        "ai_reason": "",
+                    }
+                ],
+            )
+
+        history = await self.cache.get_screening_history(long_name)
+        assert len(history) == 1
+        assert history.iloc[0]["strategy_name"] == long_name
 
     async def test_clear_cache(self):
         """Test clearing cache"""
         await self.cache.update_sync_status("test", _RECENT, 1)
+
+        stock_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "symbol": ["000001"],
+                "name": ["PingAn"],
+                "area": ["Shenzhen"],
+                "industry": ["Bank"],
+                "market": ["Main"],
+                "list_date": ["19910403"],
+            },
+        )
+        await self.cache.save_stock_basic(stock_df)
+
+        quotes_df = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": [_RECENT.strftime("%Y%m%d")],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.5],
+                "pre_close": [10.0],
+                "change": [0.5],
+                "pct_chg": [5.0],
+                "vol": [1000],
+                "amount": [10000],
+                "adj_factor": [1.0],
+            },
+        )
+        await self.cache.save_daily_quotes(quotes_df)
+
         await self.cache.clear_all_cache()
 
         status = await self.cache.get_sync_status("test")
-        self.assertIsNone(status)
+        assert status is None
+
+        async with self.cache.engine.connect() as conn:
+            sb_count = (await conn.execute(text("SELECT count(*) FROM stock_basic"))).scalar()
+            dq_count = (await conn.execute(text("SELECT count(*) FROM daily_quotes"))).scalar()
+            av_count = (await conn.execute(text("SELECT count(*) FROM alembic_version"))).scalar()
+        assert sb_count == 0
+        assert dq_count == 0
+        assert av_count is not None and av_count >= 1, "alembic_version should be preserved after clear_all_cache"
 
     async def test_clear_cache_drops_alembic_version(self):
         """Verify clear_all_cache resets alembic_version so init_db can rebuild from scratch."""
@@ -387,19 +845,15 @@ class TestCacheManager(TestDatabaseBase):
 
         async with self.cache.engine.connect() as conn:
             result = await conn.execute(sa.text("SELECT count(*) FROM alembic_version"))
-            self.assertEqual(result.scalar(), 1)
+            assert result.scalar() == 1
 
         await self.cache.clear_all_cache()
 
         async with self.cache.engine.connect() as conn:
             result = await conn.execute(sa.text("SELECT version_num FROM alembic_version"))
             version = result.scalar()
-        self.assertIsNotNone(version)
-        self.assertNotEqual(
-            version,
-            "test_rev",
-            "alembic_version should be reset to actual migration version",
-        )
+        assert version is not None
+        assert version != "test_rev", "alembic_version should be reset to actual migration version"
 
     async def test_top_list(self):
         """Test Top List (LHB)"""
@@ -425,16 +879,40 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_top_list(df)
 
         res = await self.cache.get_top_list(_RECENT)
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["net_amount"], 1000)
-        self.assertEqual(
-            res.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["net_amount"],
-            TOP_LIST_NET_AMOUNT_UNIT,
+        assert len(res) == 1
+        assert res.iloc[0]["net_amount"] == 1000
+        assert res.attrs[DATAFRAME_ATTR_COLUMN_UNITS]["net_amount"] == TOP_LIST_NET_AMOUNT_UNIT
+        assert res.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["net_amount"] == TOP_LIST_NET_AMOUNT_UNIT_SOURCE
+
+    async def test_top_list_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_top_list 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked quote_dao top_list failure")
+
+        monkeypatch.setattr(self.cache.quote_dao, "save_top_list", _raise)
+
+        df = pd.DataFrame(
+            {
+                "trade_date": [_RECENT.strftime("%Y%m%d")],
+                "ts_code": ["000001.SZ"],
+                "net_amount": [1000],
+                "name": ["PA"],
+                "close": [10],
+                "pct_chg": [10],
+                "turnover_rate": [1],
+                "amount": [1000],
+                "l_sell": [0],
+                "l_buy": [0],
+                "l_amount": [0],
+                "net_rate": [0],
+                "amount_rate": [0],
+                "float_values": [0],
+                "reason": ["Test"],
+            },
         )
-        self.assertEqual(
-            res.attrs[DATAFRAME_ATTR_COLUMN_UNIT_SOURCES]["net_amount"],
-            TOP_LIST_NET_AMOUNT_UNIT_SOURCE,
-        )
+        with pytest.raises(RuntimeError, match="mocked quote_dao top_list failure"):
+            await self.cache.save_top_list(df)
 
     async def test_block_trade(self):
         """Test Block Trade"""
@@ -452,5 +930,27 @@ class TestCacheManager(TestDatabaseBase):
         await self.cache.save_block_trade(df)
 
         res = await self.cache.get_block_trade(_RECENT)
-        self.assertEqual(len(res), 1)
-        self.assertEqual(res.iloc[0]["amount"], 500)
+        assert len(res) == 1
+        assert res.iloc[0]["amount"] == 500
+
+    async def test_block_trade_error_path(self, monkeypatch):
+        """DAO 异常应通过 save_block_trade 传播。"""
+
+        async def _raise(*args, **kwargs):
+            raise RuntimeError("mocked quote_dao block_trade failure")
+
+        monkeypatch.setattr(self.cache.quote_dao, "save_block_trade", _raise)
+
+        df = pd.DataFrame(
+            {
+                "trade_date": [_RECENT.strftime("%Y%m%d")],
+                "ts_code": ["000001.SZ"],
+                "amount": [500],
+                "price": [10.0],
+                "volume": [50.0],
+                "buyer": ["B1"],
+                "seller": ["S1"],
+            },
+        )
+        with pytest.raises(RuntimeError, match="mocked quote_dao block_trade failure"):
+            await self.cache.save_block_trade(df)
