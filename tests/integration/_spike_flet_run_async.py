@@ -40,5 +40,7 @@ async def main():
 if __name__ == "__main__":
     # 强制用 selector loop（与 pytest-asyncio 配置一致）
     if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(main())
+        with asyncio.Runner(loop_factory=asyncio.WindowsSelectorEventLoop) as runner:
+            runner.run(main())
+    else:
+        asyncio.run(main())

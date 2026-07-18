@@ -474,8 +474,8 @@ class FletPage:
             logger.debug("Combined locator wait_for failed for text '%s': %s", text, e, exc_info=True)
 
         # Fallback: poll input field values
-        start_time = asyncio.get_event_loop().time()
-        while (asyncio.get_event_loop().time() - start_time) * 1000 < scaled:
+        start_time = asyncio.get_running_loop().time()
+        while (asyncio.get_running_loop().time() - start_time) * 1000 < scaled:
             try:
                 inputs_match = self.page.locator("input")
                 count = await inputs_match.count()

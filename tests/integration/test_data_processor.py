@@ -179,10 +179,10 @@ class TestDataProcessor(unittest.TestCase):
             DataProcessor.check_data_health,
             HealthCheckMixin.check_data_health,
         )
-        # get_latest_trade_date should come from CalendarMixin
+        # ensure_trade_cal is the only retained CalendarMixin facade
         self.assertIs(
-            DataProcessor.get_latest_trade_date,
-            CalendarMixin.get_latest_trade_date,
+            DataProcessor.ensure_trade_cal,
+            CalendarMixin.ensure_trade_cal,
         )
 
     # ==========================================================
@@ -221,14 +221,10 @@ class TestDataProcessor(unittest.TestCase):
                 ),
             )
 
-            date_obj = await self.processor.get_latest_trade_date()
+            date_obj = await self.processor.trade_calendar.get_latest_trade_date()
             # Pre-market Wednesday - should be Tuesday 20231024
             self.assertEqual(date_obj, datetime.date(2023, 10, 24))
 
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    # filterwarnings: 直接调用 CalendarMixin facade（DataProcessor.get_latest_trade_date）
-    # 验证 TradeCalendarService 业务逻辑；facade 弃用警告为 incidental 噪声，
-    # facade 弃用契约由 tests/unit/test_calendar_mixin.py 单测覆盖。
     def test_get_latest_trade_date_weekday_pre_market(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekday_pre_market())
 
@@ -265,11 +261,9 @@ class TestDataProcessor(unittest.TestCase):
                 ),
             )
 
-            date_obj = await self.processor.get_latest_trade_date()
+            date_obj = await self.processor.trade_calendar.get_latest_trade_date()
             self.assertEqual(date_obj, datetime.date(2023, 10, 25))
 
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_latest_trade_date_weekday_pre_market 注释。
     def test_get_latest_trade_date_weekday_post_market(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekday_post_market())
 
@@ -303,11 +297,9 @@ class TestDataProcessor(unittest.TestCase):
                 ),
             )
 
-            date_obj = await self.processor.get_latest_trade_date()
+            date_obj = await self.processor.trade_calendar.get_latest_trade_date()
             self.assertEqual(date_obj, datetime.date(2023, 10, 27))
 
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_latest_trade_date_weekday_pre_market 注释。
     def test_get_latest_trade_date_weekend(self):
         asyncio.run(self.async_test_get_latest_trade_date_weekend())
 
@@ -319,13 +311,11 @@ class TestDataProcessor(unittest.TestCase):
             "ts": time.time(),  # just now
             "val": datetime.date(2023, 1, 1),
         }
-        result = await self.processor.get_latest_trade_date()
+        result = await self.processor.trade_calendar.get_latest_trade_date()
         self.assertEqual(result, datetime.date(2023, 1, 1))
         # No cache mock calls should have been made (cache hit)
         self.mock_cache.get_trade_cal.assert_not_called()
 
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_latest_trade_date_weekday_pre_market 注释。
     def test_get_latest_trade_date_ttl_cache(self):
         asyncio.run(self.async_test_get_latest_trade_date_ttl_cache())
 
@@ -336,7 +326,7 @@ class TestDataProcessor(unittest.TestCase):
         )
         self.mock_cache.get_trade_cal = AsyncMock(return_value=mock_df)
 
-        dates = await self.processor.get_trade_dates("20230101", "20230103")
+        dates = await self.processor.trade_calendar.get_trade_dates("20230101", "20230103")
         self.assertEqual(
             dates,
             [
@@ -346,9 +336,6 @@ class TestDataProcessor(unittest.TestCase):
             ],
         )
 
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    # filterwarnings: 直接调用 CalendarMixin facade（DataProcessor.get_trade_dates），
-    # 验证 TradeCalendarService 业务逻辑；facade 弃用警告为 incidental 噪声。
     def test_get_trade_dates(self):
         asyncio.run(self.async_test_get_trade_dates())
 
@@ -359,7 +346,7 @@ class TestDataProcessor(unittest.TestCase):
         )
         self.mock_cache.get_trade_cal = AsyncMock(side_effect=Exception("DB Error"))
 
-        dates = await self.processor.get_trade_dates("20230102", "20230106")
+        dates = await self.processor.trade_calendar.get_trade_dates("20230102", "20230106")
         # Fallback should return weekday-only dates via OfflineCalendar
         # Note: 2023-01-02 is Monday but 元旦假期调休, A股休市
         # 2023-01-03 (Tue) to 2023-01-06 (Fri) are trading days
@@ -373,16 +360,14 @@ class TestDataProcessor(unittest.TestCase):
             ],
         )
 
-    @pytest.mark.filterwarnings("ignore::DeprecationWarning")
-    # filterwarnings: 直接调用 CalendarMixin facade，见 test_get_trade_dates 注释。
     def test_get_trade_dates_fallback(self):
         asyncio.run(self.async_test_get_trade_dates_fallback())
 
     async def async_test_get_stock_history_prefers_latest_closed_trade_date(self):
         """盘中读取历史行情时，应以最近闭市日作为结束日。"""
         fixed_now = datetime.datetime(2026, 3, 9, 10, 0, 0)
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2026, 3, 6))
-        self.processor.get_trade_dates = AsyncMock(
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2026, 3, 6))
+        self.processor.trade_calendar.get_trade_dates = AsyncMock(
             return_value=[
                 datetime.date(2026, 3, 4),
                 datetime.date(2026, 3, 5),
@@ -394,7 +379,7 @@ class TestDataProcessor(unittest.TestCase):
         with patch("data.data_processor.get_now", return_value=fixed_now):
             await self.processor.get_stock_history("000001.SZ", days=2)
 
-        self.processor.get_trade_dates.assert_awaited_once_with(
+        self.processor.trade_calendar.get_trade_dates.assert_awaited_once_with(
             start_date=datetime.date(2026, 3, 2),
             end_date=datetime.date(2026, 3, 6),
         )
@@ -893,7 +878,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context(self):
         """Test prepare_screening_context"""
         self.processor._quality_tier = 3
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame({"pe": [10], "trade_date": ["20230101"]}),
         )
@@ -932,7 +917,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_prepare_screening_context_resolves_trade_date_from_data(self):
         """当缓存 trade_date 缺失时，应从 screening_data 的唯一 trade_date 推导"""
         self.processor._quality_tier = 3
-        self.processor.get_latest_trade_date = AsyncMock(return_value=None)
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=None)
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value=None)
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
@@ -973,7 +958,7 @@ class TestDataProcessor(unittest.TestCase):
     ):
         """无显式 trade_date 时，应优先使用交易日服务的最近闭市日而不是库里最大日期。"""
         self.processor._quality_tier = 3
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 5))
         self.mock_cache.get_latest_trade_date = AsyncMock(return_value="20230106")
         self.mock_cache.get_screening_data = AsyncMock(
             return_value=pd.DataFrame(
@@ -1141,7 +1126,7 @@ class TestDataProcessor(unittest.TestCase):
         cst = ZoneInfo("Asia/Shanghai")
         fixed_now = dt.datetime(2025, 12, 1, tzinfo=cst)
 
-        self.processor.get_latest_trade_date = AsyncMock(return_value=dt.date(2025, 12, 1))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=dt.date(2025, 12, 1))
 
         # Mock stock basic
         stocks = [f"{i:06d}.SZ" for i in range(1, 6)]
@@ -1234,7 +1219,7 @@ class TestDataProcessor(unittest.TestCase):
         stocks = [f"{i:06d}.SZ" for i in range(1, 4)]
         cal_dates = pd.bdate_range(anchor_date - datetime.timedelta(days=14), anchor_date).strftime("%Y%m%d").tolist()
 
-        self.processor.get_latest_trade_date = AsyncMock(return_value=anchor_date)
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=anchor_date)
         self.mock_cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame({"ts_code": stocks, "list_status": ["L"] * len(stocks)}),
         )
@@ -1415,7 +1400,7 @@ class TestDataProcessor(unittest.TestCase):
     async def async_test_run_quality_scan_cancellation(self):
         """Test run_quality_scan respects cancellation"""
         stocks = [f"{i:06d}.SZ" for i in range(1, 20)]
-        self.processor.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
+        self.processor.trade_calendar.get_latest_trade_date = AsyncMock(return_value=datetime.date(2023, 1, 1))
         self.mock_cache.get_stock_basic = AsyncMock(
             return_value=pd.DataFrame(
                 {"ts_code": stocks, "list_status": ["L"] * len(stocks)},

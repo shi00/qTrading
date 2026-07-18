@@ -1,4 +1,4 @@
-import asyncio
+import inspect
 
 import flet as ft
 from unittest.mock import MagicMock
@@ -156,7 +156,7 @@ class MockFletPage:
         mock_task.cancel = MagicMock()
         try:
             result = func(*args, **kwargs)
-            if asyncio.iscoroutine(result):
+            if inspect.iscoroutine(result):
                 mock_task._coro = result
                 result.close()
         except (ValueError, TypeError, AttributeError):

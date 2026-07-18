@@ -577,7 +577,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
             "screening_data": screening_data,
             "params": {"nb_flow_min": 50},
         }
-        out = asyncio.new_event_loop().run_until_complete(strat.filter(ctx))
+        out = asyncio.run(strat.filter(ctx))
         assert len(out) == 0
 
     def test_gating_returns_empty_when_flow_null(self):
@@ -604,7 +604,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
             "screening_data": screening_data,
             "params": {"nb_flow_min": 50},
         }
-        out = asyncio.new_event_loop().run_until_complete(strat.filter(ctx))
+        out = asyncio.run(strat.filter(ctx))
         assert len(out) == 0
 
     def test_filter_returns_empty_when_context_missing(self):
@@ -699,7 +699,7 @@ class TestNorthboundFlowStrategy(unittest.TestCase):
             "screening_data": screening_data,
             "params": {"nb_flow_min": 50},
         }
-        out = asyncio.new_event_loop().run_until_complete(strat.filter(ctx))
+        out = asyncio.run(strat.filter(ctx))
         assert len(out) == 0
 
 

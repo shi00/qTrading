@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
@@ -67,10 +68,10 @@ class _DummyPage:
         # V1: main.py 直接调用 page.run_task(_perform_window_shutdown) 调度协程。
         # 测试需要协程真正执行以验证 coordinator 调用，故用 loop.create_task 调度。
         try:
-            loop = asyncio.get_event_loop()
-            if asyncio.iscoroutine(coro):
+            loop = asyncio.get_running_loop()
+            if inspect.iscoroutine(coro):
                 loop.create_task(coro)
-            elif asyncio.iscoroutinefunction(coro):
+            elif inspect.iscoroutinefunction(coro):
                 loop.create_task(coro(*args))
         except RuntimeError:
             pass

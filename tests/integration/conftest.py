@@ -167,14 +167,13 @@ def pytest_collection_modifyitems(items):
             item.add_marker(pytest.mark.integration)
 
 
-_test_db_initialized = False
+async def _drop_test_db():
+    """清理测试 DB（由 ``pytest_sessionfinish`` 调用）。
 
-
-async def _ensure_test_db():
-    global _test_db_initialized
-    if _test_db_initialized:
-        return
-
+    与 ``_ensure_test_db`` 的 clean slate DROP 不同，本函数仅在 session 正常
+    结束时清理，避免本地开发环境 DB 残留积累。CI 环境中 PostgreSQL 服务每次
+    run 重启，DB 本就不残留，此函数为 no-op（DROP IF EXISTS）。
+    """
     conn = await asyncpg.connect(
         host=TEST_DB_HOST,
         port=TEST_DB_PORT,
@@ -186,50 +185,92 @@ async def _ensure_test_db():
     try:
         db_name_sql = TEST_DB_NAME.replace('"', '""')
         await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
-        await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
-        _test_db_initialized = True
     finally:
         await conn.close()
 
 
-@pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def _session_db_setup():
-    """Session-scoped: 确保测试数据库存在，xdist worker 退出时 drop。
+def pytest_sessionfinish(session, exitstatus):
+    """Session 结束时清理测试 DB（仅 xdist worker，sync hook）。
 
-    将 DB 创建/drop 从 test_engine 分离，使 test_engine 可改为 function-scoped
-    避免 session loop 与 function loop 测试跨 loop 冲突（P1-2 根因修复）。
+    原清理逻辑在 ``_session_db_setup`` teardown 中（已移除，因其跨 loop_scope
+    依赖导致 teardown 提前执行）。本 hook 在 session 正常结束后清理，避免
+    本地开发环境 DB 残留积累。
+
+    实现要点：
+    - 仅在 xdist worker 中执行（``_xdist_worker`` 非空）；非 xdist 模式
+      （本地单进程）由 clean slate 在下次 run 时处理。
+    - 用 ``asyncio.run()`` 在新 loop 中运行 asyncpg 清理（sessionfinish 时
+      pytest-asyncio 的 loop 已关闭，需创建新 loop）。
+    - 清理失败不阻断 session 退出（不影响测试结果报告）。
     """
-    await _ensure_test_db()
-    yield
-    if _xdist_worker:
-        try:
-            conn = await asyncpg.connect(
-                host=TEST_DB_HOST,
-                port=TEST_DB_PORT,
-                user=TEST_DB_USER,
-                password=TEST_DB_PASSWORD,
-                database="postgres",
-                timeout=5.0,
-            )
-            try:
-                db_name_sql = TEST_DB_NAME.replace('"', '""')
-                await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
-            finally:
-                await conn.close()
-        except (OSError, asyncpg.PostgresError):
-            pass
+    if not _xdist_worker:
+        return
+    try:
+        asyncio.run(_drop_test_db())
+    except Exception as e:
+        logger.warning("[pytest_sessionfinish] DB cleanup failed (non-blocking): %s", e)
+
+
+_test_db_clean_slate_done = False
+
+
+async def _ensure_test_db():
+    """幂等确保测试 DB 存在，支持自愈（根因修复）。
+
+    行为：
+    - 首次调用：clean slate (DROP+CREATE)，确保起始状态干净（防止上次 session 残留
+      数据/schema 干扰），设置 ``_test_db_clean_slate_done`` 标志。
+    - 后续调用：检查 DB 存在性，存在则跳过，不存在则 CREATE（自愈）。
+
+    根因修复：原实现使用 ``_test_db_initialized`` 全局标志，首次成功后任何调用
+    直接 return；当 ``_session_db_setup``（已移除）的 teardown 提前 drop DB 后，
+    标志仍为 True 阻止 DB 重建，导致后续测试 ``InvalidCatalogNameError``。
+    新实现基于 DB 实际存在性判断，DB 被任何原因 drop 后均能自愈重建。
+
+    Cross loop_scope 安全：``_session_db_setup``（session-scoped + session loop_scope）
+    与 ``test_engine``（function loop_scope）的跨 loop_scope 依赖是 teardown 提前
+    执行的直接原因，已通过移除 ``_session_db_setup`` 消除（见 ``test_engine`` 注释）。
+    """
+    global _test_db_clean_slate_done
+    conn = await asyncpg.connect(
+        host=TEST_DB_HOST,
+        port=TEST_DB_PORT,
+        user=TEST_DB_USER,
+        password=TEST_DB_PASSWORD,
+        database="postgres",
+        timeout=5.0,
+    )
+    try:
+        db_name_sql = TEST_DB_NAME.replace('"', '""')
+        if not _test_db_clean_slate_done:
+            # 首次调用：clean slate 防止上次 session 残留
+            await conn.execute(f'DROP DATABASE IF EXISTS "{db_name_sql}" WITH (FORCE)')
+            await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
+            _test_db_clean_slate_done = True
+        else:
+            # 后续调用：自愈检查，DB 不存在则重建
+            exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", TEST_DB_NAME)
+            if not exists:
+                await conn.execute(f'CREATE DATABASE "{db_name_sql}"')
+    finally:
+        await conn.close()
 
 
 @pytest_asyncio.fixture(loop_scope="function")
-async def test_engine(_session_db_setup):
+async def test_engine():
     """Function-scoped engine: 每个 test 创建独立 engine，避免跨 loop。
 
-    根因修复：test_engine 原为 session-scoped + session loop，与 function loop 测试
-    混用导致 ``Future attached to a different loop``。改为 function-scoped + function loop
-    后，engine 绑定到当前测试的 function loop，与测试在同一 loop 中执行。
+    根因修复：
+    1. ``test_engine`` 原为 session-scoped + session loop，与 function loop 测试
+       混用导致 ``Future attached to a different loop``。改为 function-scoped +
+       function loop 后，engine 绑定到当前测试的 function loop。
+    2. 移除了对 ``_session_db_setup``（session-scoped + session loop_scope）的依赖。
+       该跨 loop_scope 依赖在 pytest-asyncio 1.4.0 + ``asyncio_default_fixture_loop_scope="function"``
+       配置下，导致 ``_session_db_setup`` 的 teardown（DROP DATABASE）在 function 边界
+       提前执行，DB 在测试间被 drop。DB 创建/自愈现由 ``db_schema_ready`` autouse
+       fixture 调用 ``_ensure_test_db()`` 负责（幂等+自愈）。
 
     Schema 初始化由 ``db_schema_ready`` autouse fixture 负责（幂等）。
-    DB 创建/drop 由 ``_session_db_setup`` fixture 负责（session 级）。
     UTC 时区由 ``create_test_engine`` 的 ``server_settings.setdefault("timezone", "UTC")``
     保证（与生产环境前提对齐）。
     """
@@ -615,8 +656,14 @@ async def db_schema_ready(request, _test_engine_dep):
 
     test_engine 通过同步 fixture ``_test_engine_dep`` 解析，避免在 async 上下文
     中调用 ``getfixturevalue`` 触发 ``Runner.run()`` 嵌套事件循环错误。
+
+    根因修复：在 schema 初始化前调用 ``_ensure_test_db()``，确保 DB 存在。
+    原 ``_session_db_setup`` fixture 移除后，DB 创建/自愈责任由本 fixture 承担。
+    ``_ensure_test_db()`` 幂等+自愈：首次 clean slate，后续检查存在性，DB 被 drop
+    则自动重建，避免 ``InvalidCatalogNameError``。
     """
     if _test_engine_dep is not None:
+        await _ensure_test_db()
         from data.persistence.db_migrator import DatabaseMigrator
 
         with override_db_url(TEST_DB_URL):

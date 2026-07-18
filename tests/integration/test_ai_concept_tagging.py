@@ -214,10 +214,10 @@ class TestAIConceptTagStrategyE2E:
 
         asyncio.create_task(_set_cancel())
 
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         with pytest.raises(asyncio.CancelledError):
             await strategy.run(batch_size=10)
-        elapsed = asyncio.get_event_loop().time() - start
+        elapsed = asyncio.get_running_loop().time() - start
         # 应在 ~2s 内响应（_AI_TAG_CANCEL_POLL_INTERVAL），不是 10s
         assert elapsed < 3.0, f"取消响应时间 {elapsed}s 超过 3 秒阈值"
 
