@@ -178,7 +178,7 @@ class TestQuickParameterFunctionality:
 
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock()
-        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.sync_historical_data = AsyncMock(return_value=MagicMock(status="success"))
         dp.sync_comprehensive_fundamentals = AsyncMock(return_value=MagicMock(status="success"))
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="success"))
