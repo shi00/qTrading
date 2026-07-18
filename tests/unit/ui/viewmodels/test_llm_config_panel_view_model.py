@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ui.viewmodels import Message
 from ui.viewmodels.llm_config_panel_view_model import (
     LLMConfigPanelViewModel,
     LLMConfigState,
@@ -472,14 +473,12 @@ class TestLLMConfigPanelViewModelVerifyConnection:
 
     @pytest.mark.asyncio
     async def test_verify_connection_failure_shows_error(self, mock_test_connection, mock_config_handler):
-        mock_test_connection.return_value = {"success": False, "message": "Invalid key"}
+        mock_test_connection.return_value = {"success": False, "message": "llm_err_auth_failed"}
         vm = _make_vm(mock_test_connection)
         result = await vm.verify_connection()
         assert result is False
         assert vm.state.status_type == "error"
-        assert vm.state.status_message is not None
-        assert vm.state.status_message.key == "_raw_msg_"
-        assert vm.state.status_message.params["default"] == "Invalid key"
+        assert vm.state.status_message == Message("llm_err_auth_failed")
 
     @pytest.mark.asyncio
     async def test_verify_connection_reentry_guard(self, mock_test_connection, mock_config_handler):
