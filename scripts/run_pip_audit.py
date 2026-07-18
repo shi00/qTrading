@@ -136,6 +136,9 @@ def run_pip_audit(
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
     args = parse_args()
 
     allowlist_path = Path(args.allowlist)
