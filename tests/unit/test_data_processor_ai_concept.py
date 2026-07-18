@@ -248,5 +248,5 @@ class TestRunAIConceptTagging:
             MockAKShare.return_value.run = AsyncMock(side_effect=asyncio.CancelledError())
             MockLimitList.return_value.run = AsyncMock(return_value=mock_result)
             MockAITag.return_value.run = AsyncMock(return_value=mock_result)
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):  # noqa: weak-assertion R2 红线契约仅验证 CancelledError 类型传播即可，无有意义 message 可 match
                 await dp.run_ai_concept_tagging(manual_trigger=False)
