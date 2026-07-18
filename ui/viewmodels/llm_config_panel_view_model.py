@@ -419,7 +419,7 @@ class LLMConfigPanelViewModel(ObservableViewModelMixin[LLMConfigState]):
                 self._show_success(Message("llm_test_success"))
                 return True
 
-            self._show_error(self._raw_message(result.get("message", "common_err_unknown")))
+            self._show_error(Message(result.get("message", "common_err_unknown")))
             return False
 
         except Exception as ex:

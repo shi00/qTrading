@@ -64,6 +64,7 @@ class _DummyPage:
         self.padding = 0
         self.toast = None
         self.controls = []
+        self.overlay = []
         self.current_dialog = None
         self.updated_count = 0
         self.run_task_calls = []
@@ -162,6 +163,7 @@ def _prepare_main(monkeypatch, *, cleanup_result=True, exit_spy=None):
     monkeypatch.setattr(app_main, "setup_logging", lambda: None)
     monkeypatch.setattr(app_main, "apply_page_theme", lambda _page: None)
     monkeypatch.setattr(app_main, "ToastManager", lambda _page: MagicMock())
+    monkeypatch.setattr(app_main, "ToastManagerView", lambda: MagicMock())
     # WindowEventType must be a string "close" so SimpleNamespace(type="close") matches
     monkeypatch.setattr(app_main.ft, "WindowEventType", SimpleNamespace(CLOSE="close"))
     monkeypatch.setattr(app_main, "CacheManager", lambda: MagicMock())
@@ -212,6 +214,9 @@ class TestMainWindowDestroyError:
         _prepare_main(monkeypatch, cleanup_result=True)
         logger_spy = _LoggerSpy()
         monkeypatch.setattr(app_main, "logger", logger_spy)
+        # 重构后 "Window destroy failed" 日志由 app.error_logging 模块的 logger 输出
+        # （通过 log_exception_with_severity 调用，perform_window_shutdown 内部触发）
+        monkeypatch.setattr("app.error_logging.logger", logger_spy)
 
         class _WindowWithDestroyError:
             def __init__(self):
@@ -259,7 +264,9 @@ class TestMainWindowDestroyError:
         confirm_btn.on_click(MagicMock())
         await asyncio.sleep(0.1)
 
-        assert any("Window destroy failed" in msg for msg in logger_spy.errors)
+        # 重构后日志格式由 "[Main] Window destroy failed" 变为 "[Main window destroy failed]"
+        # （log_exception_with_severity 统一格式 "[%s] (%s): %s"），用大小写不敏感匹配
+        assert any("window destroy failed" in msg.lower() for msg in logger_spy.errors)
 
 
 class TestMainRunTask:
@@ -458,6 +465,9 @@ class TestMainWindowCloseShowDialogSkipped:
         _prepare_main(monkeypatch)
         logger_spy = _LoggerSpy()
         monkeypatch.setattr(app_main, "logger", logger_spy)
+        # 重构后 "Skip showing close confirm dialog" 日志由 app.window_lifecycle 模块的
+        # logger 输出（WindowDialogManager._show_close_confirm_dialog 内部触发）
+        monkeypatch.setattr("app.window_lifecycle.logger", logger_spy)
 
         with (
             patch("app.startup_controller.check_onboarding_needed", return_value=False),

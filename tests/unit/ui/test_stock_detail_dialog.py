@@ -987,3 +987,98 @@ class TestStockDetailDialogContract:
         # 常量
         assert "TUSHARE_MV_UNIT" in content
         assert "TUSHARE_AMOUNT_UNIT" in content
+
+    def test_alert_dialog_modal_is_false(self) -> None:
+        """契约：AlertDialog.modal=False，允许外部点击关闭（P3-UI-Source-Bugs-5）。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        assert "modal=False" in content
+        assert "modal=True" not in content
+
+    def test_alert_dialog_on_dismiss_registered(self) -> None:
+        """契约：AlertDialog 注册 on_dismiss=_close，外部点击关闭时同步状态（P3-UI-Source-Bugs-5）。"""
+        from pathlib import Path
+
+        dialog_path = Path(__file__).parent.parent.parent.parent / "ui" / "components" / "stock_detail_dialog.py"
+        content = dialog_path.read_text(encoding="utf-8")
+
+        assert "on_dismiss=_close" in content
+
+
+# ---------------------------------------------------------------------------
+# 组件运行时测试：AlertDialog modal=False + on_dismiss 回调
+# ---------------------------------------------------------------------------
+class TestStockDetailDialogComponent:
+    """StockDetailDialog 组件运行时测试（声明式 V1，P3-UI-Source-Bugs-5）。
+
+    验证 AlertDialog 的 modal 属性和 on_dismiss 回调正确注册：
+    - ``dialog.modal is False``
+    - 调用 ``dialog.on_dismiss(...)`` 触发 ``set_open(False)`` + ``on_close()``
+    """
+
+    def test_dialog_modal_is_false_at_runtime(self, mock_i18n_state, mock_app_colors_state, monkeypatch):
+        """挂载后 dialog.modal is False。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+        from ui.components import stock_detail_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        component = make_component(
+            mod.StockDetailDialog,
+            stock_data={"ts_code": "000001.SZ", "name": "测试"},
+            data_processor=None,
+            page=None,
+            open_state=True,
+            on_close=MagicMock(),
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        # 从 page._dialogs 找到 AlertDialog
+        dialog = page._dialogs.controls[-1]
+        assert isinstance(dialog, ft.AlertDialog)
+        assert dialog.modal is False
+
+    def test_on_dismiss_invokes_on_close(self, mock_i18n_state, mock_app_colors_state, monkeypatch):
+        """调用 dialog.on_dismiss 触发 on_close 回调（同步关闭状态）。"""
+        from tests.unit.ui.component_renderer import (
+            FakePage,
+            make_component,
+            render_once,
+            run_mount_effects,
+        )
+        from ui.components import stock_detail_dialog as mod
+
+        mock_i18n = MagicMock()
+        mock_i18n.get.side_effect = lambda key, *a, **kw: key
+        monkeypatch.setattr(mod, "I18n", mock_i18n)
+
+        on_close = MagicMock()
+        component = make_component(
+            mod.StockDetailDialog,
+            stock_data={"ts_code": "000001.SZ", "name": "测试"},
+            data_processor=None,
+            page=None,
+            open_state=True,
+            on_close=on_close,
+        )
+        page = FakePage()
+        run_mount_effects(component, page=page)
+        render_once(component)
+
+        dialog = page._dialogs.controls[-1]
+        # on_dismiss 类型为 Optional[ControlEventHandler]，测试上下文保证非 None
+        assert dialog.on_dismiss is not None
+        dialog.on_dismiss(None)
+        on_close.assert_called_once()

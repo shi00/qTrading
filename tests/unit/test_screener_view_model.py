@@ -11,6 +11,7 @@ import pytest
 from core.i18n import Message
 from ui.components.virtual_table import next_sort_state
 from ui.viewmodels.screener_view_model import ScreenerViewModel, TASK_NAME_PREFIX
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -404,6 +405,32 @@ class TestScreenerViewModelExport:
                 path, error = await vm.export_results(filepath)
                 assert path == filepath
                 assert error is None
+
+    @pytest.mark.asyncio
+    async def test_export_results_excel_no_data(self, vm, tmp_path):
+        vm._full_results = None
+        path, error = await vm.export_results_excel(str(tmp_path / "test.xlsx"))
+        assert path is None
+        assert error == "No data to export"
+
+    @pytest.mark.asyncio
+    async def test_export_results_excel_success(self, vm):
+        vm._full_results = pd.DataFrame({"A": [1, 2, 3]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "test_export.xlsx")
+            with patch("ui.viewmodels.screener_view_model.ThreadPoolManager") as mock_tm:
+                mock_tm.return_value.run_async = AsyncMock(
+                    side_effect=lambda tt, func, *args, **kwargs: func(*args, **kwargs),
+                )
+                path, error = await vm.export_results_excel(filepath)
+                assert path == filepath
+                assert error is None
+                # 验证 to_excel 被调用 (通过 ThreadPoolManager.run_async 的调用参数)
+                call_args = mock_tm.return_value.run_async.call_args
+                assert call_args.args[0] == TaskType.CPU
+                assert call_args.args[1] == vm._full_results.to_excel
+                assert call_args.args[2] == filepath
+                assert call_args.kwargs == {"index": False, "engine": "openpyxl"}
 
 
 class TestScreenerViewModelRunStrategy:

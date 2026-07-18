@@ -994,7 +994,7 @@ class TestTestConnectionBoundaryConditions:
             base_url="https://api.openai.com",
         )
         assert result["success"] is False
-        assert "Model ID is empty" in result["message"]
+        assert result["message"] == "llm_test_need_model"
 
     @pytest.mark.asyncio
     async def test_empty_api_key_returns_failure(self):
@@ -1005,7 +1005,7 @@ class TestTestConnectionBoundaryConditions:
             base_url="https://api.openai.com",
         )
         assert result["success"] is False
-        assert "API Key is empty" in result["message"]
+        assert result["message"] == "llm_test_need_key"
 
 
 class TestReasoningModelFallbackList:

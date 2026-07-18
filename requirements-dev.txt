@@ -234,7 +234,9 @@ oauthlib==3.3.1 ; sys_platform != 'emscripten'
 openai==2.45.0
     # via litellm
 openpyxl==3.1.5
-    # via akshare
+    # via
+    #   astockscreener (pyproject.toml)
+    #   akshare
 packageurl-python==0.17.6
     # via cyclonedx-python-lib
 packaging==26.2

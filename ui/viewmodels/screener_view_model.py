@@ -1180,6 +1180,30 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             logger.debug("Export failed traceback", exc_info=True)
             return None, str(e)
 
+    async def export_results_excel(self, filepath: str) -> tuple[str | None, str | None]:
+        """Export current results to Excel (.xlsx) at the specified path.
+
+        与 ``export_results`` 结构对齐: 通过 ``ThreadPoolManager.run_async(TaskType.CPU, ...)``
+        offload CPU 密集的 ``df.to_excel`` 调用 (R16). ``asyncio.CancelledError`` 为
+        BaseException, 不被 ``except Exception`` 捕获, 自动传播 (R2 与 ``export_results`` 一致).
+        """
+        if self._full_results is None or self._full_results.empty:
+            return None, "No data to export"
+
+        try:
+            await ThreadPoolManager().run_async(
+                TaskType.CPU,
+                self._full_results.to_excel,
+                filepath,
+                index=False,
+                engine="openpyxl",
+            )
+            return filepath, None
+        except Exception as e:
+            logger.error("Export Excel failed: %s", DataSanitizer.sanitize_error(e))
+            logger.debug("Export Excel failed traceback", exc_info=True)
+            return None, str(e)
+
     # --- TaskManager Subscription ---
 
     def subscribe_task_manager(self):

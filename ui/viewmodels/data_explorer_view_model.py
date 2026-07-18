@@ -404,6 +404,22 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
             functools.partial(df.to_csv, filepath, index=False, encoding="utf-8-sig"),
         )
 
+    async def write_excel(self, df: pd.DataFrame, filepath: str) -> None:
+        """将 DataFrame 写入 Excel 文件 (CPU 密集操作, 下沉到 VM 以符合 MVVM 契约).
+
+        Args:
+            df: 待写入的 DataFrame
+            filepath: 目标文件路径
+
+        Raises:
+            asyncio.CancelledError: 取消时传播 (R2)
+            Exception: 文件写入失败时传播, 由调用方处理 UI 反馈
+        """
+        await self._tp.run_async(
+            TaskType.CPU,
+            functools.partial(df.to_excel, filepath, index=False, engine="openpyxl"),
+        )
+
     @log_async_operation(threshold_ms=PerfThreshold.DB_BULK_IO)
     async def execute_sql(self, sql: str) -> dict:
         """Execute a read-only SQL query from the SQL Console.

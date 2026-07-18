@@ -876,9 +876,9 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             years = ConfigHandler.get_init_history_years()
             end_date = get_now().date()
             rough_start = (get_now() - datetime.timedelta(days=365 * years + 30)).date()
-            cal_success = await self.ensure_trade_cal(
+            cal_success = await self.trade_calendar.ensure_calendar_range(
+                rough_start,
                 end_date,
-                required_start_date=rough_start,
             )
             if not cal_success:
                 logger.error(

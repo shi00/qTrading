@@ -635,7 +635,7 @@ class TestDataProcessorInitializeSystem:
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
-        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.strategies["holder"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.check_data_health = AsyncMock(return_value={"tier": 3})
@@ -672,7 +672,7 @@ class TestDataProcessorInitializeSystem:
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
-        dp.ensure_trade_cal = AsyncMock(return_value=False)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=False)
         dp.clear_cancel()
         with (
             patch("data.data_dictionary.validate_schema_definitions"),
@@ -693,7 +693,7 @@ class TestDataProcessorInitializeSystem:
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
-        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="completed", added=10))
         dp.strategies["macro"].run = AsyncMock(return_value=MagicMock(status="completed"))
@@ -719,7 +719,7 @@ class TestDataProcessorInitializeSystem:
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
-        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="failed", errors=["err"]))
         dp.clear_cancel()
         with (
@@ -741,7 +741,7 @@ class TestDataProcessorInitializeSystem:
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
-        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.strategies["historical"].run = AsyncMock(return_value=MagicMock(status="completed"))
         dp.strategies["financial"].run = AsyncMock(return_value=MagicMock(status="failed", errors=["err"]))
         dp.clear_cancel()
@@ -764,7 +764,7 @@ class TestDataProcessorInitializeSystem:
         dp = _make_dp()
         dp.sync_stock_basic = AsyncMock(return_value=5)
         dp.sync_concepts = AsyncMock(return_value=3)
-        dp.ensure_trade_cal = AsyncMock(return_value=True)
+        dp.trade_calendar.ensure_calendar_range = AsyncMock(return_value=True)
         dp.clear_cancel()
         dp._get_cancel_event().set()
         with (

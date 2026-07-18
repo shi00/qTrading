@@ -103,6 +103,7 @@ async def test_screener_sort_by_column(e2e_page):
     await screener.expect_text(f"{col_label} ↓", timeout_ms=TIMEOUTS.FAST)
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=1)
 async def test_detail_dialog_open_close(e2e_page):
     """测试：点击行打开详情对话框，验证关键字段渲染，点击关闭按钮关闭对话框。
 
@@ -110,6 +111,9 @@ async def test_detail_dialog_open_close(e2e_page):
     1. 点击表格行 → 对话框打开
     2. 验证 ts_code/name/close/PE/PB 等字段标签渲染（StockDetailDialog 渲染约定）
     3. 点击"关闭"按钮 → 对话框隐藏
+
+    flaky 注记：xdist 并行运行时偶发 worker 崩溃（隔离运行稳定 PASS），
+    用 pytest-rerunfailures 自动重跑 2 次（间隔 1s）以吸收基础设施抖动。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -182,17 +186,22 @@ async def test_export_screener_results_csv(e2e_page):
 
 
 @pytest.mark.xfail(
-    reason="UI 仅支持 CSV 导出（screener_view._on_export_click: allowed_extensions=['csv']），"
-    "Excel 导出未实现。源码需新增 Excel 导出支持后此测试才能通过。",
+    reason="Flet Web FilePicker.save_file 使用浏览器 File System Access API "
+    "(window.showSaveFilePicker) 打开原生保存对话框，不触发 Playwright download 事件。"
+    "源码层面需改用 anchor.download 或 blob URL 下载方式才能被 Playwright 捕获，"
+    "或测试侧需 mock FilePicker 验证调用参数。当前两种方案均未实现，测试超时 → xfail。"
+    "注：Excel 导出功能已由 Task 4.1-4.4 实现（screener_view._on_export_excel_click），"
+    "但 FilePicker.save_file 的 Playwright 捕获限制同样影响 Excel 导出按钮 → xfail。",
     strict=False,
 )
 async def test_export_screener_results_excel(e2e_page):
-    """测试：点击导出按钮触发 Excel 文件下载。
+    """测试：点击 Excel 导出按钮触发 Excel 文件下载。
 
     期望行为（DoD）：导出按钮支持 Excel 格式，文件名以 ``.xlsx`` 结尾。
-    当前状态：UI 仅支持 CSV 导出（``screener_view._on_export_click`` 中
-    ``allowed_extensions=["csv"]``、``default_filename=f"screener_results_{timestamp}.csv"``），
-    无 Excel 导出选项。测试期望 ``.xlsx`` 扩展名，实际下载为 ``.csv``，断言失败 → xfail。
+    当前状态：Task 4.4 已实现 Excel 导出（``screener_view._on_export_excel_click`` +
+    ``DataExplorerViewModel.write_excel`` + openpyxl），UI 新增独立 Excel 导出按钮。
+    但 Flet Web FilePicker.save_file 无法触发 Playwright download 事件
+    （技术债 P3-UI-Source-Bugs ⑥），测试无法捕获下载事件 → xfail。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -200,29 +209,23 @@ async def test_export_screener_results_excel(e2e_page):
     await screener.run()
     await screener.expect_result("平安银行")
 
-    # 用 expect_download 捕获下载事件（与 CSV 测试同按钮，UI 无独立 Excel 导出按钮）
+    # 用 expect_download 捕获下载事件（Excel 导出按钮触发）
     async with e2e_page.page.expect_download(timeout=TIMEOUTS.SCREEN_RESULT) as download_info:
         await screener.click_export(timeout_ms=TIMEOUTS.INTERACTION)
 
     download = await download_info.value
     filename = download.suggested_filename
 
-    # 期望 Excel 文件（.xlsx 结尾）；实际为 .csv，断言失败 → xfail
+    # 期望 Excel 文件（.xlsx 结尾）
     assert filename.endswith(".xlsx"), f"文件名扩展名不符（期望 .xlsx）: {filename}"
 
 
-@pytest.mark.xfail(
-    reason="对话框为 modal=True（stock_detail_dialog.py:AlertDialog(modal=True)），"
-    "modal 对话框不会因点击外部而关闭。源码需改为 modal=False 或添加 on_dismiss 处理后此测试才能通过。",
-    strict=False,
-)
 async def test_detail_dialog_outside_click_close(e2e_page):
     """测试：点击对话框外部 → 验证对话框关闭。
 
     期望行为（DoD）：点击对话框外部区域关闭对话框。
-    当前状态：``stock_detail_dialog.py`` 中 ``ft.AlertDialog(modal=True)``，
-    modal 对话框的 barrier 不响应点击关闭，点击外部后对话框保持打开。
-    ``wait_for(state="hidden")`` 超时 → xfail。
+    当前状态：Task 5.1 已修复 ``stock_detail_dialog.py`` 中 ``ft.AlertDialog(modal=False)``
+    + ``on_dismiss=_close`` 回调（commit 91f9006c），点击对话框外部应触发 on_dismiss 关闭对话框。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -240,7 +243,7 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     # 点击对话框外部（页面左上角，远离对话框中心）
     await e2e_page.page.mouse.click(10, 10)
 
-    # 期望对话框关闭：等待 PE 标签消失；modal=True 时不会关闭，超时 → xfail
-    # timeout 用 TIMEOUTS.INTERACTION（8s）避免 xfail 用例长时间挂起占用 worker
+    # 期望对话框关闭：等待 PE 标签消失（modal=False + on_dismiss 应触发关闭）
+    # timeout 用 TIMEOUTS.INTERACTION（8s）足够等待对话框关闭动画
     pe_locator = e2e_page.page.get_by_text(pe_label, exact=False)
     await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)

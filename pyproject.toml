@@ -35,6 +35,7 @@ dependencies = [
     "polars>=1.42.1",
     "pyarrow>=24.0.0",
     "pandas_market_calendars>=5.3.2",
+    "openpyxl>=3.1.5",  # Excel export engine for pandas.DataFrame.to_excel()
     "asyncpg>=0.31.0",
     "psycopg2-binary>=2.9.12",
     "sqlalchemy>=2.0.51",

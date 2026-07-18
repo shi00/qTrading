@@ -21,6 +21,7 @@ from ui.viewmodels.data_explorer_view_model import (
     SqlResultRow,
     TableRow,
 )
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -775,3 +776,28 @@ class TestExecuteSQLSeverity:
         with pytest.raises(PermissionError):
             await vm.execute_sql("SELECT 1")
         assert vm.state.sql_is_executing is False
+
+
+class TestWriteExcel:
+    async def test_write_excel_calls_to_excel_with_correct_args(self, vm, mock_tp):
+        """write_excel 通过 ThreadPoolManager 调用 df.to_excel(filepath, index=False, engine='openpyxl') (R16)."""
+        df = MagicMock()
+        filepath = "/tmp/test.xlsx"
+        await vm.write_excel(df, filepath)
+        df.to_excel.assert_called_once_with(filepath, index=False, engine="openpyxl")
+        # R16: 必须 offload 到 CPU 线程池
+        call_args = mock_tp.run_async.call_args
+        assert call_args[0][0] is TaskType.CPU
+
+    async def test_cancelled_error_propagates(self, vm, mock_tp):
+        """R2: CancelledError 必须重新 raise, 不可吞没."""
+        mock_tp.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+        df = MagicMock()
+        with pytest.raises(asyncio.CancelledError):
+            await vm.write_excel(df, "/tmp/test.xlsx")
+
+    async def test_success_returns_none(self, vm, mock_tp):
+        """成功路径返回 None, 与 write_csv 一致."""
+        df = MagicMock()
+        result = await vm.write_excel(df, "/tmp/test.xlsx")
+        assert result is None

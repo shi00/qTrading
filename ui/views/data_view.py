@@ -314,9 +314,9 @@ def TableViewerTab(
             except Exception as e:
                 logger.error("[TableViewerTab] next page error: %s", e, exc_info=True)
 
-    async def _export_csv(current_page: bool = True) -> None:
+    async def _export_data(format_: str, current_page: bool = True) -> None:
         scope = "current_page" if current_page else "all"
-        UILogger.log_action("TableViewerTab", "Click", f"export_csv={scope}")
+        UILogger.log_action("TableViewerTab", "Click", f"export_{format_}={scope}")
         try:
             df = await vm.export_data(current_page_only=current_page)
             if df.empty:
@@ -326,15 +326,19 @@ def TableViewerTab(
                 return
             suffix = f"_p{state.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"{state.current_table}{suffix}_{timestamp}.csv"
+            ext = "csv" if format_ == "csv" else "xlsx"
+            default_filename = f"{state.current_table}{suffix}_{timestamp}.{ext}"
             filepath = await file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
                 file_name=default_filename,
-                allowed_extensions=["csv"],
+                allowed_extensions=[ext],
             )
             if filepath:
                 try:
-                    await vm.write_csv(df, filepath)
+                    if format_ == "csv":
+                        await vm.write_csv(df, filepath)
+                    else:
+                        await vm.write_excel(df, filepath)
                     filename = os.path.basename(filepath)
                     msg = I18n.get("data_export_success", file=filename)
                     page = _get_page()
@@ -397,12 +401,17 @@ def TableViewerTab(
     def _on_export_current(e: ft.ControlEvent) -> None:
         page = _get_page()
         if page is not None:
-            page.run_task(_export_csv, True)
+            page.run_task(_export_data, "csv", True)
 
     def _on_export_all(e: ft.ControlEvent) -> None:
         page = _get_page()
         if page is not None:
-            page.run_task(_export_csv, False)
+            page.run_task(_export_data, "csv", False)
+
+    def _on_export_excel(e: ft.ControlEvent) -> None:
+        page = _get_page()
+        if page is not None:
+            page.run_task(_export_data, "excel", True)
 
     # --- 派生渲染数据 ---
     is_loading = state.is_loading
@@ -575,6 +584,11 @@ def TableViewerTab(
                         content=I18n.get("data_export_all"),
                         icon=ft.Icons.DRIVE_FILE_MOVE,
                         on_click=_on_export_all,
+                    ),
+                    ft.PopupMenuItem(
+                        content=I18n.get("data_export_excel"),
+                        icon=ft.Icons.TABLE_VIEW,
+                        on_click=_on_export_excel,
                     ),
                 ],
             ),

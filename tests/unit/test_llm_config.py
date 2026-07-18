@@ -421,7 +421,7 @@ class TestAIServiceLiteLLM:
 
         result = await AIService.test_connection(api_key="")
         assert result["success"] is False
-        assert "API Key is empty" in result["message"]
+        assert result["message"] == "llm_test_need_key"
 
     @pytest.mark.asyncio
     async def test_test_connection_litellm_not_available(self, isolated_config):
@@ -435,7 +435,7 @@ class TestAIServiceLiteLLM:
         try:
             result = await AIService.test_connection(api_key="test-key", model="gpt-5.4")
             assert result["success"] is False
-            assert "LiteLLM not installed" in result["message"]
+            assert result["message"] == "llm_err_litellm_not_installed"
         finally:
             ai_service_module.LITELLM_AVAILABLE = original_litellm
 
