@@ -311,6 +311,11 @@ jobs:
           uv pip install --system -r requirements.txt
           uv pip install --system -r requirements-optional.txt
           uv pip install --system -r requirements-dev.txt
+          # Pre-install flet-web to prevent Flet 0.86.0 from auto-installing it at app startup.
+          # Without this, 4 xdist workers concurrently pip install flet-web to the same
+          # site-packages, triggering Windows file lock errors (WinError 32 / Permission denied)
+          # and causing workers to crash in setup phase (root cause of run 29655213301).
+          uv pip install --system flet-web==0.86.0
           pip install playwright pytest-playwright
 
       - name: Get Playwright Version
