@@ -611,7 +611,8 @@ def StockDetailDialog(
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
     dialog = (
         ft.AlertDialog(
-            modal=True,
+            modal=False,
+            on_dismiss=_close,
             title=_build_title(data),
             content=_build_content(data, chart_content, width, height),
             actions=[
