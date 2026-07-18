@@ -1,17 +1,30 @@
 import threading
 
 import pytest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from data.cache.cache_manager import CacheManager
 from data.data_processor import DataProcessor
+from data.domain_services.market_data_service import MarketDataService  # noqa: F401
+from data.external.akshare_concept_client import AkshareConceptClient  # noqa: F401
+from data.external.tushare_client import TushareClient  # noqa: F401
 from services.ai_service import AIService
 from services.local_model_manager import LocalModelManager
 from services.news_subscription_service import NewsSubscriptionService
 from services.task_manager import TaskManager, AppTask, TaskStatus
+from strategies.all_strategies import StrategyManager  # noqa: F401
 from utils.scheduler_service import SchedulerService
+from utils.singleton_registry import _registry
+from utils.thread_pool import ThreadPoolManager  # noqa: F401
 
 pytestmark = pytest.mark.unit
+
+# Phase 4 Task 4.1: 模块收集时显式导入全部 12 个 @register_singleton 模块，
+# 触发装饰器注册到 _registry。随后动态枚举 _registry 构造参数化测试用例，
+# 自动覆盖后续新增的注册单例，无需手工维护清单。上述 noqa: F401 标注的
+# 导入仅用于 side-effect 注册，不在测试中直接引用类名。
+_REGISTERED_SINGLETON_CLASSES: list[type[object]] = list(_registry)
+_SINGLETON_IDS: list[str] = [c.__name__ for c in _REGISTERED_SINGLETON_CLASSES]
 
 
 @pytest.mark.unit
@@ -264,3 +277,37 @@ class TestSingletonResetClearsLoopLocal:
 
         assert inst._listeners == set()
         assert inst._alert_listeners == set()
+
+
+@pytest.mark.parametrize(
+    "cls",
+    _REGISTERED_SINGLETON_CLASSES,
+    ids=_SINGLETON_IDS,
+)
+class TestAllRegisteredSingletonsReset:
+    """Phase 4 Task 4.1: 动态枚举 _registry 中所有 @register_singleton 注册项，验证隔离契约。
+
+    通过 _registry 动态枚举所有注册单例，自动覆盖后续新增项，无需手工维护清单。
+    - R15: 每个 @register_singleton 类必须有可调用的 _reset_singleton classmethod
+    - R7:  _reset_singleton() 后 _instance 必须为 None
+    覆盖此前缺失的 AIService / TushareClient / AkshareConceptClient /
+    LocalModelManager / StrategyManager / MarketDataService /
+    NewsSubscriptionService 7 项。
+    """
+
+    def test_has_reset_singleton_classmethod(self, cls: type[object]) -> None:
+        """R15: 每个注册单例必须有可调用的 _reset_singleton classmethod。"""
+        assert hasattr(cls, "_reset_singleton"), f"{cls.__name__} 缺少 _reset_singleton classmethod (R15)"
+        assert callable(cls._reset_singleton)  # type: ignore[attr-defined]
+
+    def test_reset_singleton_clears_instance(self, cls: type[object]) -> None:
+        """R7: _reset_singleton() 后 _instance 必须为 None。
+
+        用 MagicMock 占位 _instance，避免触发真实资源初始化
+        （如 ThreadPoolExecutor / 后台任务 / 子进程），专注验证 reset 行为。
+        """
+        cls._instance = MagicMock()  # type: ignore[attr-defined]
+        cls._reset_singleton()  # type: ignore[attr-defined]
+        assert cls._instance is None, (  # type: ignore[attr-defined]
+            f"{cls.__name__}._reset_singleton 未清空 _instance (R7)"
+        )
