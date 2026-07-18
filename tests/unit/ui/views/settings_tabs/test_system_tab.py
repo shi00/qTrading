@@ -26,6 +26,8 @@ from tests.unit.ui.component_renderer import (
     run_mount_effects,
     run_unmount_effects,
 )
+from ui.theme import AppColors
+from utils.thread_pool import TaskType
 
 pytestmark = pytest.mark.unit
 
@@ -397,7 +399,7 @@ def _invoke(handler: Any, *args: Any) -> None:
 
 def _await_run_task_handler(page: MagicMock) -> tuple[Any, tuple, dict]:
     """提取 page.run_task 最近一次调用的 handler 与参数。"""
-    assert page.run_task.called, "page.run_task 未被调用"
+    assert page.run_task.call_args is not None, "page.run_task 未被调用"
     call = page.run_task.call_args
     handler = call.args[0]
     args = call.args[1:]
@@ -783,7 +785,7 @@ class TestDoLanguageChange:
 
         env["mock_config"].set_locale.assert_called_with("en_US")
         env["mock_i18n"].set_locale.assert_called_with("en_US")
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_language_changed]")
 
     def test_set_locale_false_rolls_back(self, system_tab_env) -> None:
         """set_locale 返回 False → 回滚到 current_locale + 失败 snack。"""
@@ -797,21 +799,22 @@ class TestDoLanguageChange:
         assert any("color" in c.kwargs for c in snack_calls)
 
     def test_exception_path_calls_show_snack(self, system_tab_env) -> None:
-        """set_locale 抛 Exception → snack 显示 sanitize_error。"""
+        """set_locale 抛 Exception → VM 捕获返回 False → snack 显示 settings_language_save_failed。"""
         env = system_tab_env
         env["mock_config"].set_locale.side_effect = RuntimeError("boom")
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_language_save_failed]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播, 不被 except Exception 吞没。"""
         env = system_tab_env
         env["mock_config"].set_locale.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoThemeChange:
@@ -830,9 +833,9 @@ class TestDoThemeChange:
         handler, args, _ = self._trigger(env)
         with patch("ui.theme.apply_page_theme") as mock_apply:
             asyncio.run(handler(*args))
-            mock_apply.assert_called_once()
+            mock_apply.assert_called_once_with(env["page"], "light")
         env["mock_config"].set_theme_name.assert_called_with("light")
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_snack_theme_updated]")
 
     def test_page_none_skips_apply_page_theme(self, system_tab_env) -> None:
         """page=None 时跳过 apply_page_theme (不抛异常)。"""
@@ -852,15 +855,16 @@ class TestDoThemeChange:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = system_tab_env
         env["mock_config"].set_theme_name.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoLogLevelChange:
@@ -885,7 +889,7 @@ class TestDoLogLevelChange:
             asyncio.run(handler(*args))
             mock_update.assert_called_once_with("DEBUG")
         env["mock_config"].set_log_level.assert_called_with("DEBUG")
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_log_label]: DEBUG")
 
     def test_exception_path_calls_show_snack(self, system_tab_env) -> None:
         """set_log_level 抛 Exception → snack 错误。"""
@@ -894,15 +898,16 @@ class TestDoLogLevelChange:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = system_tab_env
         env["mock_config"].set_log_level.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
     def test_state_dropdown_value_updates_after_change(self, system_tab_env) -> None:
         """state: _on_log_level_change 触发后 rerender，dropdown.value 反映新 level。
@@ -977,8 +982,11 @@ class TestDoSaveConcurrency:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].set_sync_max_concurrent_heavy.assert_called_once()
-        env["show_snack"].assert_called()
+        env["mock_config"].set_sync_max_concurrent_heavy.assert_called_once_with(4)
+        env["show_snack"].assert_called_once_with(
+            "i18n[sys_sync_heavy] i18n[common_saved]",
+            color=AppColors.SUCCESS,
+        )
 
     def test_out_of_range_lower(self, system_tab_env) -> None:
         """val=0 (< 1) → snack range 错误, 不调 setter。"""
@@ -1001,7 +1009,7 @@ class TestDoSaveConcurrency:
         asyncio.run(handler(*args))
 
         env["mock_config"].set_sync_max_concurrent_heavy.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_num_fmt]", color=AppColors.ERROR)
 
     def test_exception_path(self, system_tab_env) -> None:
         """set_sync_max_concurrent_heavy 抛 Exception → snack 错误。"""
@@ -1010,15 +1018,16 @@ class TestDoSaveConcurrency:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = system_tab_env
         env["mock_config"].set_sync_max_concurrent_heavy.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoSaveDbPool:
@@ -1040,7 +1049,10 @@ class TestDoSaveDbPool:
         env["mock_config"].set_db_connection_pool_size.assert_called_once_with(5)
         env["mock_config"].set_db_max_overflow.assert_called_once_with(10)
         env["mock_config"].set_db_pool_timeout.assert_called_once_with(30)
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with(
+            "i18n[settings_db_pool_saved]",
+            color=AppColors.SUCCESS,
+        )
 
     def test_pool_size_out_of_range(self, system_tab_env) -> None:
         """pool_size=0 (< 1) → snack range 错误, 不调 setter。"""
@@ -1049,7 +1061,10 @@ class TestDoSaveDbPool:
         asyncio.run(handler("0", "10", "30"))
 
         env["mock_config"].set_db_connection_pool_size.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with(
+            "i18n[sys_snack_pool_range]",
+            color=AppColors.ERROR,
+        )
 
     def test_max_overflow_out_of_range(self, system_tab_env) -> None:
         """max_overflow=100 (> 50) → snack overflow 错误, 不调 setter。"""
@@ -1058,7 +1073,10 @@ class TestDoSaveDbPool:
         asyncio.run(handler("5", "100", "30"))
 
         env["mock_config"].set_db_max_overflow.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with(
+            "i18n[settings_db_overflow]: 0-50",
+            color=AppColors.ERROR,
+        )
 
     def test_timeout_out_of_range(self, system_tab_env) -> None:
         """timeout=1 (< 5) → snack timeout 错误, 不调 setter。"""
@@ -1067,7 +1085,10 @@ class TestDoSaveDbPool:
         asyncio.run(handler("5", "10", "1"))
 
         env["mock_config"].set_db_pool_timeout.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with(
+            "i18n[settings_db_timeout]: 5-300",
+            color=AppColors.ERROR,
+        )
 
     def test_value_error_path(self, system_tab_env) -> None:
         """pool_size_str 非数字 → ValueError → snack num_fmt。"""
@@ -1076,7 +1097,7 @@ class TestDoSaveDbPool:
         asyncio.run(handler("abc", "10", "30"))
 
         env["mock_config"].set_db_connection_pool_size.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_num_fmt]", color=AppColors.ERROR)
 
     def test_exception_path(self, system_tab_env) -> None:
         """set_db_connection_pool_size 抛 Exception → snack 错误。"""
@@ -1085,15 +1106,16 @@ class TestDoSaveDbPool:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = system_tab_env
         env["mock_config"].set_db_connection_pool_size.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoSaveThreadPool:
@@ -1114,8 +1136,13 @@ class TestDoSaveThreadPool:
 
         env["mock_config"].set_max_io_workers.assert_called_once_with(8)
         env["mock_config"].set_max_cpu_workers.assert_called_once_with(4)
-        env["mock_tpm"].reload_config.assert_called_once()
-        env["show_snack"].assert_called()
+        env["mock_tpm"].reload_config.assert_called_once_with()
+        # _do_save_thread_pool 调 show_snack 两次（common_preparing + sys_snack_pool_saved）
+        # 用 assert_called_with 验证最后一次调用的参数（成功路径收尾）
+        env["show_snack"].assert_called_with(
+            "i18n[sys_snack_pool_saved]",
+            color=AppColors.SUCCESS,
+        )
 
     def test_empty_string_path(self, system_tab_env) -> None:
         """io_str 或 cpu_str 为空 → snack threads_empty, 不调 setter。"""
@@ -1124,7 +1151,10 @@ class TestDoSaveThreadPool:
         asyncio.run(handler("", "4"))
 
         env["mock_config"].set_max_io_workers.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with(
+            "i18n[sys_snack_threads_empty]",
+            color=AppColors.ERROR,
+        )
 
     def test_io_out_of_range(self, system_tab_env) -> None:
         """io_val=2 (< 4) → snack io_range, 不调 setter。"""
@@ -1133,7 +1163,7 @@ class TestDoSaveThreadPool:
         asyncio.run(handler("2", "4"))
 
         env["mock_config"].set_max_io_workers.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_io_range]", color=AppColors.ERROR)
 
     def test_cpu_out_of_range(self, system_tab_env) -> None:
         """cpu_val=100 (> 64) → snack cpu_range, 不调 setter。"""
@@ -1142,7 +1172,7 @@ class TestDoSaveThreadPool:
         asyncio.run(handler("8", "100"))
 
         env["mock_config"].set_max_cpu_workers.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_cpu_range]", color=AppColors.ERROR)
 
     def test_value_error_path(self, system_tab_env) -> None:
         """io_str 非数字 → ValueError → snack num_fmt。"""
@@ -1151,7 +1181,7 @@ class TestDoSaveThreadPool:
         asyncio.run(handler("abc", "4"))
 
         env["mock_config"].set_max_io_workers.assert_not_called()
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_num_fmt]", color=AppColors.ERROR)
 
     def test_exception_path(self, system_tab_env) -> None:
         """set_max_io_workers 抛 Exception → snack 错误。"""
@@ -1160,15 +1190,18 @@ class TestDoSaveThreadPool:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        # _do_save_thread_pool 调 show_snack 两次（common_preparing + save_err）
+        # 用 assert_called_with 验证最后一次调用（异常路径收尾）
+        env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
         env = system_tab_env
         env["mock_config"].set_max_io_workers.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoSaveNoProxy:
@@ -1185,12 +1218,15 @@ class TestDoSaveNoProxy:
         """成功: no_proxy_value="" → set_no_proxy_domains([]) + show_snack + reapply。"""
         env = system_tab_env
         handler, args, _ = self._trigger(env)
-        with patch("utils.proxy_manager.ProxyManager"):
+        with patch("utils.proxy_manager.ProxyManager") as mock_pm:
             asyncio.run(handler(*args))
 
             env["mock_config"].set_no_proxy_domains.assert_called_once_with([])
-            env["mock_tpm"].submit.assert_called()
-            env["show_snack"].assert_called()
+            env["mock_tpm"].submit.assert_called_once_with(TaskType.IO, mock_pm.reapply_proxy_policy)
+            env["show_snack"].assert_called_once_with(
+                "i18n[settings_snack_no_proxy_saved]",
+                color=AppColors.SUCCESS,
+            )
 
     def test_success_with_domains(self, system_tab_env) -> None:
         """raw_text 含逗号分隔域名 → 解析为 list 传入 setter。"""
@@ -1213,7 +1249,7 @@ class TestDoSaveNoProxy:
         with patch("utils.proxy_manager.ProxyManager"):
             asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates(self, system_tab_env) -> None:
         """R2: CancelledError 必须传播。"""
@@ -1221,8 +1257,9 @@ class TestDoSaveNoProxy:
         env["mock_config"].set_no_proxy_domains.side_effect = asyncio.CancelledError()
         handler, args, _ = self._trigger(env)
         with patch("utils.proxy_manager.ProxyManager"):
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
 class TestDoExportDiagnostics:
@@ -1251,8 +1288,8 @@ class TestDoExportDiagnostics:
             mock_collector.export = MagicMock(side_effect=self._async_return("/tmp/diag.zip"))
             asyncio.run(handler(*args))
 
-            mock_collector.export.assert_called_once()
-        env["show_snack"].assert_called()
+            mock_collector.export.assert_called_once_with()
+        env["show_snack"].assert_called_once_with("i18n[settings_diagnostics_success]", color=AppColors.SUCCESS)
 
     def test_exception_path(self, system_tab_env) -> None:
         """export 抛 Exception → snack 错误。"""
@@ -1266,7 +1303,7 @@ class TestDoExportDiagnostics:
             mock_collector.export = MagicMock(side_effect=_raise)
             asyncio.run(handler(*args))
 
-        env["show_snack"].assert_called()
+        env["show_snack"].assert_called_once_with("i18n[settings_diagnostics_failed]", color=AppColors.ERROR)
 
     def test_cancelled_error_propagates_and_state_reset(self, system_tab_env) -> None:
         """R2: CancelledError 传播; finally 仍调 set_diagnostics_exporting(False)。
@@ -1278,8 +1315,9 @@ class TestDoExportDiagnostics:
         handler, args, _ = self._trigger(env)
         with patch("utils.diagnostics.SystemDiagnosticsCollector") as mock_collector:
             mock_collector.export = MagicMock(side_effect=asyncio.CancelledError())
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 asyncio.run(handler(*args))
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
         # finally 中 set_diagnostics_exporting(False) 已执行 (Python finally 语义)
         # 重新渲染使 state 变化反映到控件树
