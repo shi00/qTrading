@@ -83,6 +83,49 @@ class TestHomeViewModelInit:
         callback.assert_not_called()
 
 
+class TestHomeViewModelNewsAlertListener:
+    """测试新闻告警监听注册/退订 (P2-2: View 经 VM 命令转发, 不直调 NewsSubscriptionService)."""
+
+    def test_register_news_alert_listener_delegates_to_service(self):
+        """register_news_alert_listener 转发到 NewsSubscriptionService.add_listener(is_alert=True)."""
+        vm = HomeViewModel()
+        callback = MagicMock()
+
+        with patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_svc:
+            mock_svc.return_value.add_listener = MagicMock()
+
+            vm.register_news_alert_listener(callback)
+
+            mock_svc.return_value.add_listener.assert_called_once_with(callback, is_alert=True)
+
+    def test_unregister_news_alert_listener_delegates_to_service(self):
+        """unregister_news_alert_listener 转发到 NewsSubscriptionService.remove_listener(is_alert=True)."""
+        vm = HomeViewModel()
+        callback = MagicMock()
+
+        with patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_svc:
+            mock_svc.return_value.remove_listener = MagicMock()
+
+            vm.unregister_news_alert_listener(callback)
+
+            mock_svc.return_value.remove_listener.assert_called_once_with(callback, is_alert=True)
+
+    def test_register_and_unregister_round_trip(self):
+        """注册 + 退订闭环: 同一 callback 经两个命令转发到 service."""
+        vm = HomeViewModel()
+        callback = MagicMock()
+
+        with patch("ui.viewmodels.home_view_model.NewsSubscriptionService") as mock_svc:
+            mock_svc.return_value.add_listener = MagicMock()
+            mock_svc.return_value.remove_listener = MagicMock()
+
+            vm.register_news_alert_listener(callback)
+            vm.unregister_news_alert_listener(callback)
+
+            mock_svc.return_value.add_listener.assert_called_once_with(callback, is_alert=True)
+            mock_svc.return_value.remove_listener.assert_called_once_with(callback, is_alert=True)
+
+
 class TestHomeViewModelMarketData:
     """测试市场数据加载"""
 

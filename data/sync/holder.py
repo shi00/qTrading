@@ -9,7 +9,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.error_classifier import classify_error, classify_severity
 from utils.time_utils import get_now
 
-from .base import ISyncStrategy, SyncResult
+from .base import ISyncStrategy, SyncResult, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
@@ -63,20 +63,22 @@ class HolderSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[HolderSync] Effective trade date | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical(
+                    "[HolderSync] Effective trade date | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[HolderSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HolderSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
         return get_now().date()
@@ -200,12 +202,14 @@ class HolderSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[HolderSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[HolderSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning("[HolderSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
+                logger.warning(
+                    "[HolderSync] Recoverable error (%s): %s", error_info["code"], safe_error(e), exc_info=True
+                )
             else:
-                logger.error("[HolderSync] Operational error: %s", e, exc_info=True)
+                logger.error("[HolderSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -335,7 +339,7 @@ class HolderSyncStrategy(ISyncStrategy):
                             "[HolderSync] top10_holders | SYSTEM-LEVEL failure for %s period=%s: %s",
                             ts_code,
                             period,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -353,7 +357,7 @@ class HolderSyncStrategy(ISyncStrategy):
                                 ts_code,
                                 period,
                                 error_info["code"],
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
                         else:
@@ -362,7 +366,7 @@ class HolderSyncStrategy(ISyncStrategy):
                                 ts_code,
                                 period,
                                 error_info["code"],
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
                     if consecutive_errors >= _MAX_ERRORS:
@@ -449,7 +453,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 logger.critical(
                     "[HolderSync] top10_holders | SYSTEM-LEVEL failure while querying existing ts_codes for period=%s: %s",
                     period,
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -459,7 +463,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     "for period=%s, falling back to full sync (%s): %s",
                     period,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
@@ -468,7 +472,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     "for period=%s, falling back to full sync (%s): %s",
                     period,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return set()
@@ -502,7 +506,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 logger.critical(
                     "[HolderSync] top10_holders | SYSTEM-LEVEL failure during checkpoint save for period=%s: %s",
                     period,
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -511,7 +515,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     "[HolderSync] top10_holders | Checkpoint save failed for period=%s (%s): %s",
                     period,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
@@ -519,7 +523,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     "[HolderSync] top10_holders | Checkpoint save failed for period=%s (%s): %s",
                     period,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return False
@@ -532,7 +536,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 "[HolderSync] Table | SYSTEM-LEVEL failure syncing %s date=%s: %s",
                 table_name,
                 date_str,
-                e,
+                safe_error(e),
                 exc_info=True,
             )
             raise
@@ -542,7 +546,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 table_name,
                 date_str,
                 error_info["code"],
-                e,
+                safe_error(e),
                 exc_info=True,
             )
         else:
@@ -551,7 +555,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 table_name,
                 date_str,
                 error_info["code"],
-                e,
+                safe_error(e),
                 exc_info=True,
             )
 
@@ -609,7 +613,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     "[HolderSync] Table | SYSTEM-LEVEL failure syncing %s end_date=%s: %s",
                     table_name,
                     end_date,
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -619,7 +623,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     table_name,
                     end_date,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
@@ -628,7 +632,7 @@ class HolderSyncStrategy(ISyncStrategy):
                     table_name,
                     end_date,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return -1
@@ -669,7 +673,7 @@ class HolderSyncStrategy(ISyncStrategy):
                         logger.critical(
                             "[HolderSync] pledge_stat | SYSTEM-LEVEL failure for end_date=%s: %s",
                             end_date,
-                            api_err,
+                            safe_error(api_err),
                             exc_info=True,
                         )
                         raise
@@ -731,7 +735,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[HolderSync] pledge_stat | SYSTEM-LEVEL failure while recording skipped_permission: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -739,14 +743,14 @@ class HolderSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[HolderSync] pledge_stat | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[HolderSync] pledge_stat | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
             return -1, None
@@ -756,7 +760,7 @@ class HolderSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HolderSync] Table | SYSTEM-LEVEL failure syncing pledge_stat: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -764,14 +768,14 @@ class HolderSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HolderSync] Table | Error syncing pledge_stat (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HolderSync] Table | Error syncing pledge_stat (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return -1, None
@@ -835,7 +839,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[HolderSync] share_float | SYSTEM-LEVEL failure while recording skipped_permission: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -843,14 +847,14 @@ class HolderSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[HolderSync] share_float | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[HolderSync] share_float | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
             return -1, None
@@ -860,7 +864,7 @@ class HolderSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HolderSync] Table | SYSTEM-LEVEL failure syncing share_float: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -868,14 +872,14 @@ class HolderSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HolderSync] Table | Error syncing share_float (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HolderSync] Table | Error syncing share_float (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return -1, None
@@ -938,7 +942,7 @@ class HolderSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[HolderSync] stk_holdertrade | SYSTEM-LEVEL failure while recording skipped_permission: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -946,14 +950,14 @@ class HolderSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[HolderSync] stk_holdertrade | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[HolderSync] stk_holdertrade | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
             return -1, None
@@ -963,7 +967,7 @@ class HolderSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HolderSync] Table | SYSTEM-LEVEL failure syncing stk_holdertrade: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -971,14 +975,14 @@ class HolderSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HolderSync] Table | Error syncing stk_holdertrade (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HolderSync] Table | Error syncing stk_holdertrade (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return -1, None

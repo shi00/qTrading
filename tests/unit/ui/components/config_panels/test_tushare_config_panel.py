@@ -29,9 +29,9 @@ from tests.unit.ui.component_renderer import (
     run_mount_effects,
     run_unmount_effects,
 )
+from data.constants import TUSHARE_POINT_TIERS
 from ui.components.config_panels import tushare_config_panel as panel_module
 from ui.components.config_panels.tushare_config_panel import (
-    TUSHARE_POINT_TIERS,
     TushareConfigPanel,
     _build_tier_options,
     _on_register_click,
@@ -187,13 +187,13 @@ class TestTusharePointTiersConstant:
 
 
 class TestBuildTierOptions:
-    """_build_tier_options: 构建 5 档下拉选项。"""
+    """_build_tier_options: 构建 5 档下拉选项 (P1-1: tier_options 由 VM state 产出, View 接收参数)."""
 
     def test_returns_five_options(self) -> None:
         """DoD: 返回 5 个 ft.dropdown.Option。"""
         with patch.object(panel_module, "I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_tier_options()
+            options = _build_tier_options(TUSHARE_POINT_TIERS)
         assert len(options) == 5
         assert all(isinstance(o, ft.dropdown.Option) for o in options)
 
@@ -201,7 +201,7 @@ class TestBuildTierOptions:
         """DoD: 选项 key 与 TUSHARE_POINT_TIERS 一一对应。"""
         with patch.object(panel_module, "I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, **kw: key
-            options = _build_tier_options()
+            options = _build_tier_options(TUSHARE_POINT_TIERS)
         keys = [o.key for o in options]
         assert keys == list(TUSHARE_POINT_TIERS)
 
@@ -209,7 +209,7 @@ class TestBuildTierOptions:
         """DoD: 选项 text 通过 I18n.get(f"sys_tier_{tier}_label") 翻译。"""
         with patch.object(panel_module, "I18n") as mock_i18n:
             mock_i18n.get.side_effect = lambda key, **kw: f"i18n[{key}]"
-            options = _build_tier_options()
+            options = _build_tier_options(TUSHARE_POINT_TIERS)
         for opt, tier in zip(options, TUSHARE_POINT_TIERS, strict=True):
             assert opt.text == f"i18n[sys_tier_{tier}_label]"
             mock_i18n.get.assert_any_call(f"sys_tier_{tier}_label")

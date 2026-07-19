@@ -28,7 +28,9 @@ from ui.viewmodels.system_viewmodel import ProbeResultRow, SystemViewModel
 logger = logging.getLogger(__name__)
 
 # 响应式断点阈值（与设计文档 §3.2.10 一致；与 ui/theme.py AppStyles 配合使用）
-_TIER_PANEL_LG_BREAKPOINT = 1200
+# P3-25: LG 断点复用 AppStyles.BREAKPOINT_COMPACT（同 1200），保持单一真相源。
+_TIER_PANEL_LG_BREAKPOINT = AppStyles.BREAKPOINT_COMPACT
+# NOTE(lazy): MD 断点 800 保留作为防御代码, 生产 min_width=1280 下不可达. ceiling: width ≥ 1280 ≥ 1200 永远命中 LG 分支. upgrade: min_width 调低或组件嵌入更窄容器时自动生效.
 _TIER_PANEL_MD_BREAKPOINT = 800
 
 
@@ -164,8 +166,12 @@ def _compute_progress_text(
     - result.type=completed：sys_tier_probe_completed
     - result.type=tier_too_high：sys_tier_tier_too_high
     - result.type=all_failed：sys_tier_probe_all_failed
-    - result.type=set_tier_failed：sys_tier_probe_failed + (message)
+    - result.type=set_tier_failed：按 result.reason 映射
+      (io → sys_tier_set_failed_io, invalid_tier → sys_tier_set_failed_invalid)
     - 其他（idle 无 result / 未知 type）：空
+
+    i18n 状态驱动 (CLAUDE.md §3.2): VM 产出 locale 无关 reason, View 按 reason
+    映射 i18n key 渲染, 避免硬编码中文 message 在 en_US 下混排.
     """
     if probe_in_progress:
         if progress[1] > 0:
@@ -193,7 +199,10 @@ def _compute_progress_text(
         if rtype == "all_failed":
             return I18n.get("sys_tier_probe_all_failed")
         if rtype == "set_tier_failed":
-            return I18n.get("sys_tier_probe_failed") + " (" + result.message + ")"
+            if result.reason == "io":
+                return I18n.get("sys_tier_set_failed_io")
+            if result.reason == "invalid_tier":
+                return I18n.get("sys_tier_set_failed_invalid")
     return ""
 
 

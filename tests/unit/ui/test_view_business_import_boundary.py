@@ -1,9 +1,17 @@
-"""ui/views/ 业务对象导入边界守护测试 (Task 5.1, P2-3 升级为 AST 扫描).
+"""ui/views/ + ui/components/ + ui/ 根目录业务对象导入边界守护测试 (Task 5.1, P2-3 升级为 AST 扫描, P1-1 扫描范围扩展).
 
 CLAUDE.md §3.2 MVVM 契约: View = f(ViewModel.state), 不应直接调用 data/strategies/
-services/utils 业务对象。本测试用 ``ast.NodeVisitor`` 扫描 ``ui/views/`` 下所有 .py
-源码, 检测 10 类禁止业务对象的 import / alias / 调用 / 间接引用, 强制 View 通过
-ViewModel command/state 消费业务逻辑。
+services/utils 业务对象。本测试用 ``ast.NodeVisitor`` 扫描 ``ui/views/`` +
+``ui/components/`` + ``ui/`` 根目录 .py 下所有源码, 检测 11 类禁止业务对象的
+import / alias / 调用 / 间接引用, 强制 View 通过 ViewModel command/state 消费业务逻辑。
+
+扫描范围 (P1-1 升级):
+- ``ui/views/`` (递归)
+- ``ui/components/`` (递归)
+- ``ui/`` 根目录下的直接 .py 文件 (不递归, 仅 app_layout/startup_views/__init__ 等)
+- 显式排除 (基础设施豁免): ``ui/viewmodels/``、``ui/i18n.py``、``ui/theme.py``、
+  ``ui/hooks.py``、``ui/pubsub_topics.py``、``ui/__init__.py``
+  (这些是 VM 层 / i18n 基础设施 / 主题 token / hooks 基础设施, 不属 View 层)
 
 与 ``tests/unit/test_architecture_boundaries.py`` 的区别:
 - 后者仅检查模块级 import, 且 R1 允许 ui → strategies 反向依赖
@@ -22,7 +30,7 @@ AST 扫描覆盖的违规形式 (相比 regex 升级点):
 
 跳过 ``TYPE_CHECKING`` 块内的 import (仅类型注解用途, 不引入运行时依赖).
 
-10 类禁止业务对象 (5 原有 + 5 新增):
+10 类禁止业务对象 (5 原有 + 5 新增) + P2-2 追加 ``NewsSubscriptionService``:
 - 原有: ``MetaDataManager`` / ``strategy_prompts.get_base_prompt`` / ``TushareClient`` /
   ``TUSHARE_POINT_TIERS`` / ``DataProcessor``
 - 新增: ``services.task_manager`` (TaskManager/AppTask; TaskStatus 作为纯展示枚举允许) /
@@ -30,6 +38,8 @@ AST 扫描覆盖的违规形式 (相比 regex 升级点):
   ``services.local_model_manager.LocalModelManager`` /
   ``utils.config_handler.ConfigHandler`` /
   ``utils.thread_pool`` (ThreadPoolManager/TaskType)
+- P2-2 追加: ``services.news_subscription_service.NewsSubscriptionService``
+  (Task 6 修复 startup_views.py 直调后补入, 监听注册/退订必须经 HomeViewModel 命令转发)
 
 白名单 ``ALLOWED_VIEW_BUSINESS_IMPORTS`` 仅在以下场景允许:
 - 纯展示常量 (不是业务对象)
@@ -51,6 +61,26 @@ pytestmark = pytest.mark.unit
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 VIEWS_DIR = PROJECT_ROOT / "ui" / "views"
+COMPONENTS_DIR = PROJECT_ROOT / "ui" / "components"
+UI_ROOT_DIR = PROJECT_ROOT / "ui"
+
+# 基础设施豁免清单 (不属 View 层, 不在扫描范围内):
+# - ui/viewmodels/: VM 层, 已由本测试守护其不被 View 反向污染, VM 自身允许 import 业务对象
+# - ui/i18n.py: i18n 基础设施 (Flet 文本绑定薄封装, 允许 import core.i18n)
+# - ui/theme.py: 主题 token / 样式常量 (纯展示常量, 允许内部封装)
+# - ui/hooks.py: use_viewmodel / use_state 等 React-like hooks 实现 (基础设施)
+# - ui/pubsub_topics.py: pubsub topic 常量 (基础设施)
+# - ui/__init__.py: 包初始化 (空文件 / 仅 re-export)
+INFRA_EXEMPT_REL_PATHS: frozenset[str] = frozenset(
+    {
+        "ui/viewmodels",
+        "ui/i18n.py",
+        "ui/theme.py",
+        "ui/hooks.py",
+        "ui/pubsub_topics.py",
+        "ui/__init__.py",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -71,10 +101,12 @@ class ForbiddenModule:
     forbid_any_import: bool = False
 
 
-# 禁止业务对象清单 (10 类: 5 原有 + 5 新增).
+# 禁止业务对象清单 (10 类: 5 原有 + 5 新增) + P2-2 追加 NewsSubscriptionService.
 # 5 原有: data/strategies 业务对象 (Task 5.1 首批).
 # 5 新增 (P2-3): services/utils 业务编排对象 (覆盖 Plans-ui-review-20260717.md F2
 #   指出的 17 处真实违规中的 services/utils 部分).
+# P2-2 (Task 6): NewsSubscriptionService 监听注册/退订必须经 HomeViewModel 命令转发,
+#   startup_views.py 修复后补入本清单.
 FORBIDDEN_BUSINESS_OBJECTS: tuple[ForbiddenModule, ...] = (
     ForbiddenModule(
         key="MetaDataManager",
@@ -130,10 +162,15 @@ FORBIDDEN_BUSINESS_OBJECTS: tuple[ForbiddenModule, ...] = (
         module_path="utils.thread_pool",
         symbols=frozenset({"ThreadPoolManager", "TaskType"}),
     ),
+    ForbiddenModule(
+        key="services.news_subscription_service.NewsSubscriptionService",
+        module_path="services.news_subscription_service",
+        symbols=frozenset({"NewsSubscriptionService"}),
+    ),
 )
 
 
-# UI lazy import 白名单: 允许 ``ui/views/`` 在特定场景下保留对
+# UI lazy import 白名单: 允许 View 层在特定场景下保留对
 # data/strategies/services/utils 业务对象的导入.
 # 每个条目: (relative_path, forbidden_key), 配套注释说明原因.
 # Phase 3 各 Task 完成后, 对应条目应被移除 (白名单压路机: Plans-ui-review-20260717.md
@@ -141,7 +178,14 @@ FORBIDDEN_BUSINESS_OBJECTS: tuple[ForbiddenModule, ...] = (
 # Phase 3 全部完成: data_view ThreadPoolManager 已下沉到 DataExplorerViewModel.write_csv;
 # task_center_view 的 TaskStatus 作为纯展示枚举被 AST 扫描器允许
 #   (FORBIDDEN_BUSINESS_OBJECTS 中 services.task_manager 的 symbols 仅含 TaskManager/AppTask).
-ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = set()
+ALLOWED_VIEW_BUSINESS_IMPORTS: set[tuple[str, str]] = {
+    # P1-1 扫描范围扩展后新发现的同类违规: stock_detail_dialog.py:517 函数级 lazy import
+    # ``utils.thread_pool`` 在 CPU 线程池生成 K 线 PNG (R16 防阻塞主循环). 该违规不在原 P1-1
+    # (3 处) 范围内, 属于扫描器盲区消除后新暴露的问题. stock_detail_dialog 当前未配套 VM,
+    # 修复需先评估下沉方案 (新增 StockDetailViewModel 或经父 VM 转发), 不适合在本任务驱动修复.
+    # 暂时豁免以让扫描器落地, 后续独立任务修复后移除本条目.
+    ("ui/components/stock_detail_dialog.py", "utils.thread_pool"),
+}
 
 
 # ============================================================================
@@ -320,10 +364,38 @@ class _BusinessObjectVisitor(ast.NodeVisitor):
 
 
 def _view_python_files() -> list[Path]:
-    """收集 ``ui/views/`` 下所有 .py 文件 (递归)."""
-    if not VIEWS_DIR.exists():
-        return []
-    return sorted(VIEWS_DIR.rglob("*.py"))
+    """收集 View 层 .py 文件 (P1-1 扫描范围扩展).
+
+    覆盖:
+    - ``ui/views/`` 下所有 .py 文件 (递归)
+    - ``ui/components/`` 下所有 .py 文件 (递归)
+    - ``ui/`` 根目录下直接 .py 文件 (不递归, 如 app_layout/startup_views)
+
+    排除基础设施豁免 (INFRA_EXEMPT_REL_PATHS):
+    - ``ui/viewmodels/`` (VM 层, 允许 import 业务对象)
+    - ``ui/i18n.py`` / ``ui/theme.py`` / ``ui/hooks.py`` / ``ui/pubsub_topics.py`` /
+      ``ui/__init__.py`` (基础设施薄封装, 不属 View)
+    """
+    files: list[Path] = []
+    # 1. ui/views/ 递归
+    if VIEWS_DIR.exists():
+        files.extend(VIEWS_DIR.rglob("*.py"))
+    # 2. ui/components/ 递归
+    if COMPONENTS_DIR.exists():
+        files.extend(COMPONENTS_DIR.rglob("*.py"))
+    # 3. ui/ 根目录直接 .py 文件 (不递归)
+    if UI_ROOT_DIR.exists():
+        files.extend(UI_ROOT_DIR.glob("*.py"))
+
+    def _is_exempt(path: Path) -> bool:
+        rel = path.relative_to(PROJECT_ROOT).as_posix()
+        # 精确文件名豁免
+        if rel in INFRA_EXEMPT_REL_PATHS:
+            return True
+        # ui/viewmodels/ 目录豁免 (前缀匹配)
+        return any(rel.startswith(exempt + "/") for exempt in INFRA_EXEMPT_REL_PATHS)
+
+    return sorted(f for f in files if not _is_exempt(f))
 
 
 def _source_without_docstrings(source: str) -> str:
@@ -377,10 +449,11 @@ def _strip_comments(source: str) -> str:
 
 @pytest.mark.unit
 def test_no_view_directly_imports_business_objects() -> None:
-    """验证 ``ui/views/`` 下所有 .py 文件不直接 import/use 业务对象 (P2-3 AST 升级).
+    """验证 View 层 (ui/views/ + ui/components/ + ui/ 根目录) 不直接 import/use 业务对象 (P2-3 AST 升级 + P1-1 扫描范围扩展).
 
     AST 扫描覆盖 9 类违规形式 (见模块 docstring), 跳过 TYPE_CHECKING 块.
     白名单 ``ALLOWED_VIEW_BUSINESS_IMPORTS`` 仅在特定场景允许 (需配套原因注释).
+    基础设施豁免见 ``INFRA_EXEMPT_REL_PATHS`` (VM 层 / i18n / theme / hooks 等).
     """
     violations: list[str] = []
     for py_file in _view_python_files():
@@ -399,8 +472,8 @@ def test_no_view_directly_imports_business_objects() -> None:
             violations.append(f"{rel_path}: forbidden business object '{key}' ({len(evidences)} occurrence(s))")
 
     assert not violations, (
-        "ui/views/ 直接调用 data/strategies/services/utils 业务对象, 违反 MVVM 契约 "
-        "(CLAUDE.md §3.2).\n"
+        "View 层 (ui/views/ + ui/components/ + ui/ 根目录) 直接调用 data/strategies/services/utils 业务对象, "
+        "违反 MVVM 契约 (CLAUDE.md §3.2).\n"
         "应通过对应 ViewModel command/state 消费业务逻辑.\n" + "\n".join(violations)
     )
 
@@ -533,8 +606,8 @@ def test_ast_scanner_ignores_comments_and_strings() -> None:
 
 
 @pytest.mark.unit
-def test_ast_scanner_catches_all_10_forbidden_categories() -> None:
-    """AST 扫描器必须能检测全部 10 类禁止业务对象 (覆盖性测试)."""
+def test_ast_scanner_catches_all_forbidden_categories() -> None:
+    """AST 扫描器必须能检测全部 11 类禁止业务对象 (覆盖性测试)."""
     samples: dict[str, str] = {
         "MetaDataManager": "from data.persistence.metadata_manager import MetaDataManager\n",
         "strategy_prompts.get_base_prompt": "from strategies.strategy_prompts import get_base_prompt\n",
@@ -548,6 +621,9 @@ def test_ast_scanner_catches_all_10_forbidden_categories() -> None:
         ),
         "utils.config_handler.ConfigHandler": "from utils.config_handler import ConfigHandler\n",
         "utils.thread_pool": "from utils.thread_pool import ThreadPoolManager\n",
+        "services.news_subscription_service.NewsSubscriptionService": (
+            "from services.news_subscription_service import NewsSubscriptionService\n"
+        ),
     }
     for key, source in samples.items():
         violations = _scan_source(source)

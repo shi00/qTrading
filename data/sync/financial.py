@@ -11,7 +11,7 @@ import threading
 import pandas as pd
 
 from data.constants import FINANCIAL_BATCH_TABLES, FINANCIAL_REPORT_SCHEMA_COLS, SYNC_RESULT_SKIPPED_PERMISSION
-from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season
+from data.sync.base import ISyncStrategy, SyncResult, _get_seasonal_adjustments, _is_peak_disclosure_season, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from core.i18n import I18n
@@ -107,20 +107,22 @@ class FinancialSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[FinancialSync] Effective trade date | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical(
+                    "[FinancialSync] Effective trade date | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[FinancialSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[FinancialSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
         return get_now().date()
@@ -182,12 +184,14 @@ class FinancialSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[FinancialSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[FinancialSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning("[FinancialSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
+                logger.warning(
+                    "[FinancialSync] Recoverable error (%s): %s", error_info["code"], safe_error(e), exc_info=True
+                )
             else:
-                logger.error("[FinancialSync] Operational error: %s", e, exc_info=True)
+                logger.error("[FinancialSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -362,7 +366,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             logger.critical(
                                 "[FinancialSync] StockSync | SYSTEM-LEVEL failure for %s: %s",
                                 ts_code,
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
                             raise
@@ -371,7 +375,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 "[FinancialSync] StockSync | Failed for %s (%s): %s",
                                 ts_code,
                                 error_info["code"],
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
                         else:
@@ -379,7 +383,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 "[FinancialSync] StockSync | Failed for %s (%s): %s",
                                 ts_code,
                                 error_info["code"],
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
 
@@ -415,7 +419,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     logger.critical(
                         "[FinancialSync] StockSync | SYSTEM-LEVEL failure for %s: %s",
                         ts_code,
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -424,7 +428,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         "[FinancialSync] StockSync | Failed for %s (%s): %s",
                         ts_code,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
@@ -432,7 +436,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         "[FinancialSync] StockSync | Failed for %s (%s): %s",
                         ts_code,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
 
@@ -538,7 +542,7 @@ class FinancialSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[FinancialSync] Date parse | SYSTEM-LEVEL failure: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -546,14 +550,14 @@ class FinancialSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[FinancialSync] Date parse | Failed to parse last_sync_date, using 30-day fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[FinancialSync] Date parse | Failed to parse last_sync_date, using 30-day fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             start_date_dt = get_now() - datetime.timedelta(days=30)
@@ -636,7 +640,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 "[FinancialSync] Incremental | SYSTEM-LEVEL failure for %s period=%s: %s",
                                 ts_code,
                                 period,
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
                             raise
@@ -646,7 +650,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 ts_code,
                                 period,
                                 error_info["code"],
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
                         else:
@@ -655,7 +659,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                                 ts_code,
                                 period,
                                 error_info["code"],
-                                e,
+                                safe_error(e),
                                 exc_info=True,
                             )
 
@@ -792,7 +796,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             "[FinancialSync] BatchSync | SYSTEM-LEVEL failure for %s on %s: %s",
                             table_name,
                             date_str,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -802,7 +806,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             table_name,
                             date_str,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
@@ -811,7 +815,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             table_name,
                             date_str,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
 
@@ -918,7 +922,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     logger.critical(
                         "[FinancialSync] Fetch | SYSTEM-LEVEL failure for aux table on %s: %s",
                         ts_code,
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -927,7 +931,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         "[FinancialSync] Fetch | Failed to fetch aux table on %s (%s): %s",
                         ts_code,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
@@ -935,7 +939,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                         "[FinancialSync] Fetch | Failed to fetch aux table on %s (%s): %s",
                         ts_code,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 return 0
@@ -1033,7 +1037,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                 logger.critical(
                     "[FinancialSync] Fetch | SYSTEM-LEVEL failure for %s: %s",
                     ts_code,
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -1042,7 +1046,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     "[FinancialSync] Fetch | Comprehensive data failed for %s (%s): %s",
                     ts_code,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
@@ -1050,7 +1054,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                     "[FinancialSync] Fetch | Comprehensive data failed for %s (%s): %s",
                     ts_code,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             return None, {"mainbz": 0, "audit": 0}
@@ -1118,7 +1122,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             "[FinancialSync] Repair | SYSTEM-LEVEL failure for %s period=%s: %s",
                             ts_code,
                             period,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -1128,7 +1132,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             ts_code,
                             period,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
@@ -1137,7 +1141,7 @@ class FinancialSyncStrategy(ISyncStrategy):
                             ts_code,
                             period,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
 

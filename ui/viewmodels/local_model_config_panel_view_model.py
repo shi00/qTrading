@@ -337,3 +337,18 @@ class LocalModelConfigPanelViewModel(ObservableViewModelMixin[LocalModelConfigSt
             self._set_state(is_saving=False)
             if self._on_loading_change and self._show_internal_loading:
                 self._on_loading_change(False)
+
+    def cancel_verification(self) -> None:
+        """取消未提交的验证状态 (P1-1: View cleanup 时经此 VM 命令转发, 避免View 直接 import LocalModelManager).
+
+        语义: 调用 LocalModelManager.cancel_verification_if_active()。
+        命名用 ``cancel_verification`` 而非 ``dispose`` 以避免与 Observable 协议的
+        ``dispose()`` 命名冲突 (子类 dispose 用于清理订阅者, 不能被覆盖为业务命令)。
+        异常静默: cleanup 路径不可抛异常阻断组件卸载, 仅记 debug 日志。
+        """
+        try:
+            from services.local_model_manager import LocalModelManager
+
+            LocalModelManager.cancel_verification_if_active()
+        except Exception as e:
+            logger.debug("[LocalModelConfigVM] cancel_verification failed: %s", e, exc_info=True)

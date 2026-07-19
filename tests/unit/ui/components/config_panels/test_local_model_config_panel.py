@@ -7,7 +7,7 @@
 3. 组件运行时:
    - _setup_file_picker: page.services 不含/已含 picker / page None 容错
    - _cleanup_file_picker: page.services 含/不含 picker /
-     LocalModelManager.cancel_verification_if_active 调用 / 异常 logger.debug
+     vm.cancel_verification 调用 (P1-1: 经 VM 命令转发, 不直调 LocalModelManager)
    - compact=True/False + show_save_button + show_internal_loading
    - is_gpu_auto=True 显示 gpu_auto_switch 隐藏 gpu_layers_input
    - is_verifying=True 显示 ProgressRing
@@ -405,6 +405,8 @@ class _FakeLocalModelConfigPanelVM:
         self.update_batch = MagicMock()
         self.update_ctx = MagicMock()
         self.update_flash_attn = MagicMock()
+        # P1-1: cleanup 时经 VM 命令转发, 避免 View 直接 import LocalModelManager
+        self.cancel_verification = MagicMock()
 
     @property
     def state(self) -> LocalModelConfigState:
@@ -451,8 +453,6 @@ def _render_panel(
         mock_styles.primary_button.return_value = ft.ButtonStyle()
         mock_styles.secondary_button.return_value = ft.ButtonStyle()
         stack.enter_context(patch.object(panel_module, "SectionHeader", side_effect=lambda *a, **kw: ft.Container()))
-        # R7 守卫: mock LocalModelManager 单例, 避免真实单例污染
-        stack.enter_context(patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active"))
 
         component = make_component(
             LocalModelConfigPanel,
@@ -497,7 +497,6 @@ class TestSetupFilePicker:
             stack.enter_context(
                 patch.object(panel_module, "SectionHeader", side_effect=lambda *a, **kw: ft.Container())
             )
-            stack.enter_context(patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active"))
 
             component = make_component(LocalModelConfigPanel, vm=_FakeLocalModelConfigPanelVM())
             # 第一次挂载: picker 加入 services
@@ -529,7 +528,6 @@ class TestSetupFilePicker:
             stack.enter_context(
                 patch.object(panel_module, "SectionHeader", side_effect=lambda *a, **kw: ft.Container())
             )
-            stack.enter_context(patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active"))
             # 注入 ft.context.page 抛 RuntimeError
             stack.enter_context(
                 patch(
@@ -574,32 +572,14 @@ class TestCleanupFilePicker:
         pickers_after = [s for s in page.services if isinstance(s, ft.FilePicker)]
         assert len(pickers_after) == 0
 
-    def test_cleanup_calls_cancel_verification_if_active(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """卸载时调 LocalModelManager.cancel_verification_if_active()。"""
-        with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active") as mock_cancel:
-            _, _, _, component = _render_panel()
-            mock_cancel.assert_not_called()  # 挂载时不调
+    def test_cleanup_calls_vm_cancel_verification(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """卸载时调 vm.cancel_verification() (P1-1: 经 VM 命令转发, 不直调 LocalModelManager)."""
+        vm, _, _, component = _render_panel()
+        vm.cancel_verification.assert_not_called()  # 挂载时不调
 
-            run_unmount_effects(component)
+        run_unmount_effects(component)
 
-            mock_cancel.assert_called_once_with()
-
-    def test_cleanup_cancel_raises_logs_debug(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """cancel_verification_if_active 抛异常 → logger.debug 被调用, 不抛出。"""
-        with (
-            patch(
-                "services.local_model_manager.LocalModelManager.cancel_verification_if_active",
-                side_effect=RuntimeError("cancel failed"),
-            ),
-            patch.object(panel_module, "logger") as mock_logger,
-        ):
-            _, _, _, component = _render_panel()
-            # 卸载不应抛异常
-            run_unmount_effects(component)
-
-            # logger.debug 被调用 (cleanup cancel_verification failed)
-            debug_calls = [str(c) for c in mock_logger.debug.call_args_list]
-            assert any("cancel_verification failed" in c for c in debug_calls)
+        vm.cancel_verification.assert_called_once_with()
 
     def test_cleanup_skips_remove_when_picker_not_in_services(self, mock_i18n_state, mock_app_colors_state) -> None:
         """page.services 不含 picker → remove 跳过 (不抛 ValueError)。
@@ -618,20 +598,19 @@ class TestCleanupFilePicker:
 
         覆盖源码 162-163 行的 `except RuntimeError: pass` 分支。
         先正常渲染, 卸载前 patch ft.context 让 page property 抛 RuntimeError,
-        验证 cleanup 仍能继续执行 cancel_verification_if_active。
+        验证 cleanup 仍能继续执行 vm.cancel_verification()。
         """
-        with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active") as mock_cancel:
-            _, _, _, component = _render_panel()
-            # 卸载前 patch ft.context 让 page 抛 RuntimeError
-            with patch(
-                "ui.components.config_panels.local_model_config_panel.ft.context",
-                new=_ContextWithRaisingPage(),
-            ):
-                # 卸载不应抛异常 (RuntimeError 被 except 捕获)
-                run_unmount_effects(component)
+        vm, _, _, component = _render_panel()
+        # 卸载前 patch ft.context 让 page 抛 RuntimeError
+        with patch(
+            "ui.components.config_panels.local_model_config_panel.ft.context",
+            new=_ContextWithRaisingPage(),
+        ):
+            # 卸载不应抛异常 (RuntimeError 被 except 捕获)
+            run_unmount_effects(component)
 
-            # cleanup 仍调用了 cancel_verification_if_active (RuntimeError 不阻断后续逻辑)
-            mock_cancel.assert_called_once_with()
+        # cleanup 仍调用了 vm.cancel_verification (RuntimeError 不阻断后续逻辑)
+        vm.cancel_verification.assert_called_once_with()
 
 
 # ============================================================================
@@ -1138,9 +1117,9 @@ class TestLocalModelConfigPanelVMLifecycle:
 class TestLocalModelConfigPanelIsolation:
     """R7 守卫: 测试间无单例状态污染 (由 conftest _reset_all_singletons autouse 保证)。
 
-    LocalModelManager 是单例 (CLAUDE.md §4.3), _cleanup_file_picker 调用
-    LocalModelManager.cancel_verification_if_active()。本测试验证 mock 隔离正确,
-    不依赖真实单例状态。
+    P1-1 改造后: _cleanup_file_picker 调用 vm.cancel_verification() (VM 内部
+    才触碰 LocalModelManager 单例), View 层不再直接依赖 LocalModelManager。
+    本测试验证 View 层 mock 隔离正确, 不依赖真实单例状态。
     """
 
     def test_no_singleton_state_leakage_between_tests(self, mock_i18n_state, mock_app_colors_state) -> None:
@@ -1158,9 +1137,8 @@ class TestLocalModelConfigPanelIsolation:
         sliders2 = [c for c in ctrls2 if isinstance(c, ft.Slider) and c.max == 100]
         assert sliders2[0].value == 40.0
 
-    def test_cleanup_does_not_touch_real_local_model_manager(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """卸载时 mock 的 cancel_verification_if_active 被调用, 真实单例未被触碰。"""
-        with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active") as mock_cancel:
-            _, _, _, component = _render_panel()
-            run_unmount_effects(component)
-            mock_cancel.assert_called_once_with()
+    def test_cleanup_calls_vm_cancel_verification_only(self, mock_i18n_state, mock_app_colors_state) -> None:
+        """卸载时仅调 vm.cancel_verification(), View 层不触碰 LocalModelManager 单例 (P1-1)."""
+        vm, _, _, component = _render_panel()
+        run_unmount_effects(component)
+        vm.cancel_verification.assert_called_once_with()

@@ -11,7 +11,7 @@ from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.error_classifier import classify_error, classify_severity
 from utils.time_utils import get_now, parse_date
 
-from .base import ISyncStrategy, SyncResult
+from .base import ISyncStrategy, SyncResult, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError
 from data.constants import SYNC_RESULT_SKIPPED_PERMISSION
@@ -180,20 +180,22 @@ class MacroSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[MacroSync] Effective trade date | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical(
+                    "[MacroSync] Effective trade date | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True
+                )
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[MacroSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[MacroSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
         return get_now().date()
@@ -226,12 +228,14 @@ class MacroSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[MacroSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[MacroSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning("[MacroSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
+                logger.warning(
+                    "[MacroSync] Recoverable error (%s): %s", error_info["code"], safe_error(e), exc_info=True
+                )
             else:
-                logger.error("[MacroSync] Operational error: %s", e, exc_info=True)
+                logger.error("[MacroSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
         if self._cancelled and result.status not in ("failed", "cancelled"):
@@ -285,20 +289,22 @@ class MacroSyncStrategy(ISyncStrategy):
                 error_info = classify_error(e, context="general")
                 severity = classify_severity(e, context="general")
                 if severity == "system":
-                    logger.critical("[MacroSync] Monthly | SYSTEM-LEVEL failure for cn_gdp: %s", e, exc_info=True)
+                    logger.critical(
+                        "[MacroSync] Monthly | SYSTEM-LEVEL failure for cn_gdp: %s", safe_error(e), exc_info=True
+                    )
                     raise
                 elif severity == "recoverable":
                     logger.warning(
                         "[MacroSync] Monthly | cn_gdp fetch failed, skipping GDP (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[MacroSync] Monthly | cn_gdp fetch failed, skipping GDP (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 # GDP 失败不阻断 m2/cpi/ppi 同步，df_gdp 保持 None
@@ -345,7 +351,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[MacroSync] Monthly | SYSTEM-LEVEL failure while recording skipped_permission: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -353,34 +359,34 @@ class MacroSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[MacroSync] Monthly | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[MacroSync] Monthly | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[MacroSync] Monthly | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[MacroSync] Monthly | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[MacroSync] Monthly | Recoverable error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[MacroSync] Monthly | Operational error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             result.errors.append(f"Macro Monthly: {e}")
@@ -547,7 +553,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[MacroSync] Shibor | SYSTEM-LEVEL failure for LPR fetch: %s",
-                        lpr_err,
+                        safe_error(lpr_err),
                         exc_info=True,
                     )
                     raise
@@ -610,7 +616,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[MacroSync] Shibor | SYSTEM-LEVEL failure while recording skipped_permission: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -618,34 +624,34 @@ class MacroSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[MacroSync] Shibor | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[MacroSync] Shibor | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[MacroSync] Shibor | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[MacroSync] Shibor | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[MacroSync] Shibor | Recoverable error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[MacroSync] Shibor | Operational error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             result.errors.append(f"Shibor: {e}")
@@ -725,7 +731,7 @@ class MacroSyncStrategy(ISyncStrategy):
                         logger.critical(
                             "[MacroSync] IndexWeight | SYSTEM-LEVEL failure for %s: %s",
                             idx_code,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -734,7 +740,7 @@ class MacroSyncStrategy(ISyncStrategy):
                             "[MacroSync] IndexWeight | Failed %s (%s): %s",
                             idx_code,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
@@ -742,7 +748,7 @@ class MacroSyncStrategy(ISyncStrategy):
                             "[MacroSync] IndexWeight | Failed %s (%s): %s",
                             idx_code,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
 
@@ -774,7 +780,7 @@ class MacroSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[MacroSync] IndexWeight | SYSTEM-LEVEL failure while recording skipped_permission: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -782,34 +788,34 @@ class MacroSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[MacroSync] IndexWeight | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[MacroSync] IndexWeight | Failed to record skipped_permission status (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
         except Exception as e:
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[MacroSync] IndexWeight | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[MacroSync] IndexWeight | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[MacroSync] IndexWeight | Recoverable error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[MacroSync] IndexWeight | Operational error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             result.errors.append(f"IndexWeight: {e}")

@@ -135,7 +135,7 @@ class DataSanitizer:
     )
 
     _PATTERN_URL_CREDENTIALS = re.compile(
-        r"(postgresql|postgres|mysql|mongodb|redis|amqp|http|https|ftp)://([^:@\s]+):([^@\s]+)@",
+        r"([a-z][a-z0-9+.\-]*)://([^:@\s]+):([^@\s]+)@",
         re.IGNORECASE,
     )
 
@@ -284,6 +284,12 @@ class DataSanitizer:
         # 位置参数转为安全表示(避免大对象)
         clean_args = []
         for arg in args:
+            # R9: 位置字符串参数追加 _known_secrets 精确替换（与 sanitize_error 同源兜底），
+            # 避免裸 token 经 repr()[:100] 原样记录到日志
+            if isinstance(arg, str):
+                for _secret in list(DataSanitizer._known_secrets):
+                    if _secret in arg:
+                        arg = arg.replace(_secret, "***")
             if isinstance(arg, pd.DataFrame):
                 clean_args.append(DataSanitizer.sanitize_dataframe(arg))
             elif isinstance(arg, str) and len(arg) > 100:

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import Any
 
 import flet as ft
 
@@ -15,11 +14,10 @@ from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
 )
+from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
-
-if TYPE_CHECKING:
-    from data.data_processor import DataProcessor
+from ui.viewmodels.health_scan_view_model import HealthScanViewModel
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +545,7 @@ def HealthReportDialog(
         ft.AlertDialog(
             content_padding=0,
             modal=True,
-            title=ft.Container(),
+            title=ft.Text(I18n.get("health_report_title"), size=16, weight=ft.FontWeight.BOLD),
             title_padding=0,
             content=_build_health_content(report, width, height),
             actions=[
@@ -724,6 +722,7 @@ def _build_scan_content(
     result: dict | None,
     width: int,
     height: int,
+    error_key: str | None = None,
 ) -> ft.Container:
     """构建扫描弹窗内容（纯函数，状态驱动渲染）。
 
@@ -734,6 +733,7 @@ def _build_scan_content(
         result: 扫描结果字典（scan_state="done" 时非 None）
         width: 对话框宽度
         height: 对话框高度
+        error_key: 错误状态 i18n key（scan_state="error" 时使用，默认 "db_err_format"）
     """
     if scan_state == "done" and result is not None:
         return ft.Container(
@@ -743,7 +743,7 @@ def _build_scan_content(
         )
 
     # 进度阶段：idle / scanning / error
-    status_display = I18n.get("db_err_format") if scan_state == "error" else status_text
+    status_display = I18n.get(error_key or "db_err_format") if scan_state == "error" else status_text
     progress_value: float | None = progress if scan_state == "scanning" else None
 
     return ft.Container(
@@ -766,27 +766,27 @@ def _build_scan_content(
 
 @ft.component
 def HealthScanDialog(
-    data_processor: DataProcessor | None = None,
+    data_processor: Any = None,
     page: ft.Page | None = None,
     open_state: bool = False,
     on_close: Callable[[], None] | None = None,
 ) -> ft.Container:
     """深度健康扫描弹窗（声明式 V1）。
 
-    CLAUDE.md §3.2 MVVM + §3.3 声明式范式 + Phase 3.0.2 spike 模式：
+    CLAUDE.md §3.2 MVVM + §3.3 声明式范式：
     - ``use_state(open)`` 控制 dialog 显隐，``ft.use_dialog`` 自动挂载/卸载到 page overlay
     - i18n 通过 ``ft.use_state(get_observable_state)`` 自动重渲染
-    - 扫描状态/进度/状态文本/结果均由 ``use_state`` 驱动渲染
+    - 业务状态（scan_state/progress/status_text/result/error_key）由 ``HealthScanViewModel``
+      持有，View 经 ``use_viewmodel`` 消费仅渲染（View = f(ViewModel.state)）
     - 扫描任务通过 ``use_effect(setup, [open_], cleanup=cleanup)`` 启动，
-      ``open_=True`` 时自动触发（替代旧消费方 ``page.run_task(scan_dlg.start_scan)``）
-    - 跨线程 ``on_progress`` 回调通过 ``asyncio.run_coroutine_threadsafe`` 调度回主 loop
-      更新 state（替代旧命令式 progress_bar.value 直接赋值 + page 刷新）
-    - cleanup 中取消 pending futures（R2 兼容：CancelledError 在 future.cancel() 内部消化，
-      不重新抛出，符合关机清理语义）
+      ``open_=True`` 时调 ``vm.start_scan()``；cleanup 调 ``vm.cancel_pending_futures()``
+      取消 pending futures（R2 兼容：CancelledError 在 future.cancel() 内部消化）
+    - 跨线程 ``on_progress`` 回调在 VM 内通过 ``asyncio.run_coroutine_threadsafe``
+      调度回主 loop 更新 state（R11 loop-local 守卫）
     - 无命令式生命周期回调/手动刷新/``show_dialog``/``pop_dialog``
 
     Args:
-        data_processor: DataProcessor 实例（用于执行 ``run_quality_scan``）
+        data_processor: DataProcessor 实例（注入 VM，由 VM 调用 ``run_quality_scan``）
         page: ft.Page 引用（用于计算对话框尺寸）
         open_state: 初始打开状态（消费方重新实例化推送，每次为 True）
         on_close: 关闭回调（消费方用于清理引用）
@@ -797,72 +797,20 @@ def HealthScanDialog(
     # --- dialog 显隐 state（从 prop 初始化）---
     open_, set_open = ft.use_state(open_state)
 
-    # --- 扫描状态 state ---
-    # scan_state: "idle" | "scanning" | "done" | "error"
-    scan_state, set_scan_state = ft.use_state("idle")
-    progress, set_progress = ft.use_state(0.0)
-    status_text, set_status_text = ft.use_state(lambda: I18n.get("scan_step_init"))
-    _initial_result: dict | None = None
-    result, set_result = ft.use_state(_initial_result)
+    # --- ViewModel（业务状态 + command，View 经 use_viewmodel 消费仅渲染）---
+    state, vm = use_viewmodel(lambda: HealthScanViewModel(data_processor))
 
     width, height = _scan_dialog_size(page)
 
-    # --- 跨线程 future 持久化（use_ref 缓存数据，非命令式实例，符合声明式红线）---
-    futures_ref = ft.use_ref(lambda: set())
-
-    async def _update_progress(current: int, total: int, msg: str) -> None:
-        """主 loop 上更新进度 state（跨线程通过 run_coroutine_threadsafe 调度）。"""
-        set_progress(current / total)
-        set_status_text(msg)
-
     async def _start_scan_effect() -> None:
-        """open_=True 时启动扫描任务（use_effect 触发）。"""
+        """open_=True 时启动扫描任务（use_effect 触发，转调 VM command）。"""
         if not open_:
             return
-        if data_processor is None:
-            set_scan_state("error")
-            return
+        await vm.start_scan()
 
-        loop = asyncio.get_running_loop()
-        futures = futures_ref.current
-        assert futures is not None  # use_ref factory 首次渲染已执行，current 保证非 None
-
-        def on_progress(current: int, total: int, msg: str) -> None:
-            """工作线程回调：调度 _update_progress 到主 loop（线程安全）。"""
-            fut = asyncio.run_coroutine_threadsafe(
-                _update_progress(current, total, msg),
-                loop,
-            )
-            futures.add(fut)
-            fut.add_done_callback(futures.discard)
-
-        set_scan_state("scanning")
-        try:
-            scan_result = await data_processor.run_quality_scan(
-                sample_size=50,
-                progress_callback=on_progress,
-            )
-            set_result(scan_result)
-            set_scan_state("done")
-        except asyncio.CancelledError:
-            raise  # R2: CancelledError 必须传播以配合优雅停机
-        except Exception as ex:
-            logger.error("[HealthScanDialog] Scan failed: %s", ex, exc_info=True)
-            set_scan_state("error")
-
-    async def _cleanup_scan() -> None:
-        """卸载/open 变化时取消 pending futures（R2 兼容）。
-
-        ``future.cancel()`` 在 future 已完成时返回 False，未完成时触发
-        ``CancelledError`` 由 future 内部消化（run_coroutine_threadsafe 的 coroutine
-        收到 CancelledError），不向调用方传播——符合关机清理语义。
-        """
-        futures = futures_ref.current
-        assert futures is not None  # use_ref factory 首次渲染已执行，current 保证非 None
-        for f in list(futures):
-            if not f.done():
-                f.cancel()
-        futures.clear()
+    def _cleanup_scan() -> None:
+        """卸载/open 变化时取消 pending futures（R2 兼容不重新抛出）。"""
+        vm.cancel_pending_futures()
 
     ft.use_effect(_start_scan_effect, dependencies=[open_], cleanup=_cleanup_scan)
 
@@ -873,12 +821,13 @@ def HealthScanDialog(
 
     # --- 条件渲染 dialog + use_dialog 自动挂载/卸载 ---
     content = _build_scan_content(
-        scan_state=scan_state,
-        progress=progress,
-        status_text=status_text,
-        result=result,
+        scan_state=state.scan_state,
+        progress=state.progress,
+        status_text=state.status_text,
+        result=state.result,
         width=width,
         height=height,
+        error_key=state.error_key,
     )
 
     dialog = (

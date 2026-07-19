@@ -76,6 +76,18 @@ class TestCalculateHolderChanges:
         dao._write_db = AsyncMock(side_effect=Exception("db error"))
         await dao._calculate_holder_changes(["000001.SZ"])
 
+    @pytest.mark.asyncio
+    async def test_database_query_error_propagates(self):
+        """P2-2: _write_db 抛 DatabaseQueryError 必须原样传播，不可被 except Exception 吞为 warning。
+
+        _write_db 默认 suppress_errors=False，遇到非连接型异常会包装为 DatabaseQueryError 抛出。
+        若被 except Exception 静默吞没，会与 P1-4 同根导致 holder_num_change 永久静默不更新。
+        """
+        dao = _make_dao()
+        dao._write_db = AsyncMock(side_effect=DatabaseQueryError("db write failed"))
+        with pytest.raises(DatabaseQueryError):
+            await dao._calculate_holder_changes(["000001.SZ"])
+
 
 class TestSaveTop10Holders:
     @pytest.mark.asyncio

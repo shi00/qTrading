@@ -9,6 +9,8 @@ import logging
 import webbrowser
 from urllib.parse import urlparse
 
+from ui.i18n import I18n
+
 logger = logging.getLogger(__name__)
 
 # 白名单域名：金融数据相关站点，hostname 以这些域名结尾（含子域名）即放行。
@@ -33,9 +35,10 @@ def _show_blocked_toast(page) -> None:
 
     CLAUDE.md §3.2 声明式 UI: 用 ``page.show_toast`` 替代 ``page.show_dialog(ft.SnackBar)``
     (main.py:251 动态挂载 show_toast).
+    P3-25: 文案经 ``I18n.get("markdown_link_blocked")`` 国际化（en_US 下显示 "Link blocked"）。
     """
     if hasattr(page, "show_toast"):
-        page.show_toast("链接已拦截", type="error")  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
+        page.show_toast(I18n.get("markdown_link_blocked"), type="error")  # type: ignore[untyped]  # [reason: main.py 动态挂载, ft.Page 存根未声明]
     else:
         logger.warning("[MarkdownSafe] Blocked non-whitelisted URL (toast unavailable)")
 

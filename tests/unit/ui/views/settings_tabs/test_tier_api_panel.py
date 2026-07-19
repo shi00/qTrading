@@ -334,11 +334,21 @@ class TestComputeProgressText:
         self.mock_i18n.get.assert_called_with("sys_tier_probe_all_failed")
         assert result == "sys_tier_probe_all_failed"
 
-    def test_result_set_tier_failed_returns_failed_with_message(self):
-        """result.type=set_tier_failed → sys_tier_probe_failed + (message)。"""
-        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="set_tier_failed", message="custom error"))
-        self.mock_i18n.get.assert_called_with("sys_tier_probe_failed")
-        assert result == "sys_tier_probe_failed (custom error)"
+    def test_result_set_tier_failed_io_reason_maps_to_set_failed_io(self):
+        """result.type=set_tier_failed + reason=io → sys_tier_set_failed_io (i18n 状态驱动).
+
+        VM 产出 locale 无关 reason, View 按 reason 映射 i18n key,
+        避免硬编码中文 message 在 en_US 下中英混排 (CLAUDE.md §3.2).
+        """
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="set_tier_failed", reason="io"))
+        self.mock_i18n.get.assert_called_with("sys_tier_set_failed_io")
+        assert result == "sys_tier_set_failed_io"
+
+    def test_result_set_tier_failed_invalid_tier_reason_maps_to_set_failed_invalid(self):
+        """result.type=set_tier_failed + reason=invalid_tier → sys_tier_set_failed_invalid."""
+        result = _compute_progress_text(False, (0, 0), ProbeResultRow(type="set_tier_failed", reason="invalid_tier"))
+        self.mock_i18n.get.assert_called_with("sys_tier_set_failed_invalid")
+        assert result == "sys_tier_set_failed_invalid"
 
     def test_idle_no_result_returns_empty(self):
         """idle 且无 result → 空。"""

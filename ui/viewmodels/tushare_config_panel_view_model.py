@@ -19,6 +19,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from data.constants import TUSHARE_POINT_TIERS
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.config_handler import ConfigHandler
@@ -34,11 +35,16 @@ _RAW_MSG_KEY = "_raw_msg_"
 
 @dataclass(frozen=True)
 class TushareConfigState:
-    """TushareConfigPanel 的不可变 state snapshot。"""
+    """TushareConfigPanel 的不可变 state snapshot。
+
+    tier_options: 5 档积分档位常量元组 (由 VM 产出, View 经 use_viewmodel 消费,
+        避免View 直接 import data.constants.TUSHARE_POINT_TIERS 违反 MVVM 契约).
+    """
 
     # Config fields
     token: str = ""
     tier: str = "points_5000"  # 默认档位（ConfigHandler.get_tushare_point_tier 的默认值）
+    tier_options: tuple[str, ...] = TUSHARE_POINT_TIERS  # VM 产出供 View 渲染下拉选项
     # Status fields
     is_verifying: bool = False
     status_message: Message | None = None

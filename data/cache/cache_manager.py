@@ -34,6 +34,7 @@ from data.persistence.daos.stk_limit_dao import StkLimitDao
 from data.persistence.daos.sw_industry_dao import SwIndustryClassifyDao, SwIndustryMemberDao
 from data.persistence.daos.sync_dao import SyncDao
 from data.persistence.daos.top_inst_dao import TopInstDao
+from data.sync.base import safe_error
 from utils.config_handler import ConfigHandler
 from utils.db_utils import get_db_pool_config
 from utils.async_utils import gather_return_exceptions_propagating_cancel
@@ -106,7 +107,9 @@ class CacheManager:
                     inst.engine.sync_engine.dispose()
                     inst._disposed = True
             except Exception as e:
-                logger.debug("Cache operation failed: %s", e, exc_info=True)
+                # P3-24: warning 与 data_processor.py:79 同级 atexit cleanup 场景对齐
+                # （atexit 异常属资源释放失败，需可见而非静默吞没）
+                logger.warning("CacheManager atexit cleanup failed: %s", safe_error(e), exc_info=True)
 
     def __init__(self):
         with self._lock:

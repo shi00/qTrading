@@ -31,7 +31,10 @@ class ProbeResultRow:
     替代 dual-track 的 dict 持有模式, 扁平化原 result dict 直接放入 state.
     不同 type 用不同子集字段 (completed: available/unavailable/unknown;
     tier_too_high: false_count/total; all_failed: 仅 type/tier;
-    set_tier_failed: message/error).
+    set_tier_failed: reason[io|invalid_tier]/error).
+
+    i18n 状态驱动 (CLAUDE.md §3.2): reason 为 locale 无关判别字段,
+    View 按 reason 映射 i18n key 渲染, VM 不产出本地化 message.
     """
 
     type: str
@@ -41,7 +44,7 @@ class ProbeResultRow:
     unknown: int = 0
     false_count: int = 0
     total: int = 0
-    message: str = ""
+    reason: str = ""
     error: str = ""
 
 
@@ -168,12 +171,13 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
                 raise
             except Exception as exc:
                 # IO 失败 → 通过 _emit_result 通知 View 显示失败消息
+                # i18n 状态驱动 (§3.2): VM 产出 locale 无关 reason, View 按 reason 映射 i18n key
                 logger.warning("[SystemViewModel] set_tushare_point_tier failed: %s", exc)
                 return self._emit_result(
                     {
                         "type": "set_tier_failed",
+                        "reason": "io",
                         "tier": old_tier,
-                        "message": "档位保存失败，请检查配置文件权限",
                         "error": str(exc),
                     }
                 )
@@ -184,8 +188,8 @@ class SystemViewModel(ObservableViewModelMixin[SystemState]):
                 return self._emit_result(
                     {
                         "type": "set_tier_failed",
+                        "reason": "invalid_tier",
                         "tier": old_tier,
-                        "message": f"档位 {new_tier} 无效，已回滚",
                     }
                 )
 
@@ -311,6 +315,6 @@ def _result_dict_to_row(result: dict[str, Any]) -> ProbeResultRow:
         unknown=int(result.get("unknown", 0)),
         false_count=int(result.get("false_count", 0)),
         total=int(result.get("total", 0)),
-        message=str(result.get("message", "")),
+        reason=str(result.get("reason", "")),
         error=str(result.get("error", "")),
     )

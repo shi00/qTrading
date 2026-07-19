@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 对应 [CLAUDE.md §3.1 R18](./CLAUDE.md#31--绝对禁止)。本节承接宪法中关于 git 隔离开发的强制要求，提供分支模型、命名规范、worktree 标准流程。**使用 git worktree 隔离开发，确保主工作区整洁**。
+> 对应 [CLAUDE.md §3.1 R18](../../CLAUDE.md#31--绝对禁止)。本节承接宪法中关于 git 隔离开发的强制要求，提供分支模型、命名规范、worktree 标准流程。**使用 git worktree 隔离开发，确保主工作区整洁**。
 
 ### 分支模型：GitHub Flow
 

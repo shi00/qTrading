@@ -114,13 +114,73 @@ class BacktestViewModel(ObservableViewModelMixin[BacktestState]):
         self._task_id: str | None = None
         self._state: BacktestState = BacktestState()
         self._subscribers: list[Callable[[BacktestState], None]] = []
+        # P2-1: 跟踪 fire-and-forget task 生命周期，dispose 时取消避免孤儿 (对齐 ScreenerViewModel)
+        self._background_tasks: set = set()
 
     def dispose(self):
         """清理资源：先取消运行中任务（防孤儿），再清引用与状态。"""
         self.cancel_backtest()
         self._task_id = None
+        for t in list(self._background_tasks):
+            if not t.done():
+                t.cancel()
+        # NOTE(lazy): 不立即 clear _background_tasks — done_callback (_on_background_task_done)
+        # 会在任务完成时移除并读取 exception(), 避免 'Task exception was never retrieved'.
+        # ceiling: 事件循环关闭导致 callback 不触发时, 任务随 VM 一起被 GC.
+        # upgrade: 引入 async_dispose() 显式 await drain (本任务范围内不引入以保持微创).
         self._subscribers.clear()
         self._state = BacktestState()
+
+    def _on_background_task_done(self, task: asyncio.Task) -> None:
+        """Done callback: 移除已完成任务并记录非取消异常.
+
+        - 丢弃任务引用前读取 task.exception() 标记异常已 retrieved,
+          避免 'Task exception was never retrieved' 警告.
+        - CancelledError 不记录为 error, 取消正常传播 (R2).
+        """
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[BacktestVM] Background task failed: %s", exc, exc_info=exc)
+
+    def get_splitter_width(self, config_key: str, default_width: int) -> int:
+        """读取持久化的 splitter 宽度 (P1-1: 经 VM 读取, View 不再直接 import ConfigHandler).
+
+        ConfigHandler._config_cache 命中是纯内存读 (非 IO); 首次未命中触发小 JSON
+        文件读 (单次 < 5ms), 在 use_effect 上下文中可接受。返回值由 ResizableSplitter
+        内部 clamp 到 [min_width, max_width]。
+        """
+        from utils.config_handler import ConfigHandler
+
+        return ConfigHandler.get_typed(config_key, int, default_width)
+
+    def persist_splitter_width(self, config_key: str, width: int) -> None:
+        """持久化 splitter 宽度 (P1-1/P2-1: 异步写盘, R16 合规). fire-and-forget.
+
+        同步签名以满足 ResizableSplitter ``on_persist_width`` 回调契约; 内部经
+        ThreadPoolManager.run_async 提交 IO 写盘, 不阻塞 Flet 事件处理器。
+        复用 _background_tasks + _on_background_task_done 跟踪 task 生命周期。
+        """
+        from utils.config_handler import ConfigHandler
+        from utils.thread_pool import TaskType, ThreadPoolManager
+
+        async def _persist() -> None:
+            try:
+                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_typed, config_key, width)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("[BacktestVM] persist_splitter_width failed: %s", e, exc_info=True)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # 无事件循环 (测试环境), 静默跳过
+        task = loop.create_task(_persist())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
 
     def get_available_strategies(self) -> dict[str, str]:
         """获取可用策略列表。"""

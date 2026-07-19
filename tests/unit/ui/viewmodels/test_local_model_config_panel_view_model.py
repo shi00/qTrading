@@ -815,3 +815,45 @@ class TestSanitizeErrorAndCancelledError:
         vm.update_model_path("/models/test.gguf")
         with pytest.raises(asyncio.CancelledError):
             await vm.save_config()
+
+
+# --- cancel_verification (P1-1: View cleanup 经 VM 命令转发) ---
+
+
+class TestLocalModelConfigPanelViewModelCancelVerification:
+    """cancel_verification: P1-1 下沉的 VM 命令, 替代 View 直调 LocalModelManager.
+
+    覆盖:
+    1. 正常调用: 转发到 LocalModelManager.cancel_verification_if_active
+    2. 异常静默: cleanup 路径不阻断组件卸载, 仅记 debug 日志
+    """
+
+    def test_cancel_verification_calls_local_model_manager(self, mock_verify_model, mock_config_handler):
+        """DoD: cancel_verification() 转发到 LocalModelManager.cancel_verification_if_active()."""
+        vm = _make_vm(mock_verify_model)
+        with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active") as mock_cancel:
+            vm.cancel_verification()
+        mock_cancel.assert_called_once_with()
+
+    def test_cancel_verification_swallows_exception_logs_debug(self, mock_verify_model, mock_config_handler, caplog):
+        """DoD: cancel_verification_if_active 抛异常时静默, 仅记 debug 日志 (cleanup 不阻断卸载)."""
+        vm = _make_vm(mock_verify_model)
+        with (
+            patch(
+                "services.local_model_manager.LocalModelManager.cancel_verification_if_active",
+                side_effect=RuntimeError("manager not ready"),
+            ),
+            caplog.at_level(logging.DEBUG),
+        ):
+            vm.cancel_verification()  # 不应抛异常
+        assert any(
+            "cancel_verification failed" in rec.message and rec.levelno == logging.DEBUG for rec in caplog.records
+        )
+
+    def test_cancel_verification_does_not_change_state(self, mock_verify_model, mock_config_handler):
+        """DoD: cancel_verification 不修改 VM state (cleanup 命令, 无副作用)."""
+        vm = _make_vm(mock_verify_model)
+        original_state = vm.state
+        with patch("services.local_model_manager.LocalModelManager.cancel_verification_if_active"):
+            vm.cancel_verification()
+        assert vm.state is original_state

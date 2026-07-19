@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 
 import pandas as pd
 
-from data.sync.base import ISyncStrategy, SyncContext, SyncResult
+from data.sync.base import ISyncStrategy, SyncContext, SyncResult, safe_error
 import pytest
 
 
@@ -323,3 +323,45 @@ class TestISyncStrategyCancelSemantics:
         from data.sync.macro import MacroSyncStrategy
 
         assert hasattr(MacroSyncStrategy, "_check_cancelled"), "MacroSyncStrategy.run should use _check_cancelled"
+
+
+class TestSafeError:
+    """P3-2: data/ 层 R9 一致性 — safe_error 共享脱敏入口单测。"""
+
+    def test_returns_sanitized_string_for_plain_exception(self):
+        """普通异常经 safe_error 返回字符串。"""
+        result = safe_error(ValueError("plain message"))
+        assert isinstance(result, str)
+        assert "plain message" in result
+
+    def test_url_credentials_redacted(self):
+        """含 DB URL 凭证的异常经 safe_error 后密码被脱敏。"""
+        err = RuntimeError("connect to postgresql://user:secret_pass@host:5432/db failed")
+        result = safe_error(err)
+        assert "secret_pass" not in result
+        assert "***" in result
+
+    def test_known_secret_replaced(self):
+        """注册的 secret 在异常消息中被精确替换为 ***。"""
+        from utils.sanitizers import DataSanitizer
+
+        secret = "super_secret_token_12345"
+        DataSanitizer.register_secret(secret)
+        try:
+            err = RuntimeError(f"auth failed with token={secret}")
+            result = safe_error(err)
+            assert secret not in result
+            assert "***" in result
+        finally:
+            DataSanitizer._reset_known_secrets()
+
+    def test_non_exception_string_input(self):
+        """safe_error 接受 Exception 对象，str(e) 用于脱敏。"""
+        err = ValueError("with api_key=sk-abcd1234efgh5678")
+        result = safe_error(err)
+        assert "sk-abcd1234efgh5678" not in result
+
+    def test_returns_string_for_empty_exception(self):
+        """空消息异常返回空字符串（脱敏后）。"""
+        result = safe_error(ValueError(""))
+        assert isinstance(result, str)

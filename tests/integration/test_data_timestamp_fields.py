@@ -14,7 +14,7 @@ from tests.integration.test_data_db_migrator import (
     _drop_isolated_db,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.slow]
 
 
 class TestCreatedAtSchema:

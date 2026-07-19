@@ -24,4 +24,4 @@ class MyStrategy(BaseStrategy):
 
 - **策略入口**: `strategies/all_strategies.py` 通过导入触发 `@register_strategy`，由 `_STRATEGY_REGISTRY` 统一暴露。
 - **策略 API**: 依赖声明 (`required_context_keys`/`required_tables`/`required_history_days`/`required_apis`)、动态参数 (`get_parameters()`)、动态描述 (`get_dynamic_description()`)、依赖检查 (`check_dependencies()`) — 详见 `strategies/base_strategy.py`。
-- **新增策略流程**: 见 [标准开发工作流](./docs/guides/how-to.md#3-新增一个策略)。
+- **新增策略流程**: 见 [标准开发工作流](../guides/how-to.md#3-新增一个策略)。

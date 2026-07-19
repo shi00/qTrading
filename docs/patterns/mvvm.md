@@ -2,7 +2,7 @@
 
 > 来源：从 CONTRIBUTING.md 迁移
 
-> 对应 [CLAUDE.md §3.2 UI 模型（强制）](./CLAUDE.md#32--强制要求)；声明式渲染细则见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)。
+> 对应 [CLAUDE.md §3.2 UI 模型（强制）](../../CLAUDE.md#32--强制要求)；声明式渲染细则见 [V1 声明式 UI 开发规范](../flet/v1-api-constraints.md#v1-声明式-ui-开发规范)。
 
 采用 MVVM + 声明式渲染复合范式：MVVM 负责架构分层，声明式负责 UI 渲染模型。`View = f(ViewModel.state)`，用户事件调 `ViewModel.command()`，VM 更新 state 后 View 自动重渲染。
 
@@ -68,7 +68,7 @@ class ScreenerViewModel:
 
 ### 桥接 hook 契约
 
-View 通过 `use_viewmodel(factory=...)` 或 `use_viewmodel(vm=...)` 消费 ViewModel（两种模式互斥，不可同时传入；完整签名与实现见 [ui/hooks.py](./ui/hooks.py)）：
+View 通过 `use_viewmodel(factory=...)` 或 `use_viewmodel(vm=...)` 消费 ViewModel（两种模式互斥，不可同时传入；完整签名与实现见 [ui/hooks.py](../../ui/hooks.py)）：
 
 ```python
 import flet as ft
@@ -90,7 +90,7 @@ def ScreenerView():
     ])
 ```
 
-`use_viewmodel` 契约（已实现，见 [ui/hooks.py](./ui/hooks.py)，签名 `use_viewmodel(factory=None, *, vm=None, dispose_on_unmount=True) -> (state, vm)`）：
+`use_viewmodel` 契约（已实现，见 [ui/hooks.py](../../ui/hooks.py)，签名 `use_viewmodel(factory=None, *, vm=None, dispose_on_unmount=True) -> (state, vm)`）：
 
 **两种互斥模式**：
 
@@ -104,8 +104,8 @@ def ScreenerView():
 - 首次渲染：`factory()` 实例化 VM（内部模式）或直接使用传入的 `vm`（外部模式），调 `vm.subscribe(set_state)` 注册（保存返回的 unsub），返回 `(vm.state, vm)`
 - `_notify` 触发：VM 遍历订阅者调 `callback(self.state)`，hook 注册的 callback 即 `set_state(new_state)`，触发组件重渲染
 - 卸载时：`use_effect` 的显式 `cleanup=` 参数调 `unsub()` 退订；内部模式且 `dispose_on_unmount=True` 时额外调 `vm.dispose()`
-- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: ScreenerViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](./CLAUDE.md#43-单例模式) DI 原则）
+- `factory` 必须是无参 callable；DI 参数在 factory 闭包里完成（如 `lambda: ScreenerViewModel(dep1, dep2)` 或 `functools.partial`），VM 的 `__init__` 接受 DI 参数，不在构造函数里隐式获取全局状态（遵循 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) DI 原则）
 
 ### 存量技术债
 
-[ui/viewmodels/](./ui/viewmodels/) 下所有 ViewModel 必须满足 [`_ViewModelProtocol`](./ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）+ state snapshot + commands + `use_viewmodel` 目标范式。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。已知例外清单见 `ui/viewmodels/` 审查记录。
+[ui/viewmodels/](../../ui/viewmodels/) 下所有 ViewModel 必须满足 [`_ViewModelProtocol`](../../ui/hooks.py)（`state` / `subscribe` / `dispose` 三方法）+ state snapshot + commands + `use_viewmodel` 目标范式。新代码必须沿用此范式，不得使用 `on_update`/`on_log` 回调注入。已知例外清单见 `ui/viewmodels/` 审查记录。

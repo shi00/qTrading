@@ -1748,8 +1748,20 @@ class AIService:
     async def classify_news(self, text: str) -> dict:
         """
         Classify news text using Local LLM (Preferred) or Cloud LLM (Fallback).
+
+        P3-6 设计取舍：外部新闻原文 ``text`` 仅做长度截断（``NEWS_TEXT_MAX_LEN``），
+        未走 ``neutralize_external_text`` 中性化（与 ``analyze_stock`` 不一致）。
+        残余展示层污染属已知简化，靠三层防御兜底：
+        1. JSON mode：LLM 输出强制 JSON 结构，限制自由文本污染面；
+        2. 白名单校验：``_parse_news_result`` 仅接受 ``NEWS_CATEGORY_MAP`` 内的
+           L1/L2 枚举值，无效编码降级为本地化"资讯"；
+        3. 兜底降级：解析失败回退默认 Neutral 语义，避免污染下游消费方。
+
+        升级触发条件：若新增展示层字段直接 echo LLM 原文（如 reason 段落），
+        必须补 ``neutralize_external_text`` 调用对齐 ``analyze_stock`` 范式。
         """
         system_instruction = ConfigHandler.get_ai_news_prompt()
+        # NOTE(lazy): classify_news 未走 neutralize_external_text, 仅长度截断. ceiling: 三层防御(JSON mode+白名单+兜底降级). upgrade: 新增展示层字段 echo LLM 原文时补 neutralize_external_text.
         messages = [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": text[:NEWS_TEXT_MAX_LEN]},

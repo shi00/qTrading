@@ -326,7 +326,10 @@ def check_onboarding_needed(db_url, token, llm_api_key, onboarding_complete):
     return not db_url or not token or not llm_api_key or not onboarding_complete
 
 
-def mask_sensitive(value, prefix_len=4):
-    if value and len(value) > prefix_len:
-        return f"{value[:prefix_len]}****"
-    return "None"
+def mask_sensitive(value):
+    """R9 一致性：复用 DataSanitizer.sanitize_token 替换私有前缀脱敏实现。
+
+    旧实现固定泄露 token 前 4 字符，对短 token 仍泄露显著片段；改用 sanitize_token
+    后短 token（< 32）全部隐藏为 ***，长 token 部分脱敏（前 3 + *** + 后 4）。
+    """
+    return DataSanitizer.sanitize_token(value)

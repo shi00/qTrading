@@ -116,3 +116,6 @@ Plans*.md
 # 8. Code reviews
 reviews/
 
+# 9. Static analysis reports (auto-generated, not source code)
+pyright_report.txt
+

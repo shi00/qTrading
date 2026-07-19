@@ -43,11 +43,6 @@ ALLOWED_VIOLATIONS: dict[tuple[str, int, str], str] = {
     ("startup_views.py", 93, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
     ("startup_views.py", 106, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
     ("startup_views.py", 139, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
-    # health_report_dialog.py 全屏样式: title 为显式空 Container
-    # (搭配 title_padding=0 + content_padding=0), 实际无标题文本, 设计意图为全屏无 chrome.
-    ("components/health_report_dialog.py", 547, "missing_title"): (
-        "全屏样式设计, title=ft.Container() 显式空容器搭配 padding=0"
-    ),
 }
 
 

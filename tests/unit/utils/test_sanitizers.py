@@ -133,6 +133,46 @@ class TestSanitizeError:
         assert "***" in result
         assert "user" in result
 
+    def test_error_with_compound_scheme_url_credentials(self):
+        """P3-3: 复合 scheme（如 postgresql+asyncpg://）凭证也应被脱敏。
+
+        通配正则 `[a-z][a-z0-9+.-]*` 应匹配 `postgresql+asyncpg`，密码替换为 ***，
+        scheme 与 user 保留。
+        """
+        err = ValueError("DB connect: postgresql+asyncpg://myuser:my_db_password@host:5432/mydb")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_db_password" not in result
+        assert "***" in result
+        assert "postgresql+asyncpg" in result
+        assert "myuser" in result
+
+    def test_error_with_mysql_pymysql_scheme_url_credentials(self):
+        """P3-3: mysql+pymysql:// scheme 凭证也应被脱敏。"""
+        err = ValueError("DB connect: mysql+pymysql://myuser:my_mysql_pass@host:3306/mydb")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_mysql_pass" not in result
+        assert "***" in result
+        assert "mysql+pymysql" in result
+        assert "myuser" in result
+
+    def test_error_with_mssql_pyodbc_scheme_url_credentials(self):
+        """P3-3: mssql+pyodbc:// scheme 凭证也应被脱敏。"""
+        err = ValueError("DB connect: mssql+pyodbc://myuser:my_mssql_pass@host:1433/mydb")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_mssql_pass" not in result
+        assert "***" in result
+        assert "mssql+pyodbc" in result
+        assert "myuser" in result
+
+    def test_error_with_redis_scheme_url_credentials(self):
+        """P3-3: redis:// scheme 凭证也应被脱敏。"""
+        err = ValueError("Redis: redis://myuser:my_redis_pass@host:6379/0")
+        result = DataSanitizer.sanitize_error(err)
+        assert "my_redis_pass" not in result
+        assert "***" in result
+        assert "redis" in result
+        assert "myuser" in result
+
     def test_error_with_access_token(self):
         err = ValueError("Failed: ?access_token=eyJhbGciOiJIUzI1NiJ9")
         result = DataSanitizer.sanitize_error(err)
@@ -399,6 +439,46 @@ class TestSanitizeArgs:
     def test_basic_args(self):
         result = DataSanitizer.sanitize_args("hello", 42)
         assert isinstance(result, tuple)
+
+    def test_positional_string_arg_with_registered_secret_replaced(self):
+        """P3-5: 位置字符串参数含已注册 secret 时应精确替换为 ***。"""
+        secret = "tushare_positional_secret_abc"
+        DataSanitizer.register_secret(secret)
+        try:
+            args, _ = DataSanitizer.sanitize_args(f"token={secret}", 42)
+            assert secret not in args[0]
+            assert "***" in args[0]
+        finally:
+            DataSanitizer._reset_known_secrets()
+
+    def test_positional_long_string_arg_with_secret_replaced_before_truncation(self):
+        """P3-5: 长字符串（>100）位置参数在 truncation 前应用 secret 替换。
+
+        旧实现 `repr(arg)[:100]` 不查 secret，长 token 在前 50 字符内会泄露。
+        """
+        secret = "long_running_tushare_token_xyz_1234567890_abcdefghij"
+        DataSanitizer.register_secret(secret)
+        try:
+            long_arg = f"prefix_padding_{secret}_suffix_padding_" * 3
+            args, _ = DataSanitizer.sanitize_args(long_arg)
+            assert secret not in args[0]
+            assert "***" in args[0]
+        finally:
+            DataSanitizer._reset_known_secrets()
+
+    def test_positional_non_string_arg_unaffected(self):
+        """P3-5: 非字符串位置参数（int/dict）行为不变，不触发 secret 查找。"""
+        args, _ = DataSanitizer.sanitize_args(42, [1, 2, 3], {"key": "val"})
+        assert args[0] == "42"
+        assert isinstance(args[1], str)
+        assert isinstance(args[2], str)
+
+    def test_positional_dataframe_arg_unaffected(self):
+        """P3-5: DataFrame 位置参数仍走 sanitize_dataframe 分支。"""
+        df = pd.DataFrame({"a": [1, 2]})
+        args, _ = DataSanitizer.sanitize_args(df)
+        assert "DataFrame" in args[0]
+        assert "shape=" in args[0]
 
 
 class TestAIServiceErrorSanitization:

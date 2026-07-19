@@ -30,15 +30,15 @@
 
 ### 4. 新增一个 UI 视图
 
-1. 先确认 `ui.hooks.use_viewmodel` 是否已满足当前 ViewModel 消费需求；若未满足，先实现/扩展该 hook（见 [MVVM 表现层](#mvvm-表现层)）。
+1. 先确认 `ui.hooks.use_viewmodel` 是否已满足当前 ViewModel 消费需求；若未满足，先实现/扩展该 hook（见 [MVVM 表现层](../patterns/mvvm.md#mvvm-表现层)）。
 2. 在 `ui/viewmodels/` 下创建对应 ViewModel：暴露不可变 state snapshot、commands、`subscribe(callback) -> unsub`，禁止 import Flet、禁止持有 Flet 控件、禁止调 `page.update()`/`control.update()`。
-3. 在 `ui/views/` 下创建 `@ft.component` 声明式 View：只读取 state 渲染控件树，只在事件中调用 commands；禁止 `did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`（见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范)）。
-4. i18n 文案由 VM 输出 key + params，View 按当前 locale 渲染；locale 变化作为 View 层声明式状态源触发重渲染（见 [V1 声明式 UI 开发规范](#v1-声明式-ui-开发规范) 中的 i18n 状态驱动规则）。
+3. 在 `ui/views/` 下创建 `@ft.component` 声明式 View：只读取 state 渲染控件树，只在事件中调用 commands；禁止 `did_mount`/`will_unmount`/`self.update()`/`UserControl`/`PageRefMixin`（见 [V1 声明式 UI 开发规范](../flet/v1-api-constraints.md#v1-声明式-ui-开发规范)）。
+4. i18n 文案由 VM 输出 key + params，View 按当前 locale 渲染；locale 变化作为 View 层声明式状态源触发重渲染（见 [V1 声明式 UI 开发规范](../flet/v1-api-constraints.md#v1-声明式-ui-开发规范) 中的 i18n 状态驱动规则）。
 5. 响应式布局优先使用声明式 state / props / `ResponsiveRow`，禁止新增 `handle_resize` 鸭子分发式命令式代码。
 6. 若需注册新标签页，再修改 `ui/app_layout.py`。
 7. UI 事件中的同步 IO/CPU 密集任务必须通过 `ThreadPoolManager.run_async()` 或 `TaskManager.submit_task()` 提交，避免阻塞 Flet 主循环（对应 CLAUDE.md §3.1 R16）。
 8. UI 事件回调使用 `@log_ui_action` 装饰器埋点。
-9. 按 [变更类型 → 最小验证子集](#变更类型--最小验证子集) 运行 UI 相关验证。
+9. 按 [变更类型 → 最小验证子集](../../CONTRIBUTING.md#变更类型--最小验证子集) 运行 UI 相关验证。
 
 ### 5. 新增一个外部数据源
 
@@ -80,10 +80,10 @@
 
 ### 8. 新增一个单例
 
-1. 使用 `@register_singleton` 装饰器注册类（代码模板见[单例模式实现模板](#单例模式实现模板)）。
+1. 使用 `@register_singleton` 装饰器注册类（代码模板见[单例模式实现模板](../architecture/singleton-lifecycle.md#单例模式实现模板)）。
 2. 实现 `_reset_singleton()` 类方法 (测试隔离必须)。
 3. 实例创建必须受 `threading.Lock` 保护 (优先在 `__new__` 中持锁)。
 4. 支持 `_initialized` 标志防止重复初始化。
 5. 如需进程退出清理，实现 `_atexit_cleanup()` 类方法。
-6. 在 [CLAUDE.md §4.3](./CLAUDE.md#43-单例模式) 的单例列表中补充新单例名称。
+6. 在 [CLAUDE.md §4.3](../../CLAUDE.md#43-单例模式) 的单例列表中补充新单例名称。
 7. 在 `tests/unit/` 下编写单测；常规隔离由 `_reset_all_singletons` autouse fixture 自动处理，需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器。

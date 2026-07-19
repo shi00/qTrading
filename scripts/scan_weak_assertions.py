@@ -8,6 +8,7 @@
 - assert len(mock.calls) >= 1 / assert len(mock.call_args_list) >= 1  （仅验证调用次数）
 - pytest.raises(SomeError) 后无进一步断言  （仅验证抛异常不验 message/type）
 - print(...) 替代断言  （测试中用 print 输出而非 assert）
+- assert X is not None 作为函数唯一终态  （仅验证存在性，不验证行为/参数）
 
 模式：
     python scripts/scan_weak_assertions.py
@@ -263,6 +264,45 @@ def _is_weak_print(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
     return all(not (isinstance(child, ast.Assert) and child is not node) for child in ast.walk(parent_func))
 
 
+def _is_is_not_none_assert(node: ast.AST) -> bool:
+    """判断 assert 是否为 `assert X is not None` 形式。"""
+    if not isinstance(node, ast.Assert):
+        return False
+    test = node.test
+    if not isinstance(test, ast.Compare):
+        return False
+    if not test.ops or not isinstance(test.ops[0], ast.Is):
+        return False
+    right = test.comparators[0] if test.comparators else None
+    return isinstance(right, ast.Constant) and right.value is None
+
+
+def _is_weak_is_not_none_terminal(node: ast.AST, parent_func: ast.FunctionDef | None) -> bool:
+    """判断 `assert X is not None` 是否作为函数内唯一终态断言（弱断言）。
+
+    匹配模式（弱断言）：
+    - test_ 函数内 `assert X is not None`，且函数体内仅含此类断言，
+      无其他内容断言（如 ``assert result == expected`` / ``assert "x" in s`` 等）。
+
+    不匹配（强断言 / 链式非终态）：
+    - 函数内还有其他非 `is not None` 的断言（说明 `is not None` 是
+      前置条件，函数有真实意图断言）。
+    - 不在 test_ 函数内（helper 等不报）。
+    """
+    if not isinstance(node, ast.Assert):
+        return False
+    if not _is_is_not_none_assert(node):
+        return False
+    if parent_func is None or not parent_func.name.startswith("test_"):
+        return False
+    for child in ast.walk(parent_func):
+        if child is node or not isinstance(child, ast.Assert):
+            continue
+        if not _is_is_not_none_assert(child):
+            return False
+    return True
+
+
 def _find_parent_func(node: ast.AST, test_funcs: list[ast.FunctionDef]) -> ast.FunctionDef | None:
     """查找包含 node 的 test_ 函数（按 lineno 范围匹配）。"""
     lineno = getattr(node, "lineno", None)
@@ -330,6 +370,10 @@ def scan_file(filepath: Path, rel_path: str | None = None) -> list[WeakAssertion
             line_no = node_lineno
             issue_type = "weak_raises_only"
             detail = "pytest.raises 后无进一步断言"
+        elif _is_weak_is_not_none_terminal(node, _find_parent_func(node, test_funcs)):
+            line_no = node_lineno
+            issue_type = "weak_is_not_none"
+            detail = "assert X is not None 作为函数唯一终态（链式非终态除外）"
         elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
             parent_func = _find_parent_func(node, test_funcs)
             if _is_weak_print(node, parent_func):

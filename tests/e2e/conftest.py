@@ -812,6 +812,7 @@ async def _ensure_e2e_db() -> None:
     from tests.integration.conftest import _ensure_test_db
 
     def _run_in_selector_loop() -> None:
+        # NOTE(lazy): Uses asyncio.SelectorEventLoop()/asyncio.new_event_loop() to run _ensure_test_db in a dedicated selector loop on a worker thread (avoids ProactorEventLoop+asyncpg incompatibility on Windows). ceiling: asyncio.new_event_loop 在 Python 3.13 仍可用, 未来版本可能 deprecate (暂无明确版本). upgrade: 项目升级 Python 3.16 前改用 asyncio.Runner.
         loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         try:
             loop.run_until_complete(_ensure_test_db())
@@ -835,6 +836,7 @@ async def seed_e2e_data(_ensure_e2e_db: None):
     logger.info("[E2E Seeding] start _seed_e2e_data in SelectorEventLoop thread")
 
     def _run_in_selector_loop() -> None:
+        # NOTE(lazy): Uses asyncio.SelectorEventLoop()/asyncio.new_event_loop() to run _seed_e2e_data in a dedicated selector loop on a worker thread (avoids ProactorEventLoop+asyncpg incompatibility on Windows). ceiling: asyncio.new_event_loop 在 Python 3.13 仍可用, 未来版本可能 deprecate (暂无明确版本). upgrade: 项目升级 Python 3.16 前改用 asyncio.Runner.
         loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         try:
             loop.run_until_complete(_seed_e2e_data())

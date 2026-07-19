@@ -120,6 +120,23 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             logger.warning("[HomeVM] Dispose error: %s", e, exc_info=True)
         super().dispose()
 
+    @staticmethod
+    def register_news_alert_listener(callback: Callable[[str], None]) -> None:
+        """注册新闻告警监听 (View 通过 VM 命令转发, 不直调 NewsSubscriptionService).
+
+        参照 ``init`` 范例 (CLAUDE.md §3.2 MVVM): View 持有需要 page 访问的 toast 回调,
+        通过本命令转发注册到 NewsSubscriptionService 的 alert listener 集合。
+
+        P2-2: 改为 staticmethod 避免调用方临时实例化 HomeViewModel (startup_views.py
+        启动期无业务状态需求, 仅需转发到 NewsSubscriptionService 单例)。
+        """
+        NewsSubscriptionService().add_listener(callback, is_alert=True)
+
+    @staticmethod
+    def unregister_news_alert_listener(callback: Callable[[str], None]) -> None:
+        """退订新闻告警监听 (与 register_news_alert_listener 配对)。"""
+        NewsSubscriptionService().remove_listener(callback, is_alert=True)
+
     # --- Service Event Handlers ---
 
     async def _on_news_service_update(self, update_type=None, data=None):
