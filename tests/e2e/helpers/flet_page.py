@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Any
 
 from playwright.async_api import Page, Playwright, Browser, BrowserContext
@@ -418,11 +419,25 @@ class FletPage:
             # 进入暴力搜索模式：依次点击每个 aria-expanded 触发器，检查弹出的选项是否匹配。
             # 这避免了依赖触发器文本定位 Dropdown，适配 V1 M3 的渲染特性。
             # NOTE(lazy): 暴力搜索上限 8 个触发器，每触发器等待 1s. ceiling: 页面上同时超过 8 个 Dropdown. upgrade: 改进触发器定位策略避免暴力搜索.
+            #
+            # Brute-force total deadline: 30s base (scaled by _tm), so CI multiplier=2.0 → 60s.
+            # Without this deadline, brute force on CanvasKit + CI high load can exhaust
+            # Chromium resources and cause xdist worker crash (run 29665883855:
+            # worker gw0 down after brute force iterated through dropdown options
+            # daily_quotes → fina_audit → financial_reports → index_weight, each click
+            # triggered vm.set_table → DB query → resource accumulation → crash).
+            # Fail fast with RuntimeError instead of letting worker hang/crash.
+            brute_force_deadline_s = time.monotonic() + self._tm(30000) / 1000
             all_triggers = self.page.locator('flt-semantics[role="button"][aria-expanded]')
             trigger_count = await all_triggers.count()
             max_triggers = min(trigger_count, 8)
             logger.debug("select_dropdown: 暴力搜索模式，共 %d 个触发器，扫描前 %d 个", trigger_count, max_triggers)
             for idx in range(max_triggers):
+                if time.monotonic() > brute_force_deadline_s:
+                    logger.debug(
+                        "select_dropdown: 暴力搜索总超时 %.0fs，已扫描 %d 个触发器", self._tm(30000) / 1000, idx
+                    )
+                    break
                 try:
                     trigger = all_triggers.nth(idx)
                     if await trigger.count() == 0:

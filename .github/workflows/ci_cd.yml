@@ -429,7 +429,11 @@ jobs:
           # same shared test_astock database, causing extreme slowness (27s SELECT)
           # and eventual worker termination (node down: Not properly terminated).
           # Serial execution trades ~5min extra wall time for stability.
-          python -m pytest tests/e2e/ -n 1 -v --tb=long --junitxml=junit-e2e.xml --reruns 2 --reruns-delay 5
+          #
+          # --reruns removed: when xdist worker crashes, reruns cannot resurrect
+          # the dead worker, only adds ~12min idle wait before job fails (run 29665883855).
+          # Fail fast to expose real root cause instead of masking it.
+          python -m pytest tests/e2e/ -n 1 -v --tb=long --junitxml=junit-e2e.xml
 
       - name: Sanitize E2E artifacts
         if: always()
