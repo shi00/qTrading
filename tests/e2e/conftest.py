@@ -536,7 +536,11 @@ async def _seed_e2e_data() -> None:
             )
 
             trade_dates = _generate_trade_dates(60)
-            today = date.today()
+            # 关键：让 "today" 始终等于种子数据中的最新交易日，而非自然日。
+            # 否则在周末/节假日跑 CI 时，sync_status.last_data_date 会是自然日（如周日），
+            # 但 daily_quotes.MAX(trade_date) 是上一个交易日（如周五），导致
+            # ScreenerDao._get_latest_closed_trade_date 与种子数据不一致，策略查不到任何行。
+            today = trade_dates[-1]
 
             # stock_basic
             await conn.execute(
@@ -745,6 +749,39 @@ async def _seed_e2e_data() -> None:
                 _actual = await conn.fetchval(f"SELECT count(*) FROM {_table}")
                 if _actual != _expected:
                     raise RuntimeError(f"E2E seed 计数不符: table={_table}, expected={_expected}, actual={_actual}")
+
+            # A9: 业务不变量自检 — 用与 ScreenerDao 完全相同的查询逻辑，验证
+            # volume_breakout 策略默认参数下能命中"平安银行"。这是防御性契约：
+            # 一旦未来有人改动阈值/表结构/seed 逻辑导致策略查不到数据，
+            # 在 seed 阶段就报错，而不是让 5 个 E2E 测试在 30s 超时后才失败。
+            _latest_td = await conn.fetchval("SELECT MAX(trade_date) FROM daily_quotes")
+            if _latest_td != today:
+                raise RuntimeError(
+                    f"E2E seed 日期不一致: daily_quotes.MAX(trade_date)={_latest_td} 应等于最新交易日 today={today}"
+                )
+
+            _hit_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM daily_quotes q
+                JOIN daily_indicators i ON q.ts_code = i.ts_code AND q.trade_date = i.trade_date
+                WHERE q.ts_code = '000001.SZ'
+                  AND q.trade_date = $1
+                  AND q.pct_chg BETWEEN $2 AND $3
+                  AND i.turnover_rate > $4
+                """,
+                today,
+                _vb_params["pct_chg_min"],
+                _vb_params["pct_chg_max"],
+                _vb_params["turnover_min"],
+            )
+            if _hit_count == 0:
+                raise RuntimeError(
+                    "E2E seed 业务不变量失败: 平安银行在最新交易日 "
+                    f"{today} 未满足 volume_breakout 默认参数 "
+                    f"(pct_chg ∈ [{_vb_params['pct_chg_min']}, {_vb_params['pct_chg_max']}], "
+                    f"turnover_rate > {_vb_params['turnover_min']})"
+                )
 
         logger.info("[E2E Seeding] Database seeded successfully.")
     finally:
