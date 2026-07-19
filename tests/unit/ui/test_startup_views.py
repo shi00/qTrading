@@ -265,3 +265,42 @@ def test_startup_view_uses_use_dialog():
     assert "_setup_dialog" not in source, "禁止 _setup_dialog 命令式 use_effect"
     assert "page.show_dialog" not in source, "禁止 page.show_dialog 命令式 API"
     assert "page.pop_dialog" not in source, "禁止 page.pop_dialog 命令式 API"
+
+
+def test_startup_view_does_not_directly_call_news_subscription_service():
+    """P2-2 (CLAUDE.md §3.2 MVVM): View 不直调 NewsSubscriptionService,
+    监听注册/退订必须经 HomeViewModel 命令转发 (合规范例 home_view_model.py:111).
+
+    检查实际违规模式 (import / 实例化调用), 允许注释中提及类名作为开发者提示.
+    """
+    from pathlib import Path
+
+    import ui.startup_views as mod
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    # 禁止直接 import (函数级 lazy import 或模块级)
+    assert "from services.news_subscription_service import" not in source, (
+        "startup_views.py 禁止 import NewsSubscriptionService (P2-2), 应通过 HomeViewModel 命令转发"
+    )
+    assert "import services.news_subscription_service" not in source, (
+        "startup_views.py 禁止 import services.news_subscription_service (P2-2)"
+    )
+    # 禁止直接实例化调用
+    assert "NewsSubscriptionService()" not in source, (
+        "startup_views.py 禁止直接实例化 NewsSubscriptionService (P2-2), "
+        "应通过 HomeViewModel.register_news_alert_listener / unregister_news_alert_listener 命令转发"
+    )
+    # P2-2: 必须通过 HomeViewModel 静态命令转发 (不创建临时实例)
+    assert "HomeViewModel.register_news_alert_listener" in source, (
+        "必须通过 HomeViewModel.register_news_alert_listener 注册新闻告警监听 (P2-2)"
+    )
+    assert "HomeViewModel.unregister_news_alert_listener" in source, (
+        "必须通过 HomeViewModel.unregister_news_alert_listener 退订新闻告警监听 (P2-2)"
+    )
+    # 禁止临时实例化 HomeViewModel 仅用于转发命令 (P2-2)
+    assert "HomeViewModel().register_news_alert_listener" not in source, (
+        "禁止临时实例化 HomeViewModel 仅用于转发命令 (P2-2), 应改为静态调用"
+    )
+    assert "HomeViewModel().unregister_news_alert_listener" not in source, (
+        "禁止临时实例化 HomeViewModel 仅用于转发命令 (P2-2), 应改为静态调用"
+    )

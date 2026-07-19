@@ -103,12 +103,18 @@ class BaseDao:
         params_fn=None,
         start_idx=1,
         extra_params=None,
+        conn: typing.Any = None,
         **db_kwargs,
     ):
         """IN 子句分块执行的公共逻辑（ARCH-M5 / CQ-M4 代码去重）。
 
         处理：分块分割、占位符生成、SQL 模板调用、参数组装，对每个分块调用
-        ``db_fn(sql, params, **db_kwargs)`` 并收集返回值。
+        ``db_fn(sql, params, **kwargs)`` 并收集返回值。
+
+        当 ``conn`` 显式传入时（共享事务连接场景），强制串行 for 循环执行分块：
+        asyncpg 禁止单连接并发执行语句，并发会触发
+        ``InterfaceError: another operation is in progress``
+        （与 ``_save_upsert`` conn 分支同型）。
 
         Args:
             db_fn: async 函数 ``(sql, params, **kwargs) -> result``
@@ -119,6 +125,7 @@ class BaseDao:
             params_fn: ``callable(values_chunk) -> extra params list``，追加到值之后
             start_idx: 占位符起始索引（默认 1）
             extra_params: 前缀参数列表，前置到查询参数
+            conn: 共享事务连接；非 None 时强制串行执行
             **db_kwargs: 透传给 db_fn 的额外关键字参数
 
         Returns:
@@ -149,6 +156,30 @@ class BaseDao:
             except (ValueError, TypeError):
                 template_takes_start_idx = False
 
+        def _build_sql(chunk, chunk_start_idx):
+            placeholders = ",".join([f"${chunk_start_idx + j}" for j in range(len(chunk))])
+            extra_suffix = params_fn(chunk) if params_fn else []
+            if callable(sql_template):
+                if template_takes_start_idx:
+                    sql = sql_template(placeholders, len(chunk), chunk_start_idx)
+                else:
+                    sql = sql_template(placeholders, len(chunk))
+            else:
+                sql = sql_template.format(placeholders=placeholders)
+            return sql, extra_prefix + chunk + extra_suffix
+
+        # Shared transaction connection: asyncpg forbids concurrent ops on a single
+        # connection, so chunks must execute serially (mirrors _save_upsert conn branch).
+        if conn is not None:
+            results = []
+            for i in range(0, len(values), chunk_size):
+                chunk = values[i : i + chunk_size]
+                sql, params = _build_sql(chunk, actual_start_idx)
+                result = await db_fn(sql, params, conn=conn, **db_kwargs)
+                results.append(result)
+            return results
+
+        # No shared conn: spawn chunks concurrently under a semaphore bounded by pool size.
         try:
             from utils.config_handler import ConfigHandler
 
@@ -160,16 +191,8 @@ class BaseDao:
 
         async def _execute_chunk(chunk, chunk_start_idx):
             async with semaphore:
-                placeholders = ",".join([f"${chunk_start_idx + j}" for j in range(len(chunk))])
-                extra_suffix = params_fn(chunk) if params_fn else []
-                if callable(sql_template):
-                    if template_takes_start_idx:
-                        sql = sql_template(placeholders, len(chunk), chunk_start_idx)
-                    else:
-                        sql = sql_template(placeholders, len(chunk))
-                else:
-                    sql = sql_template.format(placeholders=placeholders)
-                return await db_fn(sql, extra_prefix + chunk + extra_suffix, **db_kwargs)
+                sql, params = _build_sql(chunk, chunk_start_idx)
+                return await db_fn(sql, params, **db_kwargs)
 
         chunk_tasks = []
         for i in range(0, len(values), chunk_size):
@@ -229,6 +252,7 @@ class BaseDao:
         params_fn=None,
         start_idx=1,
         extra_params=None,
+        conn: typing.Any = None,
         **write_db_kwargs,
     ):
         """
@@ -245,6 +269,7 @@ class BaseDao:
             params_fn: callable(values_chunk) -> extra params list, appended after values
             start_idx: starting index for placeholders (default 1)
             extra_params: prefix parameters list to prepend to query arguments
+            conn: shared transaction connection; when not None, chunks run serially
             **write_db_kwargs: extra kwargs to pass to write_db_fn
         """
         results = await BaseDao._chunked_execute(
@@ -255,6 +280,7 @@ class BaseDao:
             params_fn=params_fn,
             start_idx=start_idx,
             extra_params=extra_params,
+            conn=conn,
             **write_db_kwargs,
         )
         total = 0

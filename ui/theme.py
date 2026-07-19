@@ -660,10 +660,10 @@ PARAM_GROUP_ORDER = [
 ]
 
 DEFAULT_GROUP_LABELS = {
-    "core_signal": "🎯 核心触发信号",
-    "volume_confirm": "📊 量价资金确认",
-    "fundamental": "🏢 基本面滤网",
-    "risk_control": "🛑 严格风控红线",
-    "default": "🎛️ 基础设置",
-    "advanced": "⚙️ 高级调优",
+    "core_signal": "param_group_core_signal",
+    "volume_confirm": "param_group_volume_confirm",
+    "fundamental": "param_group_fundamental",
+    "risk_control": "param_group_risk_control",
+    "default": "param_group_default",
+    "advanced": "param_group_advanced",
 }

@@ -131,7 +131,7 @@
 | R4 | **SQL 注入** | 在 asyncpg 原生查询中使用 `%s` 占位符 (必须用 `$1, $2, ...`) | pre-commit（check_redlines.py） |
 | R5 | **僵尸引擎操作** | 在 disposed 的引擎上执行数据库操作 (DAO/维护流程必须检查引擎状态；已释放时抛出或传播 `EngineDisposedError`) | 仅人工评审 |
 | R6 | **过时类型注解** | 使用 `Union[X, Y]` / `Optional[X]` (必须使用 `X \| Y` / `X \| None`) | ruff |
-| R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `singleton_state` 上下文管理器) | CI-test（全量，conftest.py autouse fixture） |
+| R7 | **测试状态污染** | 单例未隔离 (单元测试由 `tests/unit/conftest.py` 的 `_reset_all_singletons` autouse fixture 自动重置注册单例；需精细控制单例初始化状态时使用 `tests/conftest.py` 的 `singleton_state` 上下文管理器) | CI-test（全量，conftest.py autouse fixture） |
 | R8 | **废弃 API** | 使用 `_write_db(is_many=True)` 进行批量写入 (会发 `DeprecationWarning`，必须用 `_save_upsert()`) | CI-test（filterwarnings error::DeprecationWarning） |
 | R9 | **敏感信息泄露** | 日志/异常消息直接打印明文 Token / API Key / 密码 / 个人信息 (必须经 `DataSanitizer` 脱敏) | 安全扫描 + 仅人工评审 |
 | R10 | **硬编码密钥** | 在代码或测试中硬编码 API Key / DB 密码 (必须从 `keyring` 或环境变量读取) | CI-test（gitleaks-action 独立 workflow 全量扫描） + 仅人工评审 |
@@ -160,7 +160,7 @@
 
 ### 3.3 ⚠️ 已知技术债与架构限制 (Known Limitations)
 
-当前活动规范中无未解决的技术债；历史技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
+当前活动规范中无未解决的技术债；活跃跟踪中的技术债与跟进记录见 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md)。
 
 > **有意识简化的代码现场标记**：对有意识的简化（如已知上限的权宜之计、推迟的优化），使用 `# NOTE(lazy):` 注释标记，格式为 `# NOTE(lazy): <简化内容>. ceiling: <已知上限>. upgrade: <升级触发条件>.`。三要素必须齐全。缺少 `upgrade` 的标记视为 **no-trigger 高风险**，PR 评审时必须补充升级触发条件或拒绝合并。积累到 3 处以上或 `upgrade` 条件触发时，应升级为 [docs/debt/known-technical-debt.md](./docs/debt/known-technical-debt.md) 中的技术债表格条目。可用 `grep -rn "NOTE(lazy):"` 汇集。禁止用此标记掩盖真正的 TODO（应用 `# TODO:`）、业务逻辑简化、红线/模板/专项规范的省略。
 

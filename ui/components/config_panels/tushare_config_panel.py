@@ -18,7 +18,6 @@ from collections.abc import Callable
 
 import flet as ft
 
-from data.constants import TUSHARE_POINT_TIERS
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -53,12 +52,12 @@ def _render_message(msg: Message | None) -> str:
     return I18n.get(msg.key, **msg.params)
 
 
-def _build_tier_options() -> list[ft.dropdown.Option]:
-    """构建 5 档下拉选项（points_120/2000/5000/10000/15000）。
+def _build_tier_options(tier_options: tuple[str, ...]) -> list[ft.dropdown.Option]:
+    """构建档位下拉选项 (P1-1: tier_options 由 VM state 产出, View 不再直接 import TUSHARE_POINT_TIERS).
 
     与 TierApiPanel 同源 i18n key，不抽象共享（YAGNI，5 行重复成本 < 抽象成本）。
     """
-    return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in TUSHARE_POINT_TIERS]
+    return [ft.dropdown.Option(key=tier, text=I18n.get(f"sys_tier_{tier}_label")) for tier in tier_options]
 
 
 def _on_verify_click_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.ControlEvent], None]:
@@ -153,7 +152,7 @@ def TushareConfigPanel(
         label=I18n.get("sys_tier_label_in_token_panel"),
         value=state.tier,
         width=AppStyles.CONTROL_WIDTH_MD,
-        options=_build_tier_options(),
+        options=_build_tier_options(state.tier_options),
         on_select=_on_tier_change_factory(vm),
         hint_text=I18n.get("sys_tier_hint_in_token_panel"),
         disabled=state.is_verifying,

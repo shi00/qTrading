@@ -17,6 +17,10 @@ pytestmark = pytest.mark.integration
 
 
 class TestDataProcessor(unittest.TestCase):
+    # 42 个纯 mock 测试，不依赖真实 DB；no_db marker 与 tests/integration/conftest.py
+    # 的 _test_engine_dep autouse fixture 配合，短路 test_engine 创建与 db_schema_ready 初始化。
+    pytestmark = pytest.mark.no_db
+
     async def fake_run_async(self, task_type, func, *args, **kwargs):
         # Unwrap partial if present (simulating run_async logic simplified)
         import functools

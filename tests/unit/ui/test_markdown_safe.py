@@ -120,6 +120,17 @@ class TestSafeOpenUrlToast:
         assert e.control.page.show_toast.called
 
     @patch("ui.components._markdown_safe.webbrowser.open")
+    def test_non_whitelisted_url_toast_uses_i18n_key(self, mock_open):
+        """P3-25: toast 文案应经 I18n.get('markdown_link_blocked') 国际化。"""
+        e = self._make_event_with_page("https://evil.com/phish")
+        with patch("ui.components._markdown_safe.I18n") as mock_i18n:
+            mock_i18n.get.return_value = "Link blocked"
+            safe_open_url(e)
+            mock_open.assert_not_called()
+            mock_i18n.get.assert_called_once_with("markdown_link_blocked")
+            e.control.page.show_toast.assert_called_once_with("Link blocked", type="error")
+
+    @patch("ui.components._markdown_safe.webbrowser.open")
     def test_whitelisted_url_does_not_show_toast(self, mock_open):
         e = self._make_event_with_page("https://eastmoney.com/stock")
         safe_open_url(e)

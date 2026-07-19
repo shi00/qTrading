@@ -11,7 +11,7 @@
 - 移除命令式生命周期回调、手动 update、手动 locale 刷新等命令式模式
 - page 访问改用 ``ft.context.page``（try/except 守卫 RuntimeError）
 - FilePicker 通过 ``use_effect`` 注册到 ``page.services``，cleanup 时移除
-- LocalModelManager.cancel_verification_if_active() 在 use_effect cleanup 中调用
+- P1-1: cleanup 时调 ``vm.cancel_verification()`` (VM 命令) 而非直接 import LocalModelManager
 """
 
 import logging
@@ -161,13 +161,8 @@ def LocalModelConfigPanel(
                 page.services.remove(file_picker)
         except RuntimeError:
             pass
-        # 清理未提交的验证状态
-        from services.local_model_manager import LocalModelManager
-
-        try:
-            LocalModelManager.cancel_verification_if_active()
-        except Exception as e:
-            logger.debug("[LocalModelConfigPanel] cleanup cancel_verification failed: %s", e, exc_info=True)
+        # 清理未提交的验证状态 (P1-1: 经 VM 命令转发, 避免View 直接 import LocalModelManager)
+        vm.cancel_verification()
 
     ft.use_effect(_setup_file_picker, dependencies=[], cleanup=_cleanup_file_picker)
 

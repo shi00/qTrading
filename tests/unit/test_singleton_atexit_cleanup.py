@@ -65,8 +65,12 @@ class TestCacheManagerAtexitCleanup:
         CacheManager._instance = mgr
         CacheManager._atexit_cleanup()  # should not raise
 
-    def test_no_error_when_dispose_raises(self):
-        """_atexit_cleanup swallows exceptions from sync_engine.dispose()."""
+    def test_no_error_when_dispose_raises(self, caplog):
+        """_atexit_cleanup swallows exceptions from sync_engine.dispose().
+
+        P3-24: 异常日志级别应为 WARNING（与 data_processor.py:79 同级 atexit 场景对齐），
+        非 DEBUG（atexit 资源释放失败需可见而非静默吞没）。
+        """
         mgr = CacheManager.__new__(CacheManager)
         mgr._disposed = False
         mock_sync_engine = MagicMock()
@@ -76,7 +80,12 @@ class TestCacheManagerAtexitCleanup:
         mgr.engine = mock_engine
 
         CacheManager._instance = mgr
-        CacheManager._atexit_cleanup()  # should not raise
+        with caplog.at_level("WARNING", logger="data.cache.cache_manager"):
+            CacheManager._atexit_cleanup()  # should not raise
+
+        warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert warning_records, "Expected WARNING log for atexit cleanup failure"
+        assert "CacheManager atexit cleanup failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------

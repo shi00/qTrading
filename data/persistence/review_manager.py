@@ -9,6 +9,7 @@ import pandas as pd
 
 from data.cache.cache_manager import CacheManager
 from data.external.tushare_client import TushareClient
+from data.persistence.daos.base_dao import EngineDisposedError
 from core.i18n import I18n
 from utils.config_handler import ConfigHandler
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -249,6 +250,9 @@ class ReviewManager:
                 date_threshold = to_date(date_threshold)
             return await self.cache.screener_dao.get_pending_predictions(date_threshold)  # type: ignore[union-attr]
 
+        except EngineDisposedError:
+            # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
+            raise
         except Exception as e:
             logger.error("[Review] Error fetching pending predictions: %s", e)
             return pd.DataFrame()
@@ -319,6 +323,9 @@ class ReviewManager:
                         },
                     )
 
+        except EngineDisposedError:
+            # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
+            raise
         except Exception as e:
             logger.warning("[Review] Error fetching learning context: %s", e)
             # Non-blocking: return empty context on error
@@ -371,6 +378,9 @@ class ReviewManager:
                         alpha=u["alpha"],
                         conn=conn,
                     )
+        except EngineDisposedError:
+            # R5 一致性：disposed 引擎不可恢复，必须上抛避免被吞没（news_subscription_service 是停止后台循环策略，此处为同步调用路径需上抛）.
+            raise
         except Exception as e:
             logger.error("[Review] Batch update failed, falling back to individual updates: %s", e)
             for u in updates:
@@ -385,6 +395,9 @@ class ReviewManager:
                         t5_price=u["t5_price"],
                         alpha=u["alpha"],
                     )
+                except EngineDisposedError:
+                    # R5 一致性： disposed 引擎不可恢复，fallback 路径同样必须上抛（与主路径对齐）.
+                    raise
                 except Exception as inner_e:
                     logger.error("[Review] Individual update also failed for record %s: %s", u["record_id"], inner_e)
 

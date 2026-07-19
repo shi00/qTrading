@@ -11,23 +11,36 @@ pytestmark = pytest.mark.unit
 
 
 class TestMaskSensitive:
-    def test_long_value_masked(self):
-        assert mask_sensitive("abcdefghijklmnop") == "abcd****"
+    """P3-4: mask_sensitive 复用 DataSanitizer.sanitize_token。
 
-    def test_short_value_returns_none(self):
-        assert mask_sensitive("abc") == "None"
+    行为变更：短 token（< 32）全部隐藏为 ***，长 token（≥ 32）部分脱敏（前 3 + *** + 后 4）。
+    """
 
-    def test_none_value_returns_none(self):
-        assert mask_sensitive(None) == "None"
+    def test_short_value_masked(self):
+        assert mask_sensitive("abcdefghijklmnop") == "***"
 
-    def test_empty_value_returns_none(self):
-        assert mask_sensitive("") == "None"
+    def test_very_short_value_masked(self):
+        assert mask_sensitive("abc") == "***"
 
-    def test_exact_prefix_len(self):
-        assert mask_sensitive("abcd") == "None"
+    def test_none_value_masked(self):
+        assert mask_sensitive(None) == "***"
 
-    def test_custom_prefix_len(self):
-        assert mask_sensitive("abcdefgh", prefix_len=2) == "ab****"
+    def test_empty_value_masked(self):
+        assert mask_sensitive("") == "***"
+
+    def test_exact_boundary_31_masked(self):
+        assert mask_sensitive("a" * 31) == "***"
+
+    def test_long_token_32_partial_mask(self):
+        token = "a" * 32
+        assert mask_sensitive(token) == "aaa***aaaa"
+
+    def test_long_token_64_partial_mask(self):
+        token = "tushare_abc123xyz78901234567890123456789"
+        result = mask_sensitive(token)
+        assert result.startswith("tus")
+        assert result.endswith("6789")
+        assert "***" in result
 
 
 class TestCheckOnboardingNeeded:
@@ -690,29 +703,29 @@ class TestE2ETestingShortCircuit:
 
 
 class TestMaskSensitiveEdgeCases:
-    """mask_sensitive 边界覆盖（R9 守卫：Token/API Key/Password 脱敏）。
+    """P3-4: mask_sensitive 边界覆盖（R9 守卫：Token/API Key/Password 脱敏）。
 
-    注意：mask_sensitive 当前实现仅对字符串有意义。对 dict/list 输入会触发边界行为
-    （短结构返回 'None'，长结构抛 TypeError 或返回切片 repr）。这些测试固化当前行为
-    以防止回归，不代表 mask_sensitive 设计上支持非字符串输入。若未来需支持嵌套结构
-    递归脱敏，应同步更新这些测试。
+    复用 DataSanitizer.sanitize_token 后，非字符串/短字符串/长字符串均安全脱敏：
+    - 非字符串输入 → "***"（sanitize_token 的 isinstance 守卫）
+    - 短字符串（< 32）→ "***"（避免旧实现固定泄露前 4 字符）
+    - 长字符串（≥ 32）→ "前3***后4"（部分脱敏，便于人工辨识）
     """
 
-    def test_empty_string_returns_none(self):
-        """空字符串 → 'None'。"""
-        assert mask_sensitive("") == "None"
+    def test_empty_string_returns_masked(self):
+        """空字符串 → '***'。"""
+        assert mask_sensitive("") == "***"
 
     def test_no_sensitive_field_regular_string(self):
-        """普通字符串（无敏感字段语义）→ 仍按前缀脱敏。"""
+        """普通短字符串（< 32）→ 全部隐藏为 '***'。"""
         result = mask_sensitive("hello world")
-        assert result == "hell****"
+        assert result == "***"
         assert "hello world" not in result
 
     def test_token_masked(self):
-        """R9 守卫：token 字符串脱敏后不含完整 token。"""
+        """R9 守卫：短 token 字符串脱敏后不含完整 token。"""
         token = "sk-1234567890abcdef"
         result = mask_sensitive(token)
-        assert result == "sk-1****"
+        assert result == "***"
         assert "1234567890abcdef" not in result
         assert token not in result
 
@@ -721,45 +734,34 @@ class TestMaskSensitiveEdgeCases:
         api_key = "sk-abcdef1234567890"
         result = mask_sensitive(api_key)
         assert api_key not in result
-        assert result.endswith("****")
+        assert result == "***"
 
     def test_password_masked(self):
         """R9 守卫：密码字符串脱敏后不含完整密码。"""
         password = "super_secret_password_123"
         result = mask_sensitive(password)
         assert password not in result
-        assert result == "supe****"
+        assert result == "***"
 
-    def test_nested_dict_short_returns_none(self):
-        """嵌套字典（≤4 keys）→ 返回 'None'（边界行为，mask_sensitive 不处理 dict）。"""
+    def test_nested_dict_returns_masked(self):
+        """嵌套字典 → '***'（sanitize_token 对非字符串输入统一返回 '***'）。"""
         nested = {"a": {"token": "secret"}, "b": {"api_key": "k"}}
-        assert mask_sensitive(nested) == "None"
+        assert mask_sensitive(nested) == "***"
 
-    def test_nested_dict_long_raises_keyerror(self):
-        """嵌套字典（>4 keys）→ 抛 KeyError（dict 把 slice 当 key 查找，已知边界行为）。
-
-        mask_sensitive 设计上仅接受字符串。dict[:N] 会调用 dict.__getitem__(slice)，
-        slice 对象可哈希所以触发 KeyError 而非 TypeError。此测试固化当前行为，
-        若未来扩展支持 dict 递归脱敏需同步更新。
-        """
+    def test_nested_dict_long_returns_masked(self):
+        """嵌套字典（>4 keys）→ '***'（不再触发 KeyError 边界行为）。"""
         nested = {f"k{i}": {"token": f"secret{i}"} for i in range(5)}
-        with pytest.raises(KeyError):
-            mask_sensitive(nested)
+        assert mask_sensitive(nested) == "***"
 
-    def test_list_of_dicts_short_returns_none(self):
-        """列表内字典（≤4 元素）→ 返回 'None'（边界行为）。"""
+    def test_list_of_dicts_returns_masked(self):
+        """列表内字典 → '***'（sanitize_token 对非字符串输入统一返回 '***'）。"""
         data = [{"token": "secret"}, {"api_key": "k"}]
-        assert mask_sensitive(data) == "None"
+        assert mask_sensitive(data) == "***"
 
-    def test_list_of_dicts_long_returns_list_repr(self):
-        """列表内字典（>4 元素）→ 返回 list 切片 repr（已知边界行为，不递归脱敏）。
-
-        mask_sensitive 对 list 会做 list[:prefix_len] 切片并 f-string 格式化，
-        不递归脱敏 dict 内字段。此测试固化当前行为。
-        """
+    def test_list_of_dicts_long_returns_masked(self):
+        """列表内字典（>4 元素）→ '***'（不再泄露 list 切片 repr）。"""
         data = [{"token": f"secret{i}"} for i in range(5)]
         result = mask_sensitive(data)
-        assert isinstance(result, str)
-        assert "****" in result
-        # 当前实现：list[:4] 切片后 f-string 格式化，结果为前 4 个元素 repr + "****"
-        assert result == f"{str(data[:4])}****"
+        assert result == "***"
+        for item in data:
+            assert str(item) not in result

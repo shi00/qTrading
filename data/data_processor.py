@@ -13,7 +13,7 @@ from data.external.news_fetcher import NewsFetcher
 from data.external.tushare_client import TushareClient
 from data.mixins.calendar_mixin import CalendarMixin
 from data.mixins.health_mixin import HealthCheckMixin
-from data.sync.base import SyncContext
+from data.sync.base import SyncContext, safe_error
 from data.sync.financial import FinancialSyncStrategy
 from data.sync.historical import HistoricalSyncStrategy
 from data.sync.holder import HolderSyncStrategy
@@ -76,7 +76,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 if evt is not None and hasattr(evt, "set"):
                     evt.set()
             except Exception as e:
-                logger.warning("DataProcessor initialization failed: %s", e, exc_info=True)
+                logger.warning("DataProcessor atexit cleanup failed: %s", safe_error(e), exc_info=True)
 
     def __init__(self):
         # Double-check initialization state with lock to prevent race conditions
@@ -158,7 +158,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 logger.error(
                     "[DataProcessor] Stop | ❌ Failed to cancel %s: %s",
                     name,
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
 
@@ -185,14 +185,14 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                     logger.error(
                         "[DataProcessor] Stop | ❌ Failed to cancel %s: %s",
                         name,
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
 
         except Exception as e:
             logger.error(
                 "[DataProcessor] Stop | ❌ Error during stop propagation: %s",
-                e,
+                safe_error(e),
                 exc_info=True,
             )
 
@@ -220,7 +220,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         except Exception as e:
             logger.error(
                 "[DataProcessor] State | ❌ Error during engine close: %s",
-                e,
+                safe_error(e),
                 exc_info=True,
             )
 
@@ -397,7 +397,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error("[DataProcessor] AIConceptTag | AKShare failed: %s", e, exc_info=True)
+                logger.error("[DataProcessor] AIConceptTag | AKShare failed: %s", safe_error(e), exc_info=True)
                 parts.append("akshare=failed")
 
         # Step 2: LimitList
@@ -410,7 +410,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error("[DataProcessor] AIConceptTag | LimitList failed: %s", e, exc_info=True)
+                logger.error("[DataProcessor] AIConceptTag | LimitList failed: %s", safe_error(e), exc_info=True)
                 parts.append("limit_list=failed")
 
         # Step 3: AIConceptTag (only on manual trigger)
@@ -425,7 +425,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                logger.error("[DataProcessor] AIConceptTag | AI tag failed: %s", e, exc_info=True)
+                logger.error("[DataProcessor] AIConceptTag | AI tag failed: %s", safe_error(e), exc_info=True)
                 parts.append("ai_tag=failed")
 
         return " | ".join(parts)
@@ -521,7 +521,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 except Exception as e:
                     logger.warning(
                         "[DataProcessor] Sync Basic | ⚠️ sw_l2_mapping query failed, keep API raw industry: %s",
-                        e,
+                        safe_error(e),
                     )
                     sw_l2_map = {}
                 if sw_l2_map:
@@ -559,7 +559,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             return 0
 
         except Exception as e:
-            logger.error("[DataProcessor] Sync Basic | ❌ Failed: %s", e, exc_info=True)
+            logger.error("[DataProcessor] Sync Basic | ❌ Failed: %s", safe_error(e), exc_info=True)
             return 0
         finally:
             with self._sync_lock:
@@ -665,7 +665,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         except Exception as e:
             logger.error(
                 "[DataProcessor] Sync Concepts | ❌ Failed: %s",
-                e,
+                safe_error(e),
                 exc_info=True,
             )
             return 0
@@ -783,7 +783,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
         except Exception as e:
             logger.error(
                 "[DataProcessor] Config | ❌ Unexpected error fetching market summary: %s",
-                e,
+                safe_error(e),
                 exc_info=True,
             )
             return None
@@ -965,7 +965,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
             logger.error(
                 "[DataProcessor] Init | ❌ System init unexpectedly failed at %s: %s",
                 step_label,
-                e,
+                safe_error(e),
                 exc_info=True,
             )
             raise  # Re-raise so UI can catch and display
@@ -993,7 +993,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 else:
                     end = parse_date(str(end_date))
         except Exception as e:
-            logger.warning("[DataProcessor] get_stock_history fallback to natural date: %s", e)
+            logger.warning("[DataProcessor] get_stock_history fallback to natural date: %s", safe_error(e))
             end = get_now().date()
 
         # 2.0 multiplier ensures we fetch enough natural days to cover `days` number of trade days
@@ -1064,7 +1064,7 @@ class DataProcessor(HealthCheckMixin, CalendarMixin):
                 logger.warning(
                     "[DataProcessor] Deep health check during screening prep failed, keeping fast-path tier=%s: %s",
                     quality_tier,
-                    e,
+                    safe_error(e),
                 )
 
         context = {}

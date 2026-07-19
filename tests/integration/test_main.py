@@ -271,7 +271,7 @@ class TestMainWindowDestroyError:
 
 class TestMainRunTask:
     @pytest.mark.asyncio
-    async def test_run_task_direct_call(self, monkeypatch):
+    async def test_close_confirm_triggers_run_task(self, monkeypatch):
         _prepare_main(monkeypatch)
 
         class _PageWithRunTask(_DummyPage):
@@ -285,7 +285,16 @@ class TestMainRunTask:
         page = _PageWithRunTask()
         await app_main.main(page)
 
-        assert page.window.on_event is not None
+        # 触发 close_confirm 流程以驱动 on_shutdown_request 回调
+        # (lambda: page.run_task(_perform_window_shutdown))，验证 page.run_task 被调用
+        on_event = cast(AsyncEventHandler, page.window.on_event)
+        await on_event(SimpleNamespace(type="close"))
+        dialog = page.current_dialog
+        confirm_btn = dialog.actions[1]
+        confirm_btn.on_click(MagicMock())
+        await asyncio.sleep(0.1)
+
+        assert page._run_task_called is True
 
 
 class TestMainShowHideDialog:

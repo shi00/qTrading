@@ -34,9 +34,15 @@ def _make_splitter(
     collapsible: bool = False,
     collapsed: bool = False,
     on_resize=None,
+    on_load_width=None,
+    on_persist_width=None,
     drag_interval: int = 16,
 ):
-    """构造一个 ResizableSplitter Component 实例（含 mount effects 已运行）。"""
+    """构造一个 ResizableSplitter Component 实例（含 mount effects 已运行）。
+
+    P1-1/P2-1: ``on_load_width`` / ``on_persist_width`` 经回调上抛父 VM,
+    默认 None 时 _load_effect / _persist 直接 return (不触发任何 IO)。
+    """
     return make_component(
         ResizableSplitter,
         left_content=ft.Container(width=100),
@@ -48,6 +54,8 @@ def _make_splitter(
         collapsible=collapsible,
         collapsed=collapsed,
         on_resize=on_resize,
+        on_load_width=on_load_width,
+        on_persist_width=on_persist_width,
         drag_interval=drag_interval,
     )
 
@@ -110,9 +118,8 @@ class TestSplitterRenderStructure:
 
     def test_left_container_width_uses_persisted(self, mock_i18n_state, mock_app_colors_state):
         """persisted != default 时 _load_effect 调用 set_width(persisted)。"""
-        component = _make_splitter(default_width=DEFAULT_WIDTH)
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=450):
-            _, result = _render(component)
+        component = _make_splitter(default_width=DEFAULT_WIDTH, on_load_width=lambda: 450)
+        _, result = _render(component)
 
         row = result.content
         left_container = row.controls[0]
@@ -178,17 +185,15 @@ class TestLoadEffect:
 
     def test_persisted_differs_from_default_sets_width(self, mock_i18n_state, mock_app_colors_state):
         """持久化宽度 != default_width 时 set_width 触发 schedule_update。"""
-        component = _make_splitter(default_width=DEFAULT_WIDTH)
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=450):
-            page, _ = _render(component)
+        component = _make_splitter(default_width=DEFAULT_WIDTH, on_load_width=lambda: 450)
+        page, _ = _render(component)
         # set_width 调用后应调度 update
         assert component in page.session.scheduled_updates
 
     def test_persisted_equals_default_no_set_width(self, mock_i18n_state, mock_app_colors_state):
         """持久化宽度 == default_width 时不调用 set_width (无 schedule_update)。"""
-        component = _make_splitter(default_width=DEFAULT_WIDTH)
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            page, _ = _render(component)
+        component = _make_splitter(default_width=DEFAULT_WIDTH, on_load_width=lambda: DEFAULT_WIDTH)
+        page, _ = _render(component)
         # _load_effect 不调用 set_width，scheduled_updates 不应包含此 component
         assert component not in page.session.scheduled_updates
 
@@ -303,8 +308,8 @@ class TestDragHandlers:
 
     def test_on_drag_end_with_cache_persists(self, mock_i18n_state, mock_app_colors_state):
         """拖拽结束 + cache 有值时持久化最终宽度。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            _, result = _render(_make_splitter())
+        mock_persist = MagicMock()
+        _, result = _render(_make_splitter(on_persist_width=mock_persist))
         divider = _find_divider(result)
 
         # 先 drag_update 设置 cache
@@ -312,32 +317,29 @@ class TestDragHandlers:
         e_update.primary_delta = 50
         _trigger_callback(divider.on_horizontal_drag_update, e_update)
 
-        # 再 drag_end
-        with patch("ui.components.resizable_splitter._persist_width") as mock_persist:
-            _trigger_callback(divider.on_horizontal_drag_end, MagicMock())
-            mock_persist.assert_called_once()
-            # 持久化的宽度应为 410 (default 360 + 50)
-            assert mock_persist.call_args.args[1] == 410
+        # 再 drag_end (P1-1: 经 on_persist_width 回调上抛父 VM)
+        _trigger_callback(divider.on_horizontal_drag_end, MagicMock())
+        mock_persist.assert_called_once()
+        # 持久化的宽度应为 410 (default 360 + 50)
+        assert mock_persist.call_args.args[0] == 410
 
     def test_on_drag_end_without_cache_persists_current_width(self, mock_i18n_state, mock_app_colors_state):
         """拖拽结束但 cache 为 None 时持久化当前 width state。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            _, result = _render(_make_splitter())
+        mock_persist = MagicMock()
+        _, result = _render(_make_splitter(on_persist_width=mock_persist))
         divider = _find_divider(result)
 
-        with patch("ui.components.resizable_splitter._persist_width") as mock_persist:
-            _trigger_callback(divider.on_horizontal_drag_end, MagicMock())
-            mock_persist.assert_called_once_with(CONFIG_KEY, DEFAULT_WIDTH)
+        _trigger_callback(divider.on_horizontal_drag_end, MagicMock())
+        mock_persist.assert_called_once_with(DEFAULT_WIDTH)
 
     def test_on_double_tap_resets_to_default(self, mock_i18n_state, mock_app_colors_state):
         """双击恢复 default_width 并持久化。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            _, result = _render(_make_splitter(default_width=400))
+        mock_persist = MagicMock()
+        _, result = _render(_make_splitter(default_width=400, on_persist_width=mock_persist))
         divider = _find_divider(result)
 
-        with patch("ui.components.resizable_splitter._persist_width") as mock_persist:
-            _trigger_callback(divider.on_double_tap, MagicMock())
-            mock_persist.assert_called_once_with(CONFIG_KEY, 400)
+        _trigger_callback(divider.on_double_tap, MagicMock())
+        mock_persist.assert_called_once_with(400)
 
 
 class TestHoverHandlers:

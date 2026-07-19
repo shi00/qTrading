@@ -160,6 +160,8 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
                     default_width=360,
                     min_width=280,
                     max_width=600,
+                    on_load_width=lambda: vm.get_splitter_width("ui_splitter_backtest_config", 360),
+                    on_persist_width=lambda w: vm.persist_splitter_width("ui_splitter_backtest_config", w),
                 ),
             ],
             spacing=12,

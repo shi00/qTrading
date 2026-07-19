@@ -156,25 +156,35 @@ class TestHealthScanDialogContract:
         """DoD: 扫描任务必须通过 use_effect 启动 (R2 CancelledError 传播)。"""
         assert "ft.use_effect(" in _raw_source(), "必须使用 use_effect 启动扫描"
 
-    def test_uses_cancelled_error_raise(self):
-        """DoD: R2 CancelledError 必须 raise。"""
-        assert "except asyncio.CancelledError:" in _code_source(), "必须捕获 CancelledError"
-        assert "raise  # R2" in _code_source(), "CancelledError 必须 raise (R2)"
+    def test_uses_use_viewmodel_for_business_state(self):
+        """DoD: 业务状态必须经 use_viewmodel 消费 HealthScanViewModel (CLAUDE.md §3.2 MVVM)。
 
-    def test_uses_run_coroutine_threadsafe(self):
-        """DoD: 跨线程进度更新必须通过 run_coroutine_threadsafe 调度回主 loop。"""
-        assert "asyncio.run_coroutine_threadsafe" in _code_source(), "跨线程进度更新必须用 run_coroutine_threadsafe"
+        R2/R11 守卫（CancelledError raise / run_coroutine_threadsafe）已随业务逻辑
+        下沉到 HealthScanViewModel，由 ``test_health_scan_view_model.py`` 守护。
+        """
+        assert "use_viewmodel(" in _raw_source(), "必须经 use_viewmodel 消费 VM"
+        assert "HealthScanViewModel(" in _raw_source(), "必须实例化 HealthScanViewModel"
 
-    def test_uses_use_ref_for_futures(self):
-        """DoD: 跨线程 future 持久化用 use_ref (缓存数据，非命令式实例)。"""
-        assert "ft.use_ref" in _raw_source(), "必须用 use_ref 持久化 futures set"
-
-    def test_no_use_ref_cache_imperative_instance(self):
-        """DoD: use_ref 不应缓存命令式 ft 控件实例 (仅缓存数据)。"""
-        # use_ref(lambda: set()) 是缓存数据 set，符合声明式红线
-        # 禁止 use_ref 缓存 ft.Container/ft.AlertDialog 等命令式实例
+    def test_no_direct_data_processor_call(self):
+        """DoD: View 不应直驱 DataProcessor.run_quality_scan (已下沉到 VM)。"""
         code = _code_source()
-        assert "use_ref(lambda: ft." not in code, "use_ref 不应缓存 ft 控件实例"
+        assert "data_processor.run_quality_scan" not in code, "禁止 View 直驱 DataProcessor.run_quality_scan"
+
+    def test_no_self_held_business_state(self):
+        """DoD: View 不应自持业务状态 (scan_state/progress/result 由 VM 持有)。
+
+        use_state 仅用于 dialog 显隐开关 (open_/set_open)，业务字段必须从 VM state 读取。
+        """
+        code = _code_source()
+        # 禁止 use_state 持有业务状态字段（scan_state/progress/status_text/result/error_key）
+        forbidden_patterns = [
+            'use_state("scanning"',
+            'use_state("done"',
+            'use_state("error"',
+            "use_state(0.0)",
+        ]
+        for pattern in forbidden_patterns:
+            assert pattern not in code, f"View 不应自持业务状态: {pattern}"
 
     def test_subscribes_i18n(self):
         """DoD: 必须订阅 get_observable_state (i18n 自动重渲染)。"""

@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Any
 
 from utils.correlation import ensure_correlation_id
+from utils.sanitizers import DataSanitizer
 from utils.time_utils import get_now
 
 # Forward declaration for type hinting if needed,
@@ -23,6 +24,21 @@ from utils.time_utils import get_now
 # from data.cache.cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
+
+
+def safe_error(e: Exception) -> str:
+    """R9 一致性：data/ 层异常日志共享脱敏入口。
+
+    data/sync/*.py 与 data_processor.py 中 `logger.*("...: %s", e, exc_info=True)`
+    调用统一经此函数脱敏，避免 40+ 处逐点 inline `DataSanitizer.sanitize_error(e)`。
+
+    Args:
+        e: 原始异常对象。
+
+    Returns:
+        经 DataSanitizer.sanitize_error 脱敏后的字符串。
+    """
+    return DataSanitizer.sanitize_error(e)
 
 
 def _is_peak_disclosure_season() -> bool:

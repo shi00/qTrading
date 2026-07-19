@@ -1,17 +1,19 @@
-"""ResizableSplitter 契约守护测试 — Phase A.3 声明式重写。
+"""ResizableSplitter 契约守护测试 — Phase A.3 声明式重写 (P1-1/P2-1 回调模式).
 
-覆盖：
-- 纯函数: _clamp_width / _load_persisted_width / _persist_width / _DragCache
-- 组件契约: @ft.component 装饰标记、参数签名、返回类型注解
+覆盖:
+- 纯函数: _clamp_width / _DragCache
+- 组件契约: @ft.component 装饰标记、参数签名、返回类型注解、回调参数默认值
 
 声明式组件组合 (@ft.component + use_state/use_effect) 是有状态的, 在无 renderer
 环境下会抛 RuntimeError, 由集成测试 (flet_test_page fixture) 覆盖, 不在本单元测试范围
 (对齐 test_task_center_view.py 模式)。
+
+P1-1/P2-1 改造: _load_persisted_width / _persist_width 模块级函数已移除,
+宽度读写经 on_load_width / on_persist_width 回调上抛父 View VM (具体行为覆盖见
+test_resizable_splitter_body.py)。
 """
 
 import inspect
-import logging
-from unittest.mock import patch
 
 import flet as ft
 import pytest
@@ -19,8 +21,6 @@ import pytest
 from ui.components.resizable_splitter import (
     _clamp_width,
     _DragCache,
-    _load_persisted_width,
-    _persist_width,
     ResizableSplitter,
 )
 
@@ -30,7 +30,6 @@ DEFAULT_WIDTH = 360
 MIN_WIDTH = 280
 MAX_WIDTH = 600
 CONFIG_KEY = "test_panel_width"
-LOGGER_NAME = "ui.components.resizable_splitter"
 
 
 # --- 1. _clamp_width ---
@@ -56,67 +55,7 @@ class TestClampWidth:
         assert _clamp_width(MAX_WIDTH, MIN_WIDTH, MAX_WIDTH) == MAX_WIDTH
 
 
-# --- 2. _load_persisted_width ---
-
-
-class TestLoadPersistedWidth:
-    def test_returns_default_when_no_persisted(self):
-        """get_typed 返回 default_width 时, 结果 == default_width。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            assert _load_persisted_width(CONFIG_KEY, DEFAULT_WIDTH, MIN_WIDTH, MAX_WIDTH) == DEFAULT_WIDTH
-
-    def test_clamps_high(self):
-        """持久化值超过 max_width 时 clamp 到 max_width。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=700):
-            assert _load_persisted_width(CONFIG_KEY, DEFAULT_WIDTH, MIN_WIDTH, MAX_WIDTH) == MAX_WIDTH
-
-    def test_clamps_low(self):
-        """持久化值低于 min_width 时 clamp 到 min_width。"""
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=200):
-            assert _load_persisted_width(CONFIG_KEY, DEFAULT_WIDTH, MIN_WIDTH, MAX_WIDTH) == MIN_WIDTH
-
-    def test_within_bounds_passes_through(self):
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=450):
-            assert _load_persisted_width(CONFIG_KEY, DEFAULT_WIDTH, MIN_WIDTH, MAX_WIDTH) == 450
-
-    def test_exception_falls_back_to_default(self, caplog):
-        """get_typed 抛异常时回退 default_width, 不抛出。"""
-        with patch(
-            "utils.config_handler.ConfigHandler.get_typed",
-            side_effect=RuntimeError("config corrupted"),
-        ):
-            with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
-                result = _load_persisted_width(CONFIG_KEY, DEFAULT_WIDTH, MIN_WIDTH, MAX_WIDTH)
-        assert result == DEFAULT_WIDTH
-        assert any("load width failed" in r.message for r in caplog.records)
-
-
-# --- 3. _persist_width ---
-
-
-class TestPersistWidth:
-    def test_calls_set_typed_with_int(self):
-        """_persist_width 调用 ConfigHandler.set_typed 持久化宽度。"""
-        with patch("utils.config_handler.ConfigHandler.set_typed", return_value=True) as mock_set:
-            _persist_width(CONFIG_KEY, 420)
-        mock_set.assert_called_once_with(CONFIG_KEY, 420)
-
-    def test_set_typed_false_warns(self, caplog):
-        """set_typed 返回 False 时记 warning 日志。"""
-        with patch("utils.config_handler.ConfigHandler.set_typed", return_value=False):
-            with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-                _persist_width(CONFIG_KEY, 420)
-        assert any("rejected by validator" in r.message for r in caplog.records)
-
-    def test_set_typed_exception_no_raise(self, caplog):
-        """set_typed 抛异常时不传播, 记 debug 日志。"""
-        with patch("utils.config_handler.ConfigHandler.set_typed", side_effect=OSError("disk full")):
-            with caplog.at_level(logging.DEBUG, logger=LOGGER_NAME):
-                _persist_width(CONFIG_KEY, 420)
-        assert any("persist width failed" in r.message for r in caplog.records)
-
-
-# --- 4. _DragCache ---
+# --- 2. _DragCache ---
 
 
 class TestDragCache:
@@ -137,7 +76,7 @@ class TestDragCache:
         assert cache.last_time == 12345.678
 
 
-# --- 5. 组件契约 (声明式标记 + 签名) ---
+# --- 3. 组件契约 (声明式标记 + 签名) ---
 
 
 class TestComponentContract:
@@ -152,13 +91,15 @@ class TestComponentContract:
         assert hasattr(ResizableSplitter, "__wrapped__")
 
     def test_signature_defaults(self):
-        """参数默认值契约: default_width=360, min_width=280, max_width=600 等。"""
+        """参数默认值契约: default_width=360, min_width=280, max_width=600, 回调默认 None。"""
         sig = inspect.signature(ResizableSplitter)
         params = sig.parameters
         assert params["default_width"].default == 360
         assert params["min_width"].default == 280
         assert params["max_width"].default == 600
         assert params["on_resize"].default is None
+        assert params["on_load_width"].default is None
+        assert params["on_persist_width"].default is None
         assert params["drag_interval"].default == 16
         assert params["collapsible"].default is False
         assert params["collapsed"].default is False
@@ -183,8 +124,15 @@ class TestComponentContract:
         assert not hasattr(mod, "PageRefMixin")
         assert "PageRefMixin" not in dir(mod)
 
+    def test_no_confighandler_import(self):
+        """P1-1: 模块不得直接 import ConfigHandler (经回调上抛父 VM)."""
+        import ui.components.resizable_splitter as mod
 
-# --- 6. 无 renderer 环境下组件实例化抛 RuntimeError (契约验证) ---
+        assert not hasattr(mod, "ConfigHandler")
+        assert "ConfigHandler" not in dir(mod)
+
+
+# --- 4. 无 renderer 环境下组件实例化抛 RuntimeError (契约验证) ---
 
 
 class TestRendererRequirement:
@@ -195,11 +143,11 @@ class TestRendererRequirement:
 
         这是有状态声明式组件的预期行为 (含 use_state/use_effect), 验证组件确实
         依赖 renderer 上下文, 而非静默返回错误结果。集成测试用 flet_test_page 覆盖。
+        P1-1: 回调模式下无需 patch ConfigHandler (on_load_width 默认 None, 不触发回调)。
         """
-        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=DEFAULT_WIDTH):
-            with pytest.raises(RuntimeError):
-                ResizableSplitter(
-                    left_content=ft.Container(width=100),
-                    right_content=ft.Container(width=100),
-                    config_key=CONFIG_KEY,
-                )
+        with pytest.raises(RuntimeError):
+            ResizableSplitter(
+                left_content=ft.Container(width=100),
+                right_content=ft.Container(width=100),
+                config_key=CONFIG_KEY,
+            )

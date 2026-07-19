@@ -8,7 +8,7 @@
 
 分为 `unit/` (单元测试, 纯逻辑隔离), `integration/` (集成测试, 依赖 PostgreSQL), `e2e/` (端到端测试)。
 
-测试 marker 清单见 [`pyproject.toml`](./pyproject.toml) 的 `[tool.pytest.ini_options].markers`（含 `unit` / `integration` / `e2e` / `slow` / `network` / `database` / `migration` / `ai` / `no_auto_mock` / `mutates_config` / `no_db` 等）。本文档不手工维护子集，以 `pyproject.toml` 为单一事实源。
+测试 marker 清单见 [`pyproject.toml`](../../pyproject.toml) 的 `[tool.pytest.ini_options].markers`（含 `unit` / `integration` / `e2e` / `slow` / `network` / `database` / `migration` / `ai` / `no_auto_mock` / `mutates_config` / `no_db` 等）。本文档不手工维护子集，以 `pyproject.toml` 为单一事实源。
 
 ### 测试编写规则
 
@@ -27,7 +27,7 @@
 
 - **Mock 规范**: `keyring` 和 `litellm` 在 `tests/conftest.py` 中全局 mock (session 别，`pytest_configure` 早期拦截)，每个测试后清理状态。
 - **异步测试**: 使用 `pytest-asyncio`，`asyncio_mode = "auto"` 自动处理 (`async def test_xxx()` 即可)。
-- **事件循环 scope**（事实源 [`pyproject.toml`](./pyproject.toml) `[tool.pytest.ini_options]`）：
+- **事件循环 scope**（事实源 [`pyproject.toml`](../../pyproject.toml) `[tool.pytest.ini_options]`）：
   - **unit test**：`asyncio_default_test_loop_scope = "function"`（每个测试独立循环，隔离单例/loop-local 状态，避免测试间污染）
   - **integration / e2e**：在 `tests/integration/conftest.py` 等处通过 `@pytest_asyncio.fixture(scope="session", loop_scope="session")` 显式 override，复用 session 级事件循环以降低启动开销
   - Windows 事件循环策略使用 `WindowsSelectorEventLoopPolicy`

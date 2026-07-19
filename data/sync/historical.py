@@ -22,7 +22,7 @@ from data.constants import (
     SYNC_RESULT_SAVE_FAILED,
     SYNC_RESULT_SKIPPED_PERMISSION,
 )
-from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments
+from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, _get_seasonal_adjustments, safe_error
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.external.tushare_client import TushareAPIPermissionError, TushareClient
 from core.i18n import I18n
@@ -105,7 +105,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] Effective trade date | SYSTEM-LEVEL failure: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -113,14 +113,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] Effective trade date fallback (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
         return get_now().date()
@@ -176,7 +176,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if severity == "system":
                         logger.critical(
                             "[HistoricalSync] Report | SYSTEM-LEVEL failure during quality scores collection: %s",
-                            qe,
+                            safe_error(qe),
                             exc_info=True,
                         )
                         raise
@@ -184,14 +184,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         logger.warning(
                             "[HistoricalSync] Report | Failed to collect quality scores (%s): %s",
                             error_info["code"],
-                            qe,
+                            safe_error(qe),
                             exc_info=True,
                         )
                     else:
                         logger.error(
                             "[HistoricalSync] Report | Failed to collect quality scores (%s): %s",
                             error_info["code"],
-                            qe,
+                            safe_error(qe),
                             exc_info=True,
                         )
 
@@ -207,12 +207,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[HistoricalSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[HistoricalSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
-                logger.warning("[HistoricalSync] Recoverable error (%s): %s", error_info["code"], e, exc_info=True)
+                logger.warning(
+                    "[HistoricalSync] Recoverable error (%s): %s", error_info["code"], safe_error(e), exc_info=True
+                )
             else:
-                logger.error("[HistoricalSync] Operational error: %s", e, exc_info=True)
+                logger.error("[HistoricalSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -254,7 +256,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] Calendar | SYSTEM-LEVEL failure during trade calendar retrieval: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -262,14 +264,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] Calendar | ⚠️ Trade calendar retrieval failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             trade_dates = []
@@ -301,7 +303,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] Config | SYSTEM-LEVEL failure loading integrity config: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -309,14 +311,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] Config | ⚠️ Failed to load integrity config, using defaults (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             QUALITY_THRESHOLD = 80
@@ -402,7 +404,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     if severity == "system":
                         logger.critical(
                             "[HistoricalSync] QualityCheck | SYSTEM-LEVEL failure: %s",
-                            qe,
+                            safe_error(qe),
                             exc_info=True,
                         )
                         raise
@@ -410,14 +412,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         logger.warning(
                             "[HistoricalSync] QualityCheck | Failed (%s): %s",
                             error_info["code"],
-                            qe,
+                            safe_error(qe),
                             exc_info=True,
                         )
                     else:
                         logger.error(
                             "[HistoricalSync] QualityCheck | Failed (%s): %s",
                             error_info["code"],
-                            qe,
+                            safe_error(qe),
                             exc_info=True,
                         )
 
@@ -440,7 +442,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] Resume | SYSTEM-LEVEL failure during cache check: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -448,14 +450,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] Resume | ⚠️ Cache check failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] Resume | ⚠️ Cache check failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
 
@@ -519,7 +521,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         logger.critical(
                             "[HistoricalSync] DaySync | SYSTEM-LEVEL failure for %s: %s",
                             date_obj,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -528,7 +530,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             "[HistoricalSync] DaySync | ⚠️ Failed %s (%s): %s",
                             date_obj,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
@@ -536,7 +538,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             "[HistoricalSync] DaySync | ⚠️ Failed %s (%s): %s",
                             date_obj,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     async with counter_lock:
@@ -610,7 +612,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                                 logger.critical(
                                     "[HistoricalSync] Retry | SYSTEM-LEVEL failure for %s: %s",
                                     date,
-                                    retry_e,
+                                    safe_error(retry_e),
                                     exc_info=True,
                                 )
                                 raise
@@ -716,7 +718,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             except TushareAPIPermissionError as e:
                 # cached unavailable 由 _handle_api_call 的 DEBUG + mark_api_unavailable 的 WARNING 充分记录；
                 # 首次真实权限错误由 _handle_api_call 的 ERROR 记录。此处仅标记本日跳过，避免按日循环刷屏。
-                logger.debug("[HistoricalSync] DaySync | PERMISSION_DENIED for %s (skipped): %s", name, e)
+                logger.debug("[HistoricalSync] DaySync | PERMISSION_DENIED for %s (skipped): %s", name, safe_error(e))
                 return (key, None, "permission_denied")
             except Exception as e:
                 error_info = classify_error(e, context="general")
@@ -726,7 +728,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         "[HistoricalSync] DaySync | SYSTEM-LEVEL failure fetching %s for %s: %s",
                         name,
                         trade_date,
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -736,7 +738,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         name,
                         trade_date,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
@@ -745,7 +747,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         name,
                         trade_date,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 return (key, None, e)
@@ -767,7 +769,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     logger.critical(
                         "[HistoricalSync] DaySync | SYSTEM-LEVEL failure fetching indices for %s: %s",
                         trade_date,
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -776,7 +778,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         "[HistoricalSync] DaySync | ⚠️ Fetch indices failed for %s (%s): %s",
                         trade_date,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
@@ -784,7 +786,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         "[HistoricalSync] DaySync | ⚠️ Fetch indices failed for %s (%s): %s",
                         trade_date,
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 return ("index", None, e)
@@ -864,7 +866,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         logger.critical(
                             "[HistoricalSync] DaySync | SYSTEM-LEVEL failure saving %s: %s",
                             key,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -873,7 +875,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             "[HistoricalSync] DaySync | ❌ Critical save failed for %s (%s): %s",
                             key,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise e
@@ -882,7 +884,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             "[HistoricalSync] DaySync | ⚠️ Non-critical save %s failed (%s): %s, skipping sync_status update",
                             key,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
@@ -890,7 +892,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                             "[HistoricalSync] DaySync | ⚠️ Non-critical save %s failed (%s): %s, skipping sync_status update",
                             key,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     return {
@@ -1019,7 +1021,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] DaySync | SYSTEM-LEVEL failure during northbound save: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -1027,14 +1029,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical) (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] DaySync | ⚠️ Northbound save failed (non-critical) (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             north_result = {"saved": None, "fetched": 0, "success": False}
@@ -1180,7 +1182,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                     )
                 return count
         except (ConnectionError, TimeoutError) as e:
-            logger.error("[HistoricalSync] MoneyFlow | ❌ Network error: %s", e, exc_info=True)
+            logger.error("[HistoricalSync] MoneyFlow | ❌ Network error: %s", safe_error(e), exc_info=True)
             raise
         except EngineDisposedError:
             raise
@@ -1190,7 +1192,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] MoneyFlow | SYSTEM-LEVEL failure during standalone sync: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -1198,14 +1200,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] MoneyFlow | ⚠️ Standalone sync failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
         return 0
@@ -1230,7 +1232,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
                         )
                     return count
         except (ConnectionError, TimeoutError) as e:
-            logger.error("[HistoricalSync] Northbound | ❌ Network error: %s", e, exc_info=True)
+            logger.error("[HistoricalSync] Northbound | ❌ Network error: %s", safe_error(e), exc_info=True)
             raise
         except EngineDisposedError:
             raise
@@ -1240,7 +1242,7 @@ class HistoricalSyncStrategy(ISyncStrategy):
             if severity == "system":
                 logger.critical(
                     "[HistoricalSync] Northbound | SYSTEM-LEVEL failure during standalone sync: %s",
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -1248,14 +1250,14 @@ class HistoricalSyncStrategy(ISyncStrategy):
                 logger.warning(
                     "[HistoricalSync] Northbound | ⚠️ Standalone sync failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[HistoricalSync] Northbound | ⚠️ Standalone sync failed (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
         return 0

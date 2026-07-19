@@ -23,7 +23,7 @@ from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.time_utils import get_now
 
-from .base import ISyncStrategy, SyncResult
+from .base import ISyncStrategy, SyncResult, safe_error
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +95,17 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[SwIndustrySync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[SwIndustrySync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[SwIndustrySync] Recoverable error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
-                logger.error("[SwIndustrySync] Operational error: %s", e, exc_info=True)
+                logger.error("[SwIndustrySync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = "failed"
             result.errors.append(error_info["message_key"])
 
@@ -151,20 +151,20 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[SwIndustrySync] Classify | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[SwIndustrySync] Classify | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[SwIndustrySync] Classify | Recoverable error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[SwIndustrySync] Classify | Operational error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             result.errors.append(f"SwIndustry Classify: {e}")
@@ -221,7 +221,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                         logger.critical(
                             "[SwIndustrySync] Members | SYSTEM-LEVEL failure for index_code=%s: %s",
                             index_code,
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -230,7 +230,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                             "[SwIndustrySync] Members | Skip index_code=%s (%s): %s",
                             index_code,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
@@ -238,7 +238,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                             "[SwIndustrySync] Members | Skip index_code=%s (%s): %s",
                             index_code,
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
 
@@ -273,20 +273,20 @@ class SwIndustrySyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[SwIndustrySync] Members | SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[SwIndustrySync] Members | SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
             elif severity == "recoverable":
                 logger.warning(
                     "[SwIndustrySync] Members | Recoverable error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
                 logger.error(
                     "[SwIndustrySync] Members | Operational error (%s): %s",
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             result.errors.append(f"SwIndustry Members: {e}")
@@ -309,7 +309,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                 logger.critical(
                     "[SwIndustrySync] SYSTEM-LEVEL failure while recording skipped_permission for %s: %s",
                     table_name,
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
                 raise
@@ -318,7 +318,7 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     "[SwIndustrySync] Failed to record skipped_permission status for %s (%s): %s",
                     table_name,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )
             else:
@@ -326,6 +326,6 @@ class SwIndustrySyncStrategy(ISyncStrategy):
                     "[SwIndustrySync] Failed to record skipped_permission status for %s (%s): %s",
                     table_name,
                     error_info["code"],
-                    e,
+                    safe_error(e),
                     exc_info=True,
                 )

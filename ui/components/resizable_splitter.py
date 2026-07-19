@@ -1,4 +1,4 @@
-"""ResizableSplitter — 声明式可拖动分栏组件 (Phase A.3).
+"""ResizableSplitter — 声明式可拖动分栏组件 (Phase A.3, P1-1 MVVM 重构).
 
 从命令式容器子类 (历史 page 引用基类) 重写为
 ``@ft.component`` 函数组件 (CLAUDE.md §3.2 MVVM, §3.3 声明式迁移).
@@ -6,7 +6,10 @@
 变更要点:
 - 历史 page 引用基类与显式 update 调用全部移除, 状态变更由 ``use_state`` 驱动自动重渲染
 - 拖拽即时宽度用 ``use_ref`` 缓存 (性能优化, 非 cache 命令式实例), 节流后 ``set_state`` 提交
-- ConfigHandler 宽度持久化用 ``use_effect`` 初始加载 + 拖拽结束写入
+- P1-1 + P2-1: 宽度持久化经回调上抛父 View 的 VM 处理 (移除 ConfigHandler 直接 import,
+  避免View 层持有业务对象; 同时让 VM 通过 ThreadPoolManager 异步写盘, 解决 R16 同步写)
+  - ``on_load_width``: 同步回调, 父 VM 读取持久化宽度 (内存读, 非 IO)
+  - ``on_persist_width``: 同步回调签名, 父 VM 内部经 page.run_task + ThreadPoolManager 异步写盘
 - 折叠状态用 ``use_state`` 管理
 """
 
@@ -17,7 +20,6 @@ from collections.abc import Callable
 import flet as ft
 
 from ui.theme import AppColors
-from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
 
@@ -40,30 +42,6 @@ def _clamp_width(width: float, min_width: int, max_width: int) -> int:
     return max(min_width, min(max_width, int(width)))
 
 
-def _load_persisted_width(config_key: str, default_width: int, min_width: int, max_width: int) -> int:
-    """从 ConfigHandler 加载持久化宽度并 clamp, 失败回退 default_width。"""
-    try:
-        loaded = ConfigHandler.get_typed(config_key, int, default_width)
-    except Exception as e:
-        logger.debug("[ResizableSplitter] load width failed, use default: %s", e)
-        loaded = default_width
-    return _clamp_width(loaded, min_width, max_width)
-
-
-def _persist_width(config_key: str, width: int) -> None:
-    """持久化宽度到 ConfigHandler, 失败仅记日志不阻断。
-
-    ``ConfigHandler.set_typed`` 对 validator 失败返回 False (不抛异常),
-    但内部 ``save_config`` 可能因磁盘满/权限抛异常, 故需 try/except 兜底。
-    """
-    try:
-        ok = ConfigHandler.set_typed(config_key, int(width))
-        if not ok:
-            logger.warning("[ResizableSplitter] persist width rejected by validator: %s", config_key)
-    except Exception as e:
-        logger.debug("[ResizableSplitter] persist width failed: %s", e)
-
-
 @ft.component
 def ResizableSplitter(
     left_content: ft.Control,
@@ -73,6 +51,8 @@ def ResizableSplitter(
     min_width: int = 280,
     max_width: int = 600,
     on_resize: Callable[[], None] | None = None,
+    on_load_width: Callable[[], int | None] | None = None,
+    on_persist_width: Callable[[int], None] | None = None,
     drag_interval: int = 16,
     collapsible: bool = False,
     collapsed: bool = False,
@@ -82,11 +62,18 @@ def ResizableSplitter(
     Args:
         left_content: 左侧内容控件
         right_content: 右侧内容控件
-        config_key: 持久化键名 (如 "backtest_config_panel_width")
+        config_key: 持久化键名 (如 "backtest_config_panel_width"); 由父 VM 透传到
+            ``on_load_width`` / ``on_persist_width`` 回调中, ResizableSplitter 自身
+            不再直接读写 ConfigHandler (P1-1 MVVM 合规)
         default_width: 默认左侧宽度 (首次启动或重置时使用)
         min_width: 左侧最小宽度
         max_width: 左侧最大宽度
         on_resize: 宽度变化回调 (可选, 用于触发子控件刷新, 签名 () -> None)
+        on_load_width: 持久化宽度读取回调 (可选, 签名 () -> int | None);
+            返回 None 表示无持久化值, 使用 default_width; 由父 VM 同步返回
+            (ConfigHandler.get_typed 是内存读, 非 IO)
+        on_persist_width: 持久化宽度写入回调 (可选, 签名 (int) -> None);
+            由父 VM 内部经 page.run_task + ThreadPoolManager.run_async 异步写盘 (R16 合规)
         drag_interval: 拖拽事件节流毫秒数, 默认 16ms (~60fps). NOTE(lazy): 匹配显示器刷新率. ceiling: 低性能设备 60fps reconcile 可能掉帧. upgrade: 设备性能检测或用户反馈掉帧时改 33ms.
         collapsible: 是否允许折叠左侧栏
         collapsed: 初始是否折叠左侧栏
@@ -102,11 +89,32 @@ def ResizableSplitter(
     assert cache is not None
 
     def _load_effect():
-        persisted = _load_persisted_width(config_key, default_width, min_width, max_width)
+        if on_load_width is None:
+            return
+        try:
+            loaded = on_load_width()
+        except Exception as e:
+            logger.debug("[ResizableSplitter] on_load_width failed, use default: %s", e)
+            return
+        if loaded is None:
+            return
+        persisted = _clamp_width(loaded, min_width, max_width)
         if persisted != default_width:
             set_width(persisted)
 
     ft.use_effect(_load_effect, dependencies=[config_key])
+
+    def _persist(width_to_persist: int) -> None:
+        """经回调上抛持久化请求到父 VM (P1-1: 不再直接调 ConfigHandler).
+
+        回调为 None 时跳过持久化 (允许父 View 不需要持久化的场景)。
+        """
+        if on_persist_width is None:
+            return
+        try:
+            on_persist_width(width_to_persist)
+        except Exception as e:
+            logger.debug("[ResizableSplitter] on_persist_width failed: %s", e)
 
     # --- Drag handlers ---
 
@@ -143,20 +151,20 @@ def ResizableSplitter(
             on_resize()
 
     def _on_drag_end(e) -> None:
-        """拖动结束时提交最终宽度并持久化。"""
+        """拖动结束时提交最终宽度并经回调上抛持久化。"""
         final_width = cache.width
         if final_width is not None:
             set_width(final_width)
             cache.width = None
-            _persist_width(config_key, final_width)
+            _persist(final_width)
         else:
-            _persist_width(config_key, width)
+            _persist(width)
 
     def _on_double_tap(e) -> None:
-        """双击恢复默认宽度并持久化。"""
+        """双击恢复默认宽度并经回调上抛持久化。"""
         cache.width = None
         set_width(default_width)
-        _persist_width(config_key, default_width)
+        _persist(default_width)
 
     def _on_divider_enter(e) -> None:
         """鼠标进入分隔条: 高亮中线。"""

@@ -127,6 +127,7 @@ async def _wait_for_any_text(e2e_page, texts: list[str], timeout_ms: int = 30000
     return ""
 
 
+@pytest.mark.network
 async def test_llm_config_save_and_validate(e2e_page):
     """LLM 配置测试连接流程 E2E.
 
@@ -184,6 +185,7 @@ async def test_llm_config_save_and_validate(e2e_page):
     logger.info("LLM 测试连接错误路径验证通过: %s", hit)
 
 
+@pytest.mark.network
 @pytest.mark.mutates_config
 async def test_tushare_token_validate_and_save(e2e_page):
     """Tushare Token 验证失败流程 E2E.

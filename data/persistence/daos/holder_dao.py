@@ -6,7 +6,7 @@ import pandas as pd
 from data.persistence.models import StkHoldernumber, Top10Holders, get_model_columns, get_model_pk_columns
 from utils.sanitizers import DataSanitizer
 
-from .base_dao import BaseDao, EngineDisposedError
+from .base_dao import BaseDao, DatabaseQueryError, EngineDisposedError
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,10 @@ class HolderDao(BaseDao):
         except asyncio.CancelledError:
             raise
         except EngineDisposedError:
+            raise
+        except DatabaseQueryError:
+            # R5/R9 一致性: DatabaseQueryError 是显式 suppress_errors=False 抛出的预期异常,
+            # 不应被 except Exception 吞没为 warning (与 P1-4 修复目标"消除静默不更新"同根).
             raise
         except Exception as e:
             logger.warning("[HolderDao] Failed to calculate holder changes: %s", DataSanitizer.sanitize_error(e))

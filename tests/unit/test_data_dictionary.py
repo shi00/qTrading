@@ -1,3 +1,4 @@
+import logging
 import os
 from unittest.mock import patch, MagicMock
 import pytest
@@ -14,7 +15,7 @@ pytestmark = pytest.mark.unit
 @patch.dict(os.environ, {"STRICT_SCHEMA_GATE": ""})
 class TestValidateSchemaDefinitionsExtended:
     @patch("data.persistence.models.Base")
-    def test_validate_with_orm_columns_missing_from_dict(self, mock_base):
+    def test_validate_with_orm_columns_missing_from_dict(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_col = MagicMock()
         mock_col.name = "orm_only_col"
         mock_table = MagicMock()
@@ -22,17 +23,26 @@ class TestValidateSchemaDefinitionsExtended:
         mock_metadata = MagicMock()
         mock_metadata.tables = {"stock_basic": mock_table}
         mock_base.metadata = mock_metadata
-        validate_schema_definitions()
+        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
+            validate_schema_definitions()
+        assert any(
+            r.levelno == logging.WARNING and "orm_only_col" in r.message and "missing from data dictionary" in r.message
+            for r in caplog.records
+        ), f"expected missing-column warning for orm_only_col, got: {[r.message for r in caplog.records]}"
 
     @patch("data.persistence.models.Base")
-    def test_validate_with_extra_defs_not_in_orm(self, mock_base):
+    def test_validate_with_extra_defs_not_in_orm(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_metadata = MagicMock()
         mock_metadata.tables = {}
         mock_base.metadata = mock_metadata
-        validate_schema_definitions()
+        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
+            validate_schema_definitions()
+        assert any(
+            r.levelno == logging.WARNING and "in TABLE_DEFINITIONS but not in ORM" in r.message for r in caplog.records
+        ), f"expected extra-defs warning, got: {[r.message for r in caplog.records]}"
 
     @patch("data.persistence.models.Base")
-    def test_validate_ignores_stock_sync_status(self, mock_base):
+    def test_validate_ignores_stock_sync_status(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_col = MagicMock()
         mock_col.name = "step4_completed_at"
         mock_table = MagicMock()
@@ -40,10 +50,15 @@ class TestValidateSchemaDefinitionsExtended:
         mock_metadata = MagicMock()
         mock_metadata.tables = {"stock_sync_status": mock_table}
         mock_base.metadata = mock_metadata
-        validate_schema_definitions()
+        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
+            validate_schema_definitions()
+        # stock_sync_status 在 IGNORED_TABLES 中，不应触发任何提及该表名的警告
+        assert not any(r.levelno >= logging.WARNING and "stock_sync_status" in r.message for r in caplog.records), (
+            f"stock_sync_status should be ignored, but appeared in: {[r.message for r in caplog.records]}"
+        )
 
     @patch("data.persistence.models.Base")
-    def test_validate_ignores_alembic_version(self, mock_base):
+    def test_validate_ignores_alembic_version(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_col = MagicMock()
         mock_col.name = "version_num"
         mock_table = MagicMock()
@@ -51,10 +66,15 @@ class TestValidateSchemaDefinitionsExtended:
         mock_metadata = MagicMock()
         mock_metadata.tables = {"alembic_version": mock_table}
         mock_base.metadata = mock_metadata
-        validate_schema_definitions()
+        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
+            validate_schema_definitions()
+        # alembic_version 在 IGNORED_TABLES 中，不应触发任何提及该表名的警告
+        assert not any(r.levelno >= logging.WARNING and "alembic_version" in r.message for r in caplog.records), (
+            f"alembic_version should be ignored, but appeared in: {[r.message for r in caplog.records]}"
+        )
 
     @patch("data.persistence.models.Base")
-    def test_validate_skips_updated_at_created_at(self, mock_base):
+    def test_validate_skips_updated_at_created_at(self, mock_base, caplog: pytest.LogCaptureFixture):
         mock_col1 = MagicMock()
         mock_col1.name = "updated_at"
         mock_col2 = MagicMock()
@@ -66,11 +86,23 @@ class TestValidateSchemaDefinitionsExtended:
         mock_metadata = MagicMock()
         mock_metadata.tables = {"stock_basic": mock_table}
         mock_base.metadata = mock_metadata
-        validate_schema_definitions()
-
-    def test_validate_import_error(self):
-        with patch("data.persistence.models.Base", side_effect=ImportError):
+        with caplog.at_level(logging.WARNING, logger="data.data_dictionary"):
             validate_schema_definitions()
+        # updated_at/created_at 被显式跳过，real_col 仍应触发 missing 警告
+        assert any(
+            r.levelno == logging.WARNING and "real_col" in r.message and "missing from data dictionary" in r.message
+            for r in caplog.records
+        ), f"expected missing-column warning for real_col, got: {[r.message for r in caplog.records]}"
+
+    def test_validate_import_error(self, caplog: pytest.LogCaptureFixture):
+        # 模拟 Base.metadata.tables.keys() 调用链抛 ImportError，验证 except Exception 分支记录 error 日志
+        with patch("data.persistence.models.Base") as mock_base:
+            mock_base.metadata.tables.keys.side_effect = ImportError("simulated import failure")
+            with caplog.at_level(logging.ERROR, logger="data.data_dictionary"):
+                validate_schema_definitions()
+        assert any(r.levelno == logging.ERROR and "ORM validation failed" in r.message for r in caplog.records), (
+            f"expected error log for ORM validation failure, got: {[r.message for r in caplog.records]}"
+        )
 
 
 class TestTableDefinitionsQualityConfig:

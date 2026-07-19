@@ -275,12 +275,14 @@ def StartupView(
     ft.use_dialog(dialog)
 
     # --- news alert 监听 (仅 READY 时注册, cleanup 必须退订避免泄漏) ---
+    # CLAUDE.md §3.2 MVVM: View 不直调 NewsSubscriptionService, 经 HomeViewModel 命令转发
+    # (合规范例 home_view_model.py:111). View 仅保留需要 page 访问的 toast 回调.
     news_alert_cb_ref = ft.use_ref(lambda: None)
 
     def _setup_news_alert() -> None:
         if state != StartupState.READY:
             return
-        from services.news_subscription_service import NewsSubscriptionService
+        from ui.viewmodels.home_view_model import HomeViewModel
 
         def on_news_alert(msg: str) -> None:
             try:
@@ -291,15 +293,15 @@ def StartupView(
                 pass
 
         news_alert_cb_ref.current = on_news_alert
-        NewsSubscriptionService().add_listener(on_news_alert, is_alert=True)
+        HomeViewModel.register_news_alert_listener(on_news_alert)
 
     def _cleanup_news_alert() -> None:
         cb = news_alert_cb_ref.current
         if cb is None:
             return
-        from services.news_subscription_service import NewsSubscriptionService
+        from ui.viewmodels.home_view_model import HomeViewModel
 
-        NewsSubscriptionService().remove_listener(cb, is_alert=True)
+        HomeViewModel.unregister_news_alert_listener(cb)
         news_alert_cb_ref.current = None
 
     ft.use_effect(_setup_news_alert, dependencies=[state], cleanup=_cleanup_news_alert)

@@ -20,7 +20,7 @@ from data.external.akshare_concept_client import AkshareConceptClient
 from data.external.tushare_client import TushareAPIPermissionError
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.daos.stock_dao import StockDao
-from data.sync.base import ISyncStrategy, SyncResult, SyncStatus
+from data.sync.base import ISyncStrategy, SyncResult, SyncStatus, safe_error
 from utils.async_utils import gather_return_exceptions_propagating_cancel
 from utils.error_classifier import classify_error, classify_severity
 from utils.log_decorators import PerfThreshold, log_async_operation
@@ -124,7 +124,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                 logger.critical(
                                     "[AKShareConceptSync] SYSTEM-LEVEL failure for board %s: %s",
                                     board_name,
-                                    e,
+                                    safe_error(e),
                                     exc_info=True,
                                 )
                                 raise
@@ -136,7 +136,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                         board_name,
                                         attempt + 1,
                                         error_info["code"],
-                                        e,
+                                        safe_error(e),
                                         exc_info=True,
                                     )
                                 else:
@@ -145,7 +145,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                         board_name,
                                         attempt + 1,
                                         error_info["code"],
-                                        e,
+                                        safe_error(e),
                                         exc_info=True,
                                     )
                                 await asyncio.sleep(delay)
@@ -157,7 +157,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                         board_name,
                                         _AKSHARE_MAX_RETRIES,
                                         error_info["code"],
-                                        e,
+                                        safe_error(e),
                                         exc_info=True,
                                     )
                                 else:
@@ -166,7 +166,7 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
                                         board_name,
                                         _AKSHARE_MAX_RETRIES,
                                         error_info["code"],
-                                        e,
+                                        safe_error(e),
                                         exc_info=True,
                                     )
 
@@ -206,9 +206,9 @@ class AKShareConceptSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[AKShareConceptSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[AKShareConceptSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            logger.error("[AKShareConceptSync] Operational error: %s", e, exc_info=True)
+            logger.error("[AKShareConceptSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
@@ -300,9 +300,9 @@ class LimitListSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[LimitListSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[LimitListSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            logger.error("[LimitListSync] Operational error: %s", e, exc_info=True)
+            logger.error("[LimitListSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 
@@ -369,7 +369,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 if severity == "system":
                     logger.critical(
                         "[AIConceptTagSync] SYSTEM-LEVEL failure while loading retry queue: %s",
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                     raise
@@ -377,14 +377,14 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[AIConceptTagSync] Failed to load retry queue, continuing without it (%s): %s",
                         error_info["code"],
-                        e,
+                        safe_error(e),
                         exc_info=True,
                     )
                 retry_pending = []
@@ -407,7 +407,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     if severity == "system":
                         logger.critical(
                             "[AIConceptTagSync] SYSTEM-LEVEL failure while loading fresh pending: %s",
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                         raise
@@ -415,14 +415,14 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                         logger.warning(
                             "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     else:
                         logger.error(
                             "[AIConceptTagSync] Failed to load fresh pending (%s): %s",
                             error_info["code"],
-                            e,
+                            safe_error(e),
                             exc_info=True,
                         )
                     fresh_pending = []
@@ -586,7 +586,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                                 logger.critical(
                                     "[AIConceptTagSync] SYSTEM-LEVEL failure while clearing failure record for %s: %s",
                                     ts_code,
-                                    fe,
+                                    safe_error(fe),
                                     exc_info=True,
                                 )
                                 raise
@@ -595,7 +595,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                                     "[AIConceptTagSync] Failed to clear failure record for %s (%s): %s",
                                     ts_code,
                                     fe_info["code"],
-                                    fe,
+                                    safe_error(fe),
                                     exc_info=True,
                                 )
                             else:
@@ -603,7 +603,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                                     "[AIConceptTagSync] Failed to clear failure record for %s (%s): %s",
                                     ts_code,
                                     fe_info["code"],
-                                    fe,
+                                    safe_error(fe),
                                     exc_info=True,
                                 )
 
@@ -627,7 +627,7 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                 if fe_sev == "system":
                     logger.critical(
                         "[AIConceptTagSync] SYSTEM-LEVEL failure while cleaning expired failures: %s",
-                        fe,
+                        safe_error(fe),
                         exc_info=True,
                     )
                     raise
@@ -635,14 +635,14 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
                     logger.warning(
                         "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
                         fe_info["code"],
-                        fe,
+                        safe_error(fe),
                         exc_info=True,
                     )
                 else:
                     logger.error(
                         "[AIConceptTagSync] Failed to clean expired failures (%s): %s",
                         fe_info["code"],
-                        fe,
+                        safe_error(fe),
                         exc_info=True,
                     )
 
@@ -664,9 +664,9 @@ class AIConceptTagSyncStrategy(ISyncStrategy):
             error_info = classify_error(e, context="general")
             severity = classify_severity(e, context="general")
             if severity == "system":
-                logger.critical("[AIConceptTagSync] SYSTEM-LEVEL failure: %s", e, exc_info=True)
+                logger.critical("[AIConceptTagSync] SYSTEM-LEVEL failure: %s", safe_error(e), exc_info=True)
                 raise
-            logger.error("[AIConceptTagSync] Operational error: %s", e, exc_info=True)
+            logger.error("[AIConceptTagSync] Operational error: %s", safe_error(e), exc_info=True)
             result.status = SyncStatus.FAILED.value
             result.errors.append(error_info["message_key"])
 

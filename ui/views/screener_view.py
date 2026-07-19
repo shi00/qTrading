@@ -187,13 +187,18 @@ def _build_page_size_options() -> list[ft.dropdown.Option]:
 
 
 def _resolve_group_title(group_name: str, label_key: str | None = None) -> str:
-    """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS > group_name."""
+    """Resolve group title with priority: label_key > DEFAULT_GROUP_LABELS[group_name] > group_name.
+
+    DEFAULT_GROUP_LABELS 为 group_name→i18n_key 映射表（CLAUDE.md §3.2 i18n 状态驱动），
+    View 经 I18n.get(key) 渲染，不感知 locale。
+    """
     from ui.theme import DEFAULT_GROUP_LABELS
 
     if label_key:
         return I18n.get(label_key)
-    if group_name in DEFAULT_GROUP_LABELS:
-        return DEFAULT_GROUP_LABELS[group_name]
+    i18n_key = DEFAULT_GROUP_LABELS.get(group_name)
+    if i18n_key:
+        return I18n.get(i18n_key)
     return group_name
 
 
@@ -1222,6 +1227,8 @@ def ScreenerView(
             max_width=420,
             collapsible=True,
             collapsed=False,
+            on_load_width=lambda: vm.get_splitter_width("ui_splitter_screener_history", 250),
+            on_persist_width=lambda w: vm.persist_splitter_width("ui_splitter_screener_history", w),
         )
 
     # 6. 详情对话框 (条件渲染)

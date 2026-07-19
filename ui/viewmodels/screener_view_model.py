@@ -259,6 +259,44 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         if exc is not None:
             logger.error("[ScreenerVM] Background task failed: %s", exc, exc_info=exc)
 
+    # --- Splitter width persistence (P1-1/P2-1: View 不再直接 import ConfigHandler) ---
+
+    def get_splitter_width(self, config_key: str, default_width: int) -> int:
+        """读取持久化的 splitter 宽度 (P1-1: 经 VM 读取, View 不再直接 import ConfigHandler).
+
+        ConfigHandler._config_cache 命中是纯内存读 (非 IO); 首次未命中触发小 JSON
+        文件读 (单次 < 5ms), 在 use_effect 上下文中可接受。返回值由 ResizableSplitter
+        内部 clamp 到 [min_width, max_width]。
+        """
+        from utils.config_handler import ConfigHandler
+
+        return ConfigHandler.get_typed(config_key, int, default_width)
+
+    def persist_splitter_width(self, config_key: str, width: int) -> None:
+        """持久化 splitter 宽度 (P1-1/P2-1: 异步写盘, R16 合规). fire-and-forget.
+
+        同步签名以满足 ResizableSplitter ``on_persist_width`` 回调契约; 内部经
+        ThreadPoolManager.run_async 提交 IO 写盘, 不阻塞 Flet 事件处理器。
+        复用 _background_tasks + _on_background_task_done 跟踪 task 生命周期。
+        """
+        from utils.config_handler import ConfigHandler
+
+        async def _persist() -> None:
+            try:
+                await ThreadPoolManager().run_async(TaskType.IO, ConfigHandler.set_typed, config_key, width)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug("[ScreenerVM] persist_splitter_width failed: %s", e, exc_info=True)
+
+        try:
+            loop = self._main_loop or asyncio.get_running_loop()
+        except RuntimeError:
+            return  # 无事件循环 (测试环境), 静默跳过
+        task = loop.create_task(_persist())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+
     # --- Data Actions ---
 
     async def get_strategies(self) -> dict[str, str]:

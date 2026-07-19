@@ -72,7 +72,18 @@ FLET_DOCS_PATHS: list[Path] = [
 ]
 
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
-CHECKED_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS, KNOWN_TECHNICAL_DEBT_PATH]
+# P3-7 修复：纳入 docs/guides/、docs/patterns/、docs/architecture/、docs/README.md 全部 markdown，
+# 防止从 CONTRIBUTING.md 迁移后的 `./` 死链逃逸门禁
+CHECKED_DOCS: list[Path] = [
+    CLAUDE_PATH,
+    CONTRIBUTING_PATH,
+    *FLET_DOCS_PATHS,
+    KNOWN_TECHNICAL_DEBT_PATH,
+    *(ROOT / "docs" / "guides").glob("*.md"),
+    *(ROOT / "docs" / "patterns").glob("*.md"),
+    *(ROOT / "docs" / "architecture").glob("*.md"),
+    ROOT / "docs" / "README.md",
+]
 
 # Flet 版本漂移检查范围（治理文档）
 FLET_VERSION_DOCS: list[Path] = [CLAUDE_PATH, CONTRIBUTING_PATH, *FLET_DOCS_PATHS]

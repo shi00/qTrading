@@ -3,6 +3,7 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import datetime
 
+from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.review_manager import ReviewManager
 
 pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
@@ -1345,3 +1346,95 @@ class TestReviewManagerSaveResultsEdgeCases:
         mock_cache.screener_dao.save_screening_results.assert_called_once()
         records = mock_cache.screener_dao.save_screening_results.call_args[0][0]
         assert records[0]["ai_score"] == 0
+
+
+class TestReviewManagerEngineDisposedErrorR5:
+    """R5 一致性：disposed 引擎抛出的 EngineDisposedError 必须上抛，不可被 except Exception 吞没。
+
+    对齐 services/news_subscription_service.py 的显式 `except EngineDisposedError: raise` 范式。
+    覆盖 _get_pending_predictions / get_learning_context / _batch_update_results 三个方法。
+    """
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_get_pending_predictions_propagates_engine_disposed(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.get_latest_trade_date = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        with pytest.raises(EngineDisposedError):
+            await rm._get_pending_predictions()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_get_learning_context_propagates_engine_disposed(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_cache.screener_dao = MagicMock()
+        mock_cache.screener_dao.get_learning_context = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        with pytest.raises(EngineDisposedError):
+            await rm.get_learning_context()
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_update_results_propagates_engine_disposed(self, mock_cm, mock_tc):
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(side_effect=EngineDisposedError("engine disposed"))
+        mock_cache.engine = mock_engine
+        mock_cache.screener_dao = MagicMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        updates = [
+            {
+                "record_id": 1,
+                "pct": 1.0,
+                "label": "WIN",
+                "t1_price": 10.0,
+                "t5_pct": 2.0,
+                "t5_price": 10.5,
+                "index_pct": 0.5,
+                "alpha": 0.5,
+            }
+        ]
+        with pytest.raises(EngineDisposedError):
+            await rm._batch_update_results(updates)
+
+    @pytest.mark.asyncio
+    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager")
+    async def test_batch_update_results_fallback_propagates_engine_disposed(self, mock_cm, mock_tc):
+        """R5 一致性：主路径抛普通 Exception 触发 fallback 时，_update_result 抛 EngineDisposedError 必须上抛。
+
+        防止 fallback 路径的 except Exception 误吞 disposed 引擎异常（与主路径对齐）。
+        """
+        mock_cache = MagicMock()
+        mock_cm.return_value = mock_cache
+        mock_engine = MagicMock()
+        mock_engine.begin = MagicMock(side_effect=RuntimeError("batch tx failed"))
+        mock_cache.engine = mock_engine
+        mock_cache.screener_dao = MagicMock()
+        rm = ReviewManager()
+        rm.cache = mock_cache
+        rm._update_result = AsyncMock(side_effect=EngineDisposedError("engine disposed"))
+        updates = [
+            {
+                "record_id": 1,
+                "pct": 1.0,
+                "label": "WIN",
+                "t1_price": 10.0,
+                "t5_pct": 2.0,
+                "t5_price": 10.5,
+                "index_pct": 0.5,
+                "alpha": 0.5,
+            }
+        ]
+        with pytest.raises(EngineDisposedError):
+            await rm._batch_update_results(updates)

@@ -249,11 +249,13 @@ async def test_on_tier_changed_set_tier_exception_notifies_state(monkeypatch):
     result = await vm.on_tier_changed("points_15000")
 
     assert result["type"] == "set_tier_failed"
+    assert result["reason"] == "io"  # i18n 状态驱动: locale 无关判别字段
     assert result["tier"] == "points_5000"  # 回滚到旧档位
     assert "config file read-only" in result["error"]
     assert any(s.probe_result is not None for s in snapshots)
     assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
     assert vm.state.probe_result.type == "set_tier_failed"
+    assert vm.state.probe_result.reason == "io"
     assert "config file read-only" in vm.state.probe_result.error
     # 链路应在此中断，未调用 reload/clear/probe
     mock_client.reload_rate_limiters.assert_not_called()
@@ -289,10 +291,12 @@ async def test_on_tier_changed_set_tier_returns_false_notifies_state(monkeypatch
     result = await vm.on_tier_changed("invalid_tier")
 
     assert result["type"] == "set_tier_failed"
+    assert result["reason"] == "invalid_tier"  # i18n 状态驱动: locale 无关判别字段
     assert result["tier"] == "points_5000"
     assert any(s.probe_result is not None for s in snapshots)
     assert vm.state.probe_result is not None  # L771 合规: probe_result 直接放入 state
     assert vm.state.probe_result.type == "set_tier_failed"
+    assert vm.state.probe_result.reason == "invalid_tier"
     # 链路中断
     mock_client.reload_rate_limiters.assert_not_called()
     mock_client.probe_api_capabilities.assert_not_awaited()

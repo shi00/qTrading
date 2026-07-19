@@ -221,11 +221,18 @@ class TestResolveGroupTitle:
         mock_i18n.get.assert_called_with("label_key_xyz")
 
     def test_default_group_label(self):
-        with patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "基础设置"}):
+        # DEFAULT_GROUP_LABELS 为 group_name→i18n_key 映射，应通过 I18n.get 渲染
+        with (
+            patch("ui.theme.DEFAULT_GROUP_LABELS", {"default": "param_group_default"}),
+            patch("ui.views.screener_view.I18n") as mock_i18n,
+        ):
+            mock_i18n.get.return_value = "基础设置"
             result = _resolve_group_title("default", None)
         assert result == "基础设置"
+        mock_i18n.get.assert_called_with("param_group_default")
 
     def test_fallback_to_group_name(self):
+        # group_name 不在 DEFAULT_GROUP_LABELS 中时，直接返回 group_name
         with patch("ui.theme.DEFAULT_GROUP_LABELS", {}):
             result = _resolve_group_title("unknown_group", None)
         assert result == "unknown_group"
