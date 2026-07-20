@@ -45,7 +45,26 @@
 
 ## 历史核验记录
 
-> 当前无历史记录。首次升级 Flet 版本或新增高风险 API 使用时，按上述模板在此追加。
+### Flet 0.86 升级核验 @ 0.86 (2026-07-20)
+
+- **API**: 全量 V1 声明式 API + 私有 API + flet_charts API
+- **锁定版本**: Flet 0.86（pyproject.toml 实际锁定补丁号见文件）
+- **核验来源**:
+  - 官方文档: https://github.com/flet-dev/flet/blob/main/CHANGELOG.md
+  - Flet issue / PR: #6680, #6606, #6684, #6686
+  - 项目运行期验证: 启动应用 + Dialog/Dropdown/use_effect/use_viewmodel 关键路径
+  - 项目单元测试:
+    - tests/unit/ui/test_flet_0_86_v1_api_compat.py
+    - tests/unit/ui/test_flet_0_86_private_api_compat.py
+    - tests/unit/ui/test_flet_0_86_charts_compat.py
+- **项目结论**: 继续使用
+  - 理由: 0.86 系列最新补丁版本是纯 bugfix，无破坏性 API 变更；三套兼容性测试全部通过；项目无 BasePage / allowed_devices 使用，bugfix 不影响现有代码
+- **需更新文件**:
+  - [x] pyproject.toml (三包版本号同步升级至最新补丁)
+  - [x] requirements.txt / requirements-optional.txt / requirements-dev.txt (pre-commit 自动重新生成)
+  - [x] docs/flet/project-differences.md (最后验证日期)
+  - [x] docs/flet/api-verification-template.md (本核验记录)
+- **核验人**: AI 助手 (GLM-5.2) + 项目维护者
 
 ## 引用关系
 
