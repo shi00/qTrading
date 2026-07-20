@@ -1493,14 +1493,14 @@ class TestOnRowClickAndDetailClose:
         """_on_row_click(row_data) → set_detail_dialog_data(raw_data) → 重渲染含 StockDetailDialog."""
         env = screener_view_env
         on_row_click = env["captured_callbacks"]["on_row_click"]
-        assert on_row_click is not None
+        assert callable(on_row_click)
 
         row_data = {"ts_code": "000001.SZ", "name": "平安银行"}
         _invoke(on_row_click, row_data)
         _rerender(env)
 
         # StockDetailDialog mock 被调用 (captured on_close)
-        assert env["captured_callbacks"]["on_close"] is not None
+        assert callable(env["captured_callbacks"]["on_close"])
 
     def test_on_detail_close_clears_data(self, screener_view_env) -> None:
         """_on_detail_close → set_detail_dialog_data(None) → 重渲染不含 StockDetailDialog."""
@@ -2029,8 +2029,8 @@ class TestTableDataRendering:
         env = screener_view_env
         # 默认 _current_page_data=None → get_current_page_data 返回空 DataFrame
         # PaginatedTable 被 mock, 验证 captured_callbacks 存在
-        assert env["captured_callbacks"]["on_sort"] is not None
-        assert env["captured_callbacks"]["on_row_click"] is not None
+        assert callable(env["captured_callbacks"]["on_sort"])
+        assert callable(env["captured_callbacks"]["on_row_click"])
 
     def test_with_data_renders_table(self, screener_view_env) -> None:
         """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""
@@ -2049,7 +2049,7 @@ class TestTableDataRendering:
 
         # PaginatedTable mock 被调用 (rows 参数含数据)
         # 验证不抛异常
-        assert env["captured_callbacks"]["on_sort"] is not None
+        assert callable(env["captured_callbacks"]["on_sort"])
 
 
 # ============================================================================

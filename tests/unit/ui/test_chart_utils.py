@@ -62,7 +62,7 @@ class TestChartUtils:
         with patch("ui.components.chart_utils.mpf.plot"):
             result = generate_kline_png(df)
 
-        assert result is not None
+        assert isinstance(result, str)
 
     def test_generate_kline_png_missing_date_raises_error(self):
         """Test chart generation without date info raises error."""
@@ -91,7 +91,7 @@ class TestChartUtils:
         with patch("ui.components.chart_utils.mpf.plot"):
             result = generate_kline_png(df)
 
-        assert result is not None
+        assert isinstance(result, str)
 
     def test_generate_kline_png_with_capitalized_columns(self):
         """Test chart generation with capitalized column names."""
@@ -107,7 +107,7 @@ class TestChartUtils:
         with patch("ui.components.chart_utils.mpf.plot"):
             result = generate_kline_png(df)
 
-        assert result is not None
+        assert isinstance(result, str)
 
     def test_generate_kline_png_with_dark_theme(self):
         """Test chart generation with dark theme."""
@@ -123,7 +123,7 @@ class TestChartUtils:
         with patch("ui.components.chart_utils.mpf.plot"):
             result = generate_kline_png(df, theme_mode="dark")
 
-        assert result is not None
+        assert isinstance(result, str)
 
     def test_generate_kline_png_with_light_theme(self):
         """Test chart generation with light theme."""
@@ -139,7 +139,7 @@ class TestChartUtils:
         with patch("ui.components.chart_utils.mpf.plot"):
             result = generate_kline_png(df, theme_mode="light")
 
-        assert result is not None
+        assert isinstance(result, str)
 
     def test_create_kline_chart_legacy_wrapper(self):
         """Test legacy create_kline_chart wrapper."""
@@ -155,7 +155,7 @@ class TestChartUtils:
         with patch("ui.components.chart_utils.mpf.plot"):
             result = create_kline_chart(df, title="Legacy")
 
-        assert result is not None
+        assert isinstance(result, str)
 
     def test_generate_kline_html(self):
         """Test generate_kline_html wrapper."""

@@ -5,6 +5,7 @@ import pytest
 import pandas as pd
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from data.cache.cache_manager import CacheManager
 from data.domain_services.market_data_service import MarketDataService
 
 pytestmark = pytest.mark.unit
@@ -13,9 +14,10 @@ pytestmark = pytest.mark.unit
 class TestMarketDataServiceInit:
     @patch("data.domain_services.market_data_service.CacheManager")
     def test_init(self, mock_cm):
+        mock_cm.return_value = MagicMock(spec=CacheManager)
         svc = MarketDataService()
-        assert svc.cache is not None
-        assert svc._listeners is not None
+        assert isinstance(svc.cache, CacheManager)
+        assert isinstance(svc._listeners, set)
 
 
 class TestMarketDataServiceFetchMarketData:

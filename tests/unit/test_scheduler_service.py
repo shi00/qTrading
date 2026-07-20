@@ -149,7 +149,7 @@ class TestSchedulerServiceScheduleJobs:
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
-        assert job is not None
+        assert job.id == "daily_update"
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_schedule_jobs_adds_nightly_prediction(self, mock_ch):
@@ -159,7 +159,7 @@ class TestSchedulerServiceScheduleJobs:
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("nightly_prediction")
-        assert job is not None
+        assert job.id == "nightly_prediction"
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_schedule_jobs_adds_ai_concept_daily(self, mock_ch):
@@ -185,7 +185,7 @@ class TestSchedulerServiceScheduleJobs:
         svc = SchedulerService()
         svc._schedule_jobs()
         job = svc.scheduler.get_job("daily_update")
-        assert job is not None
+        assert job.id == "daily_update"
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_schedule_jobs_removes_existing(self, mock_ch):
@@ -195,7 +195,8 @@ class TestSchedulerServiceScheduleJobs:
         svc = SchedulerService()
         svc._schedule_jobs()
         svc._schedule_jobs()
-        assert svc.scheduler.get_job("daily_update") is not None
+        job = svc.scheduler.get_job("daily_update")
+        assert job.id == "daily_update"
 
 
 class TestSchedulerServiceWatchConfigChanges:
@@ -565,7 +566,7 @@ class TestScheduleJobsInvalidTime:
         mock_ch.get_ai_concept_schedule_time.return_value = "10:00"
         svc = SchedulerService()
         svc._schedule_jobs()
-        assert svc.scheduler.get_job("daily_update") is not None
+        assert svc.scheduler.get_job("daily_update") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
 
     @patch("utils.scheduler_service.ConfigHandler")
     def test_none_ai_concept_time(self, mock_ch):
@@ -574,7 +575,7 @@ class TestScheduleJobsInvalidTime:
         mock_ch.get_ai_concept_schedule_time.return_value = None
         svc = SchedulerService()
         svc._schedule_jobs()
-        assert svc.scheduler.get_job("ai_concept_daily_refresh") is not None
+        assert svc.scheduler.get_job("ai_concept_daily_refresh") is not None  # noqa: weak-assertion APScheduler job 注册存在性，trigger 配置由专项测试覆盖
 
 
 class TestSchedulerServiceStatus:

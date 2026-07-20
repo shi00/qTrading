@@ -12,7 +12,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from services.task_manager import TaskStatus
+from data.cache.cache_manager import CacheManager
+from data.data_processor import DataProcessor
+from services.ai_service import AIService
+from services.task_manager import TaskManager, TaskStatus
 from ui.viewmodels import Message
 from ui.viewmodels.data_source_view_model import DataSourceViewModel, HealthResultRow
 
@@ -44,7 +47,7 @@ def _count_transitions(snapshots, field_getter, initial) -> int:
 @pytest.fixture
 def mock_processor():
     with patch("ui.viewmodels.data_source_view_model.DataProcessor") as cls:
-        instance = MagicMock()
+        instance = MagicMock(spec=DataProcessor)
         instance.check_data_health = AsyncMock(
             return_value={
                 "status": "green",
@@ -69,7 +72,7 @@ def mock_processor():
 @pytest.fixture
 def mock_cache():
     with patch("ui.viewmodels.data_source_view_model.CacheManager") as cls:
-        instance = MagicMock()
+        instance = MagicMock(spec=CacheManager)
         instance.clear_all_cache = AsyncMock()
         cls.return_value = instance
         yield instance
@@ -79,7 +82,7 @@ def mock_cache():
 def mock_ai_service():
     # T6 fix: AIService 通过构造注入到 ViewModel，需 mock 避免真实单例初始化
     with patch("ui.viewmodels.data_source_view_model.AIService") as cls:
-        instance = MagicMock()
+        instance = MagicMock(spec=AIService)
         instance.is_cloud_available = MagicMock(return_value=True)
         cls.return_value = instance
         yield instance
@@ -88,7 +91,7 @@ def mock_ai_service():
 @pytest.fixture
 def mock_task_manager():
     with patch("ui.viewmodels.data_source_view_model.TaskManager") as cls:
-        instance = MagicMock()
+        instance = MagicMock(spec=TaskManager)
         instance.submit_task = MagicMock(return_value="task_123")
         instance.get_task = MagicMock()
         instance.get_all_tasks = MagicMock(return_value=[])
@@ -138,10 +141,10 @@ def _assert_snack(bound_vm, snapshots, message_key, color_name):
 
 class TestDataSourceViewModelInit:
     def test_default_dependencies_created(self, vm):
-        assert vm._processor is not None
-        assert vm._cache is not None
-        assert vm._tm is not None
-        assert vm._ai_service is not None  # T6 fix: 验证 AIService 注入
+        assert isinstance(vm._processor, DataProcessor)
+        assert isinstance(vm._cache, CacheManager)
+        assert isinstance(vm._tm, TaskManager)
+        assert isinstance(vm._ai_service, AIService)  # T6 fix: 验证 AIService 注入
 
     def test_constructor_injection(self, mock_processor, mock_cache, mock_ai_service):
         # T6 fix: ai_service 也支持构造注入，与 _processor / _cache 一致

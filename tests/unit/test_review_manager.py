@@ -3,6 +3,8 @@ from unittest.mock import patch, MagicMock, AsyncMock
 import pandas as pd
 import datetime
 
+from data.cache.cache_manager import CacheManager
+from data.external.tushare_client import TushareClient
 from data.persistence.daos.base_dao import EngineDisposedError
 from data.persistence.review_manager import ReviewManager
 
@@ -10,12 +12,14 @@ pytestmark = [pytest.mark.unit, pytest.mark.no_auto_mock]
 
 
 class TestReviewManagerInit:
-    @patch("data.persistence.review_manager.CacheManager")
-    @patch("data.persistence.review_manager.TushareClient")
+    @patch("data.persistence.review_manager.CacheManager", spec=CacheManager)
+    @patch("data.persistence.review_manager.TushareClient", spec=TushareClient)
     def test_init_creates_cache_and_api(self, mock_tc, mock_cm):
+        mock_cm.return_value = MagicMock(spec=CacheManager)
+        mock_tc.return_value = MagicMock(spec=TushareClient)
         rm = ReviewManager()
-        assert rm.cache is not None
-        assert rm.api is not None
+        assert isinstance(rm.cache, CacheManager)
+        assert isinstance(rm.api, TushareClient)
 
     @patch("data.persistence.review_manager.CacheManager")
     @patch("data.persistence.review_manager.TushareClient")

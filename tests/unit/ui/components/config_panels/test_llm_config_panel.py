@@ -553,7 +553,7 @@ class TestBuildLinksRow:
             mock_i18n.get.side_effect = lambda key, **kw: key
             row = _build_links_row("deepseek", compact=True)
         for ctrl in row.controls:
-            assert cast(ft.TextButton, ctrl).style is not None
+            assert isinstance(cast(ft.TextButton, ctrl).style, ft.ButtonStyle)
 
     def test_non_compact_buttons_have_no_style(self) -> None:
         """compact=False 时按钮 style=None。"""

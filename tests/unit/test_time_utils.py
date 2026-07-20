@@ -25,7 +25,7 @@ class TestGetNow:
 
     def test_has_timezone(self):
         result = get_now()
-        assert result.tzinfo is not None
+        assert result.tzinfo is not None  # noqa: weak-assertion tzinfo 存在性是时区感知契约验证
 
     def test_is_cst_timezone(self):
         result = get_now()
@@ -61,12 +61,12 @@ class TestParseDate:
     def test_parse_datetime_object_naive(self):
         dt = datetime.datetime(2024, 6, 15, 10, 0)
         result = parse_date(dt)
-        assert result.tzinfo is not None
+        assert result.tzinfo is not None  # noqa: weak-assertion tzinfo 存在性是时区感知契约验证
 
     def test_parse_datetime_object_aware(self):
         dt = CST_TZ.localize(datetime.datetime(2024, 6, 15, 10, 0))
         result = parse_date(dt)
-        assert result.tzinfo is not None
+        assert result.tzinfo is not None  # noqa: weak-assertion tzinfo 存在性是时区感知契约验证
 
 
 class TestGetTodayStr:

@@ -422,7 +422,7 @@ class TestStatusBadgeBody:
         result = render_once(component)
 
         # ft.Colors.with_opacity 返回值类型不固定，验证 bgcolor 非空即可
-        assert result.bgcolor is not None
+        assert result.bgcolor is not None  # noqa: weak-assertion ft.Colors.with_opacity 返回值类型不固定，验证 bgcolor 非空即可
 
 
 class TestSectionHeaderBody:

@@ -15,6 +15,7 @@ import contextlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import flet as ft
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -308,26 +309,26 @@ class TestBuildHealthScoreCard:
         from ui.components.health_report_dialog import _build_health_score_card
 
         card = _build_health_score_card("green", 5)
-        assert card is not None
+        assert isinstance(card, ft.Container)
 
     def test_yellow_status_uses_warning_color(self):
         from ui.components.health_report_dialog import _build_health_score_card
 
         card = _build_health_score_card("yellow", 5)
-        assert card is not None
+        assert isinstance(card, ft.Container)
 
     def test_red_status_uses_error_color(self):
         from ui.components.health_report_dialog import _build_health_score_card
 
         card = _build_health_score_card("red", 5)
-        assert card is not None
+        assert isinstance(card, ft.Container)
 
     def test_unknown_status_falls_to_default(self):
         from ui.components.health_report_dialog import _build_health_score_card
 
         # 未知 status 走 _HEALTH_DEFAULT_STATUS (error/critical)
         card = _build_health_score_card("unknown_status", 0)
-        assert card is not None
+        assert isinstance(card, ft.Container)
 
 
 class TestBuildMetricTile:

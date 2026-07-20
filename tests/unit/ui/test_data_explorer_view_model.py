@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pandas as pd
 import pytest
 
+from data.persistence.data_explorer_query_client import DataExplorerQueryClient
 from ui.viewmodels import Message
 from ui.viewmodels.data_explorer_view_model import (
     DataExplorerState,
@@ -21,7 +22,7 @@ from ui.viewmodels.data_explorer_view_model import (
     SqlResultRow,
     TableRow,
 )
-from utils.thread_pool import TaskType
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 pytestmark = pytest.mark.unit
 
@@ -70,8 +71,8 @@ class TestInit:
     def test_default_dependencies_created(self):
         """When no args passed, ViewModel creates default DataExplorerQueryClient and ThreadPoolManager."""
         vm = DataExplorerViewModel()
-        assert vm._db is not None
-        assert vm._tp is not None
+        assert isinstance(vm._db, DataExplorerQueryClient)
+        assert isinstance(vm._tp, ThreadPoolManager)
 
     def test_constructor_injection(self, mock_db, mock_tp):
         vm = DataExplorerViewModel(db_manager=mock_db, thread_pool=mock_tp)

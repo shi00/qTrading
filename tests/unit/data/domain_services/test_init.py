@@ -6,11 +6,11 @@ pytestmark = pytest.mark.unit
 
 def test_domain_services_lazy_imports():
     """Test that all exported symbols are lazily importable."""
-    assert domain_services.MarketDataService is not None
-    assert domain_services.OfflineCalendar is not None
-    assert domain_services.TradeCalendarService is not None
-    assert domain_services.TransactionCostModel is not None
-    assert domain_services.TransactionCostConfig is not None
+    assert domain_services.MarketDataService is not None  # noqa: weak-assertion lazy import 契约验证符号可解析
+    assert domain_services.OfflineCalendar is not None  # noqa: weak-assertion lazy import 契约验证符号可解析
+    assert domain_services.TradeCalendarService is not None  # noqa: weak-assertion lazy import 契约验证符号可解析
+    assert domain_services.TransactionCostModel is not None  # noqa: weak-assertion lazy import 契约验证符号可解析
+    assert domain_services.TransactionCostConfig is not None  # noqa: weak-assertion lazy import 契约验证符号可解析
 
 
 def test_domain_services_invalid_attribute():

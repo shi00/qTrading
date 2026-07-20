@@ -78,7 +78,7 @@ class TestBaseDaoPrepareDataParams:
     def test_timestamp_conversion(self):
         df = pd.DataFrame({"col1": [pd.Timestamp("2024-06-15")]})
         result = BaseDao._prepare_data_params(df, ["col1"])
-        assert result[0][0] is not None
+        assert isinstance(result[0][0], datetime.datetime)
 
     def test_multiple_rows(self):
         df = pd.DataFrame({"col1": [1, 2, 3]})
@@ -1516,7 +1516,7 @@ class TestBaseDaoPrepareDataParamsExtended:
         with patch("data.persistence.models.Base.metadata") as mock_meta:
             mock_meta.tables = {"test_table": mock_table}
             result = BaseDao._prepare_data_params(df, ["trade_date", "col1"], table_name="test_table")
-            assert result is not None
+            assert len(result) >= 1
 
     def test_nat_to_none(self):
         df = pd.DataFrame({"col1": [pd.NaT]})
@@ -2283,7 +2283,7 @@ class TestBaseDaoPrepareDataParamsDateConversionError:
             mock_meta.tables = {"test_table": mock_table}
             df = pd.DataFrame({"trade_date": ["invalid_date"]})
             result = BaseDao._prepare_data_params(df, ["trade_date"], "test_table")
-            assert result is not None
+            assert len(result) >= 1
 
 
 class TestChunkedInQueryMultipleChunks:

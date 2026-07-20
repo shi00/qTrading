@@ -752,25 +752,25 @@ class TestBuildContentFunction:
     def test_ai_score_invalid_string_falls_back_to_zero(self):
         # ai_score="not_a_number" → float() raises ValueError → score_val=0
         container = self._build({"ai_reason": "test", "ai_score": "not_a_number"})
-        assert container is not None
+        assert isinstance(container, ft.Container)
 
     def test_ai_score_none_with_ai_reason(self):
         # ai_score=None → score_val=0 (else 分支)
         container = self._build({"ai_reason": "test", "ai_score": None})
-        assert container is not None
+        assert isinstance(container, ft.Container)
 
     def test_ai_score_valid_number(self):
         container = self._build({"ai_reason": "test", "ai_score": "85.5"})
-        assert container is not None
+        assert isinstance(container, ft.Container)
 
     def test_ai_score_only_no_reason(self):
         # 仅 ai_score，无 ai_reason
         container = self._build({"ai_score": "90"})
-        assert container is not None
+        assert isinstance(container, ft.Container)
 
     def test_ai_score_int_zero(self):
         container = self._build({"ai_reason": "test", "ai_score": 0})
-        assert container is not None
+        assert isinstance(container, ft.Container)
 
     def test_markdown_controls_have_on_tap_link(self):
         """SEC-010: verify ft.Markdown controls register on_tap_link=safe_open_url."""
@@ -1079,6 +1079,6 @@ class TestStockDetailDialogComponent:
 
         dialog = page._dialogs.controls[-1]
         # on_dismiss 类型为 Optional[ControlEventHandler]，测试上下文保证非 None
-        assert dialog.on_dismiss is not None
+        assert callable(dialog.on_dismiss)
         dialog.on_dismiss(None)
         on_close.assert_called_once_with()

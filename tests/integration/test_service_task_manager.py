@@ -348,7 +348,7 @@ class TestTaskManagerSubmitTask:
             task_type="Test",
             coroutine_factory=dummy_coro,
         )
-        assert task_id is not None
+        assert isinstance(task_id, str)
 
     def test_submit_duplicate_task(self):
         manager = TaskManager()

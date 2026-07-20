@@ -336,7 +336,7 @@ class TestTaskManagerSubmitTask:
         mgr._loop = MagicMock()
         mgr._loop.is_running.return_value = True
         result = mgr.submit_task("test", "System", lambda **kw: None)
-        assert result is not None
+        assert isinstance(result, str) and result
 
 
 class TestTaskManagerUpdateProgress:
@@ -737,7 +737,8 @@ class TestTaskManagerSafeDt:
 
     def test_valid_iso_string(self):
         result = TaskManager._safe_dt("2024-06-14T12:00:00")
-        assert result is not None
+        assert isinstance(result, datetime.datetime)
+        assert result == datetime.datetime(2024, 6, 14, 20, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=8)))
 
     def test_invalid_string(self):
         result = TaskManager._safe_dt("not_a_date")

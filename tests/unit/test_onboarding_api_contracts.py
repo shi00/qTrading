@@ -324,7 +324,7 @@ class TestProgressCallbackSignature:
         sig = inspect.signature(DataProcessor.initialize_system)
         progress_param = sig.parameters.get("progress_callback")
 
-        assert progress_param is not None
+        assert isinstance(progress_param, inspect.Parameter)
 
 
 class TestLocaleChangeSignature:
@@ -511,7 +511,7 @@ class TestLocalModelManagerIntegration:
         """Test that LocalModelManager can be imported"""
         from services.local_model_manager import LocalModelManager
 
-        assert LocalModelManager is not None
+        assert LocalModelManager is not None  # noqa: weak-assertion lazy import 符号验证
 
     def test_local_model_manager_has_load_model(self):
         """Test that LocalModelManager has load_model method"""

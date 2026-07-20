@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "total": 741,
+  "total": 618,
   "entries": [
     {
       "file": "integration/test_ai_concept_tagging.py",
@@ -106,20 +106,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_latest.assert_called_once()"
-    },
-    {
-      "file": "integration/test_data_timestamp_fields.py",
-      "line": 70,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert col is not None, f\"Table {table_name} missing created_at column\""
-    },
-    {
-      "file": "integration/test_data_timestamp_fields.py",
-      "line": 71,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert col.server_default is not None, f\"Table {table_name}.created_at missing server_default\""
     },
     {
       "file": "integration/test_data_trade_calendar.py",
@@ -319,13 +305,6 @@
     },
     {
       "file": "integration/test_service_task_manager.py",
-      "line": 351,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert task_id is not None"
-    },
-    {
-      "file": "integration/test_service_task_manager.py",
       "line": 414,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
@@ -386,13 +365,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "                with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/test_ai_service.py",
-      "line": 50,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert svc is not None"
     },
     {
       "file": "unit/test_ai_service.py",
@@ -480,13 +452,6 @@
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 81,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result[0][0] is not None"
-    },
-    {
-      "file": "unit/test_base_dao.py",
       "line": 883,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
@@ -571,13 +536,6 @@
     },
     {
       "file": "unit/test_base_dao.py",
-      "line": 1519,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert result is not None"
-    },
-    {
-      "file": "unit/test_base_dao.py",
       "line": 2053,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
@@ -603,13 +561,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(EngineDisposedError):"
-    },
-    {
-      "file": "unit/test_base_dao.py",
-      "line": 2286,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert result is not None"
     },
     {
       "file": "unit/test_bootstrap.py",
@@ -710,20 +661,6 @@
       "source_line": "                with pytest.raises(RuntimeError):"
     },
     {
-      "file": "unit/test_cache_manager.py",
-      "line": 1843,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result[\"publish_time\"] is not None"
-    },
-    {
-      "file": "unit/test_cache_manager.py",
-      "line": 1848,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result[\"publish_time\"] is not None"
-    },
-    {
       "file": "unit/test_concurrency_audit.py",
       "line": 51,
       "type": "weak_mock",
@@ -757,34 +694,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        engine.dispose.assert_called_once()  # type: ignore[union-attr]"
-    },
-    {
-      "file": "unit/test_data_explorer_query_client.py",
-      "line": 282,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_data_explorer_query_client.py",
-      "line": 287,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_data_explorer_query_client.py",
-      "line": 292,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_data_explorer_query_client.py",
-      "line": 308,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert result is not None"
     },
     {
       "file": "unit/test_data_processor.py",
@@ -1249,13 +1158,6 @@
       "source_line": "        with pytest.raises(asyncio.QueueFull):"
     },
     {
-      "file": "unit/test_llm_providers.py",
-      "line": 35,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert provider is not None"
-    },
-    {
       "file": "unit/test_log_decorators_extended.py",
       "line": 211,
       "type": "weak_raises_only",
@@ -1317,13 +1219,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        dao._read_db_select.assert_called_once()"
-    },
-    {
-      "file": "unit/test_macro_sync.py",
-      "line": 117,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
     },
     {
       "file": "unit/test_macro_sync.py",
@@ -1425,28 +1320,14 @@
     },
     {
       "file": "unit/test_market_data_service.py",
-      "line": 17,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert svc.cache is not None"
-    },
-    {
-      "file": "unit/test_market_data_service.py",
-      "line": 18,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert svc._listeners is not None"
-    },
-    {
-      "file": "unit/test_market_data_service.py",
-      "line": 142,
+      "line": 144,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_market_data_service.py",
-      "line": 529,
+      "line": 531,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        listener.assert_called_once()"
@@ -1457,27 +1338,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_i18n.get.assert_called_once()"
-    },
-    {
-      "file": "unit/test_metadata_manager.py",
-      "line": 91,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_metadata_manager.py",
-      "line": 102,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_metadata_manager.py",
-      "line": 84,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "                assert result is not None"
     },
     {
       "file": "unit/test_news_fetcher.py",
@@ -1620,20 +1480,6 @@
       "source_line": "            mock_cs.assert_called_once()"
     },
     {
-      "file": "unit/test_onboarding_api_contracts.py",
-      "line": 327,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert progress_param is not None"
-    },
-    {
-      "file": "unit/test_onboarding_api_contracts.py",
-      "line": 514,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert LocalModelManager is not None"
-    },
-    {
       "file": "unit/test_oversold_strategy.py",
       "line": 158,
       "type": "weak_mock",
@@ -1704,169 +1550,148 @@
       "source_line": "        with pytest.raises(QualityGateError):"
     },
     {
-      "file": "unit/test_quality_gate.py",
-      "line": 239,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert gate is not None"
-    },
-    {
       "file": "unit/test_review_manager.py",
-      "line": 17,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert rm.cache is not None"
-    },
-    {
-      "file": "unit/test_review_manager.py",
-      "line": 18,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert rm.api is not None"
-    },
-    {
-      "file": "unit/test_review_manager.py",
-      "line": 80,
+      "line": 84,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 161,
+      "line": 165,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 324,
+      "line": 328,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 382,
+      "line": 386,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 403,
+      "line": 407,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 745,
+      "line": 749,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 782,
+      "line": 786,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 821,
+      "line": 825,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 965,
+      "line": 969,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1002,
+      "line": 1006,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1044,
+      "line": 1048,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1084,
+      "line": 1088,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1126,
+      "line": 1130,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        rm._update_result.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1258,
+      "line": 1262,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1279,
+      "line": 1283,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1324,
+      "line": 1328,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1346,
+      "line": 1350,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_cache.screener_dao.save_screening_results.assert_called_once()"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1367,
+      "line": 1371,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1380,
+      "line": 1384,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1407,
+      "line": 1411,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
     },
     {
       "file": "unit/test_review_manager.py",
-      "line": 1439,
+      "line": 1443,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(EngineDisposedError):"
@@ -1880,154 +1705,112 @@
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 152,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert job is not None"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 162,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert job is not None"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 188,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert job is not None"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 198,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert svc.scheduler.get_job(\"daily_update\") is not None"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 245,
+      "line": 246,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 568,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert svc.scheduler.get_job(\"daily_update\") is not None"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 577,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert svc.scheduler.get_job(\"ai_concept_daily_refresh\") is not None"
-    },
-    {
-      "file": "unit/test_scheduler_service.py",
-      "line": 647,
+      "line": 648,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc.scheduler.start.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 781,
+      "line": 782,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1054,
+      "line": 1055,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_rm.save_results.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 422,
+      "line": 423,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 442,
+      "line": 443,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 480,
+      "line": 481,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 557,
+      "line": 558,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm_instance.submit_task.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 670,
+      "line": 671,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 704,
+      "line": 705,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 728,
+      "line": 729,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            svc._schedule_jobs.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 928,
+      "line": 929,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_dp.run_ai_concept_tagging.assert_called_once()"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 956,
+      "line": 957,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1081,
+      "line": 1082,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1111,
+      "line": 1112,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(RuntimeError):"
     },
     {
       "file": "unit/test_scheduler_service.py",
-      "line": 1131,
+      "line": 1132,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_tm.submit_task.assert_called_once()"
@@ -2122,13 +1905,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/test_screener_view_model.py",
-      "line": 949,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._full_results is not None"
     },
     {
       "file": "unit/test_shutdown.py",
@@ -2447,13 +2223,6 @@
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 339,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_task_manager.py",
       "line": 468,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
@@ -2482,49 +2251,42 @@
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 740,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_task_manager.py",
-      "line": 963,
+      "line": 964,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_sched.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1280,
+      "line": 1281,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_sched.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1377,
+      "line": 1378,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_task.cancel.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1445,
+      "line": 1446,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mgr._loop.call_soon_threadsafe.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1557,
+      "line": 1558,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_notify.assert_called()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1919,
+      "line": 1920,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_notify.assert_called_once()"
@@ -2538,66 +2300,31 @@
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1213,
+      "line": 1214,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_cache.write_db.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1812,
+      "line": 1813,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1836,
+      "line": 1837,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_persist.assert_called_once()"
     },
     {
       "file": "unit/test_task_manager.py",
-      "line": 1853,
+      "line": 1854,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/test_technical_analysis.py",
-      "line": 76,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_technical_analysis.py",
-      "line": 105,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/test_time_utils.py",
-      "line": 28,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result.tzinfo is not None"
-    },
-    {
-      "file": "unit/test_time_utils.py",
-      "line": 64,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result.tzinfo is not None"
-    },
-    {
-      "file": "unit/test_time_utils.py",
-      "line": 69,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result.tzinfo is not None"
     },
     {
       "file": "unit/test_time_utils.py",
@@ -2951,13 +2678,6 @@
     },
     {
       "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 338,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert page.on_resize is not None, \"挂载后 page.on_resize 应被注册\""
-    },
-    {
-      "file": "unit/ui/test_app_layout_runtime.py",
       "line": 404,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
@@ -2969,13 +2689,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        tasks[1].cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_app_layout_runtime.py",
-      "line": 450,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert on_resize is not None"
     },
     {
       "file": "unit/ui/test_app_layout_runtime.py",
@@ -3000,66 +2713,24 @@
     },
     {
       "file": "unit/ui/test_backtest_view_model.py",
-      "line": 267,
+      "line": 268,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.service.list_results.assert_called_once()"
     },
     {
       "file": "unit/ui/test_backtest_view_model.py",
-      "line": 589,
+      "line": 590,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_backtest_view_model.py",
-      "line": 65,
+      "line": 66,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_engine_cls.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 65,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 94,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 110,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 126,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 142,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
-    },
-    {
-      "file": "unit/ui/test_chart_utils.py",
-      "line": 158,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
     },
     {
       "file": "unit/ui/test_chart_utils.py",
@@ -3070,199 +2741,122 @@
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 73,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._db is not None"
-    },
-    {
-      "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 74,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._tp is not None"
-    },
-    {
-      "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 157,
+      "line": 158,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_db.close.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 163,
+      "line": 164,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_db.close.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 165,
+      "line": 166,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_db.close.assert_called_once()  # Still only one close call"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 232,
+      "line": 233,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 296,
+      "line": 297,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 329,
+      "line": 330,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_db.query_table.assert_called_once()"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 369,
+      "line": 370,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 392,
+      "line": 393,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 425,
+      "line": 426,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 474,
+      "line": 475,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 673,
+      "line": 674,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 688,
+      "line": 689,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 712,
+      "line": 713,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 735,
+      "line": 736,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 757,
+      "line": 758,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 776,
+      "line": 777,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(PermissionError):"
     },
     {
       "file": "unit/ui/test_data_explorer_view_model.py",
-      "line": 796,
+      "line": 797,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 866,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn is not None, \"btn_check_health 应存在\""
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 867,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn.on_click is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 879,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn is not None, \"btn_health_report 应存在\""
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 880,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn.on_click is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 892,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn is not None, \"sync_button 应存在 (idle state)\""
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 893,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn.on_click is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 950,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert _find_button_by_content(result, \"settings_init_data\") is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 964,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert _find_button_by_content(result, \"sys_init_cancel_wait\") is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 978,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert _find_button_by_content(result, \"settings_cancel_sync\") is not None"
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
@@ -3329,20 +2923,6 @@
     },
     {
       "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1624,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert page._dialogs.controls is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
-      "line": 1642,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert page._dialogs.controls is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_tab_contract.py",
       "line": 1672,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
@@ -3382,55 +2962,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        snack_cb.assert_called()"
-    },
-    {
-      "file": "unit/ui/test_data_source_view_model.py",
-      "line": 141,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._processor is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_view_model.py",
-      "line": 142,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._cache is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_view_model.py",
-      "line": 143,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._tm is not None"
-    },
-    {
-      "file": "unit/ui/test_data_source_view_model.py",
-      "line": 144,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert vm._ai_service is not None  # T6 fix: 验证 AIService 注入"
-    },
-    {
-      "file": "unit/ui/test_data_view_contract.py",
-      "line": 709,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert prev_btn is not None"
-    },
-    {
-      "file": "unit/ui/test_data_view_contract.py",
-      "line": 710,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert next_btn is not None"
-    },
-    {
-      "file": "unit/ui/test_data_view_contract.py",
-      "line": 830,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert empty_state is not None, \"有数据时 empty_state 应 visible=False\""
     },
     {
       "file": "unit/ui/test_data_view_contract.py",
@@ -3504,20 +3035,6 @@
     },
     {
       "file": "unit/ui/test_health_report_dialog.py",
-      "line": 173,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert content is not None"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog.py",
-      "line": 179,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert content is not None"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog.py",
       "line": 883,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
@@ -3564,34 +3081,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_future.cancel.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog_contract.py",
-      "line": 311,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert card is not None"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog_contract.py",
-      "line": 317,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert card is not None"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog_contract.py",
-      "line": 323,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert card is not None"
-    },
-    {
-      "file": "unit/ui/test_health_report_dialog_contract.py",
-      "line": 330,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert card is not None"
     },
     {
       "file": "unit/ui/test_home_view.py",
@@ -3658,20 +3147,6 @@
     },
     {
       "file": "unit/ui/test_mock_flet_contract.py",
-      "line": 340,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert btn is not None"
-    },
-    {
-      "file": "unit/ui/test_mock_flet_contract.py",
-      "line": 343,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert btn2 is not None"
-    },
-    {
-      "file": "unit/ui/test_mock_flet_contract.py",
       "line": 345,
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
@@ -3734,41 +3209,6 @@
       "source_line": "        mock_persist.assert_called_once()"
     },
     {
-      "file": "unit/ui/test_screener_view_runtime.py",
-      "line": 1496,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert on_row_click is not None"
-    },
-    {
-      "file": "unit/ui/test_screener_view_runtime.py",
-      "line": 1503,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert env[\"captured_callbacks\"][\"on_close\"] is not None"
-    },
-    {
-      "file": "unit/ui/test_screener_view_runtime.py",
-      "line": 2032,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert env[\"captured_callbacks\"][\"on_sort\"] is not None"
-    },
-    {
-      "file": "unit/ui/test_screener_view_runtime.py",
-      "line": 2033,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert env[\"captured_callbacks\"][\"on_row_click\"] is not None"
-    },
-    {
-      "file": "unit/ui/test_screener_view_runtime.py",
-      "line": 2052,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert env[\"captured_callbacks\"][\"on_sort\"] is not None"
-    },
-    {
       "file": "unit/ui/test_settings_view.py",
       "line": 311,
       "type": "weak_mock",
@@ -3816,13 +3256,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "            mock_logger.warning.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_settings_widgets.py",
-      "line": 425,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result.bgcolor is not None"
     },
     {
       "file": "unit/ui/test_spike_pubsub_runtask_pattern.py",
@@ -3895,48 +3328,6 @@
       "source_line": "        mock_msg.assert_called_once()"
     },
     {
-      "file": "unit/ui/test_stock_detail_dialog.py",
-      "line": 755,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert container is not None"
-    },
-    {
-      "file": "unit/ui/test_stock_detail_dialog.py",
-      "line": 760,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert container is not None"
-    },
-    {
-      "file": "unit/ui/test_stock_detail_dialog.py",
-      "line": 764,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert container is not None"
-    },
-    {
-      "file": "unit/ui/test_stock_detail_dialog.py",
-      "line": 769,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert container is not None"
-    },
-    {
-      "file": "unit/ui/test_stock_detail_dialog.py",
-      "line": 773,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert container is not None"
-    },
-    {
-      "file": "unit/ui/test_stock_detail_dialog.py",
-      "line": 1082,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert dialog.on_dismiss is not None"
-    },
-    {
       "file": "unit/ui/test_system_tab_contract.py",
       "line": 566,
       "type": "weak_mock",
@@ -3984,13 +3375,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "    with pytest.raises(asyncio.CancelledError):"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 128,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert color is not None"
     },
     {
       "file": "unit/ui/test_task_center_view.py",
@@ -4042,60 +3426,11 @@
       "source_line": "        with pytest.raises(AttributeError):"
     },
     {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 539,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert card is not None"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 544,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert card is not None"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 551,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert _find_control_by_type(card, ft.TextButton) is not None"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 561,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert _find_control_by_type(card, ft.TextButton) is not None"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 574,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn is not None"
-    },
-    {
-      "file": "unit/ui/test_task_center_view.py",
-      "line": 575,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert btn.on_click is not None"
-    },
-    {
       "file": "unit/ui/test_task_center_view_model.py",
       "line": 81,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        mock_loop.call_soon_threadsafe.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/test_theme.py",
-      "line": 303,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert result is not None"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
@@ -4110,13 +3445,6 @@
       "type": "weak_called_flag",
       "detail": "assert m.called 裸布尔标志（不验证调用参数）",
       "source_line": "        assert page.run_task.called, \"page.run_task 未被调用\""
-    },
-    {
-      "file": "unit/ui/test_toast_manager.py",
-      "line": 969,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert expand_btn is not None"
     },
     {
       "file": "unit/ui/test_toast_manager.py",
@@ -4222,13 +3550,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(RuntimeError):"
-    },
-    {
-      "file": "unit/ui/test_virtual_table_body.py",
-      "line": 350,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert row.on_click is not None"
     },
     {
       "file": "unit/utils/test_config_handler.py",
@@ -4397,48 +3718,6 @@
       "type": "weak_raises_only",
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "            with pytest.raises(DecryptionError):"
-    },
-    {
-      "file": "unit/utils/test_thread_pool.py",
-      "line": 49,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert tpm._io_pool is not None"
-    },
-    {
-      "file": "unit/utils/test_thread_pool.py",
-      "line": 50,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert tpm._cpu_pool is not None"
-    },
-    {
-      "file": "unit/utils/test_thread_pool.py",
-      "line": 77,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert mgr._io_pool is not None"
-    },
-    {
-      "file": "unit/utils/test_thread_pool.py",
-      "line": 81,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert mgr._cpu_pool is not None"
-    },
-    {
-      "file": "unit/utils/test_thread_pool.py",
-      "line": 97,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert pool is not None"
-    },
-    {
-      "file": "unit/utils/test_thread_pool.py",
-      "line": 103,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert pool is not None"
     },
     {
       "file": "unit/ui/viewmodels/test_ai_brain_settings_view_model.py",
@@ -4868,13 +4147,6 @@
       "source_line": "        env[\"fake_vm\"].cancel_backtest_mock.assert_called_once()"
     },
     {
-      "file": "unit/ui/views/settings_tabs/test_ai_brain_tab.py",
-      "line": 581,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert tf is not None"
-    },
-    {
       "file": "unit/ui/views/settings_tabs/test_database_tab.py",
       "line": 187,
       "type": "weak_raises_only",
@@ -4897,24 +4169,10 @@
     },
     {
       "file": "unit/ui/views/settings_tabs/test_database_tab.py",
-      "line": 340,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert on_save_cb is not None"
-    },
-    {
-      "file": "unit/ui/views/settings_tabs/test_database_tab.py",
       "line": 342,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        show_snack.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/views/settings_tabs/test_tier_api_panel.py",
-      "line": 849,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert page.on_resize is not None, \"挂载后 page.on_resize 应被设置\""
     },
     {
       "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
@@ -4922,41 +4180,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        callback.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
-      "line": 335,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert field is not None"
-    },
-    {
-      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
-      "line": 341,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert field is not None"
-    },
-    {
-      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
-      "line": 347,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert dd is not None"
-    },
-    {
-      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
-      "line": 359,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert run_btn is not None"
-    },
-    {
-      "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
-      "line": 371,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert checkbox is not None"
     },
     {
       "file": "unit/ui/components/backtest/test_backtest_config_panel.py",
@@ -4973,20 +4196,6 @@
       "source_line": "        on_run1.assert_called_once()"
     },
     {
-      "file": "unit/ui/components/config_panels/test_database_config_panel.py",
-      "line": 430,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert _find_text_field(result, label) is not None"
-    },
-    {
-      "file": "unit/ui/components/config_panels/test_llm_config_panel.py",
-      "line": 556,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert cast(ft.TextButton, ctrl).style is not None"
-    },
-    {
       "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
       "line": 234,
       "type": "weak_mock",
@@ -5001,46 +4210,11 @@
       "source_line": "        run_task.assert_called_once()"
     },
     {
-      "file": "unit/ui/components/config_panels/test_local_model_config_panel.py",
-      "line": 543,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "            assert result is not None"
-    },
-    {
       "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
       "line": 341,
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        vm.save.assert_called_once()"
-    },
-    {
-      "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
-      "line": 538,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert token_input is not None"
-    },
-    {
-      "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
-      "line": 539,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert tier_dd is not None"
-    },
-    {
-      "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
-      "line": 546,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert token_input is not None"
-    },
-    {
-      "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
-      "line": 547,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "        assert tier_dd is not None"
     },
     {
       "file": "unit/ui/components/config_panels/test_tushare_config_panel.py",
@@ -5083,41 +4257,6 @@
       "type": "weak_mock",
       "detail": "Mock 弱断言（不验证参数）",
       "source_line": "        cache.get_screening_data_range.assert_called_once()"
-    },
-    {
-      "file": "unit/data/domain_services/test_init.py",
-      "line": 9,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert domain_services.MarketDataService is not None"
-    },
-    {
-      "file": "unit/data/domain_services/test_init.py",
-      "line": 10,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert domain_services.OfflineCalendar is not None"
-    },
-    {
-      "file": "unit/data/domain_services/test_init.py",
-      "line": 11,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert domain_services.TradeCalendarService is not None"
-    },
-    {
-      "file": "unit/data/domain_services/test_init.py",
-      "line": 12,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert domain_services.TransactionCostModel is not None"
-    },
-    {
-      "file": "unit/data/domain_services/test_init.py",
-      "line": 13,
-      "type": "weak_is_not_none",
-      "detail": "assert X is not None 作为函数唯一终态（链式非终态除外）",
-      "source_line": "    assert domain_services.TransactionCostConfig is not None"
     },
     {
       "file": "unit/data/persistence/daos/test_express_dao.py",
@@ -5189,6 +4328,5 @@
       "detail": "pytest.raises 后无进一步断言",
       "source_line": "        with pytest.raises(asyncio.CancelledError):"
     }
-  ],
-  "growth_justification": "修复扫描器 BUG：_is_is_not_none_assert 误用 ast.Is（应为 ast.IsNot），导致 weak_is_not_none 规则从未生效，123 处真违规浮出水面；同时 weak_mock/weak_raises_only/weak_called_flag 因扫描器其他逻辑微调小幅增长（+5/+10/+1）。已记入 docs/debt/known-technical-debt.md 作为独立重构任务延后治理。"
+  ]
 }

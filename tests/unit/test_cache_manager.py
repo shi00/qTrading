@@ -1840,12 +1840,12 @@ class TestCacheManagerNormalizeNewsItem:
     def test_without_time(self):
         item = {"content": "test"}
         result = CacheManager.normalize_news_item(item)
-        assert result["publish_time"] is not None
+        assert isinstance(result["publish_time"], datetime.datetime)
 
     def test_with_invalid_time(self):
         item = {"content": "test", "time": "invalid_date"}
         result = CacheManager.normalize_news_item(item)
-        assert result["publish_time"] is not None
+        assert isinstance(result["publish_time"], datetime.datetime)
 
     def test_publish_time_default_is_utc_tz_naive(self):
         """M1 举一反三 fix: 默认 publish_time 应为 UTC tz-naive，与 server_default=now() 时区一致"""

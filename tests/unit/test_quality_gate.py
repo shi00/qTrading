@@ -236,7 +236,7 @@ class TestRequireQualityDecorator:
 class TestQualityGateClass:
     def test_quality_gate_exists(self):
         gate = QualityGate()
-        assert gate is not None
+        assert isinstance(gate, QualityGate)
 
 
 class TestComputeTier:

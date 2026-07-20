@@ -337,6 +337,6 @@ class TestDatabaseTabComponentBody:
         # 取出 _make_vm 传给 VM 构造函数的 on_save_callback
         call_kwargs = mock_cls.call_args.kwargs
         on_save_cb = call_kwargs.get("on_save_callback")
-        assert on_save_cb is not None
+        assert callable(on_save_cb)
         on_save_cb({"host": "localhost"})
         show_snack.assert_called_once()

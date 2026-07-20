@@ -337,10 +337,10 @@ def test_v1_text_button_content_kw_accepted_text_kw_rejected():
     """
     # content= 关键字可用
     btn = ft.TextButton(content="x")
-    assert btn is not None
+    assert isinstance(btn, ft.TextButton)
     # 位置参数仍映射到 content
     btn2 = ft.TextButton("x")
-    assert btn2 is not None
+    assert isinstance(btn2, ft.TextButton)
     # text= 关键字应抛 TypeError
     with pytest.raises(TypeError):
         ft.TextButton(text="x")  # type: ignore[call-arg]

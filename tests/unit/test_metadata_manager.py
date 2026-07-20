@@ -81,14 +81,14 @@ class TestGetRawAlias:
             if cols:
                 col_name = next(iter(cols))
                 result = MetaDataManager.get_raw_alias(col_name, context_table=table_name)
-                assert result is not None
+                assert result == "翻译"
                 break
 
     @patch("core.i18n.I18n")
     def test_with_common_column(self, mock_i18n):
         mock_i18n.get.return_value = "代码"
         result = MetaDataManager.get_raw_alias("ts_code")
-        assert result is not None
+        assert result == "代码"
 
     @patch("core.i18n.I18n")
     def test_no_match(self, mock_i18n):
@@ -99,7 +99,7 @@ class TestGetRawAlias:
     def test_none_context(self, mock_i18n):
         mock_i18n.get.return_value = "日期"
         result = MetaDataManager.get_raw_alias("trade_date", context_table=None)
-        assert result is not None
+        assert result == "日期"
 
 
 class TestMetadataManagerCaching:

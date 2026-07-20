@@ -73,7 +73,7 @@ class TestGetQfqDf:
         ]
         df = _make_df(rows, with_adj=False)
         result = TechnicalAnalysis._get_qfq_df(df)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
         pd.testing.assert_frame_equal(result, df)
 
     def test_empty_df(self):
@@ -102,7 +102,7 @@ class TestGetQfqDf:
         ]
         df = _make_df(rows)
         result = TechnicalAnalysis._get_qfq_df(df)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
 
     def test_no_trade_date_column(self):
         rows = [

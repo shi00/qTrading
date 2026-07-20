@@ -578,7 +578,7 @@ class TestAIBrainTabMount:
             "settings_news_prompt",
         ):
             tf = _find_text_field_by_label(env, key)
-            assert tf is not None
+            assert tf is not None  # noqa: weak-assertion UI 契约测试验证多 key 循环内 text_field 存在性
 
     def test_render_includes_save_button(self, ai_brain_tab_env) -> None:
         """渲染含 1 个 ft.Button (save_ai)。"""

@@ -332,19 +332,19 @@ class TestBacktestConfigPanelMount:
         """渲染含 initial_capital TextField。"""
         _, _, result, _ = _render_panel()
         field = _find_text_field(result, "i18n[backtest_initial_capital]")
-        assert field is not None
+        assert isinstance(field, ft.TextField)
 
     def test_render_includes_max_positions_text_field(self) -> None:
         """渲染含 max_positions TextField。"""
         _, _, result, _ = _render_panel()
         field = _find_text_field(result, "i18n[backtest_max_positions]")
-        assert field is not None
+        assert isinstance(field, ft.TextField)
 
     def test_render_includes_rebalance_dropdown(self) -> None:
         """渲染含 rebalance_freq Dropdown。"""
         _, _, result, _ = _render_panel()
         dd = _find_dropdown(result, "i18n[backtest_rebalance_freq]")
-        assert dd is not None
+        assert isinstance(dd, ft.Dropdown)
 
     def test_render_includes_three_sliders(self) -> None:
         """渲染含 3 个 Slider (commission/stamp_duty/slippage)。"""
@@ -356,7 +356,7 @@ class TestBacktestConfigPanelMount:
         """渲染含 run button (ft.Button with PLAY_ARROW icon)。"""
         _, _, result, _ = _render_panel()
         run_btn = _find_run_button(result)
-        assert run_btn is not None
+        assert isinstance(run_btn, ft.Button)
 
     def test_render_includes_two_date_buttons(self) -> None:
         """渲染含 2 个 OutlinedButton (start_date/end_date, CALENDAR_TODAY icon)。"""
@@ -368,7 +368,7 @@ class TestBacktestConfigPanelMount:
         """渲染含 stamp_duty_auto Checkbox。"""
         _, _, result, _ = _render_panel()
         checkbox = _find_checkbox(result)
-        assert checkbox is not None
+        assert isinstance(checkbox, ft.Checkbox)
 
     def test_render_includes_rebalance_options(self) -> None:
         """rebalance_dropdown 含 4 个选项 (signal/daily/weekly/monthly)。"""
