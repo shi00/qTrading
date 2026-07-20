@@ -1,7 +1,7 @@
 """文档一致性检查（C5 第一阶段 + 第二阶段 3a + 3b + 3c）。
 
 检查项：
-1. Markdown 锚点死链校验：扫描 CLAUDE.md、CONTRIBUTING.md、man/flet-best-practices.md 中带 `#anchor` 的 markdown 链接,
+1. Markdown 锚点死链校验：扫描 CHECKED_DOCS 全部受检文件中带 `#anchor` 的 markdown 链接,
    确认目标标题存在（支持同文件 `#anchor` 与跨文件 `./file.md#anchor`）。
 2. CLAUDE.md 顶部版本与 pyproject.toml `[project].version` 一致。
 3. 文档中"项目使用 N 个 pre-commit hook"的数量与 `.pre-commit-config.yaml` 本地 hook 数量一致。
@@ -74,6 +74,7 @@ FLET_DOCS_PATHS: list[Path] = [
 # 受检 markdown 文件清单（锚点死链 + 相对链接死链 + pre-commit hook 数量校验范围）
 # P3-7 修复：纳入 docs/guides/、docs/patterns/、docs/architecture/、docs/README.md 全部 markdown，
 # 防止从 CONTRIBUTING.md 迁移后的 `./` 死链逃逸门禁
+# docs-quality-review 扩展：纳入 root README/CHANGELOG/SECURITY、PR 模板、ADR 全部、man/ 全部
 CHECKED_DOCS: list[Path] = [
     CLAUDE_PATH,
     CONTRIBUTING_PATH,
@@ -82,7 +83,14 @@ CHECKED_DOCS: list[Path] = [
     *(ROOT / "docs" / "guides").glob("*.md"),
     *(ROOT / "docs" / "patterns").glob("*.md"),
     *(ROOT / "docs" / "architecture").glob("*.md"),
+    *(ROOT / "docs" / "adr").glob("*.md"),
     ROOT / "docs" / "README.md",
+    ROOT / "README.md",
+    ROOT / "CHANGELOG.md",
+    ROOT / "SECURITY.md",
+    ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md",
+    ROOT / "man" / "database-account-separation.md",
+    ROOT / "man" / "table-partitioning-strategy.md",
 ]
 
 # Flet 版本漂移检查范围（治理文档）
