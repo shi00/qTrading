@@ -460,7 +460,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             # locale 切换后不自动刷新. ceiling: VM state 非 Message, 无 *_key params 翻译机制.
             # upgrade: desc 改为 Message 结构或引入 desc_key+params 时统一修复 (与 R.2.5 同类, R.3 一并处理).
             if dep_info.get("missing_apis"):
-                warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
+                # P2-7: ⚠️ emoji 前缀删除, 由 color="warning" 在 View 层表达警示语义
+                warning_suffix = f"\n{I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
                 desc = f"{desc}{warning_suffix}"
                 color = "warning"
             else:

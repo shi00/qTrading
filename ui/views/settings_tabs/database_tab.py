@@ -83,7 +83,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
                 ft.Container(height=20),
                 ft.Row(
                     [
-                        ft.Icon(ft.Icons.STORAGE, size=32, color=AppColors.PRIMARY),
+                        ft.Icon(ft.Icons.STORAGE, size=AppStyles.ICON_SIZE_LG, color=AppColors.PRIMARY),
                         title_text,
                     ],
                 ),

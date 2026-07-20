@@ -815,7 +815,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         content=ft.Column(
             [
                 ft.Container(height=40),
-                ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),
+                ft.Icon(ft.Icons.TERMINAL, size=AppStyles.ICON_SIZE_XL, color=AppColors.TEXT_HINT),
                 empty_hint_text,
             ],
             alignment=ft.MainAxisAlignment.CENTER,

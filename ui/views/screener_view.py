@@ -193,7 +193,7 @@ def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.
         else:
             name = info["name"]
         if info.get("missing_apis"):
-            name = f"{name} ⚠️"
+            name = f"{name} (!)"  # P2-7: 警告 emoji 改为文本符号, 避免 UI 依赖 emoji 字体
         options.append(ft.dropdown.Option(key, name))
     return options
 
@@ -630,7 +630,7 @@ def ScreenerView(
                 msg = I18n.get(error_key, error_key)
                 if error_key == "prompt_err_length":
                     msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                _safe_show_toast(page, f"⚠ {msg}", "warning")
+                _safe_show_toast(page, msg, "warning")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
@@ -906,7 +906,7 @@ def ScreenerView(
                     [
                         ft.Row(
                             [
-                                ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
+                                ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
                                 ft.ProgressRing(width=14, height=14, stroke_width=2),
                             ],
                             spacing=8,
@@ -936,10 +936,14 @@ def ScreenerView(
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
+                    ft.Text(name, weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
                     ft.ExpansionTile(
-                        title=ft.Text(f"💡 {I18n.get('ai_thinking')}..."),
-                        subtitle=ft.Text(I18n.get("ai_expand_reasoning"), size=10, color=AppColors.TEXT_SECONDARY),
+                        title=ft.Text(f"{I18n.get('ai_thinking')}..."),
+                        subtitle=ft.Text(
+                            I18n.get("ai_expand_reasoning"),
+                            size=AppStyles.FONT_SIZE_CAPTION,
+                            color=AppColors.TEXT_SECONDARY,
+                        ),
                         controls=[
                             ft.Container(
                                 content=ft.Markdown(
@@ -1032,7 +1036,7 @@ def ScreenerView(
 
                 tree_controls.append(
                     ft.ExpansionTile(
-                        title=ft.Text(f"📅 {display_date}", size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500),
+                        title=ft.Text(display_date, size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500),
                         subtitle=ft.Text(
                             I18n.get("history_total").format(count=total_cnt),
                             size=AppStyles.FONT_SIZE_CAPTION,

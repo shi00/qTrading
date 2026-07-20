@@ -359,7 +359,7 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
             [
                 ft.Icon(
                     ft.Icons.INBOX_OUTLINED,
-                    size=64,
+                    size=AppStyles.ICON_SIZE_XXL,
                     color=AppColors.TEXT_HINT,
                 ),
                 ft.Text(

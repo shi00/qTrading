@@ -77,7 +77,7 @@ def _validate_prompt_or_warn(prompt: str, show_snack: Callable) -> bool:
         msg = I18n.get(warning, warning)
         if warning == "prompt_err_length":
             msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-        show_snack(f"⚠ {msg}", color=AppColors.WARNING)
+        show_snack(msg, color=AppColors.WARNING)
         return False
     return True
 

@@ -192,7 +192,7 @@ def _build_empty_content() -> ft.Column:
             ft.Container(
                 content=ft.Column(
                     [
-                        ft.Icon(ft.Icons.ASSESSMENT, size=64, color=AppColors.TEXT_SECONDARY),
+                        ft.Icon(ft.Icons.ASSESSMENT, size=AppStyles.ICON_SIZE_XXL, color=AppColors.TEXT_SECONDARY),
                         ft.Text(
                             I18n.get("backtest_no_result"),
                             size=AppStyles.FONT_SIZE_TITLE,

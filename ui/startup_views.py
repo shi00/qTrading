@@ -168,7 +168,7 @@ def _build_error_view(
         content=ft.Column(
             safe_controls(
                 [
-                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=48),
+                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.ICON_SIZE_XL),
                     ft.Text(
                         I18n.get("error_db_init_failed")
                         if error != "db_engine_missing"
@@ -304,7 +304,7 @@ def StartupView(
             try:
                 page = ft.context.page
                 if page is not None and hasattr(page, "toast") and page.toast:  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
-                    page.toast.show(f"📰 {msg}", toast_type="info")  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
+                    page.toast.show(msg, toast_type="info")  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
             except RuntimeError:
                 pass
 

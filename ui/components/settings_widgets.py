@@ -198,9 +198,11 @@ def StatusBadge(
     Color is a prop — consumer resolves and pushes new text/color via props
     (replacing the old ``set_text`` imperative API).
     """
-    content_row: list[ft.Control] = [ft.Text(text, size=10, color=color, weight=ft.FontWeight.BOLD)]
+    content_row: list[ft.Control] = [
+        ft.Text(text, size=AppStyles.FONT_SIZE_CAPTION, color=color, weight=ft.FontWeight.BOLD)
+    ]
     if icon:
-        content_row.insert(0, ft.Icon(safe_icon(icon), size=10, color=color))
+        content_row.insert(0, ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_CAPTION, color=color))
     return ft.Container(
         content=ft.Row(
             content_row,

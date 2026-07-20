@@ -84,18 +84,18 @@ def _build_api_description(api_name: str, available: bool | None, vm: SystemView
     if vm.is_independent_purchase(api_name):
         return ft.Text(
             I18n.get("sys_tier_independent_purchase"),
-            size=10,
+            size=AppStyles.FONT_SIZE_CAPTION,
             color=AppColors.WARNING,
             italic=True,
         )
     if available is False:
         return ft.Text(
             I18n.get("sys_tier_insufficient_points"),
-            size=10,
+            size=AppStyles.FONT_SIZE_CAPTION,
             color=AppColors.ERROR,
             italic=True,
         )
-    return ft.Text("", size=10)
+    return ft.Text("", size=AppStyles.FONT_SIZE_CAPTION)
 
 
 def _build_api_list_controls(
@@ -103,7 +103,7 @@ def _build_api_list_controls(
 ) -> list[ft.Control]:
     """构建 API 列表控件（按当前档位过滤 _TIER_API_COVERAGE）。
 
-    每项含：API 名称 + 独立付费标记（💰）+ probe 三态状态图标 + 状态文本。
+    每项含：API 名称 + 独立付费标记 + probe 三态状态图标 + 状态文本。
     """
     tier_apis = vm.get_tier_apis(current_tier)
     sorted_apis = sorted(tier_apis)

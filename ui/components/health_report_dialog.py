@@ -65,7 +65,7 @@ def _build_health_score_card(status: str, tables_count: int) -> ft.Container:
     return ft.Container(
         content=ft.Row(
             controls=[
-                ft.Icon(icon, color=color, size=48),
+                ft.Icon(icon, color=color, size=AppStyles.ICON_SIZE_XL),
                 ft.Column(
                     controls=[
                         ft.Text(
@@ -123,7 +123,7 @@ def _build_metric_tile(
         ),
     ]
     if sub_text:
-        controls.append(ft.Text(sub_text, size=10, color=AppColors.TEXT_HINT))
+        controls.append(ft.Text(sub_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT))
 
     return ft.Container(
         content=ft.Column(
@@ -216,7 +216,7 @@ def _build_depth_breadth_items(stats: dict) -> list[ft.Text]:
         items.append(
             ft.Text(
                 I18n.get("health_depth", ratio=f"{depth_ratio * 100:.0f}%"),
-                size=10,
+                size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.WARNING if depth_ratio < HEALTH_DEPTH_WARNING_RATIO else AppColors.TEXT_HINT,
             ),
         )
@@ -224,7 +224,7 @@ def _build_depth_breadth_items(stats: dict) -> list[ft.Text]:
         items.append(
             ft.Text(
                 I18n.get("health_breadth", ratio=f"{breadth_ratio * 100:.0f}%"),
-                size=10,
+                size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.WARNING if breadth_ratio < HEALTH_THRESHOLD_BREADTH else AppColors.TEXT_HINT,
             ),
         )
@@ -299,13 +299,11 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                         alignment=ft.Alignment.CENTER,
                     ),
                     ft.Container(width=10),
-                    ft.Text(
-                        "✓" if ratio > 0 else "✗",
+                    # P2-7: ✓/✗ 文本符号 → ft.Icon, 避免 UI 依赖 emoji/dingbat 字体
+                    ft.Icon(
+                        ft.Icons.CHECK if ratio > 0 else ft.Icons.CLOSE,
                         size=AppStyles.FONT_SIZE_TITLE,
-                        weight=ft.FontWeight.BOLD,
                         color=icon_color,
-                        width=60,
-                        text_align=ft.TextAlign.CENTER,
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -341,7 +339,7 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                                         "health_freshness",
                                         ratio=f"{fresh_ratio * 100:.0f}%",
                                     ),
-                                    size=10,
+                                    size=AppStyles.FONT_SIZE_CAPTION,
                                     color=AppColors.TEXT_HINT,
                                 ),
                             ]
@@ -613,7 +611,7 @@ def _build_scan_result(result: dict) -> ft.Column:
             ft.Container(height=20),
             ft.Row(
                 [
-                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=color, size=40),
+                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=color, size=AppStyles.ICON_SIZE_XL),
                     ft.Column(
                         [
                             ft.Text(
@@ -705,10 +703,10 @@ def _build_scan_result(result: dict) -> ft.Column:
                                 size=AppStyles.FONT_SIZE_BODY_SM,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
-                            ft.Text(
-                                "✓" if fin_recency_ok else "✗",
+                            # P2-7: ✓/✗ 文本符号 → ft.Icon, 避免 UI 依赖 emoji/dingbat 字体
+                            ft.Icon(
+                                ft.Icons.CHECK if fin_recency_ok else ft.Icons.CLOSE,
                                 size=AppStyles.FONT_SIZE_TITLE,
-                                weight=ft.FontWeight.BOLD,
                                 color=AppColors.SUCCESS if fin_recency_ok else AppColors.ERROR,
                             ),
                         ],

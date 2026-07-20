@@ -140,7 +140,7 @@ def NewsFeed(
                     [
                         ft.Icon(
                             ft.Icons.ARTICLE_OUTLINED,
-                            size=48,
+                            size=AppStyles.ICON_SIZE_XL,
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(

@@ -182,7 +182,7 @@ def _create_overview_card(
                 ),
                 ft.Text(
                     required_text if required else optional_text,
-                    size=9,
+                    size=AppStyles.FONT_SIZE_CAPTION,
                     weight=ft.FontWeight.W_600,
                     color=badge_text_color,
                 ),
@@ -198,7 +198,7 @@ def _create_overview_card(
     icon_with_badge = ft.Stack(
         [
             ft.Container(
-                content=ft.Icon(safe_icon(icon), size=32, color=color),
+                content=ft.Icon(safe_icon(icon), size=AppStyles.ICON_SIZE_LG, color=color),
                 width=52,
                 height=52,
                 border_radius=14,
@@ -537,7 +537,7 @@ def OnboardingWizard(
         [
             ft.Text(
                 I18n.get("wizard_welcome_title"),
-                size=32,
+                size=AppStyles.FONT_SIZE_DISPLAY,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.PRIMARY,
                 text_align=ft.TextAlign.CENTER,
@@ -571,7 +571,7 @@ def OnboardingWizard(
         )
 
         rocket_container = ft.Container(
-            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=72, color=AppColors.PRIMARY),
+            content=ft.Icon(ft.Icons.ROCKET_LAUNCH, size=AppStyles.ICON_SIZE_HERO, color=AppColors.PRIMARY),
             width=120,
             height=120,
             border_radius=60,
@@ -678,7 +678,7 @@ def OnboardingWizard(
         # Database step
         step_content = ft.Column(
             [
-                ft.Icon(ft.Icons.STORAGE, size=64, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.STORAGE, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_db_title"),
                     size=AppStyles.FONT_SIZE_XL,
@@ -707,7 +707,7 @@ def OnboardingWizard(
         # Token step
         step_content = ft.Column(
             [
-                ft.Icon(ft.Icons.KEY, size=64, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.KEY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step1_title"),
                     size=AppStyles.FONT_SIZE_XL,
@@ -736,7 +736,7 @@ def OnboardingWizard(
         # Cloud AI step
         step_content = ft.Column(
             [
-                ft.Icon(ft.Icons.CLOUD, size=64, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.CLOUD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step_cloud_ai_title"),
                     size=AppStyles.FONT_SIZE_XL,
@@ -769,7 +769,7 @@ def OnboardingWizard(
         # Local Model step
         step_content = ft.Column(
             [
-                ft.Icon(ft.Icons.PSYCHOLOGY, size=64, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.PSYCHOLOGY, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step_local_model_title"),
                     size=AppStyles.FONT_SIZE_XL,
@@ -807,7 +807,7 @@ def OnboardingWizard(
         step_content = ft.Column(
             safe_controls(
                 [
-                    ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
+                    ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
                     ft.Text(
                         I18n.get("wizard_step3_title"),
                         size=AppStyles.FONT_SIZE_XL,
@@ -901,7 +901,7 @@ def OnboardingWizard(
         # Schedule step
         step_content = ft.Column(
             [
-                ft.Icon(ft.Icons.SCHEDULE, size=64, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.SCHEDULE, size=AppStyles.ICON_SIZE_XXL, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step4_title"),
                     size=AppStyles.FONT_SIZE_XL,
@@ -957,10 +957,10 @@ def OnboardingWizard(
         # Complete step (step == 7)
         step_content = ft.Column(
             [
-                ft.Icon(ft.Icons.CELEBRATION, size=80, color=AppColors.SUCCESS),
+                ft.Icon(ft.Icons.CELEBRATION, size=AppStyles.ICON_SIZE_HERO, color=AppColors.SUCCESS),
                 ft.Text(
                     I18n.get("wizard_step5_title"),
-                    size=32,
+                    size=AppStyles.FONT_SIZE_DISPLAY,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),

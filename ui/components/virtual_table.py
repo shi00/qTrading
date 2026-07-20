@@ -197,7 +197,7 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
                     ft.TextSpan(
                         "." + parts[1],
                         ft.TextStyle(
-                            size=10,
+                            size=AppStyles.FONT_SIZE_CAPTION,
                             color=AppColors.TEXT_TERTIARY  # type: ignore[untyped]
                             if hasattr(AppColors, "TEXT_TERTIARY")
                             else "#888888",

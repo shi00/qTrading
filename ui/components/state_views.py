@@ -46,7 +46,7 @@ def EmptyState(
     column_controls: list[ft.Control] = []
     if icon:
         column_controls.append(
-            ft.Icon(icon, size=48, color=AppColors.TEXT_SECONDARY),
+            ft.Icon(icon, size=AppStyles.ICON_SIZE_XL, color=AppColors.TEXT_SECONDARY),
         )
     if title:
         column_controls.append(
@@ -125,7 +125,7 @@ def ErrorState(
     column_controls: list[ft.Control] = []
     if icon:
         column_controls.append(
-            ft.Icon(icon, size=48, color=AppColors.ERROR),
+            ft.Icon(icon, size=AppStyles.ICON_SIZE_XL, color=AppColors.ERROR),
         )
     if title:
         column_controls.append(
