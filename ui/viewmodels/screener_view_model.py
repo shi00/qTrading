@@ -803,6 +803,20 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             self._update_pagination(page_size=new_size, page_no=1)
             self._notify()
 
+    def clear_filters(self) -> None:
+        """重置筛选/排序/分页/档位提示至默认值 (P1-3 #71).
+
+        EmptyState 的 ``on_cta`` 回调调用本命令，清空当前筛选状态以便用户重新执行策略。
+        不清除 ``_full_results`` (保留上次结果供用户参考); 仅重置 state 中的
+        ``page_no`` / ``sort_column`` / ``sort_ascending`` / ``tier_hint`` 字段。
+        """
+        self._set_state(
+            page_no=1,
+            sort_column=None,
+            sort_ascending=True,
+            tier_hint=None,
+        )
+
     def get_current_page_data(self):
         """Get data for current page (Synchronous, fast slicing)"""
         if self._full_results is None or self._full_results.empty:

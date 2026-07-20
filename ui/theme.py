@@ -562,6 +562,19 @@ class AppStyles:
         )
 
     @staticmethod
+    def danger_button() -> ft.ButtonStyle:
+        """危险操作按钮 (取消/删除等)。bgcolor=ERROR, color=ON_ERROR (随主题切换)."""
+        return ft.ButtonStyle(
+            color=ft.Colors.ON_ERROR,
+            icon_color=ft.Colors.ON_ERROR,
+            bgcolor=ft.Colors.ERROR,
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
+            shape=ft.RoundedRectangleBorder(radius=2),
+            elevation=0,
+            text_style=ft.TextStyle(weight=ft.FontWeight.BOLD),
+        )
+
+    @staticmethod
     def data_table_row(index: int, is_hovered: bool = False) -> str:
         """表格行颜色 (Layer 2 — 自定义色)"""
         if is_hovered:
