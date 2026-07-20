@@ -200,13 +200,22 @@ async def e2e_playwright():
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def e2e_browser(e2e_playwright):
     # 启动期断言 canvaskit.wasm 本地存在（route handler 离线化依赖此文件）
-    wasm_path = Path(__file__).resolve().parent / "mock_assets" / "canvaskit" / "canvaskit.wasm"
+    mock_root = Path(__file__).resolve().parent / "mock_assets"
+    wasm_path = mock_root / "canvaskit" / "canvaskit.wasm"
     if not wasm_path.exists():
         raise RuntimeError(
             f"canvaskit.wasm not found at {wasm_path}. "
             "E2E 离线化依赖此文件，请从 flet_web 内置 canvaskit 目录复制："
             "`cp <site-packages>/flet_web/web/canvaskit/canvaskit.wasm "
             "tests/e2e/mock_assets/canvaskit/`（版本必须与 pyproject.toml 锁定的 flet 版本一致）"
+        )
+    # 启动期断言字体文件本地存在（CJK 回退字体离线化依赖）
+    fonts_dir = mock_root / "fonts"
+    if not fonts_dir.exists() or not any(fonts_dir.glob("*.woff2")):
+        raise RuntimeError(
+            f"字体文件未找到于 {fonts_dir}. "
+            "E2E 离线化依赖 Noto Sans SC / Roboto woff2 字体分片，"
+            "请用 diagnose_font_urls.py 捕获实际请求 URL 并下载到 tests/e2e/mock_assets/fonts/ 目录"
         )
     browser = await e2e_playwright.chromium.launch(
         channel=BROWSER_CHANNEL, headless=os.environ.get("E2E_HEADED", "0") != "1"
@@ -344,7 +353,7 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # In CI and sometimes local environments, gstatic.com can be extremely slow or timeout,
     # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
     # To fix this, we intercept canvaskit requests and serve them from local mock_assets.
-    # Other external requests (fonts, icons, etc.) are aborted to force offline mode.
+    # Other external requests (icons, rive, etc.) are aborted to force offline mode.
     # NOTE: canvaskit 版本由 Flutter engineRevision 决定（见 flutter_bootstrap.js 的 buildConfig）。
     # 升级 flet 时若 engineRevision 变化，必须同步更新 mock_assets/canvaskit/ 下的文件，
     # 可从 site-packages/flet_web/web/canvaskit/ 复制对应版本。
@@ -354,11 +363,36 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     # 更糟糕的是，如果加载超时，页面渲染会直接卡死在白屏，导致所有元素（如标题、按钮）等待超时 (TimeoutError)。
     # 解决方案：拦截外部资源请求，canvaskit 命中本地缓存则 fulfill，其余外部请求强制 abort（离线）。
     # 内部请求（Flet app 本身、data/blob URI）继续放行。
+    # [PITFALL FIX 2] CJK 回退字体（Noto Sans SC / Roboto）必须本地化，不可依赖 CDN：
+    # Flutter Web CanvasKit 运行时按需从 fonts.gstatic.com 下载 CJK 回退字体分片 (woff2)。
+    # 若字体请求被 abort 或网络超时，回退字体度量异常会使选股页结果表格布局高度塌陷
+    # (表头语义节点仅 ~4px)，PaginatedTable 虚拟化窗口构建 0 行 → 行语义节点 (如 "平安银行")
+    # 永久缺失，所有依赖行文本的断言 (expect_result/expect_text) 超时失败。
+    # 解决方案：字体请求按 URL 末尾文件名匹配 mock_assets/fonts/ 本地缓存，命中 fulfill，
+    # 未命中 abort（与 canvaskit 同策略）。字体分片随 Flet 版本或测试内容变化时需用
+    # diagnose_font_urls.py 重新捕获并更新本地缓存。
+    #
+    # 维护验证（Flet 升级后跑一次即可，URL 没变就无需重下字体）：
+    #   PowerShell:
+    #     Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
+    #       -Pattern "notosanssc/v\d+/" -AllMatches |
+    #       ForEach-Object { $_.Matches } | Select-Object -ExpandProperty Value -Unique
+    #   - 输出 notosanssc/v37/ → 本地缓存继续有效
+    #   - 输出其他版本号 → URL 变了，重跑 diagnose_font_urls.py 捕获新 URL 并下载替换
     async def intercept_external(route, request):
         url = request.url
         # 内部请求（Flet app 本身、data/blob URI）直接放行
         if url.startswith(("http://localhost", "http://127.0.0.1", "data:", "blob:")):
             await route.continue_()
+            return
+        # 字体 CDN：命中本地缓存则 fulfill，未命中 abort
+        if "fonts.gstatic.com" in url or "fonts.googleapis.com" in url:
+            filename = url.split("/")[-1]
+            local_path = Path(__file__).resolve().parent / "mock_assets" / "fonts" / filename
+            if local_path.exists():
+                await route.fulfill(status=200, content_type="font/woff2", path=str(local_path))
+                return
+            await route.abort()
             return
         # 外部资源：仅 canvaskit 命中本地缓存
         if "canvaskit" in url:
