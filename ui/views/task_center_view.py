@@ -58,7 +58,7 @@ _STATUS_COLOR_MAP = {
     TaskStatus.COMPLETED: AppColors.SUCCESS,
     TaskStatus.FAILED: AppColors.ERROR,
     TaskStatus.CANCELLED: AppColors.WARNING,
-    TaskStatus.INTERRUPTED: "#90A4AE",  # Blue Grey 300
+    TaskStatus.INTERRUPTED: AppColors.TEXT_DISABLED,
 }
 
 

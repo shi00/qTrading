@@ -143,7 +143,7 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
         on_click=safe_on_click(_on_cancel_backtest),
         visible=state.is_running,
         bgcolor=AppColors.ERROR,
-        color=ft.Colors.WHITE,
+        color=ft.Colors.ON_ERROR,
     )
 
     return ft.Container(

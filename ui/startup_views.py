@@ -27,6 +27,7 @@ import flet as ft
 from app.startup_controller import StartupContext, StartupController, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
+from ui.theme import AppColors
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ def _build_error_view(
         content=ft.Column(
             safe_controls(
                 [
-                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
+                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=48),
                     ft.Text(
                         I18n.get("error_db_init_failed")
                         if error != "db_engine_missing"
@@ -177,7 +178,7 @@ def _build_error_view(
                     ),
                     ft.Text(
                         _get_localized_detail(context.detail or "")[:200],
-                        color=ft.Colors.RED_400,
+                        color=AppColors.ERROR,
                         size=14,
                     ),
                     ft.Row(

@@ -171,7 +171,7 @@ def NewsFeed(
                 content=ft.Button(
                     content=ft.Text(
                         I18n.get("news_load_more"),
-                        color=ft.Colors.WHITE,
+                        color=AppColors.TEXT_ON_PRIMARY,
                     ),
                     style=ft.ButtonStyle(
                         bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},

@@ -636,7 +636,7 @@ def TableViewerTab(
                     ft.Text(
                         I18n.get("data_total_rows").format(count=state.total_rows),
                         size=12,
-                        color=ft.Colors.GREY,
+                        color=AppColors.TEXT_SECONDARY,
                     ),
                     ft.Container(expand=True),
                     ft.IconButton(
@@ -703,7 +703,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
             return
         UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
         set_status_text(I18n.get("data_status_executing"))
-        set_status_color(ft.Colors.BLUE)
+        set_status_color(AppColors.INFO)
         try:
             start_time = time.time()
             await vm.execute_sql(sql_text)
@@ -722,7 +722,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                         )
                     else:
                         set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=row_count))
-                    set_status_color(ft.Colors.GREEN)
+                    set_status_color(AppColors.SUCCESS)
                 else:
                     set_status_text(I18n.get("data_sql_error"))
                     set_status_color(AppColors.ERROR)

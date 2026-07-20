@@ -678,7 +678,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     row_diagnostics = SettingRow(
         icon=safe_icon_str(ft.Icons.ANALYTICS_ROUNDED),
-        icon_color=ft.Colors.RED,
+        icon_color=AppColors.ERROR,
         title=I18n.get("settings_diagnostics"),
         subtitle=I18n.get("settings_diagnostics_desc"),
         control=diagnostics_button,
