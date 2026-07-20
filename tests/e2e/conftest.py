@@ -204,8 +204,9 @@ async def e2e_browser(e2e_playwright):
     if not wasm_path.exists():
         raise RuntimeError(
             f"canvaskit.wasm not found at {wasm_path}. "
-            "E2E 离线化依赖此文件，请从 https://unpkg.com/canvaskit-wasm@latest/bin/canvaskit.wasm "
-            "下载并放置到 tests/e2e/mock_assets/canvaskit/ 目录"
+            "E2E 离线化依赖此文件，请从 flet_web 内置 canvaskit 目录复制："
+            "`cp <site-packages>/flet_web/web/canvaskit/canvaskit.wasm "
+            "tests/e2e/mock_assets/canvaskit/`（版本必须与 pyproject.toml 锁定的 flet 版本一致）"
         )
     browser = await e2e_playwright.chromium.launch(
         channel=BROWSER_CHANNEL, headless=os.environ.get("E2E_HEADED", "0") != "1"
@@ -338,11 +339,15 @@ async def _make_page(browser, app: AppServer, request, *, check_db_error: bool =
     fp = FletPage(page, timeout_multiplier=TIMEOUT_MULTIPLIER)
 
     # CRITICAL WORKAROUND for E2E Flakiness:
-    # Flet's web app downloads canvaskit.js and canvaskit.wasm from unpkg.com on startup.
-    # In CI and sometimes local environments, unpkg.com can be extremely slow or timeout,
+    # Flet's web app downloads canvaskit.js and canvaskit.wasm from
+    # https://www.gstatic.com/flutter-canvaskit/<engineRevision>/ on startup.
+    # In CI and sometimes local environments, gstatic.com can be extremely slow or timeout,
     # causing the entire Playwright test to fail with a TimeoutError waiting for the page to load.
     # To fix this, we intercept canvaskit requests and serve them from local mock_assets.
     # Other external requests (fonts, icons, etc.) are aborted to force offline mode.
+    # NOTE: canvaskit 版本由 Flutter engineRevision 决定（见 flutter_bootstrap.js 的 buildConfig）。
+    # 升级 flet 时若 engineRevision 变化，必须同步更新 mock_assets/canvaskit/ 下的文件，
+    # 可从 site-packages/flet_web/web/canvaskit/ 复制对应版本。
     # [PITFALL FIX] 拦截外部资源请求，强制离线化 E2E 测试
     # 坑点：Flet (Flutter Web) 启动时会动态下载 canvaskit.js 和 canvaskit.wasm。
     # Playwright E2E 测试如果在 CI 环境或者无头模式下，由于网络波动，加载这两个文件极慢。

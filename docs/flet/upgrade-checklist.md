@@ -50,3 +50,17 @@ python scripts/check_docs_consistency.py
 - Flet GitHub 仓库：<https://github.com/flet-dev/flet>
 
 > 通用 Flet v1 教程（路由、Services、存储、构建打包、移动/Web 适配、响应式布局、控件清单等）请直接查阅官方文档，本文件不再复制，避免与上游漂移。
+
+## 6. E2E canvaskit 资源版本检查
+
+> 背景：Flet web app 启动时从 `https://www.gstatic.com/flutter-canvaskit/<engineRevision>/` 加载 `canvaskit.js` 与 `canvaskit.wasm`。E2E 测试通过 [tests/e2e/conftest.py](../../tests/e2e/conftest.py) 的 `intercept_external` 拦截该请求并从 `tests/e2e/mock_assets/canvaskit/` 提供本地文件。canvaskit 版本由 Flutter `engineRevision` 决定（见 `site-packages/flet_web/web/flutter_bootstrap.js` 的 `_flutter.buildConfig`），与 Flet Python 层版本无直接关系——同 minor 版本的不同 patch 可能共用相同 engineRevision（如 0.86.0 与 0.86.1），跨 minor 版本通常不同（如 0.85.3 → 0.86.0）。
+
+- [ ] **比较 engineRevision**：对比升级前后的 `flutter_bootstrap.js` 中 `_flutter.buildConfig.engineRevision` 字段
+  - 升级前：从当前 `pyproject.toml` 锁定版本的 `flet_web` wheel 中读取
+  - 升级后：从新安装的 `site-packages/flet_web/web/flutter_bootstrap.js` 读取
+  - 命令示例：`python -c "import re,pathlib; p=pathlib.Path(__import__('flet_web').__file__).parent/'web/flutter_bootstrap.js'; print(re.findall(r'engineRevision\":\"([^\"]+)\"', p.read_text(encoding='utf-8')))"`
+- [ ] **若 engineRevision 变化**：从新版本 `site-packages/flet_web/web/canvaskit/` 复制 `canvaskit.js` 和 `canvaskit.wasm` 到 `tests/e2e/mock_assets/canvaskit/`
+  - 复制命令：`cp <site-packages>/flet_web/web/canvaskit/canvaskit.{js,wasm} tests/e2e/mock_assets/canvaskit/`
+  - 验证文件大小变化（确认复制成功）
+- [ ] **若 engineRevision 未变化**：跳过文件复制，但在升级 PR 描述中记录"engineRevision 未变，canvaskit 资源无需更新"
+- [ ] **运行 E2E 冒烟测试**（若本地环境支持）：验证 canvaskit 加载无回归
