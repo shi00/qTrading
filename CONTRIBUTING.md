@@ -62,7 +62,7 @@
 
 ### 提出新功能
 
-欢迎提出新功能建议！请通过 [功能请求模板](https://github.com/shi00/qTrading/issues/new?template=feature_request.yml) 提交（模板位于 [`.github/ISSUE_TEMPLATE/feature_request.yml`](./.github/ISSUE_TEMPLATE/feature_request.yml)）。新功能需符合 [CLAUDE.md §1.3 极简设计](./CLAUDE.md#13-极简设计-simplicity-first)（YAGNI 优先）。提问与讨论请前往 [GitHub Discussions](https://github.com/shi00/qTrading/discussions)。
+欢迎提出新功能建议！请通过 [功能请求模板](https://github.com/shi00/qTrading/issues/new?template=feature_request.yml) 提交（模板位于 [`.github/ISSUE_TEMPLATE/feature_request.yml`](./.github/ISSUE_TEMPLATE/feature_request.yml)）。新功能需符合 [CLAUDE.md §1.3 极简设计](./CLAUDE.md#13-极简设计-simplicity-first)（YAGNI 优先）。提问与讨论请前往 [GitHub Issues](https://github.com/shi00/qTrading/issues)。
 
 ### 代码复用与避免重复造轮子
 
@@ -630,11 +630,15 @@ except Exception as e:
 
 ### docs/adr/ — 架构决策记录
 
-- 占位目录，待 Phase 4 落地 ADR-0001~0004
+- [0001-record-architecture-decisions.md](./docs/adr/0001-record-architecture-decisions.md) — ADR 模板与生命周期
+- [0002-document-layering.md](./docs/adr/0002-document-layering.md) — 文档分层决策
+- [0003-overturn-3b-3c-deferral.md](./docs/adr/0003-overturn-3b-3c-deferral.md) — 推翻「3b/3c 过度工程不做」决策
+- [0004-redlines-yaml-format.md](./docs/adr/0004-redlines-yaml-format.md) — redlines.yml 格式决策
+- [0005-enforcement-mapping-check.md](./docs/adr/0005-enforcement-mapping-check.md) — enforcement 字段映射不变量
 
 ### docs/governance/ — 治理类机器可读文件
 
-- 占位目录，待 Phase 3 落地 redlines.yml
+- [redlines.yml](./docs/governance/redlines.yml) — CLAUDE.md §3.1 红线表的机器可读镜像（R1~R18 编号/标题/说明/enforcement/human_review_required）
 
 ---
 
