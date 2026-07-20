@@ -75,18 +75,18 @@
 
 | 任务类型 | 必读章节 / 文件 |
 |---------|----------------|
-| 新增/修改策略 | CONTRIBUTING.md「策略模式实现模板」、`strategies/base_strategy.py`；工作流见 CONTRIBUTING.md「新增一个策略」 |
-| 新增/修改 DAO 或数据表 | CONTRIBUTING.md「DAO 模式」、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 CONTRIBUTING.md「新增一张数据表」/「新增一个 DAO」 |
+| 新增/修改策略 | CONTRIBUTING.md「策略模式实现模板」、`strategies/base_strategy.py`；工作流见 docs/guides/how-to.md「3. 新增一个策略」 |
+| 新增/修改 DAO 或数据表 | CONTRIBUTING.md「DAO 模式」、`data/persistence/daos/base_dao.py`、`data/data_dictionary.py`；工作流见 docs/guides/how-to.md「1. 新增一张数据表」/「2. 新增一个 DAO」 |
 | 新增/修改数据同步 | CONTRIBUTING.md「数据同步架构」、`data/sync/base.py` |
-| 新增/修改 UI 视图 | CONTRIBUTING.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；工作流见 CONTRIBUTING.md「新增一个 UI 视图」 |
+| 新增/修改 UI 视图 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/app_layout.py`、对应 ViewModel；工作流见 docs/guides/how-to.md「4. 新增一个 UI 视图」 |
 | 修改异常处理 | CONTRIBUTING.md「错误处理标准模式」、§3 红线、`utils/error_classifier.py` |
 | 修改单例 / 资源生命周期 | §4.3、CONTRIBUTING.md「单例模式实现模板」、`utils/singleton_registry.py`、`utils/shutdown.py` |
 | 性能优化 | CONTRIBUTING.md「配置管理、质量门控、性能监控」、`utils/log_decorators.py` |
-| 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 CONTRIBUTING.md「新增依赖」 |
-| 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 CONTRIBUTING.md「新增回测配置」 |
-| 修改 UI 布局/响应式 | CONTRIBUTING.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py` |
+| 调整 CI / 依赖 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`pyproject.toml`、`.github/workflows/ci_cd.yml`；依赖流程见 docs/guides/how-to.md「6. 新增与升级依赖」 |
+| 新增/修改回测 | CONTRIBUTING.md「DAO 模式」、`strategies/backtest/`、`services/backtest_service.py`、`ui/views/backtest_view.py`；工作流见 docs/guides/how-to.md「7. 新增回测配置」 |
+| 修改 UI 布局/响应式 | docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」、`ui/theme.py` (`AppStyles`)、`ui/app_layout.py` |
 | 新增/修改 ViewModel | CONTRIBUTING.md「MVVM 表现层」、`ui/viewmodels/` |
-| 修改 i18n 文案 | `core/i18n.py`、`locales/`、CONTRIBUTING.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则 |
+| 修改 i18n 文案 | `core/i18n.py`、`locales/`、docs/flet/v1-api-constraints.md「V1 声明式 UI 开发规范」中的 i18n 状态驱动规则 |
 | 修改配置项 | `utils/config_handler.py`、AppConfig Pydantic 模型 |
 | 新增测试 | CONTRIBUTING.md「测试规范」、`tests/unit/conftest.py` |
 | 依赖安全审计 | CONTRIBUTING.md「CI/CD 流水线与门禁」、`scripts/run_pip_audit.py` |

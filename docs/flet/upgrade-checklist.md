@@ -47,8 +47,10 @@ Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
 ### 3.2 字体分片重新下载（仅 URL 变化时执行）
 
 ```bash
-# 1. 捕获实际请求的字体 URL
-python diagnose_font_urls.py
+# 1. 捕获实际请求的字体 URL（PowerShell；从 flet_web 包内 main.dart.js 提取）
+Select-String -Path "<site-packages>/flet_web/web/main.dart.js" `
+  -Pattern "notosanssc/v\d+/" -AllMatches |
+  ForEach-Object { $_.Matches } | Select-Object -ExpandProperty Value -Unique
 
 # 2. 按捕获的 URL 下载 woff2 分片到 tests/e2e/mock_assets/fonts/
 #    （Noto Sans SC 通常 7 个分片 + Roboto 1 个，约 278KB）

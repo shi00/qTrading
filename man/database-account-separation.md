@@ -105,11 +105,11 @@ In production, configure separate accounts:
 
 ```env
 # .env (production)
-# Admin account for migrations (used by Alembic)
-ALEMBIC_DATABASE_URL=postgresql+asyncpg://astock_admin:admin_password@db.example.com:5432/astock
+# Admin account for migrations (set DATABASE_URL before running alembic commands)
+DATABASE_URL=postgresql+asyncpg://astock_admin:admin_password@db.example.com:5432/astock
 
-# Application account for daily operations
-DATABASE_URL=postgresql+asyncpg://astock_app:app_password@db.example.com:5432/astock
+# Application account for daily operations (override DATABASE_URL after migration)
+# DATABASE_URL=postgresql+asyncpg://astock_app:app_password@db.example.com:5432/astock
 ```
 
 ### Alembic Configuration
