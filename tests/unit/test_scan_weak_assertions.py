@@ -439,6 +439,80 @@ class TestBaselineShrink:
         assert current_total == 0
         assert old_total == -1
 
+    def test_shrink_allows_growth_with_justification(self, tmp_path, monkeypatch):
+        """当前 baseline 含非空 growth_justification 字段时，数量增长也允许通过。
+
+        用于修复扫描器 BUG 后的合理增长声明，避免开发者随意绕过门禁的同时
+        给工具修复留出可控通道。
+        """
+        path = tmp_path / "baseline.json"
+        save_baseline(
+            path,
+            [
+                WeakAssertion(
+                    rel_path="a.py",
+                    line_no=1,
+                    issue_type="weak_assert",
+                    detail="d",
+                    source_line="assert True",
+                ),
+                WeakAssertion(
+                    rel_path="b.py",
+                    line_no=2,
+                    issue_type="weak_assert",
+                    detail="d",
+                    source_line="assert 1",
+                ),
+            ],
+            growth_justification="修复 _is_is_not_none_assert BUG 后浮现的真弱断言纳入 baseline",
+        )  # 当前 2
+        old_content = json.dumps({"version": 1, "total": 1, "entries": []})
+        monkeypatch.setattr(
+            "scan_weak_assertions._git_show_file",
+            lambda ref, file_rel: old_content,
+        )
+        from scan_weak_assertions import check_baseline_shrink
+
+        ok, current_total, old_total = check_baseline_shrink(path, ref="origin/main")
+        assert ok is True
+        assert current_total == 2
+        assert old_total == 1
+
+    def test_shrink_fails_when_growth_with_empty_justification(self, tmp_path, monkeypatch):
+        """growth_justification 为空字符串时，数量增长仍失败（防偷懒绕过）。"""
+        path = tmp_path / "baseline.json"
+        save_baseline(
+            path,
+            [
+                WeakAssertion(
+                    rel_path="a.py",
+                    line_no=1,
+                    issue_type="weak_assert",
+                    detail="d",
+                    source_line="assert True",
+                ),
+                WeakAssertion(
+                    rel_path="b.py",
+                    line_no=2,
+                    issue_type="weak_assert",
+                    detail="d",
+                    source_line="assert 1",
+                ),
+            ],
+            growth_justification="",
+        )  # 当前 2，justification 空
+        old_content = json.dumps({"version": 1, "total": 1, "entries": []})
+        monkeypatch.setattr(
+            "scan_weak_assertions._git_show_file",
+            lambda ref, file_rel: old_content,
+        )
+        from scan_weak_assertions import check_baseline_shrink
+
+        ok, current_total, old_total = check_baseline_shrink(path, ref="origin/main")
+        assert ok is False
+        assert current_total == 2
+        assert old_total == 1
+
 
 # ============================================================================
 # --update-baseline 模式
@@ -737,3 +811,66 @@ class TestWeakPrint:
         )
         issues = scan_file(f)
         assert not any(i.issue_type == "weak_print" for i in issues)
+
+
+class TestWeakIsNotNone:
+    """规则 ⑤：assert X is not None 作为函数唯一终态（链式非终态除外）。
+
+    仅验证存在性不验证行为/参数的弱断言。注意：``assert X is None`` 是
+    验证负向返回值的强断言（如边界测试 ``assert func(None) is None``），
+    绝不可被误判为弱断言。
+    """
+
+    def test_detects_assert_is_not_none_as_terminal(self, tmp_path):
+        """assert X is not None 作为函数唯一终态 → weak_is_not_none。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    result = func()\n    assert result is not None\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_is_not_none" for i in issues)
+
+    def test_ignores_assert_is_none(self, tmp_path):
+        """assert X is None 是验证负向返回值的强断言，不应被识别为弱断言。
+
+        Regression: ``_is_is_not_none_assert`` 曾误将 ``ast.Is`` 判定为
+        ``is not None`` 形式，导致大量边界测试被误报。
+        """
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    result = func(None)\n    assert result is None\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_is_not_none" for i in issues)
+
+    def test_ignores_is_not_none_with_other_assertions(self, tmp_path):
+        """函数内还有其他内容断言时，is not None 是前置条件，不算弱断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    result = func()\n    assert result is not None\n    assert result.value == 42\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_is_not_none" for i in issues)
+
+    def test_ignores_is_not_none_in_non_test_function(self, tmp_path):
+        """非 test_ 开头函数内的 is not None 不算弱断言。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def helper():\n    result = func()\n    assert result is not None\n",
+        )
+        issues = scan_file(f)
+        assert not any(i.issue_type == "weak_is_not_none" for i in issues)
+
+    def test_detects_is_not_none_with_subscript(self, tmp_path):
+        """assert obj.attr is not None 作为唯一终态 → weak_is_not_none。"""
+        f = _write_test_file(
+            tmp_path,
+            "test_x.py",
+            "def test_a():\n    obj = build()\n    assert obj.attr is not None\n",
+        )
+        issues = scan_file(f)
+        assert any(i.issue_type == "weak_is_not_none" for i in issues)

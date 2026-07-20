@@ -271,7 +271,7 @@ def _is_is_not_none_assert(node: ast.AST) -> bool:
     test = node.test
     if not isinstance(test, ast.Compare):
         return False
-    if not test.ops or not isinstance(test.ops[0], ast.Is):
+    if not test.ops or not isinstance(test.ops[0], ast.IsNot):
         return False
     right = test.comparators[0] if test.comparators else None
     return isinstance(right, ast.Constant) and right.value is None
@@ -447,9 +447,21 @@ def load_baseline(path: Path) -> list[WeakAssertion]:
     return result
 
 
-def save_baseline(path: Path, entries: list[WeakAssertion]) -> None:
-    """序列化 baseline 文件。包含 version/total/entries 三字段。"""
-    data = {
+def save_baseline(
+    path: Path,
+    entries: list[WeakAssertion],
+    growth_justification: str | None = None,
+) -> None:
+    """序列化 baseline 文件。包含 version/total/entries 三字段。
+
+    Args:
+        path: baseline 文件路径。
+        entries: 弱断言列表。
+        growth_justification: 可选的增长理由声明。非空时写入 baseline，
+            ``check_baseline_shrink`` 读到该字段时允许 baseline 数量增长
+            （用于修复扫描器 BUG 后的合理增长场景）。
+    """
+    data: dict[str, object] = {
         "version": 1,
         "total": len(entries),
         "entries": [
@@ -463,6 +475,8 @@ def save_baseline(path: Path, entries: list[WeakAssertion]) -> None:
             for e in entries
         ],
     }
+    if growth_justification:
+        data["growth_justification"] = growth_justification
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
@@ -498,11 +512,24 @@ def check_baseline_shrink(baseline_path: Path, ref: str = "origin/main") -> tupl
     Returns:
         (ok, current_total, old_total)
         - git 不可用或文件在 ref 中不存在时，跳过检查返回 (True, current_total, -1)。
+        - 当前 baseline 含非空 ``growth_justification`` 字段时，允许增长
+          （用于修复扫描器 BUG 后的合理增长场景），返回 (True, current_total, old_total)。
         - current_total <= old_total 时返回 (True, current_total, old_total)。
-        - current_total > old_total 时返回 (False, current_total, old_total)。
+        - current_total > old_total 且无 justification 时返回 (False, current_total, old_total)。
     """
     current = load_baseline(baseline_path)
     current_total = len(current)
+
+    # 读取 growth_justification 字段（允许修复扫描器 BUG 后的合理增长）
+    justification: str | None = None
+    try:
+        raw = json.loads(baseline_path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            val = raw.get("growth_justification")
+            if isinstance(val, str) and val.strip():
+                justification = val.strip()
+    except (json.JSONDecodeError, OSError):
+        pass
 
     # baseline_path 相对仓库根的路径，用于 git show
     try:
@@ -523,6 +550,9 @@ def check_baseline_shrink(baseline_path: Path, ref: str = "origin/main") -> tupl
         return True, current_total, -1
     # 优先用 total 字段（权威），fallback entries 长度（防篡改/老文件）
     old_total = int(old_data.get("total", len(old_data.get("entries", []))))
+    # 有 justification 时允许增长（修复扫描器 BUG 后的合理场景）
+    if justification and current_total > old_total:
+        return True, current_total, old_total
     ok = current_total <= old_total
     return ok, current_total, old_total
 
@@ -611,8 +641,10 @@ def _run_update_baseline(args: argparse.Namespace) -> int:
 
     baseline_path = Path(args.update_baseline)
     current = scan_directory(root)
-    save_baseline(baseline_path, current)
+    save_baseline(baseline_path, current, growth_justification=args.growth_justification)
     print(f"✓ 已更新 baseline：{baseline_path}（共 {len(current)} 条）")
+    if args.growth_justification:
+        print(f"  growth_justification: {args.growth_justification}")
     return 0
 
 
@@ -634,6 +666,12 @@ def main(argv: list[str] | None = None) -> int:
         "--baseline-ref",
         default="origin/main",
         help="对比 baseline 数量变化时的 git ref（默认 origin/main）",
+    )
+    parser.add_argument(
+        "--growth-justification",
+        default=None,
+        help="baseline 增长理由声明（与 --update-baseline 配合使用，"
+        "用于修复扫描器 BUG 后的合理增长场景；shrink 检查读到该字段时允许增长）",
     )
     args = parser.parse_args(argv)
 
