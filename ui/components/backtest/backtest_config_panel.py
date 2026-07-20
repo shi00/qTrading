@@ -26,6 +26,13 @@ from datetime import date, timedelta
 
 import flet as ft
 
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_on_change,
+    safe_on_click,
+    safe_on_dismiss,
+    safe_on_select,
+)
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 
@@ -85,14 +92,16 @@ def _make_date_picker(
     first_date: date,
     last_date: date,
     value: date,
-    on_change: Callable[[ft.ControlEvent], None] | None = None,
-    on_dismiss: Callable[[ft.ControlEvent], None] | None = None,
+    on_change: ft.ControlEventHandler | None = None,
+    on_dismiss: ft.ControlEventHandler | None = None,
 ) -> ft.DatePicker:
     """创建 DatePicker（i18n 文案在渲染时由声明式重建自动刷新）。
 
     Args:
         value: 选定日期（picker 高亮显示的当前选中值）。
             current_date 保持默认（datetime.now()），日历网格正确高亮"今天"。
+        on_change: 日期变更回调（已通过 ``safe_on_change`` 包装为 ``ControlEventHandler``）。
+        on_dismiss: 取消回调（已通过 ``safe_on_dismiss`` 包装为 ``ControlEventHandler``）。
     """
     return ft.DatePicker(
         first_date=first_date,
@@ -145,13 +154,15 @@ def BacktestConfigPanel(
     show_end_picker, set_show_end_picker = ft.use_state(False)
 
     def _on_start_change(e: ft.ControlEvent) -> None:
-        if e.control.value is not None:
-            set_start_date(e.control.value)
+        val = get_control_value(e.control, ft.DatePicker)
+        if val is not None:
+            set_start_date(val)
         set_show_start_picker(False)
 
     def _on_end_change(e: ft.ControlEvent) -> None:
-        if e.control.value is not None:
-            set_end_date(e.control.value)
+        val = get_control_value(e.control, ft.DatePicker)
+        if val is not None:
+            set_end_date(val)
         set_show_end_picker(False)
 
     def _on_start_dismiss(e: ft.ControlEvent) -> None:
@@ -165,8 +176,8 @@ def BacktestConfigPanel(
             date(2020, 1, 1),
             today,
             start_date,
-            on_change=_on_start_change,
-            on_dismiss=_on_start_dismiss,
+            on_change=safe_on_change(_on_start_change),
+            on_dismiss=safe_on_dismiss(_on_start_dismiss),
         )
         if show_start_picker
         else None
@@ -177,8 +188,8 @@ def BacktestConfigPanel(
             date(2020, 1, 1),
             today,
             end_date,
-            on_change=_on_end_change,
-            on_dismiss=_on_end_dismiss,
+            on_change=safe_on_change(_on_end_change),
+            on_dismiss=safe_on_dismiss(_on_end_dismiss),
         )
         if show_end_picker
         else None
@@ -207,20 +218,23 @@ def BacktestConfigPanel(
             on_run_backtest(config)
 
     def _on_stamp_duty_auto_change(e: ft.ControlEvent) -> None:
-        is_auto = e.control.value
+        is_auto = get_control_value(e.control, ft.Switch)
         set_stamp_duty_auto(is_auto)
 
     # --- Build form controls (driven by state) ---
     start_date_btn = ft.OutlinedButton(
         content=start_date.strftime("%Y-%m-%d"),
         icon=ft.Icons.CALENDAR_TODAY,
-        on_click=_show_start_picker,
+        on_click=safe_on_click(_show_start_picker),
     )
     end_date_btn = ft.OutlinedButton(
         content=end_date.strftime("%Y-%m-%d"),
         icon=ft.Icons.CALENDAR_TODAY,
-        on_click=_show_end_picker,
+        on_click=safe_on_click(_show_end_picker),
     )
+
+    def _on_initial_capital_change(e: ft.ControlEvent) -> None:
+        set_initial_capital(get_control_value(e.control, ft.TextField) or "")
 
     initial_capital_input = ft.TextField(
         label=I18n.get("backtest_initial_capital"),
@@ -229,8 +243,11 @@ def BacktestConfigPanel(
         bgcolor=AppColors.INPUT_BG,
         border_color=AppColors.INPUT_BORDER,
         color=AppColors.INPUT_TEXT,
-        on_change=lambda e: set_initial_capital(e.control.value or ""),
+        on_change=safe_on_change(_on_initial_capital_change),
     )
+
+    def _on_rebalance_select(e: ft.ControlEvent) -> None:
+        set_rebalance_freq(get_control_value(e.control, ft.Dropdown) or "signal")
 
     rebalance_dropdown = ft.Dropdown(
         label=I18n.get("backtest_rebalance_freq"),
@@ -244,8 +261,11 @@ def BacktestConfigPanel(
         bgcolor=AppColors.INPUT_BG,
         border_color=AppColors.INPUT_BORDER,
         color=AppColors.INPUT_TEXT,
-        on_select=lambda e: set_rebalance_freq(e.control.value or "signal"),
+        on_select=safe_on_select(_on_rebalance_select),
     )
+
+    def _on_max_positions_change(e: ft.ControlEvent) -> None:
+        set_max_positions(get_control_value(e.control, ft.TextField) or "")
 
     max_position_input = ft.TextField(
         label=I18n.get("backtest_max_positions"),
@@ -254,8 +274,12 @@ def BacktestConfigPanel(
         bgcolor=AppColors.INPUT_BG,
         border_color=AppColors.INPUT_BORDER,
         color=AppColors.INPUT_TEXT,
-        on_change=lambda e: set_max_positions(e.control.value or ""),
+        on_change=safe_on_change(_on_max_positions_change),
     )
+
+    def _on_commission_change(e: ft.ControlEvent) -> None:
+        val = get_control_value(e.control, ft.Slider)
+        set_commission(val if val is not None else 3.0)
 
     commission_slider = ft.Slider(
         min=0,
@@ -264,15 +288,20 @@ def BacktestConfigPanel(
         value=commission,
         label="{value}",
         expand=True,
-        on_change=lambda e: set_commission(e.control.value if e.control.value is not None else 3.0),
+        on_change=safe_on_change(_on_commission_change),
     )
     commission_text = ft.Text(f"{commission:g}‱", size=12, color=AppColors.TEXT_SECONDARY)
 
     stamp_duty_auto_checkbox = ft.Checkbox(
         label=I18n.get("backtest_stamp_duty_auto"),
         value=stamp_duty_auto,
-        on_change=_on_stamp_duty_auto_change,
+        on_change=safe_on_change(_on_stamp_duty_auto_change),
     )
+
+    def _on_stamp_duty_rate_change(e: ft.ControlEvent) -> None:
+        val = get_control_value(e.control, ft.Slider)
+        set_stamp_duty_rate(val if val is not None else 0.5)
+
     stamp_duty_slider = ft.Slider(
         min=0,
         max=2,
@@ -281,13 +310,17 @@ def BacktestConfigPanel(
         label="{value}",
         expand=True,
         disabled=stamp_duty_auto,
-        on_change=lambda e: set_stamp_duty_rate(e.control.value if e.control.value is not None else 0.5),
+        on_change=safe_on_change(_on_stamp_duty_rate_change),
     )
     if stamp_duty_auto:
         stamp_duty_text_value = I18n.get("backtest_stamp_duty_auto")
     else:
         stamp_duty_text_value = f"{stamp_duty_rate:.1f}‰"
     stamp_duty_text = ft.Text(stamp_duty_text_value, size=12, color=AppColors.TEXT_SECONDARY)
+
+    def _on_slippage_change(e: ft.ControlEvent) -> None:
+        val = get_control_value(e.control, ft.Slider)
+        set_slippage(val if val is not None else 5.0)
 
     slippage_slider = ft.Slider(
         min=0,
@@ -296,14 +329,14 @@ def BacktestConfigPanel(
         value=slippage,
         label="{value}",
         expand=True,
-        on_change=lambda e: set_slippage(e.control.value if e.control.value is not None else 5.0),
+        on_change=safe_on_change(_on_slippage_change),
     )
     slippage_text = ft.Text(f"{slippage:g} bps", size=12, color=AppColors.TEXT_SECONDARY)
 
     run_btn = ft.Button(
         content=I18n.get("backtest_run"),
         icon=ft.Icons.PLAY_ARROW,
-        on_click=_on_run_click,
+        on_click=safe_on_click(_on_run_click),
         style=ft.ButtonStyle(
             bgcolor=AppColors.PRIMARY,
             color=AppColors.TEXT_ON_PRIMARY,

@@ -1,4 +1,5 @@
 import logging
+import typing
 
 import pandas as pd
 import polars as pl
@@ -6,6 +7,7 @@ import polars as pl
 from data.persistence.quality_gate import QualityTier
 from strategies.base_strategy import register_strategy
 from strategies.polars_base import PolarsBaseStrategy
+from strategies.utils import StrategyContext
 from utils.error_classifier import classify_severity
 from utils.sanitizers import DataSanitizer
 from utils.thread_pool import TaskType, ThreadPoolManager
@@ -60,7 +62,7 @@ class VolumeBreakoutStrategy(PolarsBaseStrategy):
             },
         ]
 
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         self._data_warnings = []
         p = context.get("params", {})
         chg_min = p.get("pct_chg_min", 2)
@@ -112,7 +114,7 @@ class NorthboundHoldingStrategy(PolarsBaseStrategy):
             },
         ]
 
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         nb_df = context.get("northbound_data")
         p = context.get("params", {})
         target_ratio = p.get("nb_ratio_min", 3)
@@ -189,7 +191,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
             },
         ]
 
-    async def filter(self, context: dict):
+    async def filter(self, context: StrategyContext):
         """Override filter to add northbound flow gating before _filter_logic."""
         flow_df = context.get("northbound_flow_data")
         p = context.get("params", {})
@@ -203,7 +205,8 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
             flow_lf = pl.from_pandas(flow_df).lazy()
             gated_lf = flow_lf.sort("trade_date", descending=True).select(pl.col("north_money").first())
             # Offload CPU-intensive collect to thread pool
-            north_money_val = (await ThreadPoolManager().run_async(TaskType.CPU, gated_lf.collect)).item()
+            collected = await ThreadPoolManager().run_async(TaskType.CPU, gated_lf.collect)
+            north_money_val = typing.cast(pl.DataFrame, collected).item()
 
             if north_money_val is None or north_money_val <= target_flow:
                 logger.debug(
@@ -220,7 +223,7 @@ class NorthboundFlowStrategy(PolarsBaseStrategy):
 
         return await super().filter(context)
 
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         p = context.get("params", {})
         mv_min = p.get("total_mv_min", 100)
 
@@ -255,7 +258,7 @@ class InstitutionalStrategy(PolarsBaseStrategy):
             },
         ]
 
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         lhb = context.get("top_list")
         p = context.get("params", {})
         target_net = p.get("inst_net_min", 3000)
@@ -313,7 +316,7 @@ class BlockTradeStrategy(PolarsBaseStrategy):
             },
         ]
 
-    def _filter_logic(self, lf: pl.LazyFrame, context: dict) -> pl.LazyFrame:
+    def _filter_logic(self, lf: pl.LazyFrame, context: StrategyContext) -> pl.LazyFrame:
         block = context.get("block_trade")
         p = context.get("params", {})
         target_amount = p.get("block_amount_min", 1000)

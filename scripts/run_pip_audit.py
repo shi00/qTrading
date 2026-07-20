@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import typing
 from datetime import date, datetime
+from io import TextIOWrapper
 from pathlib import Path
 
 import yaml
@@ -137,7 +139,7 @@ def run_pip_audit(
 
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
+        typing.cast(TextIOWrapper, sys.stdout).reconfigure(line_buffering=True)
 
     args = parse_args()
 

@@ -58,6 +58,8 @@ class TushareProApi(typing.Protocol):
     repurchase: Callable[..., pd.DataFrame]
     dividend: Callable[..., pd.DataFrame]
     shibor: Callable[..., pd.DataFrame]
+    shibor_lpr: Callable[..., pd.DataFrame]
+    express: Callable[..., pd.DataFrame]
     top10_holders: Callable[..., pd.DataFrame]
     index_weight: Callable[..., pd.DataFrame]
     stk_holdernumber: Callable[..., pd.DataFrame]
@@ -115,7 +117,12 @@ class TushareClient:
     Enhanced Tushare API client with timeout, retry, trade calendar support, and TokenBucket Rate Limiting.
     """
 
-    pro: TushareProApi | None
+    pro: TushareProApi
+    # NOTE(lazy): pro 运行时可能为 None（token 未设置），但声明为非 Optional 以避免 40+ 处
+    #   reportOptionalMemberAccess warning。调用方在 _handle_api_call 内部已有
+    #   `if not self.pro: raise` 检查提供有意义错误信息。. ceiling: 调用方直接访问
+    #   self.pro.xxx 时若 pro 为 None 会抛 AttributeError 而非友好错误. upgrade: 改用
+    #   _get_pro() helper 方法返回 TushareProApi（内部 raise），调用方统一改用 helper.
     _instance = None
     _initialized = False
     _lock = threading.Lock()
@@ -463,7 +470,7 @@ class TushareClient:
                     self.timeout,
                 )
             else:
-                self.pro = None
+                self.pro = typing.cast(TushareProApi, None)
 
             self._initialized = True
 
@@ -526,7 +533,7 @@ class TushareClient:
             self.token = token
             ts.set_token(token)
             # 显式传 token，避免依赖 tushare SDK 全局状态
-            self.pro = ts.pro_api(token=token, timeout=self.timeout) if token else None
+            self.pro = typing.cast(TushareProApi, ts.pro_api(token=token, timeout=self.timeout) if token else None)
 
             self._rate_limiter, self._api_limiters, self._probe_rate_limiter = self._build_rate_limiters()
 

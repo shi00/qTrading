@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+import typing
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
@@ -185,11 +186,11 @@ class BacktestMetrics:
         if len(ic_series) < 2:
             return 0.0
         ic_mean_raw = ic_series.mean()
-        ic_mean = float(ic_mean_raw) if ic_mean_raw is not None else 0.0
+        ic_mean = float(typing.cast(Any, ic_mean_raw)) if ic_mean_raw is not None else 0.0
         ic_std_val = ic_series.std()
         if ic_std_val is None:
             return 0.0
-        ic_std_float = float(ic_std_val)
+        ic_std_float = float(typing.cast(Any, ic_std_val))
         if ic_std_float < 1e-10:
             return 0.0
         return ic_mean / ic_std_float * math.sqrt(252)
@@ -208,7 +209,7 @@ class BacktestMetrics:
         tracking_error = excess_returns.std()
         if tracking_error is None:
             return 0.0, 0.0
-        tracking_error_float = float(tracking_error)
+        tracking_error_float = float(typing.cast(Any, tracking_error))
         if tracking_error_float == 0:
             return 0.0, 0.0
 
@@ -217,7 +218,7 @@ class BacktestMetrics:
             return 0.0, 0.0
 
         tracking_error_annual = tracking_error_float * math.sqrt(trading_days_per_year)
-        information_ratio = float(excess_mean) * trading_days_per_year / tracking_error_annual
+        information_ratio = float(typing.cast(Any, excess_mean)) * trading_days_per_year / tracking_error_annual
 
         return information_ratio, tracking_error_annual
 
@@ -250,7 +251,7 @@ class BacktestMetrics:
             "win_rate": BacktestMetrics.calc_win_rate(trades),
             "profit_factor": BacktestMetrics.calc_profit_factor(trades),
             "total_trades": len(trades),
-            "ic_mean": float(_ic_mean_raw) if _ic_mean_raw is not None else 0.0,
+            "ic_mean": float(typing.cast(Any, _ic_mean_raw)) if _ic_mean_raw is not None else 0.0,
             "ic_ir": BacktestMetrics.calc_ir(ic_series),
             "information_ratio": information_ratio,
             "tracking_error": tracking_error,

@@ -9,7 +9,13 @@
 - handle_disconnect: disconnect 事件处理与 cleanup_done 短路
 """
 
-from typing import Any
+# pyright: reportAttributeAccessIssue=false, reportArgumentType=false
+# 本文件使用 _DummyPage / _DummyWindow / _FakeCoordinator 替身类对 Flet 与
+# Coordinator 进行结构性 mock，pyright 无法验证替身与 ft.Page/Window 及
+# ShutdownCoordinator 的兼容性。统一在此文件局部禁用相关告警以避免大量
+# typing.cast 噪音，替身类的行为由测试用例本身验证。
+
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import flet as ft
@@ -23,6 +29,15 @@ from app.window_lifecycle import (
     perform_window_shutdown,
     setup_window_geometry,
 )
+
+
+def _make_page() -> ft.Page:
+    """Construct _DummyPage and cast to ft.Page for type-checking.
+
+    _DummyPage is a structural stand-in; pyright cannot verify compatibility
+    with ft.Page. Centralize the cast here to avoid per-call type: ignore.
+    """
+    return cast(ft.Page, _DummyPage())
 
 
 class _DummyWindow:
@@ -171,7 +186,7 @@ class TestBuildLocaleConfiguration:
 class TestSetupWindowGeometry:
     @pytest.mark.asyncio
     async def test_normal_path_sets_min_dimensions_and_centers(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         await setup_window_geometry(page, is_web_mode=False)
         assert page.window.min_width == 1280
         assert page.window.min_height == 720
@@ -179,7 +194,7 @@ class TestSetupWindowGeometry:
 
     @pytest.mark.asyncio
     async def test_normal_path_sets_width_when_none(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         page.window.width = None
         page.window.height = None
         await setup_window_geometry(page, is_web_mode=False)
@@ -188,7 +203,7 @@ class TestSetupWindowGeometry:
 
     @pytest.mark.asyncio
     async def test_normal_path_sets_width_when_below_minimum(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         page.window.width = 800
         page.window.height = 600
         await setup_window_geometry(page, is_web_mode=False)
@@ -198,7 +213,7 @@ class TestSetupWindowGeometry:
     @pytest.mark.asyncio
     async def test_existing_valid_width_preserved(self) -> None:
         """width >= 1280 时保留用户设置的尺寸."""
-        page = _DummyPage()
+        page = _make_page()
         page.window.width = 1920
         page.window.height = 1080
         await setup_window_geometry(page, is_web_mode=False)
@@ -207,7 +222,7 @@ class TestSetupWindowGeometry:
 
     @pytest.mark.asyncio
     async def test_web_mode_skips_geometry_setup(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         await setup_window_geometry(page, is_web_mode=True)
         assert page.window.min_width == 0
         assert page.window.min_height == 0
@@ -215,7 +230,7 @@ class TestSetupWindowGeometry:
 
     @pytest.mark.asyncio
     async def test_center_failure_logs_via_log_exception_with_severity(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         page.window.center_exc = RuntimeError("center boom")
         with patch("app.window_lifecycle.log_exception_with_severity") as mock_log:
             await setup_window_geometry(page, is_web_mode=False)
@@ -233,7 +248,7 @@ class TestSetupWindowGeometry:
 
 class TestWindowDialogManagerShowHideDialog:
     def test_show_dialog_sets_active_dialog_and_calls_page_show_dialog(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("test"))
         manager._show_dialog(dialog)
@@ -241,7 +256,7 @@ class TestWindowDialogManagerShowHideDialog:
         assert manager.active_dialog is dialog
 
     def test_hide_dialog_calls_pop_dialog_and_clears_active(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("test"))
         manager._show_dialog(dialog)
@@ -251,7 +266,7 @@ class TestWindowDialogManagerShowHideDialog:
 
     def test_hide_dialog_does_not_clear_active_when_dialog_mismatches(self) -> None:
         """弹出 dialog A 后再弹出 B，隐藏 A 时不应清空 active_dialog=B."""
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog_a = ft.AlertDialog(title=ft.Text("A"))
         dialog_b = ft.AlertDialog(title=ft.Text("B"))
@@ -263,7 +278,7 @@ class TestWindowDialogManagerShowHideDialog:
 
 class TestWindowDialogManagerCloseConfirm:
     def test_show_close_confirm_dialog_sets_visible_and_active(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("close"))
         manager._show_close_confirm_dialog(dialog)
@@ -273,7 +288,7 @@ class TestWindowDialogManagerCloseConfirm:
         assert page.active_dialog is dialog
 
     def test_show_close_confirm_dialog_skips_when_already_visible(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog1 = ft.AlertDialog(title=ft.Text("first"))
         dialog2 = ft.AlertDialog(title=ft.Text("second"))
@@ -284,7 +299,7 @@ class TestWindowDialogManagerCloseConfirm:
         assert page.dialog_stack == [dialog1]
 
     def test_show_close_confirm_dialog_skips_when_shutdown_requested(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         manager.shutdown_requested = True
         dialog = ft.AlertDialog(title=ft.Text("close"))
@@ -294,7 +309,7 @@ class TestWindowDialogManagerCloseConfirm:
         assert page.dialog_stack == []
 
     def test_hide_close_confirm_dialog_clears_state(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("close"))
         manager._show_close_confirm_dialog(dialog)
@@ -305,14 +320,14 @@ class TestWindowDialogManagerCloseConfirm:
         assert page.dialog_stack == []
 
     def test_hide_close_confirm_dialog_no_op_when_no_dialog(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         manager._hide_close_confirm_dialog()  # 不应抛异常
         assert manager.close_confirm_visible is False
         assert page.dialog_stack == []
 
     def test_on_close_cancel_hides_dialog(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("close"))
         manager._show_close_confirm_dialog(dialog)
@@ -324,7 +339,7 @@ class TestWindowDialogManagerCloseConfirm:
         assert page.dialog_stack == []
 
     def test_on_close_confirm_triggers_shutdown_request(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         shutdown_calls: list[None] = []
         manager = WindowDialogManager(page, on_shutdown_request=lambda: shutdown_calls.append(None))
         dialog = ft.AlertDialog(title=ft.Text("close"))
@@ -339,7 +354,7 @@ class TestWindowDialogManagerCloseConfirm:
 
     def test_on_close_confirm_skips_when_shutdown_already_requested(self) -> None:
         """重复 confirm 不会重复触发 shutdown."""
-        page = _DummyPage()
+        page = _make_page()
         shutdown_calls: list[None] = []
         manager = WindowDialogManager(page, on_shutdown_request=lambda: shutdown_calls.append(None))
         manager.shutdown_requested = True
@@ -349,7 +364,7 @@ class TestWindowDialogManagerCloseConfirm:
 
     def test_on_close_confirm_without_shutdown_callback_does_not_raise(self) -> None:
         """未注入 on_shutdown_request 时不抛异常（仅设置标志位）."""
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("close"))
         manager._show_close_confirm_dialog(dialog)
@@ -361,7 +376,7 @@ class TestWindowDialogManagerCloseConfirm:
 
 class TestWindowDialogManagerPageDialogMatches:
     def test_matches_when_active_dialog_is_close_confirm(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         dialog = ft.AlertDialog(title=ft.Text("close"))
         manager._show_close_confirm_dialog(dialog)
@@ -373,13 +388,13 @@ class TestWindowDialogManagerPageDialogMatches:
         与 main.py 原逻辑 `active_dialog is current_close_confirm_dialog` 一致：
         两者均为 None 时 `None is None` 为 True（仅用于 debug log，不影响功能）。
         """
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         assert manager._page_dialog_matches_close_confirm() is True
 
     def test_no_match_when_active_dialog_is_other(self) -> None:
         """显示 close confirm 后被其他 dialog 覆盖 active_dialog."""
-        page = _DummyPage()
+        page = _make_page()
         manager = WindowDialogManager(page)
         close_dialog = ft.AlertDialog(title=ft.Text("close"))
         other_dialog = ft.AlertDialog(title=ft.Text("other"))
@@ -396,7 +411,7 @@ class TestWindowDialogManagerPageDialogMatches:
 class TestPerformWindowShutdown:
     @pytest.mark.asyncio
     async def test_success_path_cancels_watchdog_and_returns_true(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         coordinator = _FakeCoordinator(cleanup_ok=True)
         result = await perform_window_shutdown(
             coordinator,
@@ -415,7 +430,7 @@ class TestPerformWindowShutdown:
 
     @pytest.mark.asyncio
     async def test_web_mode_does_not_destroy_window(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         coordinator = _FakeCoordinator(cleanup_ok=True)
         await perform_window_shutdown(
             coordinator,
@@ -428,7 +443,7 @@ class TestPerformWindowShutdown:
 
     @pytest.mark.asyncio
     async def test_cleanup_failure_force_exits_and_returns_false(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         coordinator = _FakeCoordinator(cleanup_ok=False)
         with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
             result = await perform_window_shutdown(
@@ -442,7 +457,7 @@ class TestPerformWindowShutdown:
 
     @pytest.mark.asyncio
     async def test_window_destroy_failure_logged_via_log_exception_with_severity(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         page.window.destroy_exc = RuntimeError("destroy boom")
         coordinator = _FakeCoordinator(cleanup_ok=True)
         with patch("app.window_lifecycle.log_exception_with_severity") as mock_log:
@@ -468,7 +483,7 @@ class TestPerformWindowShutdown:
 class TestPerformUpgradeExit:
     @pytest.mark.asyncio
     async def test_success_path_cleans_up_and_force_exits(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         coordinator = _FakeCoordinator(cleanup_ok=True)
         await perform_upgrade_exit(
             coordinator,
@@ -483,7 +498,7 @@ class TestPerformUpgradeExit:
 
     @pytest.mark.asyncio
     async def test_web_mode_does_not_destroy_window(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         coordinator = _FakeCoordinator(cleanup_ok=True)
         await perform_upgrade_exit(
             coordinator,
@@ -494,7 +509,7 @@ class TestPerformUpgradeExit:
 
     @pytest.mark.asyncio
     async def test_cleanup_failure_logs_error(self, caplog: pytest.LogCaptureFixture) -> None:
-        page = _DummyPage()
+        page = _make_page()
         coordinator = _FakeCoordinator(cleanup_ok=False)
         with patch("app.window_lifecycle.asyncio.sleep", new_callable=AsyncMock):
             await perform_upgrade_exit(
@@ -507,7 +522,7 @@ class TestPerformUpgradeExit:
 
     @pytest.mark.asyncio
     async def test_window_destroy_failure_logged(self) -> None:
-        page = _DummyPage()
+        page = _make_page()
         page.window.destroy_exc = RuntimeError("destroy fail")
         coordinator = _FakeCoordinator(cleanup_ok=True)
         with patch("app.window_lifecycle.log_exception_with_severity") as mock_log:

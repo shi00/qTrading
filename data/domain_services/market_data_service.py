@@ -169,7 +169,8 @@ class MarketDataService:
                 except asyncio.CancelledError:
                     # 区分：stop_async 本身被外部取消（必须传播 R2）vs
                     # _task 被主动取消后的预期 CancelledError（cancelling()==0 时吞没合理）
-                    if asyncio.current_task().cancelling() > 0:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
                         raise  # R2: stop_async 被外部取消，必须传播
                 except TimeoutError:
                     logger.warning(

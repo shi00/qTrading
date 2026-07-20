@@ -14,10 +14,12 @@
 """
 
 import logging
+import typing
 from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
@@ -68,7 +70,7 @@ def MetricCard(
     resolved_color = status_color if status_color else ft.Colors.PRIMARY
     status_controls: list[ft.Control] = []
     if icon:
-        status_controls.append(ft.Icon(icon, size=14, color=resolved_color))
+        status_controls.append(ft.Icon(safe_icon(icon), size=14, color=resolved_color))
     if trend:
         trend_color = AppColors.UP if trend_up else AppColors.DOWN
         status_controls.append(
@@ -79,21 +81,23 @@ def MetricCard(
 
     return ft.Container(
         content=ft.Column(
-            [
-                ft.Text(
-                    label.upper() if label else "",
-                    size=11,
-                    weight=ft.FontWeight.BOLD,
-                    color=ft.Colors.ON_SURFACE_VARIANT,
-                ),
-                ft.Text(
-                    value,
-                    size=22,
-                    weight=ft.FontWeight.BOLD,
-                    color=ft.Colors.PRIMARY,
-                ),
-                ft.Row(status_controls, spacing=4, alignment=ft.MainAxisAlignment.START),
-            ],
+            safe_controls(
+                [
+                    ft.Text(
+                        label.upper() if label else "",
+                        size=11,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.ON_SURFACE_VARIANT,
+                    ),
+                    ft.Text(
+                        typing.cast(str, value),
+                        size=22,
+                        weight=ft.FontWeight.BOLD,
+                        color=ft.Colors.PRIMARY,
+                    ),
+                    ft.Row(status_controls, spacing=4, alignment=ft.MainAxisAlignment.START),
+                ],
+            ),
             spacing=4,
         ),
         expand=True,
@@ -150,7 +154,7 @@ def ActionChip(
         content=ft.Row(
             [
                 ft.Container(
-                    content=ft.Icon(icon, color=text_color, size=24),
+                    content=ft.Icon(safe_icon(icon), color=text_color, size=24),
                     padding=10,
                     bgcolor=ft.Colors.with_opacity(icon_bg_opacity, icon_bg_base),
                     border_radius=10,
@@ -173,7 +177,7 @@ def ActionChip(
             alignment=ft.MainAxisAlignment.START,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        on_click=on_click,
+        on_click=safe_on_click(on_click),
         ink=True,
         border_radius=12,
         padding=15,
@@ -196,7 +200,7 @@ def StatusBadge(
     """
     content_row: list[ft.Control] = [ft.Text(text, size=10, color=color, weight=ft.FontWeight.BOLD)]
     if icon:
-        content_row.insert(0, ft.Icon(icon, size=10, color=color))
+        content_row.insert(0, ft.Icon(safe_icon(icon), size=10, color=color))
     return ft.Container(
         content=ft.Row(
             content_row,
@@ -280,7 +284,7 @@ def SettingRow(
     color = icon_color if icon_color else ft.Colors.PRIMARY
 
     icon_container = ft.Container(
-        content=ft.Icon(icon, size=24, color=color),
+        content=ft.Icon(safe_icon(icon), size=24, color=color),
         padding=10,
         border_radius=10,
         bgcolor=ft.Colors.with_opacity(0.1, color),

@@ -1,5 +1,6 @@
 """BacktestService 单元测试"""
 
+import typing
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -7,6 +8,7 @@ import pandas as pd
 import pytest
 
 from strategies.backtest.config import BacktestConfig, BacktestResult
+from data.cache.cache_manager import CacheManager
 from services.backtest_service import BacktestService
 from strategies.base_strategy import BaseStrategy
 
@@ -105,7 +107,11 @@ class TestBacktestService:
     def real_engine_factory(self):
         """提供真实 VectorBacktestEngine 工厂（保持端到端测试风格）。
 
-        通过依赖注入传给 BacktestService，避免 services 层运行时导入 strategies。
+        # 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）, 动态属性访问（mock/stub/monkey-patch）。
+        # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+        # 测试行为由测试用例本身验证。
+
+                通过依赖注入传给 BacktestService，避免 services 层运行时导入 strategies。
         """
 
         def _factory(cache, config, data_processor):
@@ -255,7 +261,7 @@ class TestBacktestService:
         strategy = service._get_strategy("mock_strategy")
 
         assert strategy is not None
-        assert strategy.key == "mock_strategy"
+        assert typing.cast(typing.Any, strategy).key == "mock_strategy"
 
     def test_get_strategy_returns_none_for_unknown(self):
         """_get_strategy 对未知策略返回 None"""
@@ -270,7 +276,7 @@ class TestBacktestService:
     def test_init_requires_cache_manager(self):
         """Task 6.7: BacktestService 必须注入 CacheManager，传 None 应 fail-fast。"""
         with pytest.raises(ValueError, match="CacheManager"):
-            BacktestService(cache=None)
+            BacktestService(cache=typing.cast("CacheManager", None))
 
     @pytest.mark.asyncio
     async def test_persist_result_uses_to_persist_dict_and_adds_app_version(

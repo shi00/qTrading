@@ -37,12 +37,13 @@ UI_DIR = PROJECT_ROOT / "ui"
 
 # key: (relative_path, line_no, violation_type), value: 原因注释.
 # 白名单只豁免 "设计意图性违规", 不豁免 "尚未修复的违规".
+# 注意: 行号需与 ui/startup_views.py 中 ft.AlertDialog 调用保持同步。
 ALLOWED_VIOLATIONS: dict[tuple[str, int, str], str] = {
     # startup_views.py DB 升级模态: 必需/进行中/失败状态意图性阻塞用户,
     # 不允许 close (DB 必须升级才能继续运行, 用户无其他选择).
-    ("startup_views.py", 93, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
-    ("startup_views.py", 106, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
-    ("startup_views.py", 139, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
+    ("startup_views.py", 94, "missing_close"): ("DB 升级必需模态, 意图性阻塞 (用户必须升级, 无 close 选项)"),
+    ("startup_views.py", 109, "missing_close"): ("DB 升级进行中模态, 意图性阻塞 (升级完成后自动切换到 success dialog)"),
+    ("startup_views.py", 144, "missing_close"): ("DB 升级失败模态, 意图性阻塞 (仅允许 exit/retry, 不允许 close)"),
 }
 
 

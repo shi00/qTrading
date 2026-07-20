@@ -4,6 +4,11 @@ Tests for QualityGate decorator and related utilities.
 验证数据质量门控装饰器的正确性。
 """
 
+# pyright: reportArgumentType=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import pytest
 from unittest.mock import MagicMock, patch
 

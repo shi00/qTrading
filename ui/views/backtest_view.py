@@ -20,6 +20,7 @@ import logging
 import flet as ft
 
 from ui.components.backtest import BacktestConfigPanel, BacktestResultPanel
+from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -69,8 +70,8 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
 
     # --- Handlers ---
     def _on_strategy_change(e: ft.ControlEvent) -> None:
-        UILogger.log_action("BacktestView", "Select", f"strategy={e.control.value}")
-        set_selected_strategy(e.control.value)
+        UILogger.log_action("BacktestView", "Select", f"strategy={get_control_value(e.control, ft.Dropdown)}")
+        set_selected_strategy(get_control_value(e.control, ft.Dropdown))
         set_no_strategy_error(False)
 
     def _on_run_backtest(config: dict) -> None:
@@ -127,7 +128,7 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
         label=I18n.get("backtest_select_strategy"),
         options=[ft.dropdown.Option(key, name) for key, name in strategies.items()],
         value=selected_strategy,
-        on_select=_on_strategy_change,
+        on_select=safe_on_select(_on_strategy_change),
         width=AppStyles.CONTROL_WIDTH_LG,
         bgcolor=AppColors.INPUT_BG,
         border_color=AppColors.INPUT_BORDER,
@@ -139,7 +140,7 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
     progress_text = ft.Text(progress_text_value, size=12, color=AppColors.TEXT_SECONDARY)
     cancel_button = ft.Button(
         content=I18n.get("common_cancel"),
-        on_click=_on_cancel_backtest,
+        on_click=safe_on_click(_on_cancel_backtest),
         visible=state.is_running,
         bgcolor=AppColors.ERROR,
         color=ft.Colors.WHITE,

@@ -25,6 +25,7 @@ import flet as ft
 # 的延伸 (main.py 装配 StartupView), 不是 ui 层的正常业务导入。
 # 已在 tests/unit/test_architecture_boundaries.py 的 KNOWN_EXCEPTIONS 中记录。
 from app.startup_controller import StartupContext, StartupController, StartupState
+from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
 
 logger = logging.getLogger(__name__)
@@ -94,9 +95,11 @@ def _build_upgrade_dialog(on_upgrade: Callable[[ft.ControlEvent], None]) -> ft.A
         modal=True,
         title=ft.Text(I18n.get("db_upgrade_needed_title")),
         content=ft.Text(I18n.get("db_upgrade_needed_content")),
-        actions=[
-            ft.Button(I18n.get("db_upgrade_btn"), on_click=on_upgrade),
-        ],
+        actions=safe_controls(
+            [
+                ft.Button(I18n.get("db_upgrade_btn"), on_click=safe_on_click(on_upgrade)),
+            ]
+        ),
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
@@ -124,9 +127,11 @@ def _build_upgrade_success_dialog(on_ok: Callable[[ft.ControlEvent], None]) -> f
         modal=True,
         title=ft.Text(I18n.get("db_upgrade_success_title")),
         content=ft.Text(I18n.get("db_upgrade_success_content")),
-        actions=[
-            ft.TextButton(I18n.get("common_ok"), on_click=on_ok),
-        ],
+        actions=safe_controls(
+            [
+                ft.TextButton(I18n.get("common_ok"), on_click=safe_on_click(on_ok)),
+            ]
+        ),
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
@@ -140,10 +145,12 @@ def _build_upgrade_failed_dialog(
         modal=True,
         title=ft.Text(I18n.get("db_upgrade_error_title")),
         content=ft.Text(I18n.get("db_upgrade_error_content")),
-        actions=[
-            ft.TextButton(I18n.get("exit_program"), on_click=on_exit),
-            ft.Button(I18n.get("retry_upgrade"), on_click=on_retry),
-        ],
+        actions=safe_controls(
+            [
+                ft.TextButton(I18n.get("exit_program"), on_click=safe_on_click(on_exit)),
+                ft.Button(I18n.get("retry_upgrade"), on_click=safe_on_click(on_retry)),
+            ]
+        ),
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
@@ -158,30 +165,38 @@ def _build_error_view(
     error = context.error or ""
     return ft.Container(
         content=ft.Column(
-            [
-                ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
-                ft.Text(
-                    I18n.get("error_db_init_failed")
-                    if error != "db_engine_missing"
-                    else I18n.get("error_db_engine_missing"),
-                    size=20,
-                    weight=ft.FontWeight.BOLD,
-                ),
-                ft.Text(
-                    _get_localized_detail(context.detail or "")[:200],
-                    color=ft.Colors.RED_400,
-                    size=14,
-                ),
-                ft.Row(
-                    [
-                        ft.Button(I18n.get("retry"), icon=ft.Icons.REFRESH, on_click=on_retry),
-                        ft.TextButton(I18n.get("db_reconfigure"), icon=ft.Icons.SETTINGS, on_click=on_reconfigure),
-                        ft.TextButton(I18n.get("skip"), on_click=on_skip),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    spacing=20,
-                ),
-            ],
+            safe_controls(
+                [
+                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
+                    ft.Text(
+                        I18n.get("error_db_init_failed")
+                        if error != "db_engine_missing"
+                        else I18n.get("error_db_engine_missing"),
+                        size=20,
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    ft.Text(
+                        _get_localized_detail(context.detail or "")[:200],
+                        color=ft.Colors.RED_400,
+                        size=14,
+                    ),
+                    ft.Row(
+                        safe_controls(
+                            [
+                                ft.Button(I18n.get("retry"), icon=ft.Icons.REFRESH, on_click=safe_on_click(on_retry)),
+                                ft.TextButton(
+                                    I18n.get("db_reconfigure"),
+                                    icon=ft.Icons.SETTINGS,
+                                    on_click=safe_on_click(on_reconfigure),
+                                ),
+                                ft.TextButton(I18n.get("skip"), on_click=safe_on_click(on_skip)),
+                            ]
+                        ),
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=20,
+                    ),
+                ]
+            ),
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=10,
         ),
@@ -277,7 +292,7 @@ def StartupView(
     # --- news alert 监听 (仅 READY 时注册, cleanup 必须退订避免泄漏) ---
     # CLAUDE.md §3.2 MVVM: View 不直调 NewsSubscriptionService, 经 HomeViewModel 命令转发
     # (合规范例 home_view_model.py:111). View 仅保留需要 page 访问的 toast 回调.
-    news_alert_cb_ref = ft.use_ref(lambda: None)
+    news_alert_cb_ref = ft.use_ref(None)
 
     def _setup_news_alert() -> None:
         if state != StartupState.READY:

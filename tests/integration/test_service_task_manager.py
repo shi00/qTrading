@@ -4,6 +4,11 @@ Tests for TaskManager service.
 验证任务管理器的生命周期管理、并发控制和持久化功能。
 """
 
+# pyright: reportAttributeAccessIssue=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import asyncio
 import datetime
 import threading

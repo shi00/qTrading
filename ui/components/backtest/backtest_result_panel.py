@@ -21,12 +21,14 @@
 from __future__ import annotations
 
 import logging
+import typing
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import flet as ft
 import flet_charts as fch
 
+from ui.components.flet_type_helpers import safe_controls
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 
@@ -36,6 +38,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TRADES_PAGE_SIZE = 50
+
+# AppStyles.COL_QUARTER 推断为 dict[str, int]，与 ft.ResponsiveNumber 不兼容，cast 一次复用
+_COL_QUARTER = typing.cast("ft.ResponsiveNumber", AppStyles.COL_QUARTER)
 
 
 # --- Pure color helpers (可独立单测) ---
@@ -85,79 +90,83 @@ def _metric_card(label: str, value: str, value_color: str) -> ft.Container:
 
 def _build_metrics_section(metrics: dict) -> ft.Column:
     row1 = ft.ResponsiveRow(
-        [
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_total_return"),
-                    f"{metrics.get('total_return', 0) * 100:.2f}%",
-                    _get_color_for_value(metrics.get("total_return", 0)),
+        controls=safe_controls(
+            [
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_total_return"),
+                        f"{metrics.get('total_return', 0) * 100:.2f}%",
+                        _get_color_for_value(metrics.get("total_return", 0)),
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_annual_return"),
-                    f"{metrics.get('annualized_return', 0) * 100:.2f}%",
-                    _get_color_for_value(metrics.get("annualized_return", 0)),
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_annual_return"),
+                        f"{metrics.get('annualized_return', 0) * 100:.2f}%",
+                        _get_color_for_value(metrics.get("annualized_return", 0)),
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_sharpe"),
-                    f"{metrics.get('sharpe_ratio', 0):.2f}",
-                    _get_color_for_sharpe(metrics.get("sharpe_ratio", 0)),
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_sharpe"),
+                        f"{metrics.get('sharpe_ratio', 0):.2f}",
+                        _get_color_for_sharpe(metrics.get("sharpe_ratio", 0)),
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_max_dd"),
-                    f"{metrics.get('max_drawdown', 0) * 100:.2f}%",
-                    AppColors.ERROR if metrics.get("max_drawdown", 0) > 0.2 else AppColors.WARNING,
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_max_dd"),
+                        f"{metrics.get('max_drawdown', 0) * 100:.2f}%",
+                        AppColors.ERROR if metrics.get("max_drawdown", 0) > 0.2 else AppColors.WARNING,
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-        ],
+            ]
+        ),
         spacing=AppStyles.SPACING_MD,
         run_spacing=AppStyles.SPACING_MD,
     )
 
     row2 = ft.ResponsiveRow(
-        [
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_profit_factor"),
-                    f"{metrics.get('profit_factor', 0):.2f}",
-                    AppColors.SUCCESS if metrics.get("profit_factor", 0) > 1 else AppColors.ERROR,
+        controls=safe_controls(
+            [
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_profit_factor"),
+                        f"{metrics.get('profit_factor', 0):.2f}",
+                        AppColors.SUCCESS if metrics.get("profit_factor", 0) > 1 else AppColors.ERROR,
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_ic_mean"),
-                    f"{metrics.get('ic_mean', 0):.4f}",
-                    _get_color_for_ic(metrics.get("ic_mean", 0)),
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_ic_mean"),
+                        f"{metrics.get('ic_mean', 0):.4f}",
+                        _get_color_for_ic(metrics.get("ic_mean", 0)),
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_ic_ir"),
-                    f"{metrics.get('ic_ir', 0):.2f}",
-                    _get_color_for_ic(metrics.get("ic_ir", 0)),
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_ic_ir"),
+                        f"{metrics.get('ic_ir', 0):.2f}",
+                        _get_color_for_ic(metrics.get("ic_ir", 0)),
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-            ft.Container(
-                content=_metric_card(
-                    I18n.get("backtest_metric_total_trades"),
-                    f"{metrics.get('total_trades', 0)}",
-                    AppColors.TEXT_PRIMARY,
+                ft.Container(
+                    content=_metric_card(
+                        I18n.get("backtest_metric_total_trades"),
+                        f"{metrics.get('total_trades', 0)}",
+                        AppColors.TEXT_PRIMARY,
+                    ),
+                    col=_COL_QUARTER,
                 ),
-                col=AppStyles.COL_QUARTER,
-            ),
-        ],
+            ]
+        ),
         spacing=AppStyles.SPACING_MD,
         run_spacing=AppStyles.SPACING_MD,
     )
@@ -320,17 +329,19 @@ def _build_trades_table(
 
     return ft.Container(
         content=ft.Column(
-            [
-                ft.DataTable(
-                    columns=columns,
-                    rows=rows,
-                    heading_row_color=AppColors.TABLE_HEADER_BG,
-                    data_row_color={"hovered": AppColors.TABLE_ROW_HOVER},
-                    border=ft.Border.all(1, AppColors.DIVIDER),
-                    vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
-                ),
-                pagination,
-            ],
+            controls=safe_controls(
+                [
+                    ft.DataTable(
+                        columns=columns,
+                        rows=rows,
+                        heading_row_color=AppColors.TABLE_HEADER_BG,
+                        data_row_color={ft.ControlState.HOVERED: AppColors.TABLE_ROW_HOVER},
+                        border=ft.Border.all(1, AppColors.DIVIDER),
+                        vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
+                    ),
+                    pagination,
+                ]
+            ),
             scroll=ft.ScrollMode.AUTO,
             expand=True,
         ),
@@ -415,7 +426,7 @@ def _build_monthly_table(result: BacktestResult | None) -> ft.Container:
             columns=columns,
             rows=rows,
             heading_row_color=AppColors.TABLE_HEADER_BG,
-            data_row_color={"hovered": AppColors.TABLE_ROW_HOVER},
+            data_row_color={ft.ControlState.HOVERED: AppColors.TABLE_ROW_HOVER},
             border=ft.Border.all(1, AppColors.DIVIDER),
             vertical_lines=ft.BorderSide(1, AppColors.DIVIDER),
         ),

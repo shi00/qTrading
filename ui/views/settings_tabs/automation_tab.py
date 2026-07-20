@@ -22,6 +22,12 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_icon_str,
+    safe_on_change,
+    safe_on_select,
+)
 from ui.components.settings_widgets import DashboardCard, SettingRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -211,35 +217,35 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_schedule_toggle(e: ft.ControlEvent) -> None:
-        new_enabled = e.control.value
+        new_enabled = get_control_value(e.control, ft.Switch)
         settings_vm.set_auto_enabled(new_enabled)
         page = _get_page()
         if page is not None:
             page.run_task(_do_schedule_toggle, new_enabled)
 
     def _on_schedule_time_change(e: ft.ControlEvent) -> None:
-        new_time = e.control.value
+        new_time = get_control_value(e.control, ft.Dropdown)
         settings_vm.set_auto_time(new_time)
         page = _get_page()
         if page is not None:
             page.run_task(_do_schedule_time_change, new_time)
 
     def _on_ai_concept_toggle(e: ft.ControlEvent) -> None:
-        new_enabled = e.control.value
+        new_enabled = get_control_value(e.control, ft.Switch)
         settings_vm.set_ai_enabled(new_enabled)
         page = _get_page()
         if page is not None:
             page.run_task(_do_ai_concept_toggle, new_enabled)
 
     def _on_ai_concept_time_change(e: ft.ControlEvent) -> None:
-        new_time = e.control.value
+        new_time = get_control_value(e.control, ft.Dropdown)
         settings_vm.set_ai_time(new_time)
         page = _get_page()
         if page is not None:
             page.run_task(_do_ai_concept_time_change, new_time)
 
     def _on_ai_concept_engine_change(e: ft.ControlEvent) -> None:
-        new_engine = e.control.value
+        new_engine = get_control_value(e.control, ft.Dropdown)
         settings_vm.set_ai_engine(new_engine)
         page = _get_page()
         if page is not None:
@@ -252,14 +258,14 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     schedule_enabled_switch = ft.Switch(
         label=I18n.get("settings_auto_update"),
         value=settings_state.auto_enabled,
-        on_change=_on_schedule_toggle,
+        on_change=safe_on_change(_on_schedule_toggle),
     )
     schedule_time_dropdown = ft.Dropdown(
         label=I18n.get("settings_update_time"),
         width=_DROPDOWN_WIDTH,
         value=settings_state.auto_time,
         options=_build_time_options(),
-        on_select=_on_schedule_time_change,
+        on_select=safe_on_select(_on_schedule_time_change),
         disabled=not settings_state.auto_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
@@ -274,14 +280,14 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     ai_concept_enabled_switch = ft.Switch(
         label=I18n.get("settings_ai_concept_update"),
         value=settings_state.ai_enabled,
-        on_change=_on_ai_concept_toggle,
+        on_change=safe_on_change(_on_ai_concept_toggle),
     )
     ai_concept_time_dropdown = ft.Dropdown(
         label=I18n.get("settings_update_time"),
         width=_DROPDOWN_WIDTH,
         value=settings_state.ai_time,
         options=_build_time_options(),
-        on_select=_on_ai_concept_time_change,
+        on_select=safe_on_select(_on_ai_concept_time_change),
         disabled=not settings_state.ai_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
@@ -297,7 +303,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         width=_DROPDOWN_WIDTH,
         value=settings_state.ai_engine,
         options=_build_search_engine_options(),
-        on_select=_on_ai_concept_engine_change,
+        on_select=safe_on_select(_on_ai_concept_engine_change),
         disabled=not settings_state.ai_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
@@ -306,7 +312,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- SettingRows ---
     row_schedule = SettingRow(
-        icon=ft.Icons.SCHEDULE,
+        icon=safe_icon_str(ft.Icons.SCHEDULE),
         title=I18n.get("settings_auto_update"),
         subtitle=I18n.get("settings_auto_desc"),
         control=schedule_enabled_switch,
@@ -315,7 +321,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         subtitle_key="settings_auto_desc",
     )
     row_time = SettingRow(
-        icon=ft.Icons.ACCESS_TIME,
+        icon=safe_icon_str(ft.Icons.ACCESS_TIME),
         title=I18n.get("settings_update_time"),
         subtitle=I18n.get("settings_trading_days"),
         control=schedule_time_dropdown,
@@ -345,7 +351,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     row_ai_schedule = SettingRow(
-        icon=ft.Icons.AUTO_AWESOME,
+        icon=safe_icon_str(ft.Icons.AUTO_AWESOME),
         title=I18n.get("settings_ai_concept_update"),
         subtitle=I18n.get("settings_ai_concept_desc"),
         control=ai_concept_enabled_switch,
@@ -354,7 +360,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         subtitle_key="settings_ai_concept_desc",
     )
     row_ai_time = SettingRow(
-        icon=ft.Icons.ACCESS_TIME,
+        icon=safe_icon_str(ft.Icons.ACCESS_TIME),
         title=I18n.get("settings_update_time"),
         subtitle=I18n.get("settings_saturdays"),
         control=ai_concept_time_dropdown,
@@ -363,7 +369,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
         subtitle_key="settings_saturdays",
     )
     row_ai_engine = SettingRow(
-        icon=ft.Icons.MANAGE_SEARCH,
+        icon=safe_icon_str(ft.Icons.MANAGE_SEARCH),
         title=I18n.get("settings_ai_concept_search_engine"),
         subtitle=I18n.get("settings_ai_concept_search_engine_desc"),
         control=ai_concept_engine_dropdown,
@@ -499,14 +505,14 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_news_toggle(e: ft.ControlEvent) -> None:
-        new_enabled = e.control.value
+        new_enabled = get_control_value(e.control, ft.Switch)
         settings_vm.set_news_enabled(new_enabled)
         page = _get_page()
         if page is not None:
             page.run_task(_do_news_toggle, new_enabled)
 
     def _on_interval_change(e: ft.ControlEvent) -> None:
-        new_val = e.control.value
+        new_val = get_control_value(e.control, ft.Dropdown)
         settings_vm.set_news_interval(new_val)
         page = _get_page()
         if page is not None:
@@ -516,14 +522,14 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
     news_switch = ft.Switch(
         label=I18n.get("settings_news_alerts"),
         value=settings_state.news_enabled,
-        on_change=_on_news_toggle,
+        on_change=safe_on_change(_on_news_toggle),
     )
     interval_dropdown = ft.Dropdown(
         label=I18n.get("settings_news_interval"),
         width=AppStyles.CONTROL_WIDTH_MD,
         value=settings_state.news_interval,
         options=_build_interval_options(),
-        on_select=_on_interval_change,
+        on_select=safe_on_select(_on_interval_change),
         disabled=not settings_state.news_enabled,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
@@ -532,7 +538,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- SettingRows ---
     row_alerts = SettingRow(
-        icon=ft.Icons.NOTIFICATIONS_ACTIVE,
+        icon=safe_icon_str(ft.Icons.NOTIFICATIONS_ACTIVE),
         title=I18n.get("settings_news_alerts"),
         subtitle=I18n.get("settings_notify_desc"),
         control=news_switch,
@@ -541,7 +547,7 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
         subtitle_key="settings_notify_desc",
     )
     row_interval = SettingRow(
-        icon=ft.Icons.TIMER,
+        icon=safe_icon_str(ft.Icons.TIMER),
         title=I18n.get("settings_news_interval"),
         subtitle=I18n.get("settings_news_interval_desc"),
         control=interval_dropdown,

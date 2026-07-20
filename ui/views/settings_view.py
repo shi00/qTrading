@@ -18,6 +18,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
@@ -155,7 +156,7 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
             icon=icon,
             tooltip=I18n.get(key),
             data=str(i),
-            on_click=_on_tab_click,
+            on_click=safe_on_click(_on_tab_click),
             style=_get_tab_button_style(is_selected=(i == current_tab)),
         )
         for i, (key, icon) in enumerate(_TAB_CONFIG)
@@ -163,7 +164,7 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
 
     tab_bar = ft.Container(
         content=ft.Row(
-            tab_buttons,
+            safe_controls(tab_buttons),
             alignment=ft.MainAxisAlignment.START,
             spacing=10,
             scroll=ft.ScrollMode.AUTO,

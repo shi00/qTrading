@@ -19,6 +19,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_on_click
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.home_view_model import NewsRow
@@ -176,7 +177,7 @@ def NewsFeed(
                         bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},
                         shape=ft.RoundedRectangleBorder(radius=8),
                     ),
-                    on_click=on_load_more_click,
+                    on_click=safe_on_click(on_load_more_click),
                     height=40,
                     width=120,
                 ),

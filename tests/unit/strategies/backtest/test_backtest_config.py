@@ -1,4 +1,5 @@
 """BacktestConfig 默认值测试"""
+# pyright: reportArgumentType=false
 
 from datetime import date, datetime
 
@@ -138,6 +139,11 @@ class TestBacktestConfigValidation:
 
 def _make_result(**overrides) -> BacktestResult:
     """构造 BacktestResult 测试实例，支持覆盖部分字段。"""
+
+    # 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）。
+    # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+    # 测试行为由测试用例本身验证。
+
     config = overrides.pop("config", None) or BacktestConfig(
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 31),

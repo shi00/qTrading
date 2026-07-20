@@ -24,7 +24,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from data.data_processor import DataProcessor
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
@@ -121,7 +121,7 @@ class HealthScanViewModel(ObservableViewModelMixin[HealthScanState]):
                 self._update_progress(current, total, msg),
                 loop,
             )
-            self._futures.add(fut)
+            self._futures.add(cast("asyncio.Future[Any]", fut))
             fut.add_done_callback(self._futures.discard)
 
         try:

@@ -30,6 +30,7 @@ import flet as ft
 from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
+from ui.components.flet_type_helpers import safe_on_click
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -300,12 +301,12 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     btn_reset_prompt = ft.TextButton(
         content=I18n.get("settings_reset_prompt"),
         icon=ft.Icons.RESTORE,
-        on_click=_on_reset_ai_prompt,
+        on_click=safe_on_click(_on_reset_ai_prompt),
     )
     btn_reset_news_prompt = ft.TextButton(
         content=I18n.get("settings_reset_prompt"),
         icon=ft.Icons.RESTORE,
-        on_click=_on_reset_news_prompt,
+        on_click=safe_on_click(_on_reset_news_prompt),
     )
 
     # save_state 从 VM state 派生 (声明式自动重渲染)
@@ -315,7 +316,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     btn_save_ai = ft.Button(
         content=I18n.get("settings_save_ai"),
         icon=ft.Icons.SAVE,
-        on_click=_on_save_ai,
+        on_click=safe_on_click(_on_save_ai),
         style=AppStyles.primary_button(),
         height=40,
         disabled=is_saving,

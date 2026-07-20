@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import ast
 import sys
+import typing
 from collections.abc import Iterator
+from io import TextIOWrapper
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -426,5 +428,5 @@ if __name__ == "__main__":
     # 避免主输出 emoji（已改为 ASCII [PASS]/[FAIL]）之外的非 ASCII 字符崩溃。
     for _stream in (sys.stdout, sys.stderr):
         if hasattr(_stream, "reconfigure"):
-            _stream.reconfigure(encoding="utf-8", errors="replace")
+            typing.cast(TextIOWrapper, _stream).reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())

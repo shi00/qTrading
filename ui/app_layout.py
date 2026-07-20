@@ -17,10 +17,17 @@
 
 import asyncio
 import logging
+import typing
 from enum import IntEnum
 
 import flet as ft
 
+from ui.components.flet_type_helpers import (
+    get_control_attr,
+    safe_controls,
+    safe_on_change,
+    safe_on_click,
+)
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
 from ui.views.backtest_view import BacktestView
@@ -104,7 +111,7 @@ def _build_pages_stack(current_tab: int, viewport: ViewportState) -> ft.Stack:
             visible=current_tab == NavTabs.SETTINGS,
         ),
     ]
-    return ft.Stack(pages, expand=True)
+    return ft.Stack(safe_controls(pages), expand=True)
 
 
 def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
@@ -162,10 +169,10 @@ def AppLayout() -> ft.Container:
         if new_tab != current_tab:
             tab_name = NavTabs(new_tab).name.lower()
             UILogger.log_action("AppLayout", "Navigate", f"tab={tab_name}")
-            set_current_tab(new_tab)
+            set_current_tab(NavTabs(new_tab))
 
     def _on_nav_change(e: ft.ControlEvent) -> None:
-        selected = e.control.selected_index
+        selected = get_control_attr(e.control, ft.NavigationRail, "selected_index")
         if selected == int(current_tab):
             return
         page = _get_page()
@@ -199,7 +206,7 @@ def AppLayout() -> ft.Container:
             height = float(getattr(e, "height", 0) or 0)
             debounce_task_ref.current = page.run_task(_do_resize, width, height)
 
-        page.on_resize = _on_resize
+        page.on_resize = typing.cast("ft.EventHandler[ft.PageResizeEvent] | None", _on_resize)
 
     def _cleanup_resize() -> None:
         page = _get_page()
@@ -223,7 +230,7 @@ def AppLayout() -> ft.Container:
         icon=ft.Icons.MENU_OPEN,
         selected=nav_collapsed,
         selected_icon=ft.Icons.MENU,
-        on_click=_toggle_nav,
+        on_click=safe_on_click(_toggle_nav),
         tooltip=I18n.get("nav_toggle_collapse"),
         icon_size=20,
     )
@@ -263,7 +270,7 @@ def AppLayout() -> ft.Container:
         indicator_shape=ft.RoundedRectangleBorder(radius=4),
         leading=brand_header,
         destinations=_build_nav_destinations(),
-        on_change=_on_nav_change,
+        on_change=safe_on_change(_on_nav_change),
     )
 
     body = ft.Container(

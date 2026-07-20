@@ -14,6 +14,7 @@ from data.constants import (
     HEALTH_THRESHOLD_FINANCIAL_COVERAGE,
     HEALTH_THRESHOLD_FINANCIAL_EXCELLENT,
 )
+from ui.components.flet_type_helpers import safe_controls
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors
@@ -315,39 +316,43 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
     return ft.Container(
         padding=ft.Padding.symmetric(vertical=5),
         content=ft.Row(
-            [
-                name_row,
-                ft.ProgressBar(
-                    value=ratio,
-                    color=bar_color,
-                    bgcolor=AppColors.SURFACE_VARIANT,
-                    height=6,
-                    expand=True,
-                ),
-                ft.Container(width=10),
-                ft.Column(
-                    [
-                        ft.Text(
-                            f"{ratio * 100:.1f}%",
-                            size=12,
-                            weight=ft.FontWeight.BOLD,
-                            color=AppColors.TEXT_PRIMARY,
+            safe_controls(
+                [
+                    name_row,
+                    ft.ProgressBar(
+                        value=ratio,
+                        color=bar_color,
+                        bgcolor=AppColors.SURFACE_VARIANT,
+                        height=6,
+                        expand=True,
+                    ),
+                    ft.Container(width=10),
+                    ft.Column(
+                        safe_controls(
+                            [
+                                ft.Text(
+                                    f"{ratio * 100:.1f}%",
+                                    size=12,
+                                    weight=ft.FontWeight.BOLD,
+                                    color=AppColors.TEXT_PRIMARY,
+                                ),
+                                ft.Text(
+                                    I18n.get(
+                                        "health_freshness",
+                                        ratio=f"{fresh_ratio * 100:.0f}%",
+                                    ),
+                                    size=10,
+                                    color=AppColors.TEXT_HINT,
+                                ),
+                            ]
+                            + _build_depth_breadth_items(stats),
                         ),
-                        ft.Text(
-                            I18n.get(
-                                "health_freshness",
-                                ratio=f"{fresh_ratio * 100:.0f}%",
-                            ),
-                            size=10,
-                            color=AppColors.TEXT_HINT,
-                        ),
-                    ]
-                    + _build_depth_breadth_items(stats),
-                    spacing=0,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    width=70,
-                ),
-            ],
+                        spacing=0,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        width=70,
+                    ),
+                ],
+            ),
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         ),
     )

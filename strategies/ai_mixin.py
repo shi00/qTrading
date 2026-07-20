@@ -1570,7 +1570,7 @@ class AIStrategyMixin:
             float_date = row.get("float_date")
             float_share = row.get("float_share")
             float_ratio = row.get("float_ratio")
-            if hasattr(float_date, "strftime"):
+            if isinstance(float_date, (date, datetime)):
                 date_str = float_date.strftime("%Y-%m-%d")
             else:
                 date_str = str(float_date) if float_date is not None else "N/A"

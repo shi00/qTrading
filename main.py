@@ -17,6 +17,7 @@ from app.window_lifecycle import (
     setup_window_geometry,
 )
 from data.cache.cache_manager import CacheManager
+from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.toast_manager import ToastManager, ToastManagerView
 from ui.i18n import I18n, get_observable_state
 from ui.startup_views import StartupView, _StartupBridge
@@ -45,10 +46,12 @@ def CloseConfirmDialog(
         modal=True,
         title=ft.Text(I18n.get("exit_confirm_title")),
         content=ft.Text(I18n.get("exit_confirm_content")),
-        actions=[
-            ft.TextButton(I18n.get("common_cancel"), on_click=on_cancel),
-            ft.TextButton(I18n.get("common_confirm"), on_click=on_confirm),
-        ],
+        actions=safe_controls(
+            [
+                ft.TextButton(I18n.get("common_cancel"), on_click=safe_on_click(on_cancel)),
+                ft.TextButton(I18n.get("common_confirm"), on_click=safe_on_click(on_confirm)),
+            ]
+        ),
         actions_alignment=ft.MainAxisAlignment.END,
     )
 
@@ -123,9 +126,12 @@ async def main(page: ft.Page):
         finally:
             dialog_manager.shutdown_requested = False
 
+    def _trigger_shutdown() -> None:
+        page.run_task(_perform_window_shutdown)
+
     dialog_manager = WindowDialogManager(
         page,
-        on_shutdown_request=lambda: page.run_task(_perform_window_shutdown),
+        on_shutdown_request=_trigger_shutdown,
     )
 
     def _show_close_confirm_dialog():

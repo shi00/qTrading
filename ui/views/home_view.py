@@ -18,10 +18,12 @@
 
 import asyncio
 import logging
+import typing
 from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
 from ui.hooks import use_viewmodel
@@ -148,37 +150,41 @@ def HomeView(
     date_text_value = I18n.get("home_data_date").format(date=state.market_date) + suffix
 
     header = ft.Row(
-        [
-            ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD),
-            ft.Container(expand=True),
-            ft.Text(date_text_value, size=12, color=AppColors.TEXT_SECONDARY),
-            ft.IconButton(
-                ft.Icons.REFRESH,
-                on_click=_refresh_clicked,
-                tooltip=I18n.get("home_refresh"),
-            ),
-        ],
+        safe_controls(
+            [
+                ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD),
+                ft.Container(expand=True),
+                ft.Text(date_text_value, size=12, color=AppColors.TEXT_SECONDARY),
+                ft.IconButton(
+                    ft.Icons.REFRESH,
+                    on_click=safe_on_click(_refresh_clicked),
+                    tooltip=I18n.get("home_refresh"),
+                ),
+            ]
+        ),
         alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
     return ft.Container(
         content=ft.Column(
-            [
-                header,
-                ft.Divider(),
-                MarketDashboard(
-                    indices=state.market_indices,
-                    hsgt=state.market_hsgt,
-                    hot_concepts=state.market_hot_concepts,
-                ),
-                ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
-                NewsFeed(
-                    news_rows=state.news_rows,
-                    has_more=state.has_more_news,
-                    on_load_more_click=_on_load_more_click,
-                ),
-            ],
+            safe_controls(
+                [
+                    header,
+                    ft.Divider(),
+                    MarketDashboard(
+                        indices=state.market_indices,
+                        hsgt=state.market_hsgt,
+                        hot_concepts=state.market_hot_concepts,
+                    ),
+                    ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
+                    NewsFeed(
+                        news_rows=state.news_rows,
+                        has_more=state.has_more_news,
+                        on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
+                    ),
+                ]
+            ),
             scroll=None,
             expand=True,
         ),

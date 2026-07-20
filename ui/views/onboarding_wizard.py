@@ -26,6 +26,7 @@ Steps (8 total):
 """
 
 import logging
+import typing
 from collections.abc import Awaitable, Callable
 
 import flet as ft
@@ -34,6 +35,14 @@ from ui.components.config_panels.database_config_panel import DatabaseConfigPane
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_controls,
+    safe_icon,
+    safe_on_click,
+    safe_on_hover,
+    safe_on_select,
+)
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -141,7 +150,7 @@ def _render_message(msg: Message | None) -> str:
 
 
 def _create_overview_card(
-    icon: str,
+    icon: str | ft.IconData,
     color: str,
     title_key: str,
     desc_key: str,
@@ -189,7 +198,7 @@ def _create_overview_card(
     icon_with_badge = ft.Stack(
         [
             ft.Container(
-                content=ft.Icon(icon, size=32, color=color),
+                content=ft.Icon(safe_icon(icon), size=32, color=color),
                 width=52,
                 height=52,
                 border_radius=14,
@@ -252,7 +261,7 @@ def _create_overview_card(
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=0,
         ),
-        on_hover=on_hover,
+        on_hover=safe_on_hover(on_hover),
         animate=ft.Animation(300, ft.AnimationCurve.EASE_IN_OUT),
     )
 
@@ -381,7 +390,8 @@ def OnboardingWizard(
                     parts = normalized.split("_")
                     lang = parts[0]
                     country = parts[1] if len(parts) > 1 else None
-                    page.locale_configuration.current_locale = ft.Locale(lang, country)
+                    locale_config = typing.cast(ft.LocaleConfiguration, page.locale_configuration)
+                    locale_config.current_locale = ft.Locale(lang, country)
                 except Exception as ex:
                     logger.debug(
                         "[OnboardingWizard] Failed to update page locale configuration: %s",
@@ -453,7 +463,7 @@ def OnboardingWizard(
             page.run_task(onboarding_vm.skip_sync)
 
     def _on_language_select(e: ft.ControlEvent) -> None:
-        new_locale = e.control.value
+        new_locale = get_control_value(e.control, ft.Dropdown)
         set_language_value(new_locale)
         page = _get_page()
         if page is not None:
@@ -557,7 +567,7 @@ def OnboardingWizard(
             border_radius=8,
             content_padding=10,
             options=[ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
-            on_select=_on_language_select,
+            on_select=safe_on_select(_on_language_select),
         )
 
         rocket_container = ft.Container(
@@ -629,34 +639,38 @@ def OnboardingWizard(
         ]
 
         step_content = ft.Column(
-            [
-                ft.Container(height=20),
-                ft.Container(
-                    content=language_dropdown,
-                    alignment=ft.Alignment.CENTER,
-                ),
-                ft.Container(height=16),
-                rocket_container,
-                ft.Container(height=16),
-                gradient_title,
-                ft.Container(height=20),
-                ft.ResponsiveRow(
-                    [
-                        _create_overview_card(
-                            icon=icon,
-                            color=color,
-                            title_key=title_key,
-                            desc_key=desc_key,
-                            required=required,
-                            is_hovered=(hovered_card == idx),
-                            on_hover=_on_card_hover(idx),
-                        )
-                        for icon, color, title_key, desc_key, required, idx in overview_cards_data
-                    ],
-                    spacing=20,
-                    run_spacing=20,
-                ),
-            ],
+            safe_controls(
+                [
+                    ft.Container(height=20),
+                    ft.Container(
+                        content=language_dropdown,
+                        alignment=ft.Alignment.CENTER,
+                    ),
+                    ft.Container(height=16),
+                    rocket_container,
+                    ft.Container(height=16),
+                    gradient_title,
+                    ft.Container(height=20),
+                    ft.ResponsiveRow(
+                        safe_controls(
+                            [
+                                _create_overview_card(
+                                    icon=icon,
+                                    color=color,
+                                    title_key=title_key,
+                                    desc_key=desc_key,
+                                    required=required,
+                                    is_hovered=(hovered_card == idx),
+                                    on_hover=_on_card_hover(idx),
+                                )
+                                for icon, color, title_key, desc_key, required, idx in overview_cards_data
+                            ]
+                        ),
+                        spacing=20,
+                        run_spacing=20,
+                    ),
+                ]
+            ),
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -791,87 +805,93 @@ def OnboardingWizard(
         is_syncing = state.sync_in_progress
 
         step_content = ft.Column(
-            [
-                ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
-                ft.Text(
-                    I18n.get("wizard_step3_title"),
-                    size=24,
-                    weight=ft.FontWeight.W_500,
-                    color=AppColors.TEXT_PRIMARY,
-                ),
-                ft.Container(height=10),
-                ft.Text(
-                    I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
-                    size=14,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-                ft.Container(height=10),
-                ft.Container(
-                    content=ft.Column(
-                        [
-                            ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=20),
-                            ft.Text(
-                                I18n.get("wizard_sync_warning"),
-                                size=12,
-                                color=AppColors.WARNING,
-                                text_align=ft.TextAlign.CENTER,
-                            ),
-                        ],
-                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            safe_controls(
+                [
+                    ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
+                    ft.Text(
+                        I18n.get("wizard_step3_title"),
+                        size=24,
+                        weight=ft.FontWeight.W_500,
+                        color=AppColors.TEXT_PRIMARY,
                     ),
-                    padding=10,
-                    border_radius=8,
-                    bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
-                ),
-                ft.Container(height=20),
-                ft.Row(
-                    [
-                        ft.Button(
-                            content=I18n.get("wizard_sync_quick"),
-                            icon=ft.Icons.FLASH_ON,
-                            style=AppStyles.accent_button(),
-                            on_click=_on_quick_sync_click,
-                            disabled=is_syncing,
+                    ft.Container(height=10),
+                    ft.Text(
+                        I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
+                        size=14,
+                        color=AppColors.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                    ft.Container(height=10),
+                    ft.Container(
+                        content=ft.Column(
+                            safe_controls(
+                                [
+                                    ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=20),
+                                    ft.Text(
+                                        I18n.get("wizard_sync_warning"),
+                                        size=12,
+                                        color=AppColors.WARNING,
+                                        text_align=ft.TextAlign.CENTER,
+                                    ),
+                                ]
+                            ),
+                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
-                        ft.Button(
-                            content=I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),
-                            icon=ft.Icons.CLOUD_SYNC,
-                            style=AppStyles.primary_button(),
-                            on_click=_on_full_sync_click,
-                            disabled=is_syncing,
+                        padding=10,
+                        border_radius=8,
+                        bgcolor=ft.Colors.with_opacity(0.1, AppColors.WARNING),
+                    ),
+                    ft.Container(height=20),
+                    ft.Row(
+                        safe_controls(
+                            [
+                                ft.Button(
+                                    content=I18n.get("wizard_sync_quick"),
+                                    icon=ft.Icons.FLASH_ON,
+                                    style=AppStyles.accent_button(),
+                                    on_click=safe_on_click(_on_quick_sync_click),
+                                    disabled=is_syncing,
+                                ),
+                                ft.Button(
+                                    content=I18n.get("wizard_sync_full").format(years=DEFAULT_SYNC_YEARS),
+                                    icon=ft.Icons.CLOUD_SYNC,
+                                    style=AppStyles.primary_button(),
+                                    on_click=safe_on_click(_on_full_sync_click),
+                                    disabled=is_syncing,
+                                ),
+                                ft.TextButton(
+                                    content=I18n.get("wizard_btn_sync_later"),
+                                    icon=ft.Icons.SCHEDULE,
+                                    on_click=safe_on_click(_on_sync_later),
+                                    disabled=is_syncing,
+                                ),
+                                ft.Button(
+                                    content=I18n.get("wizard_btn_cancel"),
+                                    icon=ft.Icons.CANCEL,
+                                    color=AppColors.ERROR,
+                                    on_click=safe_on_click(_on_cancel_sync_click),
+                                    visible=is_syncing,
+                                ),
+                            ]
                         ),
-                        ft.TextButton(
-                            content=I18n.get("wizard_btn_sync_later"),
-                            icon=ft.Icons.SCHEDULE,
-                            on_click=_on_sync_later,
-                            disabled=is_syncing,
-                        ),
-                        ft.Button(
-                            content=I18n.get("wizard_btn_cancel"),
-                            icon=ft.Icons.CANCEL,
-                            color=AppColors.ERROR,
-                            on_click=_on_cancel_sync_click,
-                            visible=is_syncing,
-                        ),
-                    ],
-                    alignment=ft.MainAxisAlignment.CENTER,
-                    wrap=True,
-                ),
-                ft.Container(height=20),
-                ft.ProgressBar(
-                    width=AppStyles.CONTROL_WIDTH_LG,
-                    value=state.sync_progress,
-                    color=AppColors.ACCENT,
-                    bgcolor=AppColors.BORDER,
-                ),
-                ft.Text(
-                    _render_message(state.sync_progress_message) or I18n.get("wizard_status_ready"),
-                    size=12,
-                    color=AppColors.TEXT_SECONDARY,
-                    text_align=ft.TextAlign.CENTER,
-                ),
-            ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        wrap=True,
+                    ),
+                    ft.Container(height=20),
+                    ft.ProgressBar(
+                        width=AppStyles.CONTROL_WIDTH_LG,
+                        value=state.sync_progress,
+                        color=AppColors.ACCENT,
+                        bgcolor=AppColors.BORDER,
+                    ),
+                    ft.Text(
+                        _render_message(state.sync_progress_message) or I18n.get("wizard_status_ready"),
+                        size=12,
+                        color=AppColors.TEXT_SECONDARY,
+                        text_align=ft.TextAlign.CENTER,
+                    ),
+                ]
+            ),
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         )
 
@@ -898,9 +918,9 @@ def OnboardingWizard(
                     [
                         ft.Checkbox(
                             label=I18n.get("wizard_schedule_label"),
-                            value=schedule_enabled,
+                            value=bool(schedule_enabled),
                             active_color=AppColors.PRIMARY,
-                            on_change=lambda e: set_schedule_enabled(e.control.value),
+                            on_change=lambda e: set_schedule_enabled(bool(e.control.value)),
                         )
                     ],
                     alignment=ft.MainAxisAlignment.CENTER,
@@ -963,7 +983,7 @@ def OnboardingWizard(
             ft.Button(
                 content=I18n.get("wizard_btn_prev"),
                 icon=ft.Icons.ARROW_BACK,
-                on_click=_on_prev,
+                on_click=safe_on_click(_on_prev),
                 style=AppStyles.secondary_button(),
                 disabled=(state.sync_in_progress and is_sync_step) or state.validation_in_progress,
             )
@@ -975,7 +995,7 @@ def OnboardingWizard(
         nav_buttons.append(
             ft.TextButton(
                 content=I18n.get(config.skip_text_key),
-                on_click=_on_skip,
+                on_click=safe_on_click(_on_skip),
                 disabled=state.validation_in_progress,
             )
         )
@@ -985,7 +1005,7 @@ def OnboardingWizard(
             ft.Button(
                 content=I18n.get(config.next_text_key),
                 icon=getattr(ft.Icons, config.next_icon, ft.Icons.ARROW_FORWARD),
-                on_click=_on_next,
+                on_click=safe_on_click(_on_next),
                 style=AppStyles.primary_button(),
                 disabled=state.validation_in_progress,
             )

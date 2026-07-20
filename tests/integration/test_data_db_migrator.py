@@ -5,6 +5,11 @@ Uses isolated temporary databases for each test.
 All fixtures are async to avoid asyncio.run() conflicts with pytest-asyncio.
 """
 
+# pyright: reportOptionalSubscript=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 Optional 下标访问。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import asyncio
 import threading
 import uuid

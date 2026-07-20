@@ -21,10 +21,19 @@ import datetime
 import logging
 import os
 import time
+import typing
 
 import flet as ft
 import pandas as pd
 
+from ui.components.flet_type_helpers import (
+    get_control_attr,
+    get_control_value,
+    safe_controls,
+    safe_on_change,
+    safe_on_click,
+    safe_on_select,
+)
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -51,6 +60,13 @@ def _get_page() -> ft.Page | None:
         return ft.context.page
     except RuntimeError:
         return None
+
+
+def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
+    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。"""
+    show_toast = typing.cast(typing.Any, page).show_toast
+    if show_toast is not None:
+        show_toast(msg, msg_type)
 
 
 def _format_cell_value(val: object, col_name: str) -> str:
@@ -190,7 +206,9 @@ def TableViewerTab(
     ft.use_state(AppColors.get_observable_state)
 
     # --- 本地 UI 状态 (输入框值, 用户覆盖) ---
-    filter_col_override, set_filter_col_override = ft.use_state(None)
+    filter_col_override, set_filter_col_override = typing.cast(
+        tuple[str | None, typing.Callable[[str | None], None]], ft.use_state(None)
+    )
     filter_op_value, set_filter_op_value = ft.use_state("=")
     filter_val_text, set_filter_val_text = ft.use_state("")
 
@@ -207,7 +225,7 @@ def TableViewerTab(
         if not active:
             return
         page = _get_page()
-        if page is not None and file_picker not in page.services:
+        if page is not None and file_picker is not None and file_picker not in page.services:
             page.services.append(file_picker)
 
     def _cleanup_file_picker() -> None:
@@ -230,7 +248,7 @@ def TableViewerTab(
             logger.error("[TableViewerTab] load_schema error: %s", e, exc_info=True)
             page = _get_page()
             if page is not None:
-                page.show_toast(I18n.get("data_err_load_schema"), "error")
+                _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
 
     async def _init_tables() -> None:
         if not active:
@@ -247,7 +265,7 @@ def TableViewerTab(
             logger.error("[TableViewerTab] init_tables error: %s", e, exc_info=True)
             page = _get_page()
             if page is not None:
-                page.show_toast(I18n.get("data_err_load_schema"), "error")
+                _safe_show_toast(page, I18n.get("data_err_load_schema"), "error")
 
     # tables_loaded 变化时触发 (mount + cache_cleared stale 重载)
     ft.use_effect(_init_tables, dependencies=[state.tables_loaded, active])
@@ -322,12 +340,14 @@ def TableViewerTab(
             if df.empty:
                 page = _get_page()
                 if page is not None:
-                    page.show_toast(I18n.get("data_export_no_data"), "error")
+                    _safe_show_toast(page, I18n.get("data_export_no_data"), "error")
                 return
             suffix = f"_p{state.current_page}" if current_page else "_all"
             timestamp = get_now().strftime("%Y%m%d_%H%M%S")
             ext = "csv" if format_ == "csv" else "xlsx"
             default_filename = f"{state.current_table}{suffix}_{timestamp}.{ext}"
+            if file_picker is None:
+                return
             filepath = await file_picker.save_file(
                 dialog_title=I18n.get("data_export_save_title"),
                 file_name=default_filename,
@@ -343,12 +363,12 @@ def TableViewerTab(
                     msg = I18n.get("data_export_success", file=filename)
                     page = _get_page()
                     if page is not None:
-                        page.show_toast(msg, "success")
+                        _safe_show_toast(page, msg, "success")
                 except Exception as ex:
                     logger.error("Export write failed: %s", ex, exc_info=True)
                     page = _get_page()
                     if page is not None:
-                        page.show_toast(I18n.get("data_export_fail"), "error")
+                        _safe_show_toast(page, I18n.get("data_export_fail"), "error")
         except asyncio.CancelledError:
             raise  # R2: 必须传播
         except Exception as e:
@@ -356,11 +376,11 @@ def TableViewerTab(
             logger.debug("Export failed traceback", exc_info=True)
             page = _get_page()
             if page is not None:
-                page.show_toast(I18n.get("data_export_fail"), "error")
+                _safe_show_toast(page, I18n.get("data_export_fail"), "error")
 
     # --- 同步事件 handler (调度 page.run_task) ---
     def _on_table_changed(e: ft.ControlEvent) -> None:
-        new_table = e.control.value if e and e.control else None
+        new_table = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         if not new_table:
             return
         page = _get_page()
@@ -429,7 +449,7 @@ def TableViewerTab(
         width=250,
         label=I18n.get("data_select_table"),
         value=state.current_table or None,
-        on_select=_on_table_changed,
+        on_select=safe_on_select(_on_table_changed),
         disabled=is_loading or not state.tables_loaded,
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
@@ -460,7 +480,7 @@ def TableViewerTab(
         label=I18n.get("data_filter_op"),
         width=100,
         value=filter_op_value,
-        on_select=lambda e: set_filter_op_value(e.control.value if e and e.control else "="),
+        on_select=lambda e: set_filter_op_value((e.control.value if e and e.control else None) or "="),
         options=_build_filter_op_options(),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
@@ -476,7 +496,7 @@ def TableViewerTab(
         width=200,
         value=filter_val_text,
         on_change=lambda e: set_filter_val_text(e.control.value if e and e.control else ""),
-        on_submit=_on_query_click,
+        on_submit=safe_on_change(_on_query_click),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -489,7 +509,7 @@ def TableViewerTab(
     btn_query = ft.IconButton(
         ft.Icons.SEARCH,
         tooltip=I18n.get("common_query"),
-        on_click=_on_query_click,
+        on_click=safe_on_click(_on_query_click),
         icon_color=AppColors.PRIMARY,
         icon_size=20,
         disabled=is_loading,
@@ -497,7 +517,7 @@ def TableViewerTab(
     btn_refresh = ft.IconButton(
         ft.Icons.REFRESH,
         tooltip=I18n.get("common_refresh"),
-        on_click=_on_refresh_click,
+        on_click=safe_on_click(_on_refresh_click),
         icon_size=20,
         disabled=is_loading,
     )
@@ -578,17 +598,17 @@ def TableViewerTab(
                     ft.PopupMenuItem(
                         content=I18n.get("data_export_current"),
                         icon=ft.Icons.DOWNLOAD,
-                        on_click=_on_export_current,
+                        on_click=safe_on_click(_on_export_current),
                     ),
                     ft.PopupMenuItem(
                         content=I18n.get("data_export_all"),
                         icon=ft.Icons.DRIVE_FILE_MOVE,
-                        on_click=_on_export_all,
+                        on_click=safe_on_click(_on_export_all),
                     ),
                     ft.PopupMenuItem(
                         content=I18n.get("data_export_excel"),
                         icon=ft.Icons.TABLE_VIEW,
-                        on_click=_on_export_excel,
+                        on_click=safe_on_click(_on_export_excel),
                     ),
                 ],
             ),
@@ -611,32 +631,34 @@ def TableViewerTab(
     # 分页栏
     pagination_bar = ft.Container(
         content=ft.Row(
-            [
-                ft.Text(
-                    I18n.get("data_total_rows").format(count=state.total_rows),
-                    size=12,
-                    color=ft.Colors.GREY,
-                ),
-                ft.Container(expand=True),
-                ft.IconButton(
-                    ft.Icons.CHEVRON_LEFT,
-                    on_click=_on_prev_page,
-                    disabled=is_loading or state.current_page <= 1,
-                    tooltip=I18n.get("common_prev_page"),
-                ),
-                ft.Text(
-                    I18n.get("data_page_num").format(
-                        current=state.current_page,
-                        total=total_pages,
-                    )
-                ),
-                ft.IconButton(
-                    ft.Icons.CHEVRON_RIGHT,
-                    on_click=_on_next_page,
-                    disabled=is_loading or state.current_page >= total_pages,
-                    tooltip=I18n.get("common_next_page"),
-                ),
-            ],
+            safe_controls(
+                [
+                    ft.Text(
+                        I18n.get("data_total_rows").format(count=state.total_rows),
+                        size=12,
+                        color=ft.Colors.GREY,
+                    ),
+                    ft.Container(expand=True),
+                    ft.IconButton(
+                        ft.Icons.CHEVRON_LEFT,
+                        on_click=safe_on_click(_on_prev_page),
+                        disabled=is_loading or state.current_page <= 1,
+                        tooltip=I18n.get("common_prev_page"),
+                    ),
+                    ft.Text(
+                        I18n.get("data_page_num").format(
+                            current=state.current_page,
+                            total=total_pages,
+                        )
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CHEVRON_RIGHT,
+                        on_click=safe_on_click(_on_next_page),
+                        disabled=is_loading or state.current_page >= total_pages,
+                        tooltip=I18n.get("common_next_page"),
+                    ),
+                ]
+            ),
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
         ),
         padding=ft.Padding.symmetric(horizontal=20, vertical=5),
@@ -757,7 +779,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         I18n.get("data_sql_execute"),
         icon=ft.Icons.PLAY_ARROW,
         style=AppStyles.primary_button(),
-        on_click=_run_query,
+        on_click=typing.cast(ft.ControlEventHandler, _run_query),
         disabled=is_executing,
     )
 
@@ -907,7 +929,7 @@ def DataExplorerView(active: bool = True, viewport: ViewportState | None = None)
 
     # --- 事件 handler ---
     def _on_tab_changed(e: ft.ControlEvent) -> None:
-        new_index = e.control.selected_index if e and e.control else 0
+        new_index = get_control_attr(e.control, ft.Tabs, "selected_index") if e and e.control else 0
         set_selected_index(new_index)
         tab_name = "table_viewer" if new_index == 0 else "sql_console"
         UILogger.log_action("DataExplorerView", "Navigate", f"tab={tab_name}")
@@ -924,7 +946,7 @@ def DataExplorerView(active: bool = True, viewport: ViewportState | None = None)
         selected_index=selected_index,
         animation_duration=300,
         expand=True,
-        on_change=_on_tab_changed,
+        on_change=safe_on_change(_on_tab_changed),
         content=ft.Column(
             expand=True,
             controls=[
