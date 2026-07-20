@@ -21,11 +21,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     _base_class_names,
     _check_R4_in_tree,
+    _check_R_no_bare_ft_colors_in_tree,
     _decorator_names,
     _extract_cache_manager_dao_instances,
     _extract_dao_classes,
     _extract_table_definition_keys,
     _extract_tablenames_from_models,
+    _is_settings_tabs_dir,
     _is_singleton_class,
     _is_strategy_subclass,
     check_R12,
@@ -33,6 +35,7 @@ from check_redlines import (  # noqa: E402 - sys.path 注入后导入
     check_R14,
     check_R15,
     check_R4,
+    check_R_no_bare_ft_colors_in_ui,
     main,
 )
 
@@ -457,3 +460,275 @@ class TestGBKEncodingCompatibility:
         assert b"UnicodeEncodeError" not in combined, (
             f"UnicodeEncodeError detected under GBK encoding\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+
+
+# ============================================================================
+# R_no_bare_ft_colors_in_ui 纯函数测试 (P1-2 #54)
+# ============================================================================
+
+
+class TestRNoBareFtColorsPureFunction:
+    """R_no_bare_ft_colors_in_ui 纯函数测试: 灰阶/Layer1/裸色值/装饰色豁免分类逻辑。"""
+
+    def _check(self, code: str, source_path: Path) -> tuple[list[str], list[str]]:
+        tree = ast.parse(code)
+        return _check_R_no_bare_ft_colors_in_tree(tree, source_path)
+
+    def _ui_path(self, rel: str) -> Path:
+        """构造 ROOT 下 ui/ 路径 (用于 rel 计算)。"""
+        return ROOT / rel
+
+    def test_layer1_surface_not_flagged(self):
+        """Layer 1 语义 token ft.Colors.SURFACE 完全放行 (error/warning 均为空)。"""
+        code = "x = ft.Colors.SURFACE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_layer1_on_surface_not_flagged(self):
+        """Layer 1 语义 token ft.Colors.ON_SURFACE 完全放行。"""
+        code = "x = ft.Colors.ON_SURFACE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_layer1_primary_not_flagged(self):
+        """Layer 1 语义 token ft.Colors.PRIMARY 完全放行。"""
+        code = "x = ft.Colors.PRIMARY\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_layer1_error_not_flagged(self):
+        """Layer 1 语义 token ft.Colors.ERROR 完全放行。"""
+        code = "x = ft.Colors.ERROR\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_grayscale_grey_only_warning(self):
+        """灰阶色 ft.Colors.GREY 仅 warning, 不进入 error (不阻断)。"""
+        code = "x = ft.Colors.GREY\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "GREY" in warns[0]
+
+    def test_grayscale_white_only_warning(self):
+        """灰阶色 ft.Colors.WHITE 仅 warning。"""
+        code = "x = ft.Colors.WHITE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "WHITE" in warns[0]
+
+    def test_grayscale_black_only_warning(self):
+        """灰阶色 ft.Colors.BLACK 仅 warning。"""
+        code = "x = ft.Colors.BLACK\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "BLACK" in warns[0]
+
+    def test_grayscale_transparent_only_warning(self):
+        """灰阶色 ft.Colors.TRANSPARENT 仅 warning。"""
+        code = "x = ft.Colors.TRANSPARENT\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "TRANSPARENT" in warns[0]
+
+    def test_bare_red_intercepted_as_error(self):
+        """裸色值 ft.Colors.RED 必须进入 error (非零退出)。"""
+        code = "x = ft.Colors.RED\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "RED" in errs[0]
+        assert "R_no_bare_ft_colors_in_ui" in errs[0]
+        assert warns == []
+
+    def test_bare_green_intercepted_as_error(self):
+        """裸色值 ft.Colors.GREEN 必须进入 error。"""
+        code = "x = ft.Colors.GREEN\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "GREEN" in errs[0]
+
+    def test_bare_blue_intercepted_as_error(self):
+        """裸色值 ft.Colors.BLUE 必须进入 error。"""
+        code = "x = ft.Colors.BLUE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "BLUE" in errs[0]
+
+    def test_bare_red_400_intercepted_as_error(self):
+        """裸色值 ft.Colors.RED_400 必须进入 error (startup_views L180 场景)。"""
+        code = "x = ft.Colors.RED_400\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "RED_400" in errs[0]
+
+    def test_bare_purple_intercepted_as_error(self):
+        """裸色值 ft.Colors.PURPLE 必须进入 error (非 settings_tabs 目录)。"""
+        code = "x = ft.Colors.PURPLE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "PURPLE" in errs[0]
+
+    def test_bare_yellow_intercepted_as_error(self):
+        """裸色值 ft.Colors.YELLOW 必须进入 error。"""
+        code = "x = ft.Colors.YELLOW\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "YELLOW" in errs[0]
+
+    def test_bare_orange_intercepted_as_error(self):
+        """裸色值 ft.Colors.ORANGE 必须进入 error (非 settings_tabs 目录)。"""
+        code = "x = ft.Colors.ORANGE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "ORANGE" in errs[0]
+
+    def test_bare_teal_intercepted_as_error(self):
+        """裸色值 ft.Colors.TEAL 必须进入 error (非 settings_tabs 目录)。"""
+        code = "x = ft.Colors.TEAL\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "TEAL" in errs[0]
+
+    def test_bare_cyan_intercepted_as_error(self):
+        """裸色值 ft.Colors.CYAN 必须进入 error。"""
+        code = "x = ft.Colors.CYAN\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "CYAN" in errs[0]
+
+    def test_bare_indigo_intercepted_as_error(self):
+        """裸色值 ft.Colors.INDIGO 必须进入 error (非 settings_tabs 目录)。"""
+        code = "x = ft.Colors.INDIGO\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 1
+        assert "INDIGO" in errs[0]
+
+    def test_settings_tabs_decorative_blue_only_warning(self):
+        """settings_tabs/ 目录下装饰色 ft.Colors.BLUE 仅 warning (icon_color 场景豁免)。"""
+        code = "x = ft.Colors.BLUE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "BLUE" in warns[0]
+        assert "settings_tabs icon_color" in warns[0]
+
+    def test_settings_tabs_decorative_purple_only_warning(self):
+        """settings_tabs/ 目录下装饰色 ft.Colors.PURPLE 仅 warning。"""
+        code = "x = ft.Colors.PURPLE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "PURPLE" in warns[0]
+
+    def test_settings_tabs_decorative_indigo_only_warning(self):
+        """settings_tabs/ 目录下装饰色 ft.Colors.INDIGO 仅 warning。"""
+        code = "x = ft.Colors.INDIGO\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "INDIGO" in warns[0]
+
+    def test_settings_tabs_decorative_orange_only_warning(self):
+        """settings_tabs/ 目录下装饰色 ft.Colors.ORANGE 仅 warning。"""
+        code = "x = ft.Colors.ORANGE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "ORANGE" in warns[0]
+
+    def test_settings_tabs_decorative_teal_only_warning(self):
+        """settings_tabs/ 目录下装饰色 ft.Colors.TEAL 仅 warning。"""
+        code = "x = ft.Colors.TEAL\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "TEAL" in warns[0]
+
+    def test_settings_tabs_red_still_intercepted(self):
+        """settings_tabs/ 目录下 ft.Colors.RED 仍拦截 (RED 非装饰色, 应改 ERROR)。"""
+        code = "x = ft.Colors.RED\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert len(errs) == 1
+        assert "RED" in errs[0]
+        assert warns == []
+
+    def test_settings_tabs_green_still_intercepted(self):
+        """settings_tabs/ 目录下 ft.Colors.GREEN 仍拦截 (GREEN 非装饰色, 应改 SUCCESS)。"""
+        code = "x = ft.Colors.GREEN\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/settings_tabs/system_tab.py"))
+        assert len(errs) == 1
+        assert "GREEN" in errs[0]
+
+    def test_non_ft_colors_attribute_not_flagged(self):
+        """非 ft.Colors.X 表达式不应被检测 (如 ft.Icons.X)。"""
+        code = "x = ft.Icons.RED\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_module_attribute_not_flagged(self):
+        """非 ft 模块的 Colors.X 不应被检测 (如 other.Colors.RED)。"""
+        code = "x = other.Colors.RED\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_multiple_violations_count_correctly(self):
+        """多个违规按出现次数计数 (每个 ft.Colors.X 一个 error)。"""
+        code = "x = ft.Colors.RED\ny = ft.Colors.GREEN\nz = ft.Colors.BLUE\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert len(errs) == 3
+        assert warns == []
+
+
+# ============================================================================
+# R_no_bare_ft_colors_in_ui 辅助函数测试
+# ============================================================================
+
+
+class TestIsSettingsTabsDir:
+    """_is_settings_tabs_dir: 判断文件是否位于 ui/views/settings_tabs/ 目录下。"""
+
+    def test_system_tab_returns_true(self):
+        assert _is_settings_tabs_dir(ROOT / "ui" / "views" / "settings_tabs" / "system_tab.py") is True
+
+    def test_data_source_tab_returns_true(self):
+        assert _is_settings_tabs_dir(ROOT / "ui" / "views" / "settings_tabs" / "data_source_tab.py") is True
+
+    def test_other_views_returns_false(self):
+        assert _is_settings_tabs_dir(ROOT / "ui" / "views" / "data_view.py") is False
+
+    def test_components_returns_false(self):
+        assert _is_settings_tabs_dir(ROOT / "ui" / "components" / "news_feed.py") is False
+
+    def test_non_ui_returns_false(self):
+        assert _is_settings_tabs_dir(ROOT / "scripts" / "check_redlines.py") is False
+
+
+# ============================================================================
+# R_no_bare_ft_colors_in_ui 集成测试 (当前代码库契约)
+# ============================================================================
+
+
+class TestRNoBareFtColorsIntegration:
+    """R_no_bare_ft_colors_in_ui 集成测试: 当前代码库契约守护。
+
+    验证当前 UI 层无裸 ft.Colors.<拦截名单色值> 引用 (RED/RED_400/GREEN/BLUE 等)。
+    装饰色豁免 (settings_tabs icon_color) 与灰阶色 warning 不影响 main() 退出码 0。
+    """
+
+    def test_check_R_no_bare_ft_colors_in_ui_passes(self):
+        """R_no_bare_ft_colors_in_ui: 当前代码库无裸色值 (errors 为空)。"""
+        errors = check_R_no_bare_ft_colors_in_ui()
+        assert errors == [], "R_no_bare_ft_colors_in_ui violations:\n  " + "\n  ".join(errors)
+
+    def test_main_returns_zero_with_bare_color_check(self):
+        """main() 包含 R_no_bare_ft_colors_in_ui 检查后仍应返回 0 (当前代码库合规)。"""
+        assert main() == 0
