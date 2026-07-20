@@ -13,6 +13,11 @@ Dialog 重写（StockDetailDialog/HealthReportDialog/HealthScanDialog/ProviderCr
 作为活文档（living documentation）记录声明式 Dialog 模式。
 """
 
+# pyright: reportArgumentType=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import os
 import sys
 from unittest.mock import MagicMock

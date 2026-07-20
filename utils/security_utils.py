@@ -7,6 +7,7 @@ import platform
 import secrets
 import shutil
 import threading
+import typing
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -26,7 +27,7 @@ def _get_machine_fingerprint():
         platform.node(),
         platform.system(),
         platform.machine(),
-        str(os.getuid() if hasattr(os, "getuid") else os.environ.get("USERNAME", "unknown")),
+        str(typing.cast(typing.Any, os).getuid() if hasattr(os, "getuid") else os.environ.get("USERNAME", "unknown")),
     ]
     return "|".join(parts).encode("utf-8")
 

@@ -15,10 +15,12 @@
 """
 
 import logging
+import typing
 from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_on_click
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -92,19 +94,21 @@ async def _select_file(vm: LocalModelConfigPanelViewModel, file_picker: ft.FileP
             allowed_extensions=["gguf"],
             dialog_title=I18n.get("settings_btn_select_file"),
         )
-        if result and result.files and len(result.files) > 0:
-            vm.update_model_path(result.files[0].path or "")
+        if result and len(result) > 0:
+            vm.update_model_path(result[0].path or "")
     except Exception as e:
         logger.error("[LocalModelConfigPanel] File pick failed: %s", e, exc_info=True)
 
 
 def _on_select_file_click_factory(
     vm: LocalModelConfigPanelViewModel,
-    file_picker: ft.FilePicker,
+    file_picker: ft.FilePicker | None,
 ) -> Callable[[ft.ControlEvent], None]:
     """Create on_click handler for file select button."""
 
     def _on_select_file_click(e: ft.ControlEvent) -> None:
+        if file_picker is None:
+            return
         try:
             page = ft.context.page
             if page is not None:
@@ -149,7 +153,7 @@ def LocalModelConfigPanel(
     def _setup_file_picker() -> None:
         try:
             page = ft.context.page
-            if page is not None and file_picker not in page.services:
+            if page is not None and file_picker is not None and file_picker not in page.services:
                 page.services.append(file_picker)
         except RuntimeError:
             logger.debug("[LocalModelConfigPanel] page not available for FilePicker setup")
@@ -181,7 +185,7 @@ def LocalModelConfigPanel(
     btn_select_file = ft.OutlinedButton(
         content=I18n.get("settings_btn_select_file"),
         icon=ft.Icons.FOLDER_OPEN,
-        on_click=_on_select_file_click_factory(vm, file_picker),
+        on_click=safe_on_click(_on_select_file_click_factory(vm, file_picker)),
         disabled=state.is_verifying if show_internal_loading else False,
     )
 
@@ -201,7 +205,7 @@ def LocalModelConfigPanel(
         value=float(state.n_threads),
         label="{value}",
         tooltip=str(state.n_threads),
-        on_change=lambda e: vm.update_threads(e.control.value),
+        on_change=lambda e: vm.update_threads(typing.cast("int | float", e.control.value)),
     )
 
     gpu_auto_switch = ft.Switch(
@@ -218,7 +222,7 @@ def LocalModelConfigPanel(
         label="{value}",
         tooltip=str(gpu_layers_display),
         visible=not is_gpu_auto,
-        on_change=lambda e: vm.update_gpu_layers(e.control.value),
+        on_change=lambda e: vm.update_gpu_layers(typing.cast("int | float", e.control.value)),
     )
 
     batch_input = ft.Dropdown(
@@ -271,7 +275,7 @@ def LocalModelConfigPanel(
     # --- Buttons ---
     verify_button = ft.Button(
         content=I18n.get("wizard_btn_verify_model"),
-        on_click=_on_verify_click_factory(vm),
+        on_click=safe_on_click(_on_verify_click_factory(vm)),
         icon=ft.Icons.CHECK_CIRCLE,
         style=AppStyles.secondary_button(),
         disabled=state.is_verifying if show_internal_loading else False,
@@ -279,7 +283,7 @@ def LocalModelConfigPanel(
 
     save_button = ft.Button(
         content=I18n.get("settings_save_config"),
-        on_click=_on_save_click_factory(vm),
+        on_click=safe_on_click(_on_save_click_factory(vm)),
         icon=ft.Icons.SAVE,
         visible=show_save_button,
         style=AppStyles.primary_button(),

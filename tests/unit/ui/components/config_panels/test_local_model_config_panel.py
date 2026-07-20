@@ -196,12 +196,11 @@ class TestSelectFile:
     """_select_file: 打开文件选择器并更新 vm.model_path。"""
 
     def test_select_file_normal_updates_model_path(self) -> None:
-        """正常选文件 (result.files[0].path 非空) → vm.update_model_path(path)。"""
+        """正常选文件 (result[0].path 非空) → vm.update_model_path(path)。"""
         vm = MagicMock(spec=LocalModelConfigPanelViewModel)
         file_picker = MagicMock(spec=ft.FilePicker)
-        fake_result = MagicMock()
-        fake_result.files = [MagicMock(path="/path/to/model.gguf")]
-        file_picker.pick_files = MagicMock(return_value=_async_return(fake_result))
+        fake_file = MagicMock(path="/path/to/model.gguf")
+        file_picker.pick_files = MagicMock(return_value=_async_return([fake_file]))
 
         asyncio.run(_select_file(vm, file_picker))
 
@@ -235,28 +234,24 @@ class TestSelectFile:
         vm.update_model_path.assert_not_called()
 
     def test_select_file_empty_files_skips_update(self) -> None:
-        """result.files 为空列表 → 不调 vm.update_model_path。"""
+        """result 为空列表 → 不调 vm.update_model_path。"""
         vm = MagicMock(spec=LocalModelConfigPanelViewModel)
         file_picker = MagicMock(spec=ft.FilePicker)
-        fake_result = MagicMock()
-        fake_result.files = []
-        file_picker.pick_files = MagicMock(return_value=_async_return(fake_result))
+        file_picker.pick_files = MagicMock(return_value=_async_return([]))
 
         asyncio.run(_select_file(vm, file_picker))
 
         vm.update_model_path.assert_not_called()
 
     def test_select_file_path_none_passes_empty_string(self) -> None:
-        """result.files[0].path=None → vm.update_model_path("") (path or "" 兜底)。
+        """result[0].path=None → vm.update_model_path("") (path or "" 兜底)。
 
-        覆盖 `result.files[0].path or ""` 的 or 分支: path 为 None/空时兜底为空字符串。
+        覆盖 `result[0].path or ""` 的 or 分支: path 为 None/空时兜底为空字符串。
         """
         vm = MagicMock(spec=LocalModelConfigPanelViewModel)
         file_picker = MagicMock(spec=ft.FilePicker)
-        fake_result = MagicMock()
         # path=None, `path or ""` 兜底为 ""
-        fake_result.files = [MagicMock(path=None)]
-        file_picker.pick_files = MagicMock(return_value=_async_return(fake_result))
+        file_picker.pick_files = MagicMock(return_value=_async_return([MagicMock(path=None)]))
 
         asyncio.run(_select_file(vm, file_picker))
 

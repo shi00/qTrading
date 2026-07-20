@@ -16,10 +16,12 @@
 
 import asyncio
 import logging
+import typing
 from datetime import datetime
 
 import flet as ft
 
+from ui.components.flet_type_helpers import get_control_value, safe_on_click, safe_on_select
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -251,7 +253,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     # 下拉框乐观值：用户选择后立即更新，probe 完成后同步 VM 当前档位
     selected_tier, set_selected_tier = ft.use_state(current_tier)
     # probe 进度（progress_callback 驱动，running 态动态文本）
-    progress, set_progress = ft.use_state((0, 0))
+    progress, set_progress = ft.use_state(typing.cast(tuple[int, int], (0, 0)))
     # 响应式宽度（page.on_resize 驱动）
     width, set_width = ft.use_state(0.0)
     # prev on_resize 引用（链式保留，cleanup 恢复）
@@ -274,7 +276,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
             return
         if page is None:
             return
-        _prev_resize_ref.current = page.on_resize
+        _prev_resize_ref.current = typing.cast(typing.Any, page.on_resize)
 
         def _on_resize(e) -> None:
             if _prev_resize_ref.current:
@@ -322,7 +324,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
             logger.error("[TierApiPanel] on_tier_changed failed: %s", exc, exc_info=True)
 
     def _on_tier_change(e: ft.ControlEvent) -> None:
-        new_tier = e.control.value if e and e.control else None
+        new_tier = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         if not new_tier or new_tier == current_tier:
             return
         set_selected_tier(new_tier)
@@ -359,7 +361,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         border_radius=8,
         content_padding=10,
         options=_build_tier_options(vm),
-        on_select=_on_tier_change,
+        on_select=safe_on_select(_on_tier_change),
         disabled=probe_in_progress,
     )
 
@@ -373,7 +375,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
     probe_button = ft.Button(
         content=I18n.get("sys_tier_probe_button"),
         icon=ft.Icons.SYNC_ROUNDED,
-        on_click=_on_probe_click,
+        on_click=safe_on_click(_on_probe_click),
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
         disabled=probe_in_progress,
     )

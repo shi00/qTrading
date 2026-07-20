@@ -23,12 +23,19 @@
 
 import asyncio
 import logging
+import typing
 from collections.abc import Callable
 
 import flet as ft
 
 from services.task_manager import TaskStatus
 from ui.components.config_panels.tushare_config_panel import TushareConfigPanel
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_icon_str,
+    safe_on_click,
+    safe_on_select,
+)
 from ui.components.health_report_dialog import HealthReportDialog, HealthScanDialog
 from ui.components.settings_widgets import (
     ActionChip,
@@ -409,7 +416,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         )
 
     def _on_history_years_change(e: ft.ControlEvent) -> None:
-        new_val = e.control.value if e and e.control else None
+        new_val = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         if not new_val:
             return
         page = _get_page()
@@ -594,7 +601,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     btn_check_health = ft.Button(
         content=I18n.get("settings_check_health"),
         icon=ft.Icons.REFRESH,
-        on_click=_on_check_health,
+        on_click=safe_on_click(_on_check_health),
         style=style_health,
         height=40,
         width=AppStyles.CONTROL_WIDTH_MD,
@@ -603,32 +610,32 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     btn_health_report = ft.IconButton(
         icon=ft.Icons.INFO_OUTLINE,
         tooltip=I18n.get("health_report_title"),
-        on_click=_on_health_report_click,
+        on_click=safe_on_click(_on_health_report_click),
     )
 
     # MetricCards (props 推送, 声明式自动重渲染)
     metric_sync = MetricCard(
         label=I18n.get("ds_last_update"),
         value=metric_sync_value,
-        icon=metric_sync_icon,
+        icon=safe_icon_str(metric_sync_icon),
         status_color=metric_sync_color,
     )
     metric_coverage = MetricCard(
         label=I18n.get("ds_data_coverage"),
         value=metric_coverage_value,
-        icon=metric_coverage_icon,
+        icon=safe_icon_str(metric_coverage_icon),
         status_color=metric_coverage_color,
     )
     metric_health = MetricCard(
         label=I18n.get("ds_sys_health"),
         value=metric_health_value,
-        icon=metric_health_icon,
+        icon=safe_icon_str(metric_health_icon),
         status_color=metric_health_color,
     )
     metric_storage = MetricCard(
         label=I18n.get("ds_storage_usage"),
         value=metric_storage_value,
-        icon=metric_storage_icon,
+        icon=safe_icon_str(metric_storage_icon),
         status_color=metric_storage_color,
     )
 
@@ -667,21 +674,21 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
 
     # ActionChips (props 推送, is_loading 派生自 state)
     action_full_sync = ActionChip(
-        icon=ft.Icons.SYNC_PROBLEM,
+        icon=safe_icon_str(ft.Icons.SYNC_PROBLEM),
         title=I18n.get("settings_full_sync"),
         subtitle=I18n.get("ds_action_full"),
         on_click=_on_full_sync,
         is_loading=action_full_sync_loading,
     )
     action_ai_concept_rebuild = ActionChip(
-        icon=ft.Icons.AUTO_FIX_HIGH,
+        icon=safe_icon_str(ft.Icons.AUTO_FIX_HIGH),
         title=I18n.get("ds_btn_ai_concept_rebuild"),
         subtitle=I18n.get("ds_btn_ai_concept_rebuild_desc"),
         on_click=_on_ai_concept_rebuild,
         is_loading=action_ai_concept_loading,
     )
     action_clear_cache = ActionChip(
-        icon=ft.Icons.CLEANING_SERVICES,
+        icon=safe_icon_str(ft.Icons.CLEANING_SERVICES),
         title=I18n.get("settings_clear_cache"),
         subtitle=I18n.get("ds_action_clear"),
         on_click=_on_clear_cache,
@@ -714,7 +721,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     row_token = SettingRow(
-        icon=ft.Icons.KEY_ROUNDED,
+        icon=safe_icon_str(ft.Icons.KEY_ROUNDED),
         title=I18n.get("settings_token"),
         subtitle=I18n.get("settings_token_desc"),
         control=tushare_panel,
@@ -746,7 +753,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     sync_button = ft.Button(
         content=sync_button_content,
         icon=sync_button_icon,
-        on_click=_on_init_historical,
+        on_click=safe_on_click(_on_init_historical),
         tooltip=I18n.get("settings_init_desc"),
         style=sync_button_style,
         height=40,
@@ -760,11 +767,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         value=years_value,
         options=_build_history_years_options(),
         width=150,
-        on_select=_on_history_years_change,
+        on_select=safe_on_select(_on_history_years_change),
     )
 
     row_init = SettingRow(
-        icon=ft.Icons.HISTORY_ROUNDED,
+        icon=safe_icon_str(ft.Icons.HISTORY_ROUNDED),
         title=I18n.get("settings_init_data"),
         subtitle=I18n.get("settings_hint_first_run"),
         control=ft.Column(
@@ -837,7 +844,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             on_close=_on_health_report_close,
             on_deep_scan=_on_deep_scan,
         )
-        ft.use_dialog(health_report_dialog_ctrl)
+        ft.use_dialog(typing.cast("ft.DialogControl | None", health_report_dialog_ctrl))
 
     # --- Health scan dialog (条件渲染) ---
     if scan_dialog_open:
@@ -848,7 +855,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
             open_state=True,
             on_close=_on_scan_close,
         )
-        ft.use_dialog(scan_dialog_ctrl)
+        ft.use_dialog(typing.cast("ft.DialogControl | None", scan_dialog_ctrl))
 
     return ft.Container(
         content=ft.ListView(

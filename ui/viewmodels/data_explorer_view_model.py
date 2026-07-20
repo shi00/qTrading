@@ -2,6 +2,7 @@ import asyncio
 import functools
 import logging
 import re
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -95,7 +96,11 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         db_manager: DataExplorerQueryClient | None = None,
         thread_pool: ThreadPoolManager | None = None,
     ):
-        self._db = db_manager or DataExplorerQueryClient()
+        # NOTE(lazy): _db 声明为非 Optional 以避免 11 处 reportOptionalMemberAccess warning.
+        #   dispose() 后 _db 被 cast 为 None，但调用方由 _disposed flag 守护，不会访问 _db.
+        #   ceiling: dispose 后调用方若忘记检查 _disposed 直接访问 _db 会抛 AttributeError.
+        #   upgrade: 改用 _get_db() helper 方法返回 DataExplorerQueryClient（内部 raise）.
+        self._db: DataExplorerQueryClient = db_manager or DataExplorerQueryClient()
         self._tp = thread_pool or ThreadPoolManager()
 
         # Internal state (frozen snapshot)
@@ -130,7 +135,7 @@ class DataExplorerViewModel(ObservableViewModelMixin[DataExplorerState]):
         )
         if self._db is not None:
             self._db.close()
-            self._db = None  # type: ignore[assignment]
+            self._db = typing.cast(DataExplorerQueryClient, None)
         self._subscribers.clear()
 
     @log_async_operation(threshold_ms=PerfThreshold.DB_SINGLE_QUERY)

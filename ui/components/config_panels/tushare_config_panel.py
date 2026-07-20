@@ -18,6 +18,11 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_on_click,
+    safe_on_select,
+)
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -87,7 +92,7 @@ def _on_tier_change_factory(vm: TushareConfigPanelViewModel) -> Callable[[ft.Con
     """Create on_select handler for tier dropdown — submits vm.update_tier via page.run_task."""
 
     def _on_tier_change(e: ft.ControlEvent) -> None:
-        new_tier = e.control.value
+        new_tier = get_control_value(e.control, ft.Dropdown)
         if not new_tier:
             return
         try:
@@ -153,7 +158,7 @@ def TushareConfigPanel(
         value=state.tier,
         width=AppStyles.CONTROL_WIDTH_MD,
         options=_build_tier_options(state.tier_options),
-        on_select=_on_tier_change_factory(vm),
+        on_select=safe_on_select(_on_tier_change_factory(vm)),
         hint_text=I18n.get("sys_tier_hint_in_token_panel"),
         disabled=state.is_verifying,
     )
@@ -161,7 +166,7 @@ def TushareConfigPanel(
     verify_button = ft.Button(
         content=I18n.get("tushare_verify"),
         icon=ft.Icons.VERIFIED_USER_OUTLINED,
-        on_click=_on_verify_click_factory(vm),
+        on_click=safe_on_click(_on_verify_click_factory(vm)),
         style=AppStyles.secondary_button(),
         disabled=state.is_verifying,
     )
@@ -169,7 +174,7 @@ def TushareConfigPanel(
     save_button = ft.Button(
         content=I18n.get("tushare_save"),
         icon=ft.Icons.SAVE_OUTLINED,
-        on_click=_on_save_click_factory(vm),
+        on_click=safe_on_click(_on_save_click_factory(vm)),
         style=AppStyles.secondary_button(),
         visible=show_save_button,
         disabled=state.is_verifying,
@@ -195,7 +200,7 @@ def TushareConfigPanel(
     register_link = ft.TextButton(
         content=I18n.get("tushare_register"),
         icon=ft.Icons.OPEN_IN_NEW,
-        on_click=_on_register_click,
+        on_click=safe_on_click(_on_register_click),
         style=ft.ButtonStyle(
             color=AppColors.PRIMARY,
         ),

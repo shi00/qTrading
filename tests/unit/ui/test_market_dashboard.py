@@ -8,6 +8,11 @@ _build_index_card / _build_hsgt_card / _build_concept_card 分支逻辑
 及 MarketDashboard 组件体渲染。
 """
 
+# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）, Optional 成员访问（mock 返回 None）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import ast
 from pathlib import Path
 

@@ -20,12 +20,21 @@ import datetime
 import io
 import logging
 import os
+import typing
 from decimal import Decimal
 
 import flet as ft
 import pandas as pd
 
 from ui.components._markdown_safe import safe_open_url
+from ui.components.flet_type_helpers import (
+    get_control_attr,
+    get_control_value,
+    safe_controls,
+    safe_on_change,
+    safe_on_click,
+    safe_on_select,
+)
 from ui.components.resizable_splitter import ResizableSplitter
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
@@ -166,6 +175,13 @@ def _get_page() -> ft.Page | None:
         return None
 
 
+def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
+    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。"""
+    show_toast = typing.cast(typing.Any, page).show_toast
+    if show_toast is not None:
+        show_toast(msg, msg_type)
+
+
 def _build_strategy_options(strategies_with_dep: dict, strategy_mgr) -> list[ft.dropdown.Option]:
     """构建策略下拉框选项 (翻译策略名 + missing_apis 标记)。"""
     options = []
@@ -276,7 +292,7 @@ def ScreenerView(
         if not active:
             return
         page = _get_page()
-        if page is not None and file_picker not in page.services:
+        if page is not None and file_picker is not None and file_picker not in page.services:
             page.services.append(file_picker)
 
     def _cleanup_file_picker() -> None:
@@ -328,9 +344,9 @@ def ScreenerView(
         params_def = vm.get_strategy_params(key)
         for p in params_def:
             if p.get("name") == "ai_system_prompt":
-                params_ref.current[p["name"]] = vm.get_base_prompt(key) or p.get("default", "")
+                typing.cast(dict, params_ref.current)[p["name"]] = vm.get_base_prompt(key) or p.get("default", "")
             else:
-                params_ref.current[p["name"]] = p.get("default")
+                typing.cast(dict, params_ref.current)[p["name"]] = p.get("default")
         bump_params(_params_version + 1)
         # 执行 (VM 在 run_strategy 开始时自动清空 stream_cards)
         try:
@@ -345,7 +361,7 @@ def ScreenerView(
     # --- 事件 handler ---
 
     def _on_strategy_change(e: ft.ControlEvent) -> None:
-        new_val = e.control.value if e and e.control else None
+        new_val = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         UILogger.log_action("ScreenerView", "Select", f"strategy={new_val}")
         # R.2.2: vm.select_strategy 内聚 selected_strategy + tier_hint 到 VM state
         # Task 3.2: run_disabled 改为派生 (state.loading or not state.selected_strategy)
@@ -357,9 +373,11 @@ def ScreenerView(
             params_def = vm.get_strategy_params(new_val)
             for p in params_def:
                 if p.get("name") == "ai_system_prompt":
-                    params_ref.current[p["name"]] = vm.get_base_prompt(new_val) or p.get("default", "")
+                    typing.cast(dict, params_ref.current)[p["name"]] = vm.get_base_prompt(new_val) or p.get(
+                        "default", ""
+                    )
                 else:
-                    params_ref.current[p["name"]] = p.get("default")
+                    typing.cast(dict, params_ref.current)[p["name"]] = p.get("default")
             bump_params(_params_version + 1)
 
     async def _on_run_click(e: ft.ControlEvent) -> None:
@@ -402,8 +420,8 @@ def ScreenerView(
         df = vm.get_export_data()
         if df is None:
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("data_export_no_data"), "error")
+            if page is not None:
+                _safe_show_toast(page, I18n.get("data_export_no_data"), "error")
             return
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
         ext = "csv" if format_ == "csv" else "xlsx"
@@ -421,22 +439,26 @@ def ScreenerView(
                     buf = io.BytesIO()
                     df.to_excel(buf, index=False, engine="openpyxl")
                     src_bytes = buf.getvalue()
+                if file_picker is None:
+                    return
                 await file_picker.save_file(
                     dialog_title=I18n.get("data_export_save_title"),
                     file_name=default_filename,
                     allowed_extensions=[ext],
                     src_bytes=src_bytes,
                 )
-                if page is not None and hasattr(page, "show_toast"):
-                    page.show_toast(I18n.get("data_export_success", file=default_filename), "success")
+                if page is not None:
+                    _safe_show_toast(page, I18n.get("data_export_success", file=default_filename), "success")
             except asyncio.CancelledError:
                 raise
             except Exception as ex:
                 logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
-                if page is not None and hasattr(page, "show_toast"):
-                    page.show_toast(I18n.get("data_export_fail"), "error")
+                if page is not None:
+                    _safe_show_toast(page, I18n.get("data_export_fail"), "error")
             return
 
+        if file_picker is None:
+            return
         filepath = await file_picker.save_file(
             dialog_title=I18n.get("data_export_save_title"),
             file_name=default_filename,
@@ -453,17 +475,17 @@ def ScreenerView(
             page = _get_page()
             if path:
                 filename = os.path.basename(filepath)
-                if page is not None and hasattr(page, "show_toast"):
-                    page.show_toast(I18n.get("data_export_success", file=filename), "success")
-            elif page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("data_export_fail"), "error")
+                if page is not None:
+                    _safe_show_toast(page, I18n.get("data_export_success", file=filename), "success")
+            elif page is not None:
+                _safe_show_toast(page, I18n.get("data_export_fail"), "error")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("data_export_fail"), "error")
+            if page is not None:
+                _safe_show_toast(page, I18n.get("data_export_fail"), "error")
 
     def _on_export_csv_click(e: ft.ControlEvent) -> None:
         page = _get_page()
@@ -477,7 +499,7 @@ def ScreenerView(
 
     def _on_page_size_change(e: ft.ControlEvent) -> None:
         try:
-            new_size = int(e.control.value if e and e.control else 50)
+            new_size = int(get_control_value(e.control, ft.Dropdown) if e and e.control else 50)
             vm.change_page_size(new_size)
         except (ValueError, TypeError):
             pass
@@ -489,7 +511,7 @@ def ScreenerView(
         vm.change_page(1)
 
     def _on_mode_change(e: ft.ControlEvent) -> None:
-        selected = e.control.selected if e and e.control else []
+        selected = get_control_attr(e.control, ft.SegmentedButton, "selected") if e and e.control else []
         if not selected:
             return
         new_mode = list(selected)[0]
@@ -514,8 +536,8 @@ def ScreenerView(
         except Exception as ex:
             logger.error("[ScreenerView] History tree load failed: %s", ex, exc_info=True)
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("screener_load_failed"), "error")
+            if page is not None:
+                _safe_show_toast(page, I18n.get("screener_load_failed"), "error")
 
     def _on_load_more_history(e: ft.ControlEvent) -> None:
         page = _get_page()
@@ -553,7 +575,7 @@ def ScreenerView(
         """行点击 → 打开详情对话框。"""
         ts_code = row_data.get("ts_code", "")
         raw_data = _raw_row_lookup.get(ts_code, row_data)
-        set_detail_dialog_data(raw_data)
+        set_detail_dialog_data(typing.cast(typing.Any, raw_data))
 
     def _on_detail_close() -> None:
         set_detail_dialog_data(None)
@@ -565,41 +587,41 @@ def ScreenerView(
         bump_params(_params_version + 1)
 
     def _on_slider_change(name: str, e: ft.ControlEvent) -> None:
-        val = e.control.value if e and e.control else 0
+        val = get_control_value(e.control, ft.Slider) if e and e.control else 0
         _update_param(name, val)
         # R.2.6.2: 动态更新策略描述 (vm.update_strategy_desc 用当前 params 重算 desc+color)
         if state.selected_strategy:
             vm.update_strategy_desc(state.selected_strategy, params=dict(params_ref.current or {}))
 
-    async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField) -> None:
+    async def _do_restore_default_async(strat: str, ctrl_field: ft.TextField | None) -> None:
         # Phase 3.3: ConfigHandler.set_strategy_prompt + base_prompt 读取下沉到
         # vm.reset_strategy_prompt (返回 base_prompt 字符串), View 仅更新 UI state + 展示反馈.
         try:
             new_val = await vm.reset_strategy_prompt(strat)
             _update_param("ai_system_prompt", new_val)
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("ai_settings_restored"), "info")
+            if page is not None:
+                _safe_show_toast(page, I18n.get("ai_settings_restored"), "info")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[ScreenerView] Restore default prompt failed: %s", ex, exc_info=True)
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("sys_snack_save_err"), "error")
+            if page is not None:
+                _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
 
     async def _do_save_prompt_async(strat: str) -> None:
         # Phase 3.3: validate_prompt + ConfigHandler.set_strategy_prompt 下沉到
         # vm.save_strategy_prompt (返回 (success, error_key)), View 仅展示反馈.
         try:
-            prompt_val = params_ref.current.get("ai_system_prompt", "") or ""
+            prompt_val = (params_ref.current or {}).get("ai_system_prompt", "") or ""
             success, error_key = await vm.save_strategy_prompt(strat, prompt_val)
             page = _get_page()
-            if page is None or not hasattr(page, "show_toast"):
+            if page is None:
                 return
             if success:
                 UILogger.log_action("ScreenerView", "SavePrompt", f"strategy={strat}")
-                page.show_toast(I18n.get("ai_settings_saved"), "success")
+                _safe_show_toast(page, I18n.get("ai_settings_saved"), "success")
             else:
                 from utils.prompt_guard import MAX_PROMPT_LENGTH
 
@@ -607,14 +629,14 @@ def ScreenerView(
                 msg = I18n.get(error_key, error_key)
                 if error_key == "prompt_err_length":
                     msg = I18n.get("prompt_err_length").format(max=MAX_PROMPT_LENGTH)
-                page.show_toast(f"⚠ {msg}", "warning")
+                _safe_show_toast(page, f"⚠ {msg}", "warning")
         except asyncio.CancelledError:
             raise
         except Exception as ex:
             logger.error("[ScreenerView] Save prompt failed: %s", ex, exc_info=True)
             page = _get_page()
-            if page is not None and hasattr(page, "show_toast"):
-                page.show_toast(I18n.get("sys_snack_save_err"), "error")
+            if page is not None:
+                _safe_show_toast(page, I18n.get("sys_snack_save_err"), "error")
 
     def _on_restore_prompt(strat: str) -> None:
         page = _get_page()
@@ -667,7 +689,7 @@ def ScreenerView(
             default = p.get("default", min_val)
             step = p.get("step", 1)
             divisions = int((max_val - min_val) / step) if step > 0 else 10
-            current_val = params_ref.current.get(p_name, default)
+            current_val = (params_ref.current or {}).get(p_name, default)
             init_display = int(current_val) if current_val == int(current_val) else round(current_val, 1)
             return ft.Column(
                 [
@@ -680,7 +702,7 @@ def ScreenerView(
                         label="{value}",
                         active_color=AppColors.PRIMARY,
                         tooltip=str(init_display),
-                        on_change=lambda e, n=p_name: _on_slider_change(n, e),
+                        on_change=safe_on_change(lambda e, n=p_name: _on_slider_change(n, e)),
                     ),
                 ],
                 spacing=2,
@@ -688,7 +710,7 @@ def ScreenerView(
             )
 
         if p_type == "number":
-            current_val = params_ref.current.get(p_name, p.get("default", ""))
+            current_val = (params_ref.current or {}).get(p_name, p.get("default", ""))
             return ft.TextField(
                 label=label,
                 value=str(current_val),
@@ -704,7 +726,7 @@ def ScreenerView(
 
         if p_type == "dropdown":
             options = p.get("options", [])
-            current_val = params_ref.current.get(p_name, p.get("default", ""))
+            current_val = (params_ref.current or {}).get(p_name, p.get("default", ""))
             return ft.Dropdown(
                 label=label,
                 value=str(current_val),
@@ -721,12 +743,12 @@ def ScreenerView(
         if p_type == "textarea":
             if p_name == "ai_system_prompt" and state.selected_strategy:
                 current_val = (
-                    params_ref.current.get(p_name)
+                    (params_ref.current or {}).get(p_name)
                     or vm.get_base_prompt(state.selected_strategy)
                     or p.get("default", "")
                 )
             else:
-                current_val = params_ref.current.get(p_name, p.get("default", ""))
+                current_val = (params_ref.current or {}).get(p_name, p.get("default", ""))
             ctrl = ft.TextField(
                 label=label,
                 value=str(current_val),
@@ -1003,7 +1025,7 @@ def ScreenerView(
         load_more_btn = ft.TextButton(
             content=I18n.get("history_load_more"),
             icon=ft.Icons.EXPAND_MORE,
-            on_click=_on_load_more_history,
+            on_click=safe_on_click(_on_load_more_history),
             visible=history_load_more_visible,
         )
 
@@ -1036,27 +1058,29 @@ def ScreenerView(
 
     # 1. 顶部控制区
     title_row = ft.Row(
-        [
-            ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),
-            ft.Text(I18n.get("screener_title"), size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
-            ft.Container(width=20),
-            ft.SegmentedButton(
-                segments=[
-                    ft.Segment(
-                        value="REALTIME",
-                        label=ft.Text(I18n.get("screener_mode_run")),
-                        icon=ft.Icon(ft.Icons.ELECTRIC_BOLT),
-                    ),
-                    ft.Segment(
-                        value="HISTORY",
-                        label=ft.Text(I18n.get("screener_mode_history")),
-                        icon=ft.Icon(ft.Icons.HISTORY),
-                    ),
-                ],
-                selected=[state.mode],
-                on_change=_on_mode_change,
-            ),
-        ],
+        safe_controls(
+            [
+                ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),
+                ft.Text(I18n.get("screener_title"), size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                ft.Container(width=20),
+                ft.SegmentedButton(
+                    segments=[
+                        ft.Segment(
+                            value="REALTIME",
+                            label=ft.Text(I18n.get("screener_mode_run")),
+                            icon=ft.Icon(ft.Icons.ELECTRIC_BOLT),
+                        ),
+                        ft.Segment(
+                            value="HISTORY",
+                            label=ft.Text(I18n.get("screener_mode_history")),
+                            icon=ft.Icon(ft.Icons.HISTORY),
+                        ),
+                    ],
+                    selected=[state.mode],
+                    on_change=safe_on_change(_on_mode_change),
+                ),
+            ]
+        ),
         alignment=ft.MainAxisAlignment.START,
         spacing=10,
     )
@@ -1066,7 +1090,7 @@ def ScreenerView(
         label=I18n.get("select_strategy"),
         options=_build_strategy_options(state.strategies_with_dep, vm.strategy_mgr),
         value=state.selected_strategy,
-        on_select=_on_strategy_change,
+        on_select=safe_on_select(_on_strategy_change),
         width=AppStyles.CONTROL_WIDTH_MD,
         text_size=14,
         bgcolor=AppColors.INPUT_BG,
@@ -1111,7 +1135,7 @@ def ScreenerView(
     run_btn = ft.Button(
         content=I18n.get("run_screening"),
         icon=ft.Icons.PLAY_ARROW,
-        on_click=_on_run_click_sync,
+        on_click=safe_on_click(_on_run_click_sync),
         disabled=run_disabled,
         style=AppStyles.primary_button(),
         height=45,
@@ -1120,7 +1144,7 @@ def ScreenerView(
     export_btn = ft.Button(
         content=I18n.get("screener_export"),
         icon=ft.Icons.DOWNLOAD,
-        on_click=_on_export_csv_click,
+        on_click=safe_on_click(_on_export_csv_click),
         disabled=export_btn_disabled,
         style=AppStyles.outline_button(),
         height=45,
@@ -1128,7 +1152,7 @@ def ScreenerView(
     export_excel_btn = ft.Button(
         content=I18n.get("data_export_excel"),
         icon=ft.Icons.TABLE_VIEW,
-        on_click=_on_export_excel_click,
+        on_click=safe_on_click(_on_export_excel_click),
         disabled=export_btn_disabled,
         style=AppStyles.outline_button(),
         height=45,
@@ -1154,35 +1178,38 @@ def ScreenerView(
 
     # 2. 表格区
     pagination_row = ft.Row(
-        [
-            ft.IconButton(
-                ft.Icons.CHEVRON_LEFT,
-                on_click=_on_prev_page,
-                icon_color=AppColors.PRIMARY,
-                disabled=page_no <= 1,
-                tooltip=I18n.get("screener_page_prev"),
-            ),
-            ft.Text(
-                I18n.get("screener_page_info").format(current=page_no, total=total_pages), color=AppColors.TEXT_PRIMARY
-            ),
-            ft.IconButton(
-                ft.Icons.CHEVRON_RIGHT,
-                on_click=_on_next_page,
-                icon_color=AppColors.PRIMARY,
-                disabled=page_no >= total_pages,
-                tooltip=I18n.get("screener_page_next"),
-            ),
-            ft.Container(width=20),
-            ft.Dropdown(
-                label=I18n.get("screener_page_size"),
-                options=_build_page_size_options(),
-                value=str(state.page_size),
-                width=120,
-                dense=True,
-                text_size=13,
-                on_select=_on_page_size_change,
-            ),
-        ],
+        safe_controls(
+            [
+                ft.IconButton(
+                    ft.Icons.CHEVRON_LEFT,
+                    on_click=safe_on_click(_on_prev_page),
+                    icon_color=AppColors.PRIMARY,
+                    disabled=page_no <= 1,
+                    tooltip=I18n.get("screener_page_prev"),
+                ),
+                ft.Text(
+                    I18n.get("screener_page_info").format(current=page_no, total=total_pages),
+                    color=AppColors.TEXT_PRIMARY,
+                ),
+                ft.IconButton(
+                    ft.Icons.CHEVRON_RIGHT,
+                    on_click=safe_on_click(_on_next_page),
+                    icon_color=AppColors.PRIMARY,
+                    disabled=page_no >= total_pages,
+                    tooltip=I18n.get("screener_page_next"),
+                ),
+                ft.Container(width=20),
+                ft.Dropdown(
+                    label=I18n.get("screener_page_size"),
+                    options=_build_page_size_options(),
+                    value=str(state.page_size),
+                    width=120,
+                    dense=True,
+                    text_size=13,
+                    on_select=safe_on_select(_on_page_size_change),
+                ),
+            ]
+        ),
         alignment=ft.MainAxisAlignment.CENTER,
     )
 

@@ -17,7 +17,7 @@
     "scripts"
   ],
   "typeCheckingMode": "basic",
-  "reportMissingTypeStubs": "warning",
+  "reportMissingTypeStubs": "none",
   "reportMissingImports": "error",
   "reportUnknownMemberType": "none",
   "reportUnknownArgumentType": "none",

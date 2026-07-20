@@ -1,7 +1,12 @@
+# pyright: reportAttributeAccessIssue=false
+# 本文件使用 monkey-patch 模式给 AIStrategyMixin 实例动态注入 cache 属性，
+# 并通过 MagicMock / _make_fake_cache 创建 fake cache 对象。pyright 无法识别
+# 这些动态属性。统一在此文件局部禁用 attribute access 告警。
 import ast
 import inspect
 import re
-from unittest.mock import AsyncMock, patch
+import typing
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -172,7 +177,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_multi_period_financials_labels_match_text(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_financial_reports_history = _async_return(
             pd.DataFrame(
                 {
@@ -237,7 +242,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_multi_period_financials_empty_df_no_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
 
         labels: list[str] = []
@@ -252,7 +257,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_multi_period_financials_none_df_no_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_financial_reports_history = _async_return(None)
 
         labels: list[str] = []
@@ -267,7 +272,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_multi_period_financials_exception_clears_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_financial_reports_history = _async_raise(RuntimeError("DB error"))
 
         labels: list[str] = []
@@ -283,7 +288,7 @@ class TestInvariant3BuilderLabelEquivalence:
     async def test_multi_period_financials_all_na_no_labels(self):
         """全 NaN DataFrame：dropna() 清空所有值 → 返回哨兵，不注册标签。"""
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_financial_reports_history = _async_return(
             pd.DataFrame(
                 {
@@ -314,7 +319,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_auxiliary_data_labels_match_text(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_fina_audit = _async_return(
             pd.DataFrame({"ts_code": ["000001.SZ"], "audit_result": ["标准无保留"]})
         )
@@ -398,7 +403,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_auxiliary_data_no_data_no_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_fina_audit = _async_return(pd.DataFrame())
         mixin.cache.get_fina_mainbz = _async_return(pd.DataFrame())
         mixin.cache.get_dividend = _async_return(pd.DataFrame())
@@ -424,7 +429,7 @@ class TestInvariant3BuilderLabelEquivalence:
     @pytest.mark.asyncio
     async def test_auxiliary_data_exception_clears_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_fina_audit = _async_raise(RuntimeError("DB error"))
 
         labels: list[str] = []
@@ -440,7 +445,7 @@ class TestInvariant3BuilderLabelEquivalence:
     async def test_auxiliary_data_all_na_no_labels(self):
         """全 NaN 辅助数据：pledge_ratio=None → 不注册标签，返回哨兵。"""
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_fina_audit = _async_return(pd.DataFrame({"ts_code": ["000001.SZ"], "audit_result": [None]}))
         mixin.cache.get_fina_mainbz = _async_return(
             pd.DataFrame({"ts_code": ["000001.SZ"], "bz_item": [None], "bz_sales": [0]})
@@ -482,7 +487,7 @@ class TestInvariant3BuilderLabelEquivalence:
         """Phase 3F-2：prefetched 含 sw_industry 字段时，_build_auxiliary_data_text
         应注入申万行业段落并注册 ai_label_sw_industry 标签。"""
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         # 仅预取 sw_industry 字段（字符串），其余辅助数据返回空 DataFrame
         prefetched = {"000001.SZ": {"sw_industry": "半导体Ⅱ"}}
 
@@ -502,7 +507,7 @@ class TestInvariant3BuilderLabelEquivalence:
     async def test_auxiliary_data_sw_industry_empty_no_label(self):
         """Phase 3F-2：prefetched 含 sw_industry 但为空字符串时，不注册标签。"""
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         prefetched = {"000001.SZ": {"sw_industry": ""}}
 
         labels: list[str] = []
@@ -644,7 +649,7 @@ class TestInvariant3BuilderLabelEquivalence:
         """None 不注册标签，返回 ai_history_insufficient 哨兵。"""
         labels: list[str] = []
         result = AIStrategyMixin._build_history_text(
-            None,
+            typing.cast(pd.DataFrame, None),
             ts_code="000001.SZ",
             labels_out=labels,
         )
@@ -694,7 +699,7 @@ class TestInvariant3BuilderLabelEquivalence:
     async def test_macro_context_exception_returns_empty(self):
         """_build_macro_context 异常路径：catch 后返回空串，不触发 ai_label_shibor / ai_label_macro_full 注册。"""
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_macro_economy = _async_raise(RuntimeError("DB error"))
         mixin.cache.get_shibor_latest = _async_raise(RuntimeError("DB error"))
 
@@ -741,7 +746,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
     @pytest.mark.asyncio
     async def test_multi_period_sentinel_excludes_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
@@ -781,7 +786,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
     @pytest.mark.asyncio
     async def test_auxiliary_sentinel_excludes_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         mixin.cache.get_financial_reports_history = _async_return(
             pd.DataFrame(
                 {
@@ -838,7 +843,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
     @pytest.mark.asyncio
     async def test_all_valid_includes_all_labels(self):
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         mixin.cache.get_financial_reports_history = _async_return(
             pd.DataFrame(
                 {
@@ -936,7 +941,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
     async def test_capital_flow_sentinel_excludes_labels(self):
         """capital_flow 为空（全 NA）时，capital_labels 应为空。"""
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
@@ -973,7 +978,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
     async def test_history_sentinel_excludes_labels(self):
         """history 数据不足时，history_labels 应为空。"""
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
@@ -1022,7 +1027,7 @@ class TestInvariant5MixinAnalyzeSingleLabelAssembly:
     async def test_macro_empty_excludes_label(self):
         """macro_context 为空时，ai_label_shibor / ai_label_macro_full 不应注册。"""
         mixin = AIStrategyMixin()
-        mixin.cache = _make_fake_cache()
+        _attach_cache(mixin, _make_fake_cache())
         mixin.cache.get_financial_reports_history = _async_return(pd.DataFrame())
 
         prefetched = PreFetchedContext(
@@ -1439,7 +1444,7 @@ class TestInvariant7PledgeBoundary:
     @pytest.mark.asyncio
     async def test_pledge_zero_no_label(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_fina_audit = _async_return(pd.DataFrame())
         mixin.cache.get_fina_mainbz = _async_return(pd.DataFrame())
         mixin.cache.get_dividend = _async_return(pd.DataFrame())
@@ -1465,7 +1470,7 @@ class TestInvariant7PledgeBoundary:
     @pytest.mark.asyncio
     async def test_pledge_none_no_label(self):
         mixin = AIStrategyMixin()
-        mixin.cache = type("FakeCache", (), {})()
+        _attach_cache(mixin, MagicMock())
         mixin.cache.get_fina_audit = _async_return(pd.DataFrame())
         mixin.cache.get_fina_mainbz = _async_return(pd.DataFrame())
         mixin.cache.get_dividend = _async_return(pd.DataFrame())
@@ -1501,8 +1506,13 @@ def _async_raise(exc):
     return AsyncMock(side_effect=exc)
 
 
-def _make_fake_cache():
-    cache = type("FakeCache", (), {})()
+def _attach_cache(mixin: AIStrategyMixin, cache: typing.Any) -> None:
+    """Attach cache to mixin (AIStrategyMixin has no cache attr; monkey-patch via cast)."""
+    typing.cast(typing.Any, mixin).cache = cache
+
+
+def _make_fake_cache() -> MagicMock:
+    cache = MagicMock()
     cache.get_fina_audit = _async_return(pd.DataFrame())
     cache.get_fina_mainbz = _async_return(pd.DataFrame())
     cache.get_dividend = _async_return(pd.DataFrame())

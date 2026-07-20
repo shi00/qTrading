@@ -23,11 +23,13 @@
 import asyncio
 import logging
 import threading
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_click, safe_on_hover
 from ui.i18n import I18n
 from ui.theme import AppColors
 from utils.async_utils import gather_for_shutdown_cleanup
@@ -323,8 +325,8 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                 logger.debug("[ToastManager] Auto-dismiss failed: %s", exc, exc_info=True)
 
         task = page.run_task(_run_timer)
-        task_ref.current = task
-        _register_task(task)
+        task_ref.current = typing.cast(typing.Any, task)
+        _register_task(typing.cast(typing.Any, task))
 
     async def cleanup() -> None:
         """卸载时取消任务并等待清理完成（R2 兼容）。
@@ -392,21 +394,23 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
 
     return ft.Container(
         content=ft.Row(
-            [
-                ft.Icon(data.icon, color=data.color, size=24),
-                ft.Column(
-                    content_col_controls,
-                    spacing=2,
-                    alignment=ft.MainAxisAlignment.CENTER,
-                ),
-                ft.IconButton(
-                    ft.Icons.CLOSE,
-                    icon_size=16,
-                    icon_color=ft.Colors.ON_SURFACE_VARIANT,
-                    on_click=_on_dismiss_click,
-                    tooltip=I18n.get("common_close"),
-                ),
-            ],
+            safe_controls(
+                [
+                    ft.Icon(safe_icon(data.icon), color=data.color, size=24),
+                    ft.Column(
+                        content_col_controls,
+                        spacing=2,
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    ft.IconButton(
+                        ft.Icons.CLOSE,
+                        icon_size=16,
+                        icon_color=ft.Colors.ON_SURFACE_VARIANT,
+                        on_click=safe_on_click(_on_dismiss_click),
+                        tooltip=I18n.get("common_close"),
+                    ),
+                ],
+            ),
             alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
             vertical_alignment=ft.CrossAxisAlignment.START,
         ),
@@ -424,5 +428,5 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
         animate_offset=ft.Animation(300, ft.AnimationCurve.EASE_OUT_CUBIC),
         animate_opacity=ft.Animation(300, ft.AnimationCurve.EASE_IN),
         opacity=opacity,
-        on_hover=_on_hover,
+        on_hover=safe_on_hover(_on_hover),
     )

@@ -11,6 +11,11 @@
 业务逻辑覆盖（颜色判断/状态映射/扫描结果构建）由 ``test_health_report_dialog.py`` 单测承担。
 """
 
+# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）, Optional 成员访问（mock 返回 None）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import contextlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch

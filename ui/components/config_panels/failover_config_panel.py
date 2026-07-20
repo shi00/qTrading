@@ -19,6 +19,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_on_click
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -251,13 +252,13 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
 
     test_btn = ft.TextButton(
         content=I18n.get("failover_test_connection"),
-        on_click=_run_task_no_args(vm.test_credential),
+        on_click=safe_on_click(_run_task_no_args(vm.test_credential)),
         disabled=state.dialog_is_testing,
     )
 
     confirm_btn = ft.Button(
         content=I18n.get("common_confirm"),
-        on_click=_run_task_no_args(vm.confirm_credential),
+        on_click=safe_on_click(_run_task_no_args(vm.confirm_credential)),
         style=AppStyles.primary_button(),
         disabled=state.dialog_is_saving,
     )
@@ -317,27 +318,27 @@ def _build_list_item(
     btn_up = ft.IconButton(
         ft.Icons.ARROW_UPWARD,
         icon_size=16,
-        on_click=_run_task_factory(vm.move_item, index, -1),
+        on_click=safe_on_click(_run_task_factory(vm.move_item, index, -1)),
         disabled=index == 0,
         tooltip=I18n.get("failover_move_up"),
     )
     btn_down = ft.IconButton(
         ft.Icons.ARROW_DOWNWARD,
         icon_size=16,
-        on_click=_run_task_factory(vm.move_item, index, 1),
+        on_click=safe_on_click(_run_task_factory(vm.move_item, index, 1)),
         disabled=index == total - 1,
         tooltip=I18n.get("failover_move_down"),
     )
     btn_edit = ft.IconButton(
         ft.Icons.EDIT,
         icon_size=16,
-        on_click=_run_task_factory(vm.open_edit_dialog, index),
+        on_click=safe_on_click(_run_task_factory(vm.open_edit_dialog, index)),
         tooltip=I18n.get("failover_edit"),
     )
     btn_delete = ft.IconButton(
         ft.Icons.DELETE_OUTLINE,
         icon_size=16,
-        on_click=_run_task_factory(vm.delete_item, index),
+        on_click=safe_on_click(_run_task_factory(vm.delete_item, index)),
         tooltip=I18n.get("failover_delete"),
     )
 
@@ -444,7 +445,7 @@ def FailoverConfigPanel(
     btn_add = ft.OutlinedButton(
         content=I18n.get("failover_add_provider"),
         icon=ft.Icons.ADD,
-        on_click=_run_task_no_args(vm.open_add_dialog),
+        on_click=safe_on_click(_run_task_no_args(vm.open_add_dialog)),
         style=AppStyles.secondary_button(),
         height=36,
     )
@@ -452,7 +453,7 @@ def FailoverConfigPanel(
     btn_validate = ft.OutlinedButton(
         content=I18n.get("failover_validate_all"),
         icon=ft.Icons.VERIFIED_USER,
-        on_click=_run_task_no_args(vm.validate_all),
+        on_click=safe_on_click(_run_task_no_args(vm.validate_all)),
         style=AppStyles.secondary_button(),
         height=36,
     )

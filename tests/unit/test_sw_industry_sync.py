@@ -6,6 +6,11 @@
 正常路径与异常吞没。取消信号路径见 ``test_sw_industry_sync_cancellation.py``。
 """
 
+# pyright: reportAttributeAccessIssue=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import asyncio
 import logging
 

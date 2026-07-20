@@ -3,6 +3,7 @@ import datetime
 import inspect
 import logging
 import time
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
@@ -983,8 +984,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
 
                 # Pin ai_score and ai_reason to the front (after name)
                 # Ensure ai_reason column exists (some AI results may only return score)
-                if "ai_reason" not in self._full_results.columns:
-                    self._full_results["ai_reason"] = ""
+                if "ai_reason" not in typing.cast("pd.DataFrame", self._full_results).columns:
+                    typing.cast("pd.DataFrame", self._full_results)["ai_reason"] = ""
                 cols = list(self._full_results.columns)  # type: ignore[untyped]
                 # Remove if exists
                 if "ai_score" in cols:

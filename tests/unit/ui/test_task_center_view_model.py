@@ -10,6 +10,11 @@
 不重复已有测试，遵循 YAGNI。
 """
 
+# pyright: reportArgumentType=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import contextlib
 from unittest.mock import MagicMock, patch
 

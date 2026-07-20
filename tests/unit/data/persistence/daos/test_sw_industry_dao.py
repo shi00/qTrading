@@ -1,4 +1,5 @@
 """Phase 3F-1：SwIndustryClassifyDao + SwIndustryMemberDao 单元测试。"""
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 
 import asyncio
 
@@ -38,6 +39,11 @@ class TestSaveSwIndustryClassify:
     @pytest.mark.asyncio
     async def test_none_returns_zero(self):
         """save_sw_industry_classify(None) 返回 0，不调用 _save_upsert。"""
+
+        # 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）, 动态属性访问（mock/stub/monkey-patch）。
+        # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+        # 测试行为由测试用例本身验证。
+
         dao = _make_classify_dao()
         assert await dao.save_sw_industry_classify(None) == 0
         dao._save_upsert.assert_not_awaited()

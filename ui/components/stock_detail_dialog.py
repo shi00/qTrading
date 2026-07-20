@@ -15,6 +15,7 @@
 
 import logging
 import math
+import typing
 from collections.abc import Callable
 from decimal import Decimal
 
@@ -92,7 +93,7 @@ def _format_val(stock_data: dict, key: str, suffix: str = "") -> str:
     if not is_valid_number(val):
         return "-"
     try:
-        return f"{float(val):.2f}{suffix}"
+        return f"{float(typing.cast('float | int', val)):.2f}{suffix}"
     except (ValueError, TypeError):
         return "-"
 

@@ -1,3 +1,8 @@
+# pyright: reportArgumentType=false, reportOptionalMemberAccess=false, reportOptionalSubscript=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）, Optional 成员访问（mock 返回 None）, Optional 下标访问。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import pytest
 import httpx
 from unittest.mock import patch, AsyncMock, MagicMock

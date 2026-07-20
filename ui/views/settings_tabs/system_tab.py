@@ -21,6 +21,12 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_icon_str,
+    safe_on_click,
+    safe_on_select,
+)
 from ui.components.settings_widgets import DashboardCard, SectionHeader, SettingRow
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -119,19 +125,21 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 return
             I18n.set_locale(new_locale)
             page = _get_page()
-            if page is not None and getattr(page, "locale_configuration", None):
-                try:
-                    normalized = I18n.current_locale()
-                    parts = normalized.split("_")
-                    lang = parts[0]
-                    country = parts[1] if len(parts) > 1 else None
-                    page.locale_configuration.current_locale = ft.Locale(lang, country)
-                except Exception as ex:
-                    logger.debug(
-                        "[SystemTab] Failed to update page locale configuration: %s",
-                        ex,
-                        exc_info=True,
-                    )
+            if page is not None:
+                locale_config = page.locale_configuration
+                if locale_config is not None:
+                    try:
+                        normalized = I18n.current_locale()
+                        parts = normalized.split("_")
+                        lang = parts[0]
+                        country = parts[1] if len(parts) > 1 else None
+                        locale_config.current_locale = ft.Locale(lang, country)
+                    except Exception as ex:
+                        logger.debug(
+                            "[SystemTab] Failed to update page locale configuration: %s",
+                            ex,
+                            exc_info=True,
+                        )
             if show_snack_callback:
                 show_snack_callback(I18n.get("settings_language_changed"))
         except asyncio.CancelledError:
@@ -326,7 +334,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- Event handlers (乐观更新 + 后台保存) ---
     def _on_language_change(e: ft.ControlEvent) -> None:
-        new_locale = e.control.value if e and e.control else None
+        new_locale = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         if not new_locale:
             return
         settings_vm.set_language_value(new_locale)
@@ -336,7 +344,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_language_change, new_locale)
 
     def _on_theme_change(e: ft.ControlEvent) -> None:
-        new_theme = e.control.value if e and e.control else None
+        new_theme = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         if not new_theme:
             return
         settings_vm.set_theme_value(new_theme)
@@ -346,7 +354,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_theme_change, new_theme)
 
     def _on_log_level_change(e: ft.ControlEvent) -> None:
-        new_level = e.control.value if e and e.control else None
+        new_level = get_control_value(e.control, ft.Dropdown) if e and e.control else None
         if not new_level:
             return
         settings_vm.set_log_level_value(new_level)
@@ -400,7 +408,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         border_radius=8,
         content_padding=10,
         options=_build_language_options(),
-        on_select=_on_language_change,
+        on_select=safe_on_select(_on_language_change),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -414,7 +422,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         border_radius=8,
         content_padding=10,
         options=_build_theme_options(),
-        on_select=_on_theme_change,
+        on_select=safe_on_select(_on_theme_change),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -444,7 +452,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         border_radius=8,
         content_padding=10,
         options=_build_log_level_options(),
-        on_select=_on_log_level_change,
+        on_select=safe_on_select(_on_log_level_change),
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
@@ -551,7 +559,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             else I18n.get("settings_diagnostics_btn")
         ),
         icon=ft.Icons.DOWNLOAD_ROUNDED,
-        on_click=_on_export_diagnostics,
+        on_click=safe_on_click(_on_export_diagnostics),
         disabled=diagnostics_exporting,
         style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
     )
@@ -560,7 +568,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     # --- SettingRows ---
     row_language = SettingRow(
-        icon=ft.Icons.LANGUAGE_ROUNDED,
+        icon=safe_icon_str(ft.Icons.LANGUAGE_ROUNDED),
         icon_color=ft.Colors.BLUE,
         title=I18n.get("settings_language"),
         subtitle=I18n.get("settings_language_desc"),
@@ -570,7 +578,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     row_theme = SettingRow(
-        icon=ft.Icons.COLOR_LENS_ROUNDED,
+        icon=safe_icon_str(ft.Icons.COLOR_LENS_ROUNDED),
         icon_color=ft.Colors.PURPLE,
         title=I18n.get("settings_theme"),
         subtitle=I18n.get("settings_snack_theme_updated"),
@@ -580,7 +588,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     row_log = SettingRow(
-        icon=ft.Icons.BUG_REPORT_ROUNDED,
+        icon=safe_icon_str(ft.Icons.BUG_REPORT_ROUNDED),
         icon_color=AppColors.PRIMARY,
         title=I18n.get("settings_log_level"),
         subtitle=I18n.get("sys_log_label"),
@@ -593,10 +601,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         icon=ft.Icons.SAVE_ROUNDED,
         icon_color=AppColors.PRIMARY,
         tooltip=save_config_tip,
-        on_click=_on_save_concurrency,
+        on_click=safe_on_click(_on_save_concurrency),
     )
     row_concurrency = SettingRow(
-        icon=ft.Icons.SPEED_ROUNDED,
+        icon=safe_icon_str(ft.Icons.SPEED_ROUNDED),
         icon_color=AppColors.ACCENT,
         title=I18n.get("sys_sync_heavy"),
         subtitle=I18n.get("sys_sync_heavy_hint"),
@@ -612,10 +620,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         icon=ft.Icons.SAVE_ROUNDED,
         icon_color=AppColors.PRIMARY,
         tooltip=save_config_tip,
-        on_click=_on_save_thread_pool,
+        on_click=safe_on_click(_on_save_thread_pool),
     )
     row_thread_pool = SettingRow(
-        icon=ft.Icons.MEMORY_ROUNDED,
+        icon=safe_icon_str(ft.Icons.MEMORY_ROUNDED),
         icon_color=ft.Colors.INDIGO,
         title=I18n.get("sys_thread_pool_title"),
         subtitle=I18n.get("sys_thread_pool_desc"),
@@ -632,10 +640,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         icon=ft.Icons.SAVE_ROUNDED,
         icon_color=AppColors.PRIMARY,
         tooltip=save_config_tip,
-        on_click=_on_save_db_pool,
+        on_click=safe_on_click(_on_save_db_pool),
     )
     row_db_pool = SettingRow(
-        icon=ft.Icons.STORAGE_ROUNDED,
+        icon=safe_icon_str(ft.Icons.STORAGE_ROUNDED),
         icon_color=ft.Colors.ORANGE,
         title=I18n.get("settings_db_pool"),
         subtitle=I18n.get("settings_pool_desc"),
@@ -652,10 +660,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         icon=ft.Icons.SAVE_ROUNDED,
         icon_color=AppColors.PRIMARY,
         tooltip=I18n.get("common_save"),
-        on_click=_on_save_no_proxy,
+        on_click=safe_on_click(_on_save_no_proxy),
     )
     row_proxy = SettingRow(
-        icon=ft.Icons.PUBLIC_OFF_ROUNDED,
+        icon=safe_icon_str(ft.Icons.PUBLIC_OFF_ROUNDED),
         icon_color=ft.Colors.TEAL,
         title=I18n.get("settings_no_proxy_domains"),
         subtitle=I18n.get("settings_no_proxy_desc"),
@@ -669,7 +677,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     row_diagnostics = SettingRow(
-        icon=ft.Icons.ANALYTICS_ROUNDED,
+        icon=safe_icon_str(ft.Icons.ANALYTICS_ROUNDED),
         icon_color=ft.Colors.RED,
         title=I18n.get("settings_diagnostics"),
         subtitle=I18n.get("settings_diagnostics_desc"),

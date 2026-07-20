@@ -167,7 +167,8 @@ class NewsSubscriptionService:
                 await asyncio.wait_for(self._current_fetch_task, timeout=drain_timeout)
             except asyncio.CancelledError:
                 # R2: stop_async 被外部取消时必须传播；_task 被主动取消时吞没合理
-                if asyncio.current_task().cancelling() > 0:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
                     raise
             except TimeoutError:
                 pass
@@ -187,7 +188,8 @@ class NewsSubscriptionService:
                     await asyncio.wait_for(self._processing_task, timeout=drain_timeout)
                 except asyncio.CancelledError:
                     # R2: stop_async 被外部取消时必须传播；_task 被主动取消时吞没合理
-                    if asyncio.current_task().cancelling() > 0:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling() > 0:
                         raise
                 except TimeoutError:
                     pass

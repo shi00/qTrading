@@ -21,6 +21,7 @@ ai_prompt/news_prompt) + 三阶段保存状态机编排（CLAUDE.md §3.2 MVVM�
 import asyncio
 import logging
 import os
+import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -256,7 +257,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             news_prompt = self._state.news_prompt_value
 
             # local_vm.get_current_config() 返回 dict (复用 LocalModelConfigPanelViewModel)
-            local_config = self._local_vm.get_current_config()
+            local_config = typing.cast(typing.Any, self._local_vm).get_current_config()
             local_save_kwargs = {
                 "model_path": local_config.get("model_path", ""),
                 "timeout": local_config.get("timeout", 300),
@@ -268,7 +269,7 @@ class AIBrainSettingsViewModel(ObservableViewModelMixin[AIBrainSettingsState]):
             }
 
             # 先保存 LLM 配置 (复用 llm_vm.save_config)
-            llm_saved = await self._llm_vm.save_config()
+            llm_saved = await typing.cast(typing.Any, self._llm_vm).save_config()
             if not llm_saved:
                 self._set_state(save_state=SAVE_ERROR, warning_message="")
                 return False

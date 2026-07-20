@@ -8,6 +8,11 @@
 - 有状态组件 (use_state/use_effect) 的渲染测试走集成测试, 不在此覆盖
 """
 
+# pyright: reportAttributeAccessIssue=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 from unittest.mock import MagicMock, patch
 
 import flet as ft

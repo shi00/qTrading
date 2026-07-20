@@ -1,4 +1,5 @@
 """main.py 测试 - 覆盖窗口/对话框/disconnect管理等场景"""
+# pyright: reportArgumentType=false, reportOptionalMemberAccess=false
 
 import asyncio
 import inspect
@@ -74,6 +75,11 @@ class _DummyPage:
 
     def render(self, component, /, *args, **kwargs):
         """Mock page.render (V1 声明式 API) — 仅记录调用, 不实际渲染。"""
+
+        # 本文件含测试替身/mock/monkey-patch 模式，触发 参数类型不兼容（替身类/Optional/dict 替代）, Optional 成员访问（mock 返回 None）。
+        # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+        # 测试行为由测试用例本身验证。
+
         self.controls.append(component)
 
     def update(self):

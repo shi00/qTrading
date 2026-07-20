@@ -18,6 +18,11 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import (
+    get_control_value,
+    safe_on_click,
+    safe_on_select,
+)
 from ui.components.settings_widgets import SectionHeader
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -240,7 +245,7 @@ def _on_provider_change_factory(vm: LLMConfigPanelViewModel) -> Callable[[ft.Con
     """Create on_select handler for provider dropdown — submits vm.update_provider via page.run_task."""
 
     def _on_provider_change(e: ft.ControlEvent) -> None:
-        provider_id = e.control.value
+        provider_id = get_control_value(e.control, ft.Dropdown)
         if not provider_id:
             return
         try:
@@ -288,7 +293,7 @@ def LLMConfigPanel(
         label=I18n.get("llm_select_provider"),
         options=_build_provider_options(),
         value=state.provider,
-        on_select=_on_provider_change_factory(vm),
+        on_select=safe_on_select(_on_provider_change_factory(vm)),
         width=input_width,
     )
 
@@ -374,7 +379,7 @@ def LLMConfigPanel(
     # --- Buttons ---
     test_button = ft.Button(
         content=I18n.get("llm_test_connection"),
-        on_click=_on_test_click_factory(vm),
+        on_click=safe_on_click(_on_test_click_factory(vm)),
         icon=ft.Icons.CABLE if ft.Icons else None,
         style=AppStyles.secondary_button(),
         disabled=state.is_verifying,
@@ -383,14 +388,14 @@ def LLMConfigPanel(
     refresh_models_button = ft.IconButton(
         icon=ft.Icons.REFRESH if ft.Icons else None,
         tooltip=I18n.get("llm_refresh_models"),
-        on_click=_on_refresh_click_factory(vm),
+        on_click=safe_on_click(_on_refresh_click_factory(vm)),
         visible=state.show_refresh_button,
         disabled=state.is_refreshing,
     )
 
     save_button = ft.Button(
         content=I18n.get("settings_save_config"),
-        on_click=_on_save_click_factory(vm),
+        on_click=safe_on_click(_on_save_click_factory(vm)),
         icon=ft.Icons.SAVE if ft.Icons else None,
         visible=show_save_button,
         style=AppStyles.primary_button(),

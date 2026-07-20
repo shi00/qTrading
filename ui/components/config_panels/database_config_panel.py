@@ -17,6 +17,7 @@ from collections.abc import Callable
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_on_click
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -162,7 +163,7 @@ def DatabaseConfigPanel(
         label=I18n.get("db_create_if_not_exists"),
         value=state.create_if_not_exists,
         fill_color=AppColors.PRIMARY,
-        on_change=lambda e: vm.update_create_if_not_exists(e.control.value),
+        on_change=lambda e: vm.update_create_if_not_exists(bool(e.control.value)),
     )
 
     # --- Status display (driven by state.status_message / status_type) ---
@@ -195,14 +196,14 @@ def DatabaseConfigPanel(
     btn_test = ft.Button(
         I18n.get("db_test_connection"),
         icon=ft.Icons.POWER,
-        on_click=_on_test_click_factory(vm),
+        on_click=safe_on_click(_on_test_click_factory(vm)),
         style=AppStyles.secondary_button(),
         disabled=state.is_verifying,
     )
     btn_save = ft.Button(
         I18n.get("common_save"),
         icon=ft.Icons.SAVE,
-        on_click=_on_save_click_factory(vm),
+        on_click=safe_on_click(_on_save_click_factory(vm)),
         style=AppStyles.primary_button(),
         visible=show_save_button,
         disabled=state.is_saving,

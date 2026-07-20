@@ -21,6 +21,7 @@ from typing import Any
 
 import flet as ft
 
+from ui.components.flet_type_helpers import safe_controls
 from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
@@ -241,7 +242,7 @@ def _build_row(
         width=total_w,
         ink=True,
         bgcolor=AppStyles.data_table_row(abs_idx),
-        content=ft.Row(_build_cells(row_data, columns), spacing=0),
+        content=ft.Row(safe_controls(_build_cells(row_data, columns)), spacing=0),
     )
     if on_row_click is not None:
         row.on_click = _make_row_click_handler(on_row_click, row_data)
@@ -303,7 +304,7 @@ def PaginatedTable(
     ]
 
     canvas = ft.Stack(
-        controls=visible_rows,
+        controls=safe_controls(visible_rows),
         height=row_count * ROW_HEIGHT,
         width=total_w,
         clip_behavior=ft.ClipBehavior.HARD_EDGE,
@@ -330,7 +331,7 @@ def PaginatedTable(
         scroll_interval=100,
     )
     header_container = ft.Container(
-        content=ft.Row(header_controls, spacing=0),
+        content=ft.Row(safe_controls(header_controls), spacing=0),
         bgcolor=AppColors.TABLE_HEADER_BG,
         height=HEADER_HEIGHT,
         width=total_w,

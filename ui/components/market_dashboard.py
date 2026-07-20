@@ -12,6 +12,8 @@
   替代 dict
 """
 
+import typing
+
 import flet as ft
 
 from ui.i18n import I18n, get_observable_state
@@ -188,7 +190,7 @@ def MarketDashboard(
     else:
         concept_cards.append(
             ft.Container(
-                col=AppStyles.COL_FULL,
+                col=typing.cast("ft.ResponsiveNumber", AppStyles.COL_FULL),
                 content=ft.Text(
                     I18n.get("home_hot_concepts_empty"),
                     size=12,

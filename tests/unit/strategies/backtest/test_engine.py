@@ -1,4 +1,5 @@
 """strategies/backtest/engine.py 测试 - 覆盖 _is_rebalance_day、_calc_ic_series、_apply_qfq 等"""
+# pyright: reportAttributeAccessIssue=false
 
 import math
 from datetime import date
@@ -404,6 +405,11 @@ class TestCalcBenchmarkReturns:
 
     def test_all_benchmark_dates_missing_returns_all_zeros(self):
         """测试所有 Benchmark 日期缺失时返回全零序列。"""
+
+        # 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+        # pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+        # 测试行为由测试用例本身验证。
+
         engine = self._make_engine()
         trade_dates = [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
         benchmark_df = pl.DataFrame(

@@ -4,6 +4,11 @@ Tests for singleton_registry module.
 S5-2: Unified singleton reset registry.
 """
 
+# pyright: reportAttributeAccessIssue=false
+# 本文件含测试替身/mock/monkey-patch 模式，触发 动态属性访问（mock/stub/monkey-patch）。
+# pyright 无法验证替身类与生产类型的兼容性，统一在此文件局部禁用相关告警，
+# 测试行为由测试用例本身验证。
+
 import pytest
 
 pytestmark = pytest.mark.unit

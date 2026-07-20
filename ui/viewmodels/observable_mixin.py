@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 
 class ObservableViewModelMixin[T]:
@@ -76,7 +76,7 @@ class ObservableViewModelMixin[T]:
 
         子类可覆盖以加 disposed guard (如 ScreenerViewModel)。
         """
-        self._state = replace(self._state, **changes)
+        self._state = replace(cast(Any, self._state), **changes)
         self._notify()
 
     def dispose(self) -> None:

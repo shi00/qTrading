@@ -18,6 +18,7 @@ import flet as ft
 
 from core.i18n import Message
 from services.task_manager import TaskStatus
+from ui.components.flet_type_helpers import safe_on_click
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
@@ -323,7 +324,7 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
     clear_btn = ft.OutlinedButton(
         I18n.get("task_clear_finished"),
         icon=ft.Icons.CLEANING_SERVICES_OUTLINED,
-        on_click=_on_clear,
+        on_click=safe_on_click(_on_clear),
         style=ft.ButtonStyle(
             shape=ft.RoundedRectangleBorder(radius=6),
             side=ft.BorderSide(1, AppColors.BORDER),
@@ -398,14 +399,14 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
     btn_prev = ft.IconButton(
         icon=ft.Icons.CHEVRON_LEFT,
         tooltip=I18n.get("common_prev_page"),
-        on_click=_on_prev,
+        on_click=safe_on_click(_on_prev),
         disabled=state.current_page <= 1,
         icon_size=20,
     )
     btn_next = ft.IconButton(
         icon=ft.Icons.CHEVRON_RIGHT,
         tooltip=I18n.get("common_next_page"),
-        on_click=_on_next,
+        on_click=safe_on_click(_on_next),
         disabled=state.current_page >= state.total_pages,
         icon_size=20,
     )
