@@ -294,9 +294,10 @@ class TestAppStylesDataTableRow:
         result = AppStyles.data_table_row(1)
         assert result == AppColors.TABLE_ROW_EVEN
 
-    def test_hovered_returns_odd_color(self):
+    def test_hovered_returns_hover_color(self):
+        """P2-8: hover 状态返回独立的 TABLE_ROW_HOVER (修复原误返回 ODD 的逻辑漏洞)."""
         result = AppStyles.data_table_row(1, is_hovered=True)
-        assert result == AppColors.TABLE_ROW_ODD
+        assert result == AppColors.TABLE_ROW_HOVER
 
 
 class TestAppStylesPriceChangeColor:

@@ -29,9 +29,9 @@ from ui.viewmodels.system_viewmodel import ProbeResultRow, SystemViewModel
 
 logger = logging.getLogger(__name__)
 
-# 响应式断点阈值（与设计文档 §3.2.10 一致；与 ui/theme.py AppStyles 配合使用）
-# P3-25: LG 断点复用 AppStyles.BREAKPOINT_COMPACT（同 1200），保持单一真相源。
-_TIER_PANEL_LG_BREAKPOINT = AppStyles.BREAKPOINT_COMPACT
+# 响应式断点阈值（与设计文档 §3.2.10 一致）
+# P3-14: AppStyles.BREAKPOINT_COMPACT 已删除 (YAGNI), 此处直接保留具体数值 1200 保持单一真相源.
+_TIER_PANEL_LG_BREAKPOINT = 1200
 # NOTE(lazy): MD 断点 800 保留作为防御代码, 生产 min_width=1280 下不可达. ceiling: width ≥ 1280 ≥ 1200 永远命中 LG 分支. upgrade: min_width 调低或组件嵌入更窄容器时自动生效.
 _TIER_PANEL_MD_BREAKPOINT = 800
 
