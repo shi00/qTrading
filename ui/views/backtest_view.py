@@ -142,8 +142,7 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
         content=I18n.get("common_cancel"),
         on_click=safe_on_click(_on_cancel_backtest),
         visible=state.is_running,
-        bgcolor=AppColors.ERROR,
-        color=ft.Colors.ON_ERROR,
+        style=AppStyles.danger_button(),  # P2-9: 替换 bgcolor/color 为 danger_button 统一风格
     )
 
     return ft.Container(

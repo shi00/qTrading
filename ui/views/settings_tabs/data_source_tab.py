@@ -547,11 +547,7 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     if state.is_syncing and state.init_sync_cancellable:
         sync_button_content = I18n.get("settings_cancel_sync")
         sync_button_icon = ft.Icons.STOP_CIRCLE
-        sync_button_style = ft.ButtonStyle(
-            color=AppColors.TEXT_ON_PRIMARY,
-            icon_color=AppColors.TEXT_ON_PRIMARY,
-            bgcolor=AppColors.ERROR,
-        )
+        sync_button_style = AppStyles.danger_button()  # P2-9: 替换为 danger_button 统一风格
     elif state.is_syncing:
         sync_button_content = I18n.get("sys_init_cancel_wait")
         sync_button_icon = ft.Icons.CLOUD_DOWNLOAD

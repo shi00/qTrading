@@ -30,6 +30,7 @@ import flet as ft
 from ui.components.config_panels.failover_config_panel import FailoverConfigPanel
 from ui.components.config_panels.llm_config_panel import LLMConfigPanel
 from ui.components.config_panels.local_model_config_panel import LocalModelConfigPanel
+from ui.components.confirm_dialog import ConfirmDialog
 from ui.components.flet_type_helpers import safe_on_click
 from ui.components.settings_widgets import DashboardCard, SectionHeader
 from ui.hooks import use_viewmodel
@@ -153,6 +154,9 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     )
 
     # --- Pure UI state (VM state 是唯一真值源, 无 use_state 本地副本) ---
+    # P1-4 批次 2: ConfirmDialog open_state (消费方驱动, 无 dirty state 检测 §0.5.11.1 #78)
+    reset_ai_dialog_open, set_reset_ai_dialog_open = ft.use_state(False)
+    reset_news_dialog_open, set_reset_news_dialog_open = ft.use_state(False)
 
     # --- 异步保存 (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_save_ai_settings() -> None:
@@ -215,12 +219,31 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             page.run_task(_do_save_ai_settings)
 
     def _on_reset_ai_prompt(_e: ft.ControlEvent) -> None:
-        ai_settings_vm.set_ai_prompt_value(DEFAULT_AI_PROMPT)
-        show_snack_callback(I18n.get("settings_snack_prompt_reset"))
+        # P1-4 批次 2: 打开 ConfirmDialog 而非直接重置 (统一提示, 无 dirty state)
+        set_reset_ai_dialog_open(True)
 
     def _on_reset_news_prompt(_e: ft.ControlEvent) -> None:
+        set_reset_news_dialog_open(True)
+
+    def _do_confirm_reset_ai_prompt() -> None:
+        """ConfirmDialog on_confirm: 实际执行 AI prompt 重置 (P1-4 批次 2)."""
+        ai_settings_vm.set_ai_prompt_value(DEFAULT_AI_PROMPT)
+        show_snack_callback(I18n.get("settings_snack_prompt_reset"))
+        set_reset_ai_dialog_open(False)
+
+    def _do_cancel_reset_ai_prompt() -> None:
+        """ConfirmDialog on_cancel: 关闭对话框, 不执行重置。"""
+        set_reset_ai_dialog_open(False)
+
+    def _do_confirm_reset_news_prompt() -> None:
+        """ConfirmDialog on_confirm: 实际执行 news prompt 重置 (P1-4 批次 2)."""
         ai_settings_vm.set_news_prompt_value(DEFAULT_NEWS_PROMPT)
         show_snack_callback(I18n.get("settings_snack_prompt_reset"))
+        set_reset_news_dialog_open(False)
+
+    def _do_cancel_reset_news_prompt() -> None:
+        """ConfirmDialog on_cancel: 关闭对话框, 不执行重置。"""
+        set_reset_news_dialog_open(False)
 
     # --- Build controls (状态驱动: value/disabled/color 从 state 派生) ---
     ai_max_candidates_input = ft.TextField(
@@ -506,6 +529,26 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                         spacing=10,
                     ),
                     padding=ft.Padding.only(top=10, bottom=30, right=20),
+                ),
+                # P1-4 批次 2: 追加 2 个 ConfirmDialog (width=0/height=0 不影响布局,
+                # use_dialog 挂载到 page overlay)
+                ConfirmDialog(
+                    open_state=reset_ai_dialog_open,
+                    title=I18n.get("confirm_reset_title"),
+                    body=I18n.get("confirm_reset_body"),
+                    on_confirm=_do_confirm_reset_ai_prompt,
+                    on_cancel=_do_cancel_reset_ai_prompt,
+                    confirm_text=I18n.get("common_confirm"),
+                    cancel_text=I18n.get("common_cancel"),
+                ),
+                ConfirmDialog(
+                    open_state=reset_news_dialog_open,
+                    title=I18n.get("confirm_reset_title"),
+                    body=I18n.get("confirm_reset_body"),
+                    on_confirm=_do_confirm_reset_news_prompt,
+                    on_cancel=_do_cancel_reset_news_prompt,
+                    confirm_text=I18n.get("common_confirm"),
+                    cancel_text=I18n.get("common_cancel"),
                 ),
             ],
             spacing=15,

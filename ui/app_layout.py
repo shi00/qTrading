@@ -29,6 +29,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
 )
 from ui.i18n import I18n, get_observable_state
+from ui.pubsub_topics import TOPIC_NAVIGATE
 from ui.theme import AppColors
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
@@ -217,6 +218,36 @@ def AppLayout() -> ft.Container:
             debounce_task_ref.current = None
 
     ft.use_effect(_setup_resize, dependencies=[], cleanup=_cleanup_resize)
+
+    # --- PubSub 导航订阅 (P1-3 批次 2 #55): home_view ErrorState CTA 通过 TOPIC_NAVIGATE 广播 ---
+
+    def _on_navigate(topic: str, message: str) -> None:
+        """TOPIC_NAVIGATE 事件处理: 切换 NavigationRail selected_index."""
+        if topic != TOPIC_NAVIGATE:
+            return
+        try:
+            target_tab = NavTabs[message.upper()]
+        except KeyError:
+            logger.warning("[AppLayout] Unknown navigation target: %s", message)
+            return
+        if int(target_tab) == int(current_tab):
+            return
+        page = _get_page()
+        if page is not None:
+            page.run_task(_do_tab_switch, int(target_tab))
+
+    def _setup_navigate() -> None:
+        page = _get_page()
+        if page is None:
+            return
+        page.pubsub.subscribe_topic(TOPIC_NAVIGATE, _on_navigate)
+
+    def _cleanup_navigate() -> None:
+        page = _get_page()
+        if page is not None:
+            page.pubsub.unsubscribe_topic(TOPIC_NAVIGATE)
+
+    ft.use_effect(_setup_navigate, dependencies=[], cleanup=_cleanup_navigate)
 
     # --- ViewportState (Phase 6.2 P2-1): 基于 window_size 计算响应式断点 ---
     viewport = ViewportState(

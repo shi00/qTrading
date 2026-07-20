@@ -36,6 +36,7 @@ from ui.components.flet_type_helpers import (
     safe_on_select,
 )
 from ui.components.resizable_splitter import ResizableSplitter
+from ui.components.state_views import EmptyState
 from ui.components.stock_detail_dialog import StockDetailDialog
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
@@ -1213,8 +1214,18 @@ def ScreenerView(
         alignment=ft.MainAxisAlignment.CENTER,
     )
 
-    table_card = ft.Container(
-        content=ft.Column(
+    # P1-3 批次 2 #70/#71: 表格空态分支 (formatted_rows 为空且非 loading 时显示 EmptyState)
+    table_content: ft.Control
+    if not formatted_rows and not state.loading:
+        table_content = EmptyState(
+            icon=ft.Icons.INBOX,
+            title=I18n.get("screener_no_results"),
+            message=I18n.get("screener_no_data_context"),
+            on_cta=vm.clear_filters,
+            cta_text=I18n.get("screener_clear_filters"),
+        )
+    else:
+        table_content = ft.Column(
             [
                 PaginatedTable(
                     rows=formatted_rows,
@@ -1229,7 +1240,10 @@ def ScreenerView(
             ],
             spacing=0,
             expand=True,
-        ),
+        )
+
+    table_card = ft.Container(
+        content=table_content,
         **AppStyles.dashboard_card(padding=0),
         expand=True,
     )

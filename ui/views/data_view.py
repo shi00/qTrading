@@ -34,6 +34,7 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.state_views import ErrorState
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -397,6 +398,13 @@ def TableViewerTab(
         if page is not None:
             page.run_task(_do_refresh)
 
+    def _on_retry_load() -> None:
+        """ErrorState on_retry: 清除错误 + 重新加载 schema (P1-3 批次 2)."""
+        vm.clear_error()
+        page = _get_page()
+        if page is not None:
+            page.run_task(_load_schema_and_data)
+
     def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
             col_index = state.table_columns.index(col_id)
@@ -561,8 +569,16 @@ def TableViewerTab(
         border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
     )
 
-    # 表格区域: 加载中显示 loading widget, 否则显示 PaginatedTable
-    if is_loading:
+    # 表格区域: P1-3 批次 2 三态 (error > loading > table > loading placeholder)
+    if state.error_message is not None:
+        grid_content = ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("error_state_load_failed_title"),
+            message=I18n.get("error_state_load_failed_message"),
+            on_retry=_on_retry_load,
+            retry_text=I18n.get("common_retry"),
+        )
+    elif is_loading:
         grid_content = loading_widget
     elif state.table_columns:
         grid_content = PaginatedTable(
