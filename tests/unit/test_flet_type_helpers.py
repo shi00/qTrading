@@ -126,7 +126,7 @@ class TestGetControlValue:
         (符合 Flet ControlEvent.control.value 的典型用法约定).
         """
         container = ft.Container()
-        with pytest.raises(AttributeError):
+        with pytest.raises(AttributeError, match="has no attribute"):
             get_control_value(container, ft.Container)
 
 
@@ -146,5 +146,5 @@ class TestGetControlAttr:
         (符合 Flet ControlEvent.control.<attr> 的典型用法约定).
         """
         container = ft.Container()
-        with pytest.raises(AttributeError):
+        with pytest.raises(AttributeError, match="has no attribute"):
             get_control_attr(container, ft.Container, "nonexistent_attr")
