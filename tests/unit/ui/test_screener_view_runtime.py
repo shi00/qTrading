@@ -376,6 +376,16 @@ class _FakeScreenerViewModel:
         self.method_calls.append("switch_to_realtime")
         self._set_state(mode="REALTIME")
 
+    def clear_filters(self) -> None:
+        """P1-3 批次 2 #71: Mock clear_filters (EmptyState on_cta 回调)."""
+        self.method_calls.append("clear_filters")
+        self._set_state(
+            page_no=1,
+            sort_column=None,
+            sort_ascending=True,
+            tier_hint=None,
+        )
+
     def subscribe_task_manager(self) -> None:
         self.method_calls.append("subscribe_task_manager")
 
@@ -531,10 +541,23 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
 
 @pytest.fixture
 def screener_view_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
-    """挂载 ScreenerView (默认 REALTIME 模式 + 空参数), 返回 env dict."""
+    """挂载 ScreenerView (默认 REALTIME 模式 + 含数据), 返回 env dict.
+
+    P1-3 批次 2: 默认提供非空 _current_page_data, 让 PaginatedTable 渲染捕获回调。
+    EmptyState 分支在 formatted_rows 为空时替代 PaginatedTable, 导致 on_sort/on_row_click
+    回调未捕获。默认有数据更接近真实使用场景, 测试空态时显式清空数据。
+    """
     from ui.views import screener_view as mod
 
     fake_vm = _FakeScreenerViewModel()
+    fake_vm._current_page_data = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000002.SZ"],
+            "name": ["平安银行", "万科A"],
+            "close": [10.5, 9.8],
+        }
+    )
+    fake_vm._set_state(total_items=2, total_pages=1, strategies_loaded=True)
     mocks = _patch_screener_view_mocks(mod, monkeypatch, fake_vm)
 
     component = make_component(mod.ScreenerView)
@@ -2024,13 +2047,26 @@ class TestStatusRendering:
 class TestTableDataRendering:
     """表格数据渲染: 有数据/无数据."""
 
-    def test_no_data_renders_empty_table(self, screener_view_env) -> None:
-        """vm.get_current_page_data() 返回空 DataFrame → 表格为空."""
+    def test_no_data_renders_empty_state(self, screener_view_env) -> None:
+        """vm.get_current_page_data() 返回空 DataFrame → EmptyState 渲染 (P1-3 批次 2 #70).
+
+        EmptyState 分支替代 PaginatedTable: 无 on_sort/on_row_click 回调捕获。
+        清空 captured_callbacks 后 _rerender, 验证无新增回调 (PaginatedTable mock 未被调用)。
+        """
         env = screener_view_env
-        # 默认 _current_page_data=None → get_current_page_data 返回空 DataFrame
-        # PaginatedTable 被 mock, 验证 captured_callbacks 存在
-        assert callable(env["captured_callbacks"]["on_sort"])
-        assert callable(env["captured_callbacks"]["on_row_click"])
+        fake_vm = env["fake_vm"]
+
+        # 清空数据触发 EmptyState 分支
+        fake_vm._current_page_data = pd.DataFrame()
+        fake_vm._set_state(total_items=0, total_pages=0, strategies_loaded=True)
+        # 清空 captured_callbacks (初始渲染时已捕获回调), 验证 _rerender 不再新增
+        env["captured_callbacks"].clear()
+        _rerender(env)
+
+        # 验证 captured_callbacks 不含 on_sort/on_row_click (EmptyState 渲染, PaginatedTable 未调用)
+        assert "on_sort" not in env["captured_callbacks"]
+        assert "on_row_click" not in env["captured_callbacks"]
+        assert env["captured_callbacks"] == {}
 
     def test_with_data_renders_table(self, screener_view_env) -> None:
         """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""

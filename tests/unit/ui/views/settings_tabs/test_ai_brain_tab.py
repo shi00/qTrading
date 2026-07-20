@@ -531,6 +531,18 @@ def ai_brain_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
     monkeypatch.setattr(mod, "FailoverConfigPanel", MagicMock(return_value=MagicMock(name="FailoverConfigPanel")))
     monkeypatch.setattr(mod, "LocalModelConfigPanel", MagicMock(return_value=MagicMock(name="LocalModelConfigPanel")))
 
+    # P1-4 批次 2: Mock ConfirmDialog 捕获 on_confirm/on_cancel 回调
+    # (reset 按钮点击后先打开 ConfirmDialog, 需触发 on_confirm 才执行 reset + show_snack)
+    captured_callbacks: dict[str, Any] = {}
+
+    def _fake_confirm_dialog(**kwargs: Any) -> Any:
+        if kwargs.get("open_state"):
+            captured_callbacks["on_confirm"] = kwargs.get("on_confirm")
+            captured_callbacks["on_cancel"] = kwargs.get("on_cancel")
+        return MagicMock(name="ConfirmDialog")
+
+    monkeypatch.setattr(mod, "ConfirmDialog", _fake_confirm_dialog)
+
     # --- 挂载组件 ---
     show_snack = MagicMock()
     component = make_component(mod.AIBrainTab, show_snack_callback=show_snack)
@@ -547,6 +559,7 @@ def ai_brain_tab_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
         "fake_llm_vm": fake_llm_vm,
         "fake_failover_vm": fake_failover_vm,
         "fake_local_vm": fake_local_vm,
+        "captured_callbacks": captured_callbacks,
         **mocks,
     }
 
@@ -578,7 +591,8 @@ class TestAIBrainTabMount:
             "settings_news_prompt",
         ):
             tf = _find_text_field_by_label(env, key)
-            assert tf is not None  # noqa: weak-assertion UI 契约测试验证多 key 循环内 text_field 存在性
+            # UI 契约测试验证多 key 循环内 text_field 存在性
+            assert tf is not None
 
     def test_render_includes_save_button(self, ai_brain_tab_env) -> None:
         """渲染含 1 个 ft.Button (save_ai)。"""
@@ -625,7 +639,7 @@ class TestEventHandlersPageAvailable:
         assert args == ()
 
     def test_on_reset_ai_prompt_sets_default_prompt(self, ai_brain_tab_env) -> None:
-        """_on_reset_ai_prompt: 同步执行, set_ai_prompt(DEFAULT_AI_PROMPT) + show_snack。"""
+        """_on_reset_ai_prompt: 打开 ConfirmDialog → on_confirm 执行 reset + show_snack (P1-4 批次 2)."""
         env = ai_brain_tab_env
         buttons = _get_buttons(env)
         # btn_reset_prompt 是第 1 个 TextButton (源码顺序)
@@ -638,11 +652,16 @@ class TestEventHandlersPageAvailable:
         _invoke(reset_btn.on_click, _make_event())
         # 不调 run_task (纯同步)
         assert not page.run_task.called
+        # P1-4 批次 2: 点击 reset 后打开 ConfirmDialog, 需触发 on_confirm 才执行 reset
+        _rerender(env)
+        on_confirm = env["captured_callbacks"].get("on_confirm")
+        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"
+        on_confirm()
         # 调 show_snack
         show_snack.assert_called_once_with("i18n[settings_snack_prompt_reset]")
 
     def test_on_reset_news_prompt_sets_default_prompt(self, ai_brain_tab_env) -> None:
-        """_on_reset_news_prompt: 同步执行, set_news_prompt(DEFAULT_NEWS_PROMPT) + show_snack。"""
+        """_on_reset_news_prompt: 打开 ConfirmDialog → on_confirm 执行 reset + show_snack (P1-4 批次 2)."""
         env = ai_brain_tab_env
         buttons = _get_buttons(env)
         # btn_reset_news_prompt 是第 2 个 TextButton
@@ -655,6 +674,10 @@ class TestEventHandlersPageAvailable:
 
         _invoke(reset_news_btn.on_click, _make_event())
         assert not page.run_task.called
+        _rerender(env)
+        on_confirm = env["captured_callbacks"].get("on_confirm")
+        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"
+        on_confirm()
         show_snack.assert_called_once_with("i18n[settings_snack_prompt_reset]")
 
 
@@ -682,7 +705,7 @@ class TestEventHandlersPageNoneEarlyReturn:
         assert not page.run_task.called
 
     def test_on_reset_ai_prompt_runs_without_page(self, ai_brain_tab_env) -> None:
-        """_on_reset_ai_prompt: 不依赖 page, page=None 仍正常执行 set_ai_prompt + show_snack。"""
+        """_on_reset_ai_prompt: 不依赖 page, page=None 仍打开 ConfirmDialog → on_confirm 执行 reset (P1-4)."""
         env = ai_brain_tab_env
         buttons = _get_buttons(env)
         reset_btn = next(b for b in buttons if isinstance(b, ft.TextButton))
@@ -693,11 +716,15 @@ class TestEventHandlersPageNoneEarlyReturn:
 
         with patch("ui.views.settings_tabs.ai_brain_tab._get_page", return_value=None):
             _invoke(reset_btn.on_click, _make_event())
-        # _on_reset_ai_prompt 不依赖 page, 仍调 show_snack
+        # _on_reset_ai_prompt 不依赖 page, 仍打开 ConfirmDialog
+        _rerender(env)
+        on_confirm = env["captured_callbacks"].get("on_confirm")
+        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"
+        on_confirm()
         show_snack.assert_called_once_with("i18n[settings_snack_prompt_reset]")
 
     def test_on_reset_news_prompt_runs_without_page(self, ai_brain_tab_env) -> None:
-        """_on_reset_news_prompt: 不依赖 page, page=None 仍正常执行。"""
+        """_on_reset_news_prompt: 不依赖 page, page=None 仍打开 ConfirmDialog → on_confirm 执行 reset (P1-4)."""
         env = ai_brain_tab_env
         buttons = _get_buttons(env)
         text_btns = [b for b in buttons if isinstance(b, ft.TextButton)]
@@ -709,6 +736,10 @@ class TestEventHandlersPageNoneEarlyReturn:
 
         with patch("ui.views.settings_tabs.ai_brain_tab._get_page", return_value=None):
             _invoke(reset_news_btn.on_click, _make_event())
+        _rerender(env)
+        on_confirm = env["captured_callbacks"].get("on_confirm")
+        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"
+        on_confirm()
         show_snack.assert_called_once_with("i18n[settings_snack_prompt_reset]")
 
 

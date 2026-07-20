@@ -83,9 +83,15 @@ def _rerender(env: dict) -> Any:
 
 
 def _make_fake_page() -> FakePage:
-    """创建带 run_task 的 fake page."""
+    """创建带 run_task + pubsub 的 fake page.
+
+    P1-3 批次 2: 补 pubsub 属性 (AppLayout 订阅 TOPIC_NAVIGATE)。
+    """
     page = FakePage()
     page.run_task = MagicMock(return_value=MagicMock())  # type: ignore[method-assign]
+    page.pubsub = MagicMock()  # type: ignore[method-assign]
+    page.pubsub.subscribe_topic = MagicMock()  # type: ignore[method-assign]
+    page.pubsub.unsubscribe_topic = MagicMock()  # type: ignore[method-assign]
     return page
 
 

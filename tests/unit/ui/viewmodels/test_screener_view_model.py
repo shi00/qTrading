@@ -188,3 +188,33 @@ class TestAdapters:
         vm._on_card_start_adapter("test")
         assert len(vm.state.stream_cards) == 1
         assert vm.state.stream_cards[0].is_analyzing is True
+
+
+# --- clear_filters (P1-3 批次 2) ---
+
+
+class TestClearFilters:
+    """P1-3 批次 2 #71: clear_filters 命令."""
+
+    def test_clear_filters_resets_sort_and_pagination(self, vm):
+        """clear_filters 重置 sort_column/sort_ascending/page_no/tier_hint."""
+        vm._set_state(
+            page_no=5,
+            sort_column="ai_score",
+            sort_ascending=False,
+            tier_hint="sys_strategy_tier_hint",
+        )
+        vm.clear_filters()
+        assert vm.state.page_no == 1
+        assert vm.state.sort_column is None
+        assert vm.state.sort_ascending is True
+        assert vm.state.tier_hint is None
+
+    def test_clear_filters_does_not_clear_full_results(self, vm):
+        """clear_filters 保留 _full_results (用户可参考上次结果)."""
+        import pandas as pd
+
+        vm._full_results = pd.DataFrame({"ts_code": ["000001"]})
+        vm.clear_filters()
+        assert vm._full_results is not None
+        assert len(vm._full_results) == 1
