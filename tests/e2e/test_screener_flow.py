@@ -147,13 +147,6 @@ async def test_detail_dialog_open_close(e2e_page):
     await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)
 
 
-@pytest.mark.xfail(
-    reason="Flet Web FilePicker.save_file 使用浏览器 File System Access API "
-    "(window.showSaveFilePicker) 打开原生保存对话框，不触发 Playwright download 事件。"
-    "源码层面需改用 anchor.download 或 blob URL 下载方式才能被 Playwright 捕获，"
-    "或测试侧需 mock FilePicker 验证调用参数。当前两种方案均未实现，测试超时 → xfail。",
-    strict=False,
-)
 async def test_export_screener_results_csv(e2e_page):
     """测试：点击导出按钮触发 CSV 文件下载。
 
@@ -185,23 +178,13 @@ async def test_export_screener_results_csv(e2e_page):
     assert date_stamp.replace("_", "").isdigit(), f"日期戳非数字: {filename}"
 
 
-@pytest.mark.xfail(
-    reason="Flet Web FilePicker.save_file 使用浏览器 File System Access API "
-    "(window.showSaveFilePicker) 打开原生保存对话框，不触发 Playwright download 事件。"
-    "源码层面需改用 anchor.download 或 blob URL 下载方式才能被 Playwright 捕获，"
-    "或测试侧需 mock FilePicker 验证调用参数。当前两种方案均未实现，测试超时 → xfail。"
-    "注：Excel 导出功能已由 Task 4.1-4.4 实现（screener_view._on_export_excel_click），"
-    "但 FilePicker.save_file 的 Playwright 捕获限制同样影响 Excel 导出按钮 → xfail。",
-    strict=False,
-)
 async def test_export_screener_results_excel(e2e_page):
     """测试：点击 Excel 导出按钮触发 Excel 文件下载。
 
     期望行为（DoD）：导出按钮支持 Excel 格式，文件名以 ``.xlsx`` 结尾。
-    当前状态：Task 4.4 已实现 Excel 导出（``screener_view._on_export_excel_click`` +
-    ``DataExplorerViewModel.write_excel`` + openpyxl），UI 新增独立 Excel 导出按钮。
-    但 Flet Web FilePicker.save_file 无法触发 Playwright download 事件
-    （技术债 P3-UI-Source-Bugs ⑥），测试无法捕获下载事件 → xfail。
+    实现：screener_view._on_export_excel_click + VM 导出 + openpyxl，UI 新增独立 Excel 导出按钮。
+    Web 模式下 _do_export 通过 src_bytes 传给 FilePicker.save_file，Flet 用 Blob + <a download>
+    触发浏览器下载，Playwright 可捕获 download 事件。
     """
     screener = ScreenerPage(e2e_page)
     await screener.open()
@@ -211,7 +194,7 @@ async def test_export_screener_results_excel(e2e_page):
 
     # 用 expect_download 捕获下载事件（Excel 导出按钮触发）
     async with e2e_page.page.expect_download(timeout=TIMEOUTS.SCREEN_RESULT) as download_info:
-        await screener.click_export(timeout_ms=TIMEOUTS.INTERACTION)
+        await screener.click_export_excel(timeout_ms=TIMEOUTS.INTERACTION)
 
     download = await download_info.value
     filename = download.suggested_filename
