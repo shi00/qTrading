@@ -250,9 +250,9 @@ class TestBuildCells:
         # 第一段：600000（粗体）
         assert text.spans[0].text == "600000"
         assert text.spans[0].style.weight == ft.FontWeight.BOLD
-        # 第二段：.SH（小号 10）
+        # 第二段：.SH（小号 caption）
         assert text.spans[1].text == ".SH"
-        assert text.spans[1].style.size == 10
+        assert text.spans[1].style.size == AppStyles.FONT_SIZE_CAPTION
 
     def test_code_col_without_dot_renders_plain_text(self):
         """ts_code=600000 (无 ".") → 走普通 Text 分支。"""

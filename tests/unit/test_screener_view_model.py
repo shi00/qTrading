@@ -1272,7 +1272,9 @@ class TestScreenerViewModelUpdateStrategyDesc:
 
         vm.update_strategy_desc("value")
 
-        assert "⚠️" in vm.state.strategy_desc
+        # P2-7: ⚠️ emoji 前缀删除, warning 语义由 strategy_desc_color 表达
+        assert "strategy_missing_apis" in vm.state.strategy_desc or "daily_basic" in vm.state.strategy_desc
+        assert "⚠️" not in vm.state.strategy_desc
         assert vm.state.strategy_desc_color == "warning"
 
     @patch("ui.viewmodels.screener_view_model.ReviewManager")

@@ -1670,8 +1670,8 @@ class TestDoSavePromptAsync:
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值
-            page.show_toast.assert_called_once_with("⚠ i18n[prompt_err_length]", "warning")
+            # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值 (P2-7: ⚠ emoji 前缀删除)
+            page.show_toast.assert_called_once_with("i18n[prompt_err_length]", "warning")
 
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 返回 (True, None) → show_toast("ai_settings_saved")."""
@@ -2015,12 +2015,12 @@ class TestStatusRendering:
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._set_state(strategy_desc="⚠️ 警告", strategy_desc_color="warning", strategies_loaded=True)
+        fake_vm._set_state(strategy_desc="(!) 警告", strategy_desc_color="warning", strategies_loaded=True)
         _rerender(env)
 
-        # 验证不抛异常 (颜色映射逻辑正确)
+        # 验证不抛异常 (颜色映射逻辑正确) (P2-7: ⚠️ → 文本符号)
         texts = _get_texts(env)
-        assert any("⚠️ 警告" in (t.value or "") for t in texts)
+        assert any("(!) 警告" in (t.value or "") for t in texts)
 
     def test_task_unlocked_resets_disabled(self, screener_view_env) -> None:
         """Task 3.2: run_disabled 派生自 state.loading + state.selected_strategy.

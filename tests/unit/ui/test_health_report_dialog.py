@@ -536,9 +536,10 @@ class TestCreateCoverageRowExtended:
         count_text = count_container.content
         # mock_i18n.get 返回 key 本身，health_global_count 含 count 格式化
         assert count_text.value == "health_global_count"
-        # check 标记
-        check_text = row.content.controls[3]
-        assert check_text.value == "✓"
+        # check 标记 (P2-7: ✓ 文本 → ft.Icon CHECK)
+        check_icon = row.content.controls[3]
+        assert isinstance(check_icon, ft.Icon)
+        assert check_icon.icon == ft.Icons.CHECK
 
     def test_global_ratio_zero_shows_no_data(self):
         """global 类型 ratio == 0 时显示 health_global_no_data 文案。"""
@@ -548,9 +549,10 @@ class TestCreateCoverageRowExtended:
         count_container = row.content.controls[1]
         count_text = count_container.content
         assert count_text.value == "health_global_no_data"
-        # check 标记为 ✗
-        check_text = row.content.controls[3]
-        assert check_text.value == "✗"
+        # check 标记为 CLOSE icon (P2-7: ✗ → ft.Icon CLOSE)
+        check_icon = row.content.controls[3]
+        assert isinstance(check_icon, ft.Icon)
+        assert check_icon.icon == ft.Icons.CLOSE
 
     def test_stock_ratio_at_excellent_threshold(self):
         """ratio == HEALTH_THRESHOLD_FINANCIAL_EXCELLENT (0.9) 时用 SUCCESS 色。"""
@@ -726,7 +728,7 @@ class TestBuildScanResultExtended:
         assert fundamental_value.color == self.mock_ac.ERROR
 
     def test_fin_recency_ok_true_shows_check(self):
-        """fin_recency_ok=True 时显示 ✓（SUCCESS 色）。"""
+        """fin_recency_ok=True 时显示 CHECK icon (SUCCESS 色) (P2-7: ✓ → ft.Icon)。"""
         from ui.components.health_report_dialog import _build_scan_result
 
         result = {
@@ -739,13 +741,14 @@ class TestBuildScanResultExtended:
         }
         column = _build_scan_result(result)
         fundamental_row = column.controls[-1]
-        # Row.controls[1] 是 fin_recency Column, Column.controls[1] 是 value Text
+        # Row.controls[1] 是 fin_recency Column, Column.controls[1] 是 value Icon (P2-7)
         fin_recency_value = fundamental_row.controls[1].controls[1]
-        assert fin_recency_value.value == "✓"
+        assert isinstance(fin_recency_value, ft.Icon)
+        assert fin_recency_value.icon == ft.Icons.CHECK
         assert fin_recency_value.color == self.mock_ac.SUCCESS
 
     def test_fin_recency_ok_false_shows_cross(self):
-        """fin_recency_ok=False 时显示 ✗（ERROR 色）。"""
+        """fin_recency_ok=False 时显示 CLOSE icon (ERROR 色) (P2-7: ✗ → ft.Icon)。"""
         from ui.components.health_report_dialog import _build_scan_result
 
         result = {
@@ -759,7 +762,8 @@ class TestBuildScanResultExtended:
         column = _build_scan_result(result)
         fundamental_row = column.controls[-1]
         fin_recency_value = fundamental_row.controls[1].controls[1]
-        assert fin_recency_value.value == "✗"
+        assert isinstance(fin_recency_value, ft.Icon)
+        assert fin_recency_value.icon == ft.Icons.CLOSE
         assert fin_recency_value.color == self.mock_ac.ERROR
 
     def test_tier_rendered_in_score_row(self):
