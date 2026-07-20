@@ -77,8 +77,8 @@ def _metric_card(label: str, value: str, value_color: str) -> ft.Container:
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text(label, size=11, color=AppColors.TEXT_SECONDARY),
-                ft.Text(value, size=18, weight=ft.FontWeight.BOLD, color=value_color),
+                ft.Text(label, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
+                ft.Text(value, size=AppStyles.FONT_SIZE_HEADLINE, weight=ft.FontWeight.BOLD, color=value_color),
             ],
             spacing=4,
         ),
@@ -175,7 +175,7 @@ def _build_metrics_section(metrics: dict) -> ft.Column:
         [
             ft.Text(
                 I18n.get("backtest_metrics_title"),
-                size=16,
+                size=AppStyles.FONT_SIZE_TITLE,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.TEXT_PRIMARY,
             ),
@@ -195,12 +195,12 @@ def _build_empty_content() -> ft.Column:
                         ft.Icon(ft.Icons.ASSESSMENT, size=64, color=AppColors.TEXT_SECONDARY),
                         ft.Text(
                             I18n.get("backtest_no_result"),
-                            size=16,
+                            size=AppStyles.FONT_SIZE_TITLE,
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(
                             I18n.get("backtest_run_hint"),
-                            size=12,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                             color=AppColors.TEXT_HINT,
                         ),
                     ],
@@ -295,7 +295,7 @@ def _build_trades_table(
 
     page_info = ft.Text(
         f"{start + 1}-{end} / {total_rows}",
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=AppColors.TEXT_SECONDARY,
     )
 

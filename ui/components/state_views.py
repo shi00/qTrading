@@ -16,7 +16,7 @@ import flet as ft
 
 from ui.components.flet_type_helpers import safe_on_click
 from ui.i18n import get_observable_state
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 
 
 @ft.component
@@ -52,7 +52,7 @@ def EmptyState(
         column_controls.append(
             ft.Text(
                 title,
-                size=18,
+                size=AppStyles.FONT_SIZE_HEADLINE,
                 weight=ft.FontWeight.W_500,
                 color=AppColors.TEXT_PRIMARY,
                 text_align=ft.TextAlign.CENTER,
@@ -62,7 +62,7 @@ def EmptyState(
         column_controls.append(
             ft.Text(
                 message,
-                size=13,
+                size=AppStyles.FONT_SIZE_BODY,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,
             ),
@@ -131,7 +131,7 @@ def ErrorState(
         column_controls.append(
             ft.Text(
                 title,
-                size=18,
+                size=AppStyles.FONT_SIZE_HEADLINE,
                 weight=ft.FontWeight.W_500,
                 color=AppColors.TEXT_PRIMARY,
                 text_align=ft.TextAlign.CENTER,
@@ -141,7 +141,7 @@ def ErrorState(
         column_controls.append(
             ft.Text(
                 message,
-                size=13,
+                size=AppStyles.FONT_SIZE_BODY,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,
             ),

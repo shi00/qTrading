@@ -30,7 +30,7 @@ from ui.components.flet_type_helpers import (
 )
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import TOPIC_NAVIGATE
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 from ui.views.backtest_view import BacktestView
 from ui.views.data_view import DataExplorerView
 from ui.views.home_view import HomeView
@@ -131,7 +131,7 @@ def _build_nav_destinations() -> list[ft.NavigationRailDestination]:
             selected_icon=selected_icon,
             label=ft.Text(
                 I18n.get(label_key),
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 weight=ft.FontWeight.BOLD,
             ),
         )
@@ -263,11 +263,11 @@ def AppLayout() -> ft.Container:
         selected_icon=ft.Icons.MENU,
         on_click=safe_on_click(_toggle_nav),
         tooltip=I18n.get("nav_toggle_collapse"),
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
     )
     brand_text = ft.Text(
         I18n.get("app_brand"),
-        size=14,
+        size=AppStyles.FONT_SIZE_LG,
         weight=ft.FontWeight.BOLD,
         color=ft.Colors.ON_SURFACE,
         visible=not nav_collapsed,

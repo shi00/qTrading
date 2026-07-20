@@ -367,12 +367,12 @@ def LLMConfigPanel(
     status_icon = ft.Icon(
         status_icon_name,
         visible=status_text != "",
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=status_color,
     )
     status_text_ctrl = ft.Text(
         status_text,
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=status_color,
     )
 

@@ -31,7 +31,7 @@ import flet as ft
 
 from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_click, safe_on_hover
 from ui.i18n import I18n
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 from utils.async_utils import gather_for_shutdown_cleanup
 
 logger = logging.getLogger(__name__)
@@ -355,7 +355,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
 
     text_control = ft.Text(
         data.message,
-        size=14,
+        size=AppStyles.FONT_SIZE_LG,
         color=ft.Colors.ON_SURFACE,
         width=270,
         max_lines=max_lines,
@@ -371,7 +371,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                     ft.Container(expand=True),
                     ft.IconButton(
                         icon=expand_icon,
-                        icon_size=16,
+                        icon_size=AppStyles.FONT_SIZE_TITLE,
                         icon_color=ft.Colors.PRIMARY,
                         tooltip=expand_tooltip,
                         on_click=lambda e: set_is_expanded(not is_expanded),
@@ -396,7 +396,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
         content=ft.Row(
             safe_controls(
                 [
-                    ft.Icon(safe_icon(data.icon), color=data.color, size=24),
+                    ft.Icon(safe_icon(data.icon), color=data.color, size=AppStyles.FONT_SIZE_XL),
                     ft.Column(
                         content_col_controls,
                         spacing=2,
@@ -404,7 +404,7 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
                     ),
                     ft.IconButton(
                         ft.Icons.CLOSE,
-                        icon_size=16,
+                        icon_size=AppStyles.FONT_SIZE_TITLE,
                         icon_color=ft.Colors.ON_SURFACE_VARIANT,
                         on_click=safe_on_click(_on_dismiss_click),
                         tooltip=I18n.get("common_close"),

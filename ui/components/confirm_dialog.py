@@ -66,8 +66,8 @@ def ConfirmDialog(
     dialog = (
         ft.AlertDialog(
             modal=True,
-            title=ft.Text(title, size=16, weight=ft.FontWeight.BOLD),
-            content=ft.Text(body, size=13, color=AppColors.TEXT_SECONDARY),
+            title=ft.Text(title, size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
+            content=ft.Text(body, size=AppStyles.FONT_SIZE_BODY, color=AppColors.TEXT_SECONDARY),
             actions=[cancel_btn, confirm_btn],
             actions_alignment=ft.MainAxisAlignment.END,
             shape=ft.RoundedRectangleBorder(radius=8),

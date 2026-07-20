@@ -30,7 +30,7 @@ from ui.components.state_views import ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.pubsub_topics import CACHE_CLEARED_TOPIC, TOPIC_NAVIGATE
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.home_view_model import HomeViewModel
 from ui.views.viewport_state import ViewportState
@@ -180,9 +180,9 @@ def HomeView(
     header = ft.Row(
         safe_controls(
             [
-                ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD),
+                ft.Text(I18n.get("home_title"), size=AppStyles.FONT_SIZE_XL, weight=ft.FontWeight.BOLD),
                 ft.Container(expand=True),
-                ft.Text(date_text_value, size=12, color=AppColors.TEXT_SECONDARY),
+                ft.Text(date_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                 ft.IconButton(
                     ft.Icons.REFRESH,
                     on_click=safe_on_click(_refresh_clicked),
@@ -225,7 +225,7 @@ def HomeView(
                     hsgt=state.market_hsgt,
                     hot_concepts=state.market_hot_concepts,
                 ),
-                ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
+                ft.Text(I18n.get("home_live_news"), size=AppStyles.FONT_SIZE_HEADLINE, weight=ft.FontWeight.BOLD),
                 NewsFeed(
                     news_rows=state.news_rows,
                     has_more=state.has_more_news,

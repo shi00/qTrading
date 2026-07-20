@@ -40,6 +40,7 @@ from ui.components.config_panels.database_config_panel import (
     _on_test_click_factory,
     _render_message,
 )
+from ui.theme import AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.database_config_panel_view_model import (
     DatabaseConfigPanelViewModel,
@@ -350,6 +351,13 @@ def _render_panel(
         mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
         mock_styles.primary_button.return_value = ft.ButtonStyle()
         mock_styles.secondary_button.return_value = ft.ButtonStyle()
+        # P1-1: 字号 token 用真实数值 (create_autospec/patch 不会保留类属性 int 值)
+        from ui.theme import AppStyles as _RealAppStyles
+
+        mock_styles.FONT_SIZE_TITLE = _RealAppStyles.FONT_SIZE_TITLE
+        mock_styles.FONT_SIZE_BODY_SM = _RealAppStyles.FONT_SIZE_BODY_SM
+        mock_styles.FONT_SIZE_CAPTION = _RealAppStyles.FONT_SIZE_CAPTION
+        mock_styles.FONT_SIZE_LG = _RealAppStyles.FONT_SIZE_LG
 
         component = make_component(
             DatabaseConfigPanel,
@@ -545,23 +553,25 @@ class TestDatabaseConfigPanelStatusDisplay:
         assert icons[0].color == _STATUS_COLOR_MAP["info"]
 
     def test_status_text_size_is_12(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """status_text_ctrl.size=12。"""
+        """status_text_ctrl.size=FONT_SIZE_BODY_SM (P1-1: 12 → token)。"""
         state = DatabaseConfigState(status_message=Message("ok"), status_type="success")
         _, _, result, _ = _render_panel(state=state)
         ctrls = _walk_controls(result)
-        # status_text_ctrl size=12, 与 db_info_text (size=11) 区分
+        # status_text_ctrl size=FONT_SIZE_BODY_SM (=12), 与 db_info_text (FONT_SIZE_CAPTION=11) 区分
         status_texts = [
-            c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == 12 and c.value == "ok"
+            c
+            for c in ctrls
+            if isinstance(c, ft.Text) and getattr(c, "size", None) == AppStyles.FONT_SIZE_BODY_SM and c.value == "ok"
         ]
         assert len(status_texts) == 1
 
     def test_status_icon_size_is_16(self, mock_i18n_state, mock_app_colors_state) -> None:
-        """status_icon.size=16。"""
+        """status_icon.size=FONT_SIZE_TITLE (P1-1: 16 → token)。"""
         state = DatabaseConfigState(status_message=Message("ok"), status_type="success")
         _, _, result, _ = _render_panel(state=state)
         ctrls = _walk_controls(result)
         icons = [c for c in ctrls if isinstance(c, ft.Icon) and c.icon == ft.Icons.CHECK_CIRCLE]
-        assert icons[0].size == 16
+        assert icons[0].size == AppStyles.FONT_SIZE_TITLE
 
 
 # ============================================================================
@@ -577,8 +587,10 @@ class TestDatabaseConfigPanelDbInfo:
         state = DatabaseConfigState(db_info=Message("db_info_format", {"version": "16.0", "size": "10MB", "tables": 5}))
         _, _, result, _ = _render_panel(state=state, show_header=True)
         ctrls = _walk_controls(result)
-        # db_info_text_ctrl size=11, value=I18n.get(key, **params) → mock 返回 key
-        info_texts = [c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == 11]
+        # db_info_text_ctrl size=FONT_SIZE_CAPTION (=11, P1-1), value=I18n.get(key, **params) → mock 返回 key
+        info_texts = [
+            c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == AppStyles.FONT_SIZE_CAPTION
+        ]
         assert len(info_texts) == 1
         assert info_texts[0].value == "db_info_format"
 
@@ -587,7 +599,9 @@ class TestDatabaseConfigPanelDbInfo:
         state = DatabaseConfigState(db_info=None)
         _, _, result, _ = _render_panel(state=state, show_header=True)
         ctrls = _walk_controls(result)
-        info_texts = [c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == 11]
+        info_texts = [
+            c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == AppStyles.FONT_SIZE_CAPTION
+        ]
         assert len(info_texts) == 1
         assert info_texts[0].value == ""
 
@@ -595,7 +609,9 @@ class TestDatabaseConfigPanelDbInfo:
         """db_info_text_ctrl.text_align=ft.TextAlign.CENTER。"""
         _, _, result, _ = _render_panel(show_header=True)
         ctrls = _walk_controls(result)
-        info_texts = [c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == 11]
+        info_texts = [
+            c for c in ctrls if isinstance(c, ft.Text) and getattr(c, "size", None) == AppStyles.FONT_SIZE_CAPTION
+        ]
         assert len(info_texts) == 1
         assert info_texts[0].text_align == ft.TextAlign.CENTER
 

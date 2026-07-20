@@ -119,7 +119,7 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
     # --- Controls ---
     title_text = ft.Text(
         I18n.get("backtest_view_title"),
-        size=24,
+        size=AppStyles.FONT_SIZE_XL,
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )
@@ -137,7 +137,7 @@ def BacktestView(active: bool = True, viewport: ViewportState | None = None) -> 
 
     status_text = ft.Text(status_value, color=status_color)
     progress_bar = ft.ProgressBar(visible=state.is_running, value=state.progress, expand=True)
-    progress_text = ft.Text(progress_text_value, size=12, color=AppColors.TEXT_SECONDARY)
+    progress_text = ft.Text(progress_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
     cancel_button = ft.Button(
         content=I18n.get("common_cancel"),
         on_click=safe_on_click(_on_cancel_backtest),

@@ -245,7 +245,7 @@ def _create_overview_card(
                 ft.Container(height=16),
                 ft.Text(
                     I18n.get(title_key),
-                    size=16,
+                    size=AppStyles.FONT_SIZE_TITLE,
                     weight=ft.FontWeight.W_700,
                     color=AppColors.TEXT_PRIMARY,
                     text_align=ft.TextAlign.CENTER,
@@ -253,7 +253,7 @@ def _create_overview_card(
                 ft.Container(height=6),
                 ft.Text(
                     I18n.get(desc_key),
-                    size=13,
+                    size=AppStyles.FONT_SIZE_BODY,
                     color=ft.Colors.with_opacity(0.85, AppColors.TEXT_SECONDARY),
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -496,7 +496,7 @@ def OnboardingWizard(
                 [
                     ft.Text(
                         f"{current_step_name}  ({state.current_step}/6)",
-                        size=14,
+                        size=AppStyles.FONT_SIZE_LG,
                         weight=ft.FontWeight.W_600,
                         color=AppColors.TEXT_PRIMARY,
                     ),
@@ -544,7 +544,7 @@ def OnboardingWizard(
             ),
             ft.Text(
                 I18n.get("wizard_welcome_desc_with_time"),
-                size=16,
+                size=AppStyles.FONT_SIZE_TITLE,
                 color=AppColors.TEXT_SECONDARY,
                 text_align=ft.TextAlign.CENTER,
             ),
@@ -563,7 +563,7 @@ def OnboardingWizard(
             tooltip=I18n.get_language_label(),
             value=language_value,
             width=200,
-            text_size=14,
+            text_size=AppStyles.FONT_SIZE_LG,
             border_radius=8,
             content_padding=10,
             options=[ft.dropdown.Option(code, name) for code, name in I18n.get_language_options()],
@@ -587,7 +587,7 @@ def OnboardingWizard(
 
         gradient_guide_text = ft.Text(
             I18n.get("wizard_welcome_guide"),
-            size=20,
+            size=AppStyles.FONT_SIZE_HEADLINE,
             weight=ft.FontWeight.W_600,
             text_align=ft.TextAlign.CENTER,
         )
@@ -681,14 +681,14 @@ def OnboardingWizard(
                 ft.Icon(ft.Icons.STORAGE, size=64, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_db_title"),
-                    size=24,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_db_desc"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -710,14 +710,14 @@ def OnboardingWizard(
                 ft.Icon(ft.Icons.KEY, size=64, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step1_title"),
-                    size=24,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step1_desc"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -739,14 +739,14 @@ def OnboardingWizard(
                 ft.Icon(ft.Icons.CLOUD, size=64, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step_cloud_ai_title"),
-                    size=24,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step_cloud_ai_desc"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -772,14 +772,14 @@ def OnboardingWizard(
                 ft.Icon(ft.Icons.PSYCHOLOGY, size=64, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step_local_model_title"),
-                    size=24,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step_local_model_desc"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -810,14 +810,14 @@ def OnboardingWizard(
                     ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=64, color=AppColors.PRIMARY),
                     ft.Text(
                         I18n.get("wizard_step3_title"),
-                        size=24,
+                        size=AppStyles.FONT_SIZE_XL,
                         weight=ft.FontWeight.W_500,
                         color=AppColors.TEXT_PRIMARY,
                     ),
                     ft.Container(height=10),
                     ft.Text(
                         I18n.get("wizard_step3_desc").format(years=years, hours=int(years * 1.5)),
-                        size=14,
+                        size=AppStyles.FONT_SIZE_LG,
                         color=AppColors.TEXT_SECONDARY,
                         text_align=ft.TextAlign.CENTER,
                     ),
@@ -826,10 +826,12 @@ def OnboardingWizard(
                         content=ft.Column(
                             safe_controls(
                                 [
-                                    ft.Icon(ft.Icons.WARNING, color=AppColors.WARNING, size=20),
+                                    ft.Icon(
+                                        ft.Icons.WARNING, color=AppColors.WARNING, size=AppStyles.FONT_SIZE_HEADLINE
+                                    ),
                                     ft.Text(
                                         I18n.get("wizard_sync_warning"),
-                                        size=12,
+                                        size=AppStyles.FONT_SIZE_BODY_SM,
                                         color=AppColors.WARNING,
                                         text_align=ft.TextAlign.CENTER,
                                     ),
@@ -886,7 +888,7 @@ def OnboardingWizard(
                     ),
                     ft.Text(
                         _render_message(state.sync_progress_message) or I18n.get("wizard_status_ready"),
-                        size=12,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
                         color=AppColors.TEXT_SECONDARY,
                         text_align=ft.TextAlign.CENTER,
                     ),
@@ -902,14 +904,14 @@ def OnboardingWizard(
                 ft.Icon(ft.Icons.SCHEDULE, size=64, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get("wizard_step4_title"),
-                    size=24,
+                    size=AppStyles.FONT_SIZE_XL,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step4_desc"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -943,7 +945,7 @@ def OnboardingWizard(
                 ),
                 ft.Text(
                     I18n.get("wizard_schedule_note"),
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.TEXT_HINT,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -965,7 +967,7 @@ def OnboardingWizard(
                 ft.Container(height=10),
                 ft.Text(
                     I18n.get("wizard_step5_desc"),
-                    size=16,
+                    size=AppStyles.FONT_SIZE_TITLE,
                     color=AppColors.TEXT_SECONDARY,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -1030,7 +1032,7 @@ def OnboardingWizard(
                 ft.ProgressRing(width=40, height=40, stroke_width=3),
                 ft.Text(
                     I18n.get("wizard_validating"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_PRIMARY,
                 ),
             ],

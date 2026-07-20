@@ -54,25 +54,27 @@ def _render_probe_status(api_name: str, available: bool | None, vm: SystemViewMo
     """
     if available is True:
         return (
-            ft.Icon(ft.Icons.CHECK_CIRCLE, size=14, color=AppColors.SUCCESS),
-            ft.Text(I18n.get("sys_tier_available"), size=11, color=AppColors.SUCCESS),
+            ft.Icon(ft.Icons.CHECK_CIRCLE, size=AppStyles.FONT_SIZE_LG, color=AppColors.SUCCESS),
+            ft.Text(I18n.get("sys_tier_available"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.SUCCESS),
             AppColors.SUCCESS,
         )
     if available is False:
         if vm.is_independent_purchase(api_name):
             return (
-                ft.Icon(ft.Icons.CANCEL, size=14, color=AppColors.WARNING),
-                ft.Text(I18n.get("sys_tier_independent_purchase"), size=11, color=AppColors.WARNING),
+                ft.Icon(ft.Icons.CANCEL, size=AppStyles.FONT_SIZE_LG, color=AppColors.WARNING),
+                ft.Text(
+                    I18n.get("sys_tier_independent_purchase"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.WARNING
+                ),
                 AppColors.WARNING,
             )
         return (
-            ft.Icon(ft.Icons.CANCEL, size=14, color=AppColors.ERROR),
-            ft.Text(I18n.get("sys_tier_unavailable"), size=11, color=AppColors.ERROR),
+            ft.Icon(ft.Icons.CANCEL, size=AppStyles.FONT_SIZE_LG, color=AppColors.ERROR),
+            ft.Text(I18n.get("sys_tier_unavailable"), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.ERROR),
             AppColors.ERROR,
         )
     return (
-        ft.Icon(ft.Icons.HELP_OUTLINE, size=14, color=ft.Colors.ON_SURFACE_VARIANT),
-        ft.Text(I18n.get("sys_tier_not_probed"), size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+        ft.Icon(ft.Icons.HELP_OUTLINE, size=AppStyles.FONT_SIZE_LG, color=ft.Colors.ON_SURFACE_VARIANT),
+        ft.Text(I18n.get("sys_tier_not_probed"), size=AppStyles.FONT_SIZE_CAPTION, color=ft.Colors.ON_SURFACE_VARIANT),
         str(ft.Colors.ON_SURFACE_VARIANT),
     )
 
@@ -116,7 +118,7 @@ def _build_api_list_controls(
             independent_badge.append(
                 ft.Icon(
                     ft.Icons.ATTACH_MONEY_ROUNDED,
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.WARNING,
                     tooltip=I18n.get("sys_tier_independent_purchase"),
                 )
@@ -126,7 +128,10 @@ def _build_api_list_controls(
             [
                 ft.Container(
                     content=ft.Row(
-                        [ft.Text(api_name, size=12, color=ft.Colors.ON_SURFACE), *independent_badge],
+                        [
+                            ft.Text(api_name, size=AppStyles.FONT_SIZE_BODY_SM, color=ft.Colors.ON_SURFACE),
+                            *independent_badge,
+                        ],
                         spacing=4,
                     ),
                     col={"xs": 12, "sm": 6, "md": 6, "lg": 4},
@@ -357,7 +362,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
         label=I18n.get("sys_label_point_tier"),
         value=selected_tier,
         width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
         content_padding=10,
         options=_build_tier_options(vm),
@@ -367,7 +372,7 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
 
     points_hint_text = ft.Text(
         I18n.get("sys_tier_points_hint"),
-        size=11,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=ft.Colors.ON_SURFACE_VARIANT,
         italic=True,
     )
@@ -382,10 +387,10 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
 
     last_probe_text_ctrl = ft.Text(
         last_probe_text,
-        size=11,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=ft.Colors.ON_SURFACE_VARIANT,
     )
-    progress_text_ctrl = ft.Text(progress_text, size=11, color=ft.Colors.PRIMARY)
+    progress_text_ctrl = ft.Text(progress_text, size=AppStyles.FONT_SIZE_CAPTION, color=ft.Colors.PRIMARY)
 
     api_list_view = ft.ListView(
         controls=_build_api_list_controls(current_tier, probe_status, vm),
@@ -397,20 +402,20 @@ def TierApiPanel(system_vm: SystemViewModel) -> ft.Column:
 
     api_list_header = ft.Text(
         I18n.get("sys_tier_api_list_header"),
-        size=13,
+        size=AppStyles.FONT_SIZE_BODY,
         weight=ft.FontWeight.BOLD,
         color=ft.Colors.ON_SURFACE,
     )
     probe_status_header = ft.Text(
         I18n.get("sys_tier_probe_status_header"),
-        size=13,
+        size=AppStyles.FONT_SIZE_BODY,
         weight=ft.FontWeight.BOLD,
         color=ft.Colors.ON_SURFACE,
     )
 
     panel_title = ft.Text(
         I18n.get("sys_tier_panel_title"),
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         weight=ft.FontWeight.BOLD,
         color=ft.Colors.ON_SURFACE,
     )

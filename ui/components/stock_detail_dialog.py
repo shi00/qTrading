@@ -24,7 +24,7 @@ import flet as ft
 from ui.components._markdown_safe import safe_open_url
 from ui.components.chart_utils import generate_kline_png
 from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
 
@@ -118,10 +118,10 @@ def _info_chip(label, value, color=None) -> ft.Container:
     return ft.Container(
         content=ft.Column(
             [
-                ft.Text(label, size=11, color=AppColors.TEXT_SECONDARY),
+                ft.Text(label, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY),
                 ft.Text(
                     str(value),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     weight=ft.FontWeight.W_500,
                     color=color or AppColors.TEXT_PRIMARY,
                 ),
@@ -144,11 +144,11 @@ def _build_title(stock_data: dict) -> ft.Row:
         [
             ft.Text(
                 f"{name}",
-                size=20,
+                size=AppStyles.FONT_SIZE_HEADLINE,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.TEXT_PRIMARY,
             ),
-            ft.Text(f"({code})", size=14, color=AppColors.TEXT_SECONDARY),
+            ft.Text(f"({code})", size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_SECONDARY),
         ],
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
@@ -161,7 +161,7 @@ def _initial_chart_content() -> ft.Control:
             ft.ProgressRing(),
             ft.Text(
                 I18n.get("detail_loading_chart"),
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.TEXT_SECONDARY,
             ),
         ],
@@ -210,7 +210,7 @@ def _build_content(
         [
             ft.Text(
                 I18n.get("detail_sec_price"),
-                size=14,
+                size=AppStyles.FONT_SIZE_LG,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.PRIMARY,
             ),
@@ -250,7 +250,7 @@ def _build_content(
             ft.Container(height=10),
             ft.Text(
                 I18n.get("detail_sec_valuation"),
-                size=14,
+                size=AppStyles.FONT_SIZE_LG,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.PRIMARY,
             ),
@@ -293,7 +293,7 @@ def _build_content(
             ft.Container(height=10),
             ft.Text(
                 I18n.get("detail_sec_financial"),
-                size=14,
+                size=AppStyles.FONT_SIZE_LG,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.PRIMARY,
             ),
@@ -335,7 +335,7 @@ def _build_content(
             ft.Container(height=10),
             ft.Text(
                 I18n.get("detail_sec_basic"),
-                size=14,
+                size=AppStyles.FONT_SIZE_LG,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.PRIMARY,
             ),
@@ -378,7 +378,7 @@ def _build_content(
                         ft.Icon(ft.Icons.AUTO_AWESOME, color=AppColors.ACCENT),
                         ft.Text(
                             I18n.get("detail_ai_analysis"),
-                            size=16,
+                            size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.ACCENT,
                         ),
@@ -415,7 +415,7 @@ def _build_content(
                 ft.ExpansionTile(
                     title=ft.Text(
                         I18n.get("detail_ai_thinking"),
-                        size=12,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
                         color=AppColors.TEXT_SECONDARY,
                     ),
                     controls=[
@@ -488,7 +488,7 @@ async def _load_chart_async(
                     ft.ProgressRing(),
                     ft.Text(
                         I18n.get("detail_loading_history"),
-                        size=12,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
                         color=AppColors.TEXT_SECONDARY,
                     ),
                 ],

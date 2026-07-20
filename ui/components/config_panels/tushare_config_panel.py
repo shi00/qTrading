@@ -188,12 +188,12 @@ def TushareConfigPanel(
     status_icon = ft.Icon(
         status_icon_name,
         visible=status_text != "",
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=status_color,
     )
     status_text_ctrl = ft.Text(
         status_text,
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=status_color,
     )
 
@@ -208,7 +208,7 @@ def TushareConfigPanel(
 
     no_token_text = ft.Text(
         I18n.get("tushare_no_token"),
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=AppColors.TEXT_SECONDARY,
     )
 

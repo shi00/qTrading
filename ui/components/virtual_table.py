@@ -148,7 +148,7 @@ def _build_header(
         text = ft.Text(
             label,
             weight=ft.FontWeight.BOLD,
-            size=12,
+            size=AppStyles.FONT_SIZE_BODY_SM,
             color=AppColors.TABLE_HEADER_TEXT,
             no_wrap=True,
         )
@@ -204,13 +204,13 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
                         ),
                     ),
                 ],
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 no_wrap=True,
             )
         else:
             text = ft.Text(
                 val,
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 no_wrap=True,
                 weight=ft.FontWeight.BOLD if is_trend else None,
                 color=text_color,

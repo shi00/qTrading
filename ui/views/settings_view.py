@@ -20,7 +20,7 @@ import flet as ft
 
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 from ui.views.settings_tabs.ai_brain_tab import AIBrainTab
 from ui.views.settings_tabs.automation_tab import AutomationTab, NotificationsTab
 from ui.views.settings_tabs.data_source_tab import DataSourceTab
@@ -175,7 +175,7 @@ def SettingsView(active: bool = True, viewport: ViewportState | None = None) -> 
     # --- Header ---
     header_title = ft.Text(
         I18n.get("settings_title"),
-        size=24,
+        size=AppStyles.FONT_SIZE_XL,
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )

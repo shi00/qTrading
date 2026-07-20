@@ -109,10 +109,10 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
     status_badge = ft.Container(
         content=ft.Row(
             [
-                ft.Icon(status_icon, size=14, color=status_color),
+                ft.Icon(status_icon, size=AppStyles.FONT_SIZE_LG, color=status_color),
                 ft.Text(
                     status_label,
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     weight=ft.FontWeight.W_600,
                     color=status_color,
                 ),
@@ -127,7 +127,9 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
 
     # --- Type chip ---
     type_chip = ft.Container(
-        content=ft.Text(_render_task_field(row.task_type), size=11, color=AppColors.TEXT_SECONDARY),
+        content=ft.Text(
+            _render_task_field(row.task_type), size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_SECONDARY
+        ),
         bgcolor=ft.Colors.with_opacity(0.08, AppColors.PRIMARY),
         border_radius=4,
         padding=ft.Padding.symmetric(horizontal=8, vertical=2),
@@ -140,7 +142,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
             ft.Text(
                 _render_task_field(row.name),
                 weight=ft.FontWeight.W_600,
-                size=14,
+                size=AppStyles.FONT_SIZE_LG,
                 color=AppColors.TEXT_PRIMARY,
                 expand=True,
                 max_lines=1,
@@ -159,7 +161,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
         desc_text = _render_task_field(row.description)
     desc_row = ft.Text(
         desc_text or "",
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=AppColors.TEXT_HINT,
         max_lines=1,
         overflow=ft.TextOverflow.ELLIPSIS,
@@ -180,7 +182,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
                 ),
                 ft.Text(
                     f"{pct:.1f}%",
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     weight=ft.FontWeight.W_600,
                     color=AppColors.INFO,
                     width=48,
@@ -218,7 +220,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
     # --- Bottom: time + actions ---
     time_text = ft.Text(
         _format_time(row.created_at),
-        size=11,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=AppColors.TEXT_HINT,
         italic=True,
     )
@@ -239,7 +241,7 @@ def _build_task_card(row: TaskRow, on_cancel: Callable[[str], None]) -> ft.Conta
 
     bottom_row = ft.Row(
         [
-            ft.Icon(ft.Icons.ACCESS_TIME, size=14, color=AppColors.TEXT_HINT),
+            ft.Icon(ft.Icons.ACCESS_TIME, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_HINT),
             time_text,
             ft.Container(expand=True),
             action_btn,
@@ -317,7 +319,7 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
     # --- Header ---
     stats_text = ft.Text(
         I18n.get("task_stats_fmt").format(total=state.total_count, running=state.running_count),
-        size=13,
+        size=AppStyles.FONT_SIZE_BODY,
         color=AppColors.TEXT_SECONDARY,
     )
 
@@ -334,14 +336,14 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
 
     header_title = ft.Text(
         I18n.get("nav_tasks"),
-        size=22,
+        size=AppStyles.FONT_SIZE_XL,
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )
 
     header = ft.Row(
         [
-            ft.Icon(ft.Icons.TASK_ALT, color=AppColors.PRIMARY, size=28),
+            ft.Icon(ft.Icons.TASK_ALT, color=AppColors.PRIMARY, size=AppStyles.FONT_SIZE_DISPLAY),
             header_title,
             ft.Container(expand=True),
             stats_text,
@@ -362,13 +364,13 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
                 ),
                 ft.Text(
                     I18n.get("task_empty_title"),
-                    size=18,
+                    size=AppStyles.FONT_SIZE_HEADLINE,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_SECONDARY,
                 ),
                 ft.Text(
                     I18n.get("task_empty_subtitle"),
-                    size=13,
+                    size=AppStyles.FONT_SIZE_BODY,
                     color=AppColors.TEXT_HINT,
                     text_align=ft.TextAlign.CENTER,
                 ),
@@ -401,18 +403,18 @@ def TaskCenterView(active: bool = True, viewport: ViewportState | None = None) -
         tooltip=I18n.get("common_prev_page"),
         on_click=safe_on_click(_on_prev),
         disabled=state.current_page <= 1,
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
     )
     btn_next = ft.IconButton(
         icon=ft.Icons.CHEVRON_RIGHT,
         tooltip=I18n.get("common_next_page"),
         on_click=safe_on_click(_on_next),
         disabled=state.current_page >= state.total_pages,
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
     )
     page_info_text = ft.Text(
         f"{state.current_page} / {state.total_pages}",
-        size=13,
+        size=AppStyles.FONT_SIZE_BODY,
         color=AppColors.TEXT_SECONDARY,
     )
 

@@ -465,7 +465,7 @@ def TableViewerTab(
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         options=_build_table_selector_options(state.tables_list, vm),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=10,
     )
 
@@ -480,7 +480,7 @@ def TableViewerTab(
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         options=_build_filter_col_options(state.current_table, state.table_columns, vm),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=10,
     )
 
@@ -495,7 +495,7 @@ def TableViewerTab(
         border_color=AppColors.INPUT_BORDER,
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=5,
     )
 
@@ -510,7 +510,7 @@ def TableViewerTab(
         border_color=AppColors.INPUT_BORDER,
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=10,
     )
 
@@ -519,14 +519,14 @@ def TableViewerTab(
         tooltip=I18n.get("common_query"),
         on_click=safe_on_click(_on_query_click),
         icon_color=AppColors.PRIMARY,
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
         disabled=is_loading,
     )
     btn_refresh = ft.IconButton(
         ft.Icons.REFRESH,
         tooltip=I18n.get("common_refresh"),
         on_click=safe_on_click(_on_refresh_click),
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
         disabled=is_loading,
     )
 
@@ -548,13 +548,13 @@ def TableViewerTab(
                 ft.Container(height=16),
                 ft.Text(
                     I18n.get("data_loading"),
-                    size=16,
+                    size=AppStyles.FONT_SIZE_TITLE,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Text(
                     I18n.get("data_loading_hint"),
-                    size=13,
+                    size=AppStyles.FONT_SIZE_BODY,
                     color=AppColors.TEXT_SECONDARY,
                 ),
             ],
@@ -651,7 +651,7 @@ def TableViewerTab(
                 [
                     ft.Text(
                         I18n.get("data_total_rows").format(count=state.total_rows),
-                        size=12,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
                         color=AppColors.TEXT_SECONDARY,
                     ),
                     ft.Container(expand=True),
@@ -775,7 +775,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         multiline=True,
         min_lines=5,
         max_lines=10,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         label=I18n.get("data_sql_label"),
         hint_text=I18n.get("data_sql_hint"),
         value=sql_text,
@@ -809,7 +809,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     empty_hint_text = ft.Text(
         I18n.get("data_sql_empty_hint"),
         color=AppColors.TEXT_HINT,
-        size=14,
+        size=AppStyles.FONT_SIZE_LG,
     )
     empty_state = ft.Container(
         content=ft.Column(
@@ -844,7 +844,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                                 ft.Container(expand=True),
                                 ft.Text(
                                     I18n.get("data_date_fmt_hint"),
-                                    size=11,
+                                    size=AppStyles.FONT_SIZE_CAPTION,
                                     color=AppColors.TEXT_HINT,
                                 ),
                                 ft.OutlinedButton(
@@ -875,7 +875,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                 padding=10,
             ),
             ft.Container(
-                content=ft.Text(status_text, size=12, color=status_color),
+                content=ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
                 padding=5,
                 bgcolor=AppColors.SURFACE_VARIANT,
             ),

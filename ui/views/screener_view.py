@@ -694,7 +694,9 @@ def ScreenerView(
             init_display = int(current_val) if current_val == int(current_val) else round(current_val, 1)
             return ft.Column(
                 [
-                    ft.Text(f"{label}: {init_display}", size=12, color=AppColors.TEXT_SECONDARY),
+                    ft.Text(
+                        f"{label}: {init_display}", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
+                    ),
                     ft.Slider(
                         min=min_val,
                         max=max_val,
@@ -719,7 +721,7 @@ def ScreenerView(
                 dense=True,
                 border_color=AppColors.DIVIDER,
                 focused_border_color=AppColors.PRIMARY,
-                text_size=13,
+                text_size=AppStyles.FONT_SIZE_BODY,
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                 width=200,
                 on_change=lambda e, n=p_name: _update_param(n, _parse_num(e.control.value if e and e.control else "")),
@@ -735,7 +737,7 @@ def ScreenerView(
                 dense=True,
                 border_color=AppColors.DIVIDER,
                 focused_border_color=AppColors.PRIMARY,
-                text_size=13,
+                text_size=AppStyles.FONT_SIZE_BODY,
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=8),
                 width=200,
                 on_select=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
@@ -758,7 +760,7 @@ def ScreenerView(
                 max_lines=15,
                 border_color=AppColors.DIVIDER,
                 focused_border_color=AppColors.PRIMARY,
-                text_size=12,
+                text_size=AppStyles.FONT_SIZE_BODY_SM,
                 content_padding=ft.Padding.symmetric(horizontal=10, vertical=10),
                 on_change=lambda e, n=p_name: _update_param(n, e.control.value if e and e.control else ""),
             )
@@ -769,7 +771,7 @@ def ScreenerView(
                         [
                             ft.Row(
                                 [
-                                    ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
+                                    ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                                     ft.Container(expand=True),
                                     ft.TextButton(
                                         content=I18n.get("ai_save_prompt"),
@@ -853,7 +855,12 @@ def ScreenerView(
                 ft.Container(
                     content=ft.Column(
                         [
-                            ft.Text(title, size=13, weight=ft.FontWeight.W_500, color=AppColors.TEXT_PRIMARY),
+                            ft.Text(
+                                title,
+                                size=AppStyles.FONT_SIZE_BODY,
+                                weight=ft.FontWeight.W_500,
+                                color=AppColors.TEXT_PRIMARY,
+                            ),
                             ft.Divider(height=1, color=AppColors.DIVIDER),
                             ft.Row(controls, wrap=True, spacing=15),
                         ],
@@ -871,9 +878,13 @@ def ScreenerView(
             if controls:
                 result.append(
                     ft.ExpansionTile(
-                        title=ft.Text(I18n.get("ai_advanced_settings"), size=14, weight=ft.FontWeight.W_500),
+                        title=ft.Text(
+                            I18n.get("ai_advanced_settings"), size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500
+                        ),
                         subtitle=ft.Text(
-                            I18n.get("ai_advanced_settings_desc"), size=12, color=AppColors.TEXT_SECONDARY
+                            I18n.get("ai_advanced_settings_desc"),
+                            size=AppStyles.FONT_SIZE_BODY_SM,
+                            color=AppColors.TEXT_SECONDARY,
                         ),
                         controls=controls,
                         collapsed_text_color=AppColors.TEXT_PRIMARY,
@@ -895,7 +906,7 @@ def ScreenerView(
                     [
                         ft.Row(
                             [
-                                ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
+                                ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
                                 ft.ProgressRing(width=14, height=14, stroke_width=2),
                             ],
                             spacing=8,
@@ -925,7 +936,7 @@ def ScreenerView(
         return ft.Container(
             content=ft.Column(
                 [
-                    ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=16),
+                    ft.Text(f"📈 {name}", weight=ft.FontWeight.W_600, size=AppStyles.FONT_SIZE_TITLE),
                     ft.ExpansionTile(
                         title=ft.Text(f"💡 {I18n.get('ai_thinking')}..."),
                         subtitle=ft.Text(I18n.get("ai_expand_reasoning"), size=10, color=AppColors.TEXT_SECONDARY),
@@ -979,7 +990,9 @@ def ScreenerView(
         if not history_tree_rows:
             tree_controls.append(
                 ft.Container(
-                    content=ft.Text(I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=13),
+                    content=ft.Text(
+                        I18n.get("screener_no_results"), color=AppColors.TEXT_SECONDARY, size=AppStyles.FONT_SIZE_BODY
+                    ),
                     padding=20,
                 )
             )
@@ -993,8 +1006,10 @@ def ScreenerView(
 
                 subtiles: list[ft.Control] = [
                     ft.ListTile(
-                        leading=ft.Icon(ft.Icons.SELECT_ALL, size=18, color=AppColors.ACCENT),
-                        title=ft.Text(f"{I18n.get('screener_all_strategies')} ({total_cnt})", size=13),
+                        leading=ft.Icon(ft.Icons.SELECT_ALL, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.ACCENT),
+                        title=ft.Text(
+                            f"{I18n.get('screener_all_strategies')} ({total_cnt})", size=AppStyles.FONT_SIZE_BODY
+                        ),
                         on_click=lambda e, d=d_key: _on_tree_item_click(d, run_id=None),
                         dense=True,
                     )
@@ -1004,8 +1019,12 @@ def ScreenerView(
                     run_suffix = f" [{s['run_id'][:8]}]" if len(strategies) > 1 else ""
                     subtiles.append(
                         ft.ListTile(
-                            leading=ft.Icon(ft.Icons.TRENDING_UP, size=16, color=AppColors.TEXT_SECONDARY),
-                            title=ft.Text(f"{strategy_display}{run_suffix} ({s['cnt']})", size=13),
+                            leading=ft.Icon(
+                                ft.Icons.TRENDING_UP, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.TEXT_SECONDARY
+                            ),
+                            title=ft.Text(
+                                f"{strategy_display}{run_suffix} ({s['cnt']})", size=AppStyles.FONT_SIZE_BODY
+                            ),
                             on_click=lambda e, d=d_key, rid=s["run_id"]: _on_tree_item_click(d, run_id=rid),
                             dense=True,
                         )
@@ -1013,9 +1032,11 @@ def ScreenerView(
 
                 tree_controls.append(
                     ft.ExpansionTile(
-                        title=ft.Text(f"📅 {display_date}", size=14, weight=ft.FontWeight.W_500),
+                        title=ft.Text(f"📅 {display_date}", size=AppStyles.FONT_SIZE_LG, weight=ft.FontWeight.W_500),
                         subtitle=ft.Text(
-                            I18n.get("history_total").format(count=total_cnt), size=11, color=AppColors.TEXT_SECONDARY
+                            I18n.get("history_total").format(count=total_cnt),
+                            size=AppStyles.FONT_SIZE_CAPTION,
+                            color=AppColors.TEXT_SECONDARY,
                         ),
                         controls=subtiles,
                         expanded=(first_expand and idx == 0),
@@ -1038,7 +1059,7 @@ def ScreenerView(
                             I18n.get("screener_mode_history"),
                             weight=ft.FontWeight.BOLD,
                             color=AppColors.TEXT_PRIMARY,
-                            size=14,
+                            size=AppStyles.FONT_SIZE_LG,
                         ),
                         padding=ft.Padding.only(left=12, top=10, bottom=5),
                     ),
@@ -1061,8 +1082,13 @@ def ScreenerView(
     title_row = ft.Row(
         safe_controls(
             [
-                ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=24),
-                ft.Text(I18n.get("screener_title"), size=20, weight=ft.FontWeight.BOLD, color=AppColors.TEXT_PRIMARY),
+                ft.Icon(ft.Icons.ELECTRIC_BOLT, color=AppColors.PRIMARY, size=AppStyles.FONT_SIZE_XL),
+                ft.Text(
+                    I18n.get("screener_title"),
+                    size=AppStyles.FONT_SIZE_HEADLINE,
+                    weight=ft.FontWeight.BOLD,
+                    color=AppColors.TEXT_PRIMARY,
+                ),
                 ft.Container(width=20),
                 ft.SegmentedButton(
                     segments=[
@@ -1093,7 +1119,7 @@ def ScreenerView(
         value=state.selected_strategy,
         on_select=safe_on_select(_on_strategy_change),
         width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         bgcolor=AppColors.INPUT_BG,
         border_color=AppColors.INPUT_BORDER,
         color=AppColors.INPUT_TEXT,
@@ -1105,13 +1131,13 @@ def ScreenerView(
             ft.Row([strategy_dropdown], spacing=10),
             ft.Text(
                 state.strategy_desc or I18n.get("screener_no_strategy_hint"),
-                size=13,
+                size=AppStyles.FONT_SIZE_BODY,
                 color=_resolve_strategy_desc_color(state.strategy_desc_color),
                 no_wrap=False,
             ),
             ft.Text(
                 I18n.get(state.tier_hint) if state.tier_hint else "",
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 color=AppColors.WARNING,
                 visible=state.tier_hint is not None,
                 no_wrap=False,
@@ -1206,7 +1232,7 @@ def ScreenerView(
                     value=str(state.page_size),
                     width=120,
                     dense=True,
-                    text_size=13,
+                    text_size=AppStyles.FONT_SIZE_BODY,
                     on_select=safe_on_select(_on_page_size_change),
                 ),
             ]

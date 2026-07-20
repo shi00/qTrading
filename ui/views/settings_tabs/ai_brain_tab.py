@@ -55,8 +55,6 @@ logger = logging.getLogger(__name__)
 # UI Constants
 # ============================================================================
 _INPUT_WIDTH_SMALL = 190
-_FONT_SIZE_HINT = 11
-_FONT_SIZE_BODY = 12
 
 
 # ============================================================================
@@ -300,7 +298,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         multiline=True,
         min_lines=5,
         max_lines=15,
-        text_size=_FONT_SIZE_BODY,
+        text_size=AppStyles.FONT_SIZE_BODY_SM,
         hint_text=I18n.get("settings_ai_prompt_hint"),
         on_change=lambda e: ai_settings_vm.set_ai_prompt_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -313,7 +311,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
         multiline=True,
         min_lines=3,
         max_lines=10,
-        text_size=_FONT_SIZE_BODY,
+        text_size=AppStyles.FONT_SIZE_BODY_SM,
         hint_text=I18n.get("settings_news_prompt_hint"),
         on_change=lambda e: ai_settings_vm.set_news_prompt_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -370,19 +368,19 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
     # --- Tuning card ---
     icon_help_max = ft.Icon(
         ft.Icons.HELP_OUTLINE,
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=AppColors.TEXT_HINT,
         tooltip=I18n.get("ai_hint_cap"),
     )
     icon_help_min = ft.Icon(
         ft.Icons.HELP_OUTLINE,
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=AppColors.TEXT_HINT,
         tooltip=I18n.get("ai_hint_turnover_min"),
     )
     icon_help_conc = ft.Icon(
         ft.Icons.HELP_OUTLINE,
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=AppColors.TEXT_HINT,
         tooltip=I18n.get("settings_hint_ai_model"),
     )
@@ -397,13 +395,13 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 ft.Row(
                     [
                         section_header_tuning,
-                        ft.Icon(ft.Icons.TUNE, size=20, color=AppColors.PRIMARY),
+                        ft.Icon(ft.Icons.TUNE, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.PRIMARY),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
                 ft.Text(
                     I18n.get("ai_tuning_desc"),
-                    size=_FONT_SIZE_BODY,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.TEXT_SECONDARY,
                 ),
                 ft.Container(height=10),
@@ -472,7 +470,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 ),
                 ft.Text(
                     I18n.get("settings_ai_prompt_hint"),
-                    size=_FONT_SIZE_HINT,
+                    size=AppStyles.FONT_SIZE_CAPTION,
                     color=AppColors.TEXT_HINT,
                 ),
                 ft.Divider(height=20, color=AppColors.BORDER),
@@ -488,7 +486,7 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
                 ),
                 ft.Text(
                     I18n.get("settings_news_prompt_hint"),
-                    size=_FONT_SIZE_HINT,
+                    size=AppStyles.FONT_SIZE_CAPTION,
                     color=AppColors.TEXT_HINT,
                 ),
             ],
@@ -503,10 +501,10 @@ def AIBrainTab(show_snack_callback: Callable) -> ft.Container:
             [
                 ft.Icon(
                     ft.Icons.INFO_OUTLINE,
-                    size=16,
+                    size=AppStyles.FONT_SIZE_TITLE,
                     color=status_color,
                 ),
-                ft.Text(status_text, size=_FONT_SIZE_HINT, color=status_color),
+                ft.Text(status_text, size=AppStyles.FONT_SIZE_CAPTION, color=status_color),
             ],
             spacing=5,
         )

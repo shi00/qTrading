@@ -122,16 +122,16 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
         core_color, core_icon = AppColors.SUCCESS, ft.Icons.CHECK_CIRCLE_OUTLINE
 
     integrity_items: list[ft.Control] = [
-        ft.Icon(core_icon, size=14, color=core_color),
-        ft.Text(core_text, size=12, color=core_color),
+        ft.Icon(core_icon, size=AppStyles.FONT_SIZE_LG, color=core_color),
+        ft.Text(core_text, size=AppStyles.FONT_SIZE_BODY_SM, color=core_color),
     ]
     if miss_depth > 0:
         integrity_items.extend(
             [
-                ft.Text("|", size=12, color=AppColors.DIVIDER),
+                ft.Text("|", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.DIVIDER),
                 ft.Text(
                     I18n.get("ds_health_summary_depth").format(miss=miss_depth),
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.WARNING,
                 ),
             ]
@@ -139,10 +139,10 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
     if miss_breadth > 0:
         integrity_items.extend(
             [
-                ft.Text("|", size=12, color=AppColors.DIVIDER),
+                ft.Text("|", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.DIVIDER),
                 ft.Text(
                     I18n.get("ds_health_summary_breadth").format(miss=miss_breadth),
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.WARNING,
                 ),
             ]
@@ -152,8 +152,8 @@ def _build_health_summary_content(result: HealthResultRow) -> ft.Control:
         [
             ft.Row(
                 [
-                    ft.Icon(ft.Icons.ANALYTICS, size=14, color=AppColors.INFO),
-                    ft.Text(sys_text, size=12, color=AppColors.TEXT_PRIMARY),
+                    ft.Icon(ft.Icons.ANALYTICS, size=AppStyles.FONT_SIZE_LG, color=AppColors.INFO),
+                    ft.Text(sys_text, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_PRIMARY),
                 ],
                 spacing=5,
                 alignment=ft.MainAxisAlignment.START,
@@ -581,14 +581,18 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     # --- Health summary content (直接从 state 派生, 无 dual-track) ---
     if state.health_checking:
         health_summary_content: ft.Control = ft.Text(
-            I18n.get("health_checking"), size=12, color=AppColors.TEXT_SECONDARY
+            I18n.get("health_checking"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
         )
     elif state.health_result is not None:
         health_summary_content = _build_health_summary_content(state.health_result)
     elif state.health_error is not None:
-        health_summary_content = ft.Text(I18n.get("ds_health_check_error"), size=12, color=AppColors.ERROR)
+        health_summary_content = ft.Text(
+            I18n.get("ds_health_check_error"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.ERROR
+        )
     else:
-        health_summary_content = ft.Text(I18n.get("settings_check_health"), size=12, color=AppColors.TEXT_SECONDARY)
+        health_summary_content = ft.Text(
+            I18n.get("settings_check_health"), size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY
+        )
 
     # --- Build controls ---
     style_health = AppStyles.primary_button()
@@ -741,7 +745,9 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
     progress_bar = ft.ProgressBar(width=None, visible=progress_visible, expand=True)
     if progress_visible:
         progress_bar.value = state.progress
-    progress_text = ft.Text(progress_text_value, size=12, color=AppColors.INFO, visible=bool(progress_text_value))
+    progress_text = ft.Text(
+        progress_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.INFO, visible=bool(progress_text_value)
+    )
 
     style_init = AppStyles.primary_button()
     style_init.padding = ft.Padding.symmetric(horizontal=15, vertical=0)
