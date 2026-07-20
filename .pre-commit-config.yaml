@@ -69,10 +69,17 @@ repos:
         pass_filenames: false
 
       - id: redline-check
-        name: Redline automation check (R4/R12/R13/R14/R15)
+        name: Redline automation check (R4/R12/R13/R14/R15 + UI bare colors)
         entry: python scripts/check_redlines.py
         language: system
-        files: ^(core|data|services|strategies|utils|app)/.*\.py$|^scripts/check_redlines\.py$|^\.pre-commit-config\.yaml$
+        files: ^(core|data|services|strategies|utils|app|ui)/.*\.py$|^scripts/check_redlines\.py$|^\.pre-commit-config\.yaml$
+        pass_filenames: false
+
+      - id: theme-contrast-check
+        name: WCAG theme contrast check
+        entry: python scripts/check_theme_contrast.py
+        language: system
+        files: ^ui/theme\.py$|^scripts/check_theme_contrast\.py$
         pass_filenames: false
 
       - id: lint-imports

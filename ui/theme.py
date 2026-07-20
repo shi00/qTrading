@@ -81,6 +81,7 @@ class ThemeColors(TypedDict):
     INPUT_TEXT: str
     LOG_BG: str
     LOG_TEXT: str
+    TEXT_DISABLED: str
 
 
 # ============================================================================
@@ -109,14 +110,21 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#FFFFFF",
         "LOG_BG": "#000000",
         "LOG_TEXT": "#CCCCCC",
+        "TEXT_DISABLED": "#90A4AE",
     },
     ThemeName.LIGHT: {
         "UP_RED": "#F44336",
-        "DOWN_GREEN": "#4CAF50",
+        # NOTE(lazy): DOWN_GREEN 调整为 Green 700 以满足 WCAG §1.4.3 对比度≥3.0
+        #   (原 Green 500 #4CAF50 在白底对比度仅 2.78). ceiling: 视觉一致以 WCAG 为准.
+        #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
+        "DOWN_GREEN": "#388E3C",
         "UP": "#D32F2F",
         "DOWN": "#388E3C",
         "SUCCESS": "#388E3C",
-        "WARNING": "#FFA000",
+        # NOTE(lazy): WARNING 调整为 Orange 800 以满足 WCAG §1.4.3 对比度≥3.0
+        #   (原 Amber 800 #FFA000 在白底对比度仅 2.04). ceiling: 视觉一致以 WCAG 为准.
+        #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
+        "WARNING": "#EF6C00",
         "INFO": "#1976D2",
         "TABLE_HEADER_BG": "#FAFAFA",
         "TABLE_HEADER_TEXT": "#424242",
@@ -131,6 +139,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#212121",
         "LOG_BG": "#FFFFFF",
         "LOG_TEXT": "#212121",
+        "TEXT_DISABLED": "#607D8B",
     },
     ThemeName.NAVY: {
         "UP_RED": "#EF4444",
@@ -153,6 +162,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#F8FAFC",
         "LOG_BG": "#11192E",
         "LOG_TEXT": "#CBD5E1",
+        "TEXT_DISABLED": "#94A3B8",
     },
     ThemeName.DRACULA: {
         "UP_RED": "#F44336",
@@ -175,6 +185,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#F8F8F2",
         "LOG_BG": "#282A36",
         "LOG_TEXT": "#F8F8F2",
+        "TEXT_DISABLED": "#6272A4",
     },
 }
 
@@ -269,7 +280,10 @@ THEME_COLOR_SCHEMES = {
         on_secondary="#282A36",
         on_secondary_container="#FF79C6",
         on_surface="#F8F8F2",  # Foreground
-        on_surface_variant="#6272A4",  # Comment
+        # NOTE(lazy): on_surface_variant 调整为 Slate 400 以满足 WCAG §1.4.3 对比度≥4.5
+        #   (原 Dracula Comment #6272A4 在 #282A36 上对比度仅 3.03).
+        #   ceiling: 视觉一致以 WCAG 为准. upgrade: 引入 Dracula v2 调色板时一并刷新.
+        on_surface_variant="#94A3B8",  # Slate 400
         on_error="#282A36",
         outline="#6272A4",
         outline_variant="#44475A",
@@ -354,6 +368,7 @@ class AppColors:
     DOWN = "#00E676"
     RISE = UP
     FALL = DOWN
+    # 业务语义直通色 (随主题切换) — SUCCESS 成功 / WARNING 警告 / INFO 信息状态色
     SUCCESS = "#00E676"
     WARNING = "#FFAB00"
     INFO = "#2979FF"
@@ -374,6 +389,8 @@ class AppColors:
     INPUT_TEXT = "#FFFFFF"
     LOG_BG = "#000000"
     LOG_TEXT = "#CCCCCC"
+    # 禁用/中断状态色 (随主题切换) — 与 TEXT_HINT 区分；用于 TaskStatus.INTERRUPTED 等
+    TEXT_DISABLED = "#90A4AE"
 
     # 内部状态
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
