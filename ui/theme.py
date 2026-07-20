@@ -465,6 +465,12 @@ class AppStyles:
     FONT_SIZE_XL = 24  # 特大标题
     FONT_SIZE_DISPLAY = 28  # 展示级 (仪表盘大数字)
 
+    # --- Icon Size Tokens (P1-1 扩展: 图标尺寸 token 化, 消除魔术数字) ---
+    ICON_SIZE_LG = 32  # 卡片/空态配图
+    ICON_SIZE_XL = 48  # 空态/错误态主图标
+    ICON_SIZE_XXL = 64  # 引导页/特性图标
+    ICON_SIZE_HERO = 80  # 展示级 (完成页/庆祝)
+
     # --- Size Tokens (统一控件宽度，消除魔术数字) ---
     CONTROL_WIDTH_XS = 80  # 超小型控件：短标签、小按钮
     CONTROL_WIDTH_SM = 120  # 小型控件：数字输入、线程数、连接池
