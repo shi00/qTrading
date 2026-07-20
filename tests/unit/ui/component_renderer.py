@@ -76,9 +76,13 @@ class FakePage:
     含 ``_dialogs`` 属性与 ``_prepare_dialog`` 方法，支持 ``ft.use_dialog``
     声明式 dialog hook（dialog 控件追加到 ``_dialogs.controls`` 列表，
     ``_prepare_dialog`` 吸收 Flet 内部调用）。
+
+    含 ``web`` 属性（默认 False），模拟桌面端环境，支持 screener_view 导出逻辑
+    `page.web` 判断（Web 模式走 src_bytes 分支，桌面端走原逻辑）。
     """
 
     session: FakeSession = field(default_factory=FakeSession)
+    web: bool = False
 
     def __post_init__(self) -> None:
         self._services = FakeServiceRegistry()
