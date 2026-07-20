@@ -18,7 +18,7 @@
 - **全面采用 V1 原生机制**：通过挂载到 `page.controls` 后由 `parent` 链访问 `page`，而非 `PageRefMixin` 覆写
 - **全面使用 V1 API 形态**：`ft.Button` 而非 `ElevatedButton`；声明式组件内对话框统一用 `ft.use_dialog()`（V0→V1 迁移入口 `page.show_dialog()`/`page.pop_dialog()` 仅迁移旧代码参考，声明式组件内禁用，见 [V0→V1 迁移 API 表](#v0v1-迁移-api-表) 与 [声明式组件内 API 契约](#声明式组件内-api-契约)）
 - **历史命令式代码已重写为声明式**：所有 `class X(ft.Container)` + `did_mount`/`will_unmount` + `self.update()` + `PageRefMixin` + `on_update`/`on_log` 回调注入的代码，已重写为 `@ft.component` + `use_viewmodel` 声明式范式。新代码禁止新增命令式控件（当前受契约测试守护，覆盖 `tests/unit/ui/test_data_source_tab_contract.py`、`test_data_view_contract.py`、`test_onboarding_wizard_contract.py`、`test_task_center_view.py` 等通过 `_ViewModelProtocol` 校验 VM 契约）；例外清单见本文末。
-- **兼容垫片新代码禁止使用**：`PageRefMixin` 与 `mock_flet` 测试桩在依赖代码重写完成后已删除，当前代码库无残留（见下文「兼容垫片使用规则」）；新代码禁止 reintroduce，例外清单见本文末。
+- **兼容垫片新代码禁止使用**：`PageRefMixin` 在依赖代码重写完成后已从生产代码删除，当前生产代码库无残留；`mock_flet` 测试桩仅保留在 `tests/unit/ui/mock_flet.py` 供 UI 单测使用，生产代码不得引入（见下文「兼容垫片使用规则」）；新代码禁止 reintroduce `PageRefMixin`，例外清单见本文末。
 
 ## V0→V1 迁移 API 表
 
