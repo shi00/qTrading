@@ -57,8 +57,12 @@ class ScreenerPage:
         await self.page.click_text(col_label, timeout_ms=timeout_ms)
 
     async def click_export(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
-        """点击导出按钮。"""
+        """点击 CSV 导出按钮。"""
         await self.page.click_button(I18n.get("screener_export"), timeout_ms=timeout_ms)
+
+    async def click_export_excel(self, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
+        """点击 Excel 导出按钮。"""
+        await self.page.click_button(I18n.get("data_export_excel"), timeout_ms=timeout_ms)
 
     async def click_row_by_text(self, text: str, timeout_ms: int = TIMEOUTS.INTERACTION) -> None:
         """点击表格中包含指定文本的行（用于触发行 on_click 打开详情对话框）。

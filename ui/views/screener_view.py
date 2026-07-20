@@ -17,6 +17,7 @@
 
 import asyncio
 import datetime
+import io
 import logging
 import os
 from decimal import Decimal
@@ -407,6 +408,35 @@ def ScreenerView(
         timestamp = get_now().strftime("%Y%m%d_%H%M%S")
         ext = "csv" if format_ == "csv" else "xlsx"
         default_filename = f"screener_results_{timestamp}.{ext}"
+        # Flet 0.86.1+ Web 模式: save_file 必须传 src_bytes, 否则抛 ValueError.
+        # Flet 用 Blob + <a download>.click() 触发浏览器下载 (Playwright 可捕获 download 事件).
+        # 桌面端: save_file 打开原生对话框返回路径, VM 写文件 (原逻辑保留).
+        page = _get_page()
+        is_web = page is not None and page.web
+        if is_web:
+            try:
+                if format_ == "csv":
+                    src_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+                else:
+                    buf = io.BytesIO()
+                    df.to_excel(buf, index=False, engine="openpyxl")
+                    src_bytes = buf.getvalue()
+                await file_picker.save_file(
+                    dialog_title=I18n.get("data_export_save_title"),
+                    file_name=default_filename,
+                    allowed_extensions=[ext],
+                    src_bytes=src_bytes,
+                )
+                if page is not None and hasattr(page, "show_toast"):
+                    page.show_toast(I18n.get("data_export_success", file=default_filename), "success")
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                logger.error("[ScreenerView] Export | Failed: %s", DataSanitizer.sanitize_error(ex))
+                if page is not None and hasattr(page, "show_toast"):
+                    page.show_toast(I18n.get("data_export_fail"), "error")
+            return
+
         filepath = await file_picker.save_file(
             dialog_title=I18n.get("data_export_save_title"),
             file_name=default_filename,
