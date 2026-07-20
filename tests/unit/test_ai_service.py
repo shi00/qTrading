@@ -47,7 +47,7 @@ class TestAIServiceInit:
         mock_ch.get_ai_provider.return_value = "cloud"
         mock_ch.get_ai_model.return_value = "gpt-5.4"
         svc = AIService()
-        assert svc is not None
+        assert isinstance(svc, AIService)
 
 
 class TestAIServiceBuildLiteLLMParams:

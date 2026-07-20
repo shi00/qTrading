@@ -32,7 +32,7 @@ class TestGetProviderById:
 
     def test_custom_provider(self):
         provider = get_provider_by_id("custom")
-        assert provider is not None
+        assert isinstance(provider, dict)
 
 
 class TestGetModelInfo:

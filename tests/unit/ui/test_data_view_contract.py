@@ -706,8 +706,8 @@ class TestTableViewerTabComponentBody:
 
         prev_btn = _find_icon_button(result, ft.Icons.CHEVRON_LEFT)
         next_btn = _find_icon_button(result, ft.Icons.CHEVRON_RIGHT)
-        assert prev_btn is not None
-        assert next_btn is not None
+        assert isinstance(prev_btn, ft.IconButton)
+        assert isinstance(next_btn, ft.IconButton)
 
     def test_export_menu_items_present(
         self,
@@ -827,7 +827,7 @@ class TestSQLConsoleTabComponentBody:
             (c for c in containers if getattr(c, "visible", True) is False and _has_terminal_icon(c)),
             None,
         )
-        assert empty_state is not None, "有数据时 empty_state 应 visible=False"
+        assert isinstance(empty_state, ft.Container) and empty_state.visible is False
 
     def test_sql_editor_present(
         self,

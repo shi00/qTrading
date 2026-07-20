@@ -125,7 +125,7 @@ class TestGetStatusColor:
 
     def test_unknown_status_returns_secondary(self):
         color = _get_status_color("unknown_status")
-        assert color is not None
+        assert isinstance(color, str) and color
 
     @pytest.mark.parametrize(
         "status",
@@ -536,19 +536,19 @@ class TestBuildTaskCard:
     def test_build_task_card_completed_full_progress(self):
         row = self._make_row(status=TaskStatus.COMPLETED, progress=1.0)
         card = _build_task_card(row, on_cancel=MagicMock())
-        assert card is not None
+        assert isinstance(card, ft.Container)
 
     def test_build_task_card_failed_shows_error(self):
         row = self._make_row(status=TaskStatus.FAILED, error="disk full")
         card = _build_task_card(row, on_cancel=MagicMock())
-        assert card is not None
+        assert isinstance(card, ft.Container)
 
     def test_build_task_card_cancellable_running_has_cancel_button(self):
         row = self._make_row(status=TaskStatus.RUNNING, cancellable=True)
         on_cancel = MagicMock()
         card = _build_task_card(row, on_cancel=on_cancel)
         # The card should contain a TextButton for cancel action
-        assert _find_control_by_type(card, ft.TextButton) is not None
+        assert isinstance(_find_control_by_type(card, ft.TextButton), ft.TextButton)
 
     def test_build_task_card_not_cancellable_running_no_cancel_button(self):
         row = self._make_row(status=TaskStatus.RUNNING, cancellable=False)
@@ -558,7 +558,7 @@ class TestBuildTaskCard:
     def test_build_task_card_cancellable_queued_has_cancel_button(self):
         row = self._make_row(status=TaskStatus.QUEUED, cancellable=True)
         card = _build_task_card(row, on_cancel=MagicMock())
-        assert _find_control_by_type(card, ft.TextButton) is not None
+        assert isinstance(_find_control_by_type(card, ft.TextButton), ft.TextButton)
 
     def test_build_task_card_completed_no_cancel_button(self):
         """Completed tasks should not show cancel button even if cancellable=True."""
@@ -571,8 +571,8 @@ class TestBuildTaskCard:
         on_cancel = MagicMock()
         card = _build_task_card(row, on_cancel=on_cancel)
         btn = _find_control_by_type(card, ft.TextButton)
-        assert btn is not None
-        assert btn.on_click is not None
+        assert isinstance(btn, ft.TextButton)
+        assert callable(btn.on_click)
         # Simulate click
         btn.on_click(MagicMock())
         on_cancel.assert_called_once_with("task-xyz")

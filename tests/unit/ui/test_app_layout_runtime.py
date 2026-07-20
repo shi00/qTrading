@@ -335,7 +335,7 @@ class TestSetupResize:
         """挂载后 page.on_resize 应被赋值为 _on_resize 闭包."""
         env = app_layout_env
         page = env["page"]
-        assert page.on_resize is not None, "挂载后 page.on_resize 应被注册"
+        assert callable(page.on_resize), "挂载后 page.on_resize 应被注册"
 
     def test_page_none_skips_on_resize_registration(self, mock_i18n_state, mock_app_colors_state, monkeypatch) -> None:
         """page=None 时 _setup_resize 早返回, page.on_resize 不被注册."""
@@ -447,7 +447,7 @@ class TestResizeDebounce:
         env = app_layout_env
         page = env["page"]
         on_resize = page.on_resize
-        assert on_resize is not None
+        assert callable(on_resize)
 
         _invoke(on_resize, _make_event(width=800.0, height=600.0))
         handler, args, _ = _await_run_task_handler(page)

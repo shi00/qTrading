@@ -535,16 +535,16 @@ class TestTushareConfigPanelLayout:
         _, _, result, _ = _render_panel(compact=True)
         token_input = _find_text_field(result, "tushare_token_label")
         tier_dd = _find_dropdown(result, "sys_tier_label_in_token_panel")
-        assert token_input is not None
-        assert tier_dd is not None
+        assert isinstance(token_input, ft.TextField)
+        assert isinstance(tier_dd, ft.Dropdown)
 
     def test_standard_includes_token_input_and_tier_dropdown(self, mock_i18n_state, mock_app_colors_state) -> None:
         """compact=False 布局含 token_input + tier_dropdown。"""
         _, _, result, _ = _render_panel(compact=False)
         token_input = _find_text_field(result, "tushare_token_label")
         tier_dd = _find_dropdown(result, "sys_tier_label_in_token_panel")
-        assert token_input is not None
-        assert tier_dd is not None
+        assert isinstance(token_input, ft.TextField)
+        assert isinstance(tier_dd, ft.Dropdown)
 
 
 # ============================================================================

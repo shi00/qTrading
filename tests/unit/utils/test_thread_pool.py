@@ -1,4 +1,5 @@
 import inspect
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from unittest.mock import patch, MagicMock
@@ -46,8 +47,8 @@ class TestThreadPoolManagerReloadConfig:
         mock_ch.get_max_io_workers.return_value = 8
         mock_ch.get_max_cpu_workers.return_value = 4
         tpm.reload_config()
-        assert tpm._io_pool is not None
-        assert tpm._cpu_pool is not None
+        assert isinstance(tpm._io_pool, ThreadPoolExecutor)
+        assert isinstance(tpm._cpu_pool, ThreadPoolExecutor)
 
 
 class TestThreadPoolManagerShutdown:
@@ -74,11 +75,11 @@ class TestGetThreadPoolManager:
 class TestThreadPoolManagerPools:
     def test_io_pool_exists(self):
         mgr = ThreadPoolManager()
-        assert mgr._io_pool is not None
+        assert isinstance(mgr._io_pool, ThreadPoolExecutor)
 
     def test_cpu_pool_exists(self):
         mgr = ThreadPoolManager()
-        assert mgr._cpu_pool is not None
+        assert isinstance(mgr._cpu_pool, ThreadPoolExecutor)
 
     def test_get_executor_io(self):
         mgr = ThreadPoolManager()
@@ -94,13 +95,13 @@ class TestThreadPoolManagerPools:
         mgr = ThreadPoolManager()
         mgr._io_pool = None
         pool = mgr.io_pool
-        assert pool is not None
+        assert isinstance(pool, ThreadPoolExecutor)
 
     def test_cpu_pool_property_recovery(self):
         mgr = ThreadPoolManager()
         mgr._cpu_pool = None
         pool = mgr.cpu_pool
-        assert pool is not None
+        assert isinstance(pool, ThreadPoolExecutor)
 
 
 class TestThreadPoolManagerSingleton:

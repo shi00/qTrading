@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import flet as ft
 import pytest
 
 from ui.theme import AppColors, AppColorsState, AppStyles, ThemeName, CUSTOM_COLOR_PRESETS
@@ -300,4 +301,4 @@ class TestAppStylesPriceChangeColor:
 
     def test_zero_returns_on_surface_variant(self):
         result = AppStyles.price_change_color(0.0)
-        assert result is not None
+        assert result == ft.Colors.ON_SURFACE_VARIANT

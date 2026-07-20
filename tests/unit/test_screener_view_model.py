@@ -946,7 +946,7 @@ class TestSwitchToHistory:
         vm._set_state(mode="HISTORY")
         vm._full_results = pd.DataFrame({"A": [1]})
         vm.switch_to_history()
-        assert vm._full_results is not None
+        assert isinstance(vm._full_results, pd.DataFrame) and not vm._full_results.empty
 
 
 class TestSwitchToRealtime:

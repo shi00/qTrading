@@ -846,7 +846,7 @@ class TestTierApiPanelComponentBody:
             render_once(component)
 
         # _setup_resize 应已将 page.on_resize 替换为 _on_resize
-        assert page.on_resize is not None, "挂载后 page.on_resize 应被设置"
+        assert callable(page.on_resize), "挂载后 page.on_resize 应被设置"
         # 触发 resize 事件
         e = MagicMock()
         e.width = 1000

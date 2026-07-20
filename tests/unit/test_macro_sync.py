@@ -114,7 +114,7 @@ class TestMacroSyncMergeMacroData:
         df_m2 = pd.DataFrame({"period": ["202406"], "m2": [100.0]})
         df_cpi = pd.DataFrame({"period": ["202406"], "other": [2.0]})
         result = MacroSyncStrategy._merge_macro_data(df_m2, df_cpi, None)
-        assert result is not None
+        assert isinstance(result, pd.DataFrame)
 
 
 class TestMacroSyncQuarterHelpers:

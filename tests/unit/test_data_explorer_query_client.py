@@ -279,17 +279,17 @@ class TestApplyFilters:
     def test_with_eq_filter(self):
         stmt = sa.select(sa.text("*"))
         result = DataExplorerQueryClient._apply_filters(stmt, [("ts_code", "=", "000001.SZ")])
-        assert result is not None
+        assert isinstance(result, sa.Select)
 
     def test_with_like_filter(self):
         stmt = sa.select(sa.text("*"))
         result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "银行")])
-        assert result is not None
+        assert isinstance(result, sa.Select)
 
     def test_with_like_already_has_wildcard(self):
         stmt = sa.select(sa.text("*"))
         result = DataExplorerQueryClient._apply_filters(stmt, [("name", "LIKE", "%银行%")])
-        assert result is not None
+        assert isinstance(result, sa.Select)
 
     def test_unsupported_operator(self):
         stmt = sa.select(sa.text("*"))
@@ -305,7 +305,7 @@ class TestApplyFilters:
         for op in [">", "<", ">=", "<=", "!="]:
             stmt = sa.select(sa.text("*"))
             result = DataExplorerQueryClient._apply_filters(stmt, [("col", op, "val")], schema_cols={"col"})
-            assert result is not None
+            assert isinstance(result, sa.Select)
 
 
 class TestQueryTable:

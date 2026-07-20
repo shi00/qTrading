@@ -67,8 +67,8 @@ class TestCreatedAtSchema:
         """验证 created_at 字段有 server_default"""
         table = Base.metadata.tables.get(table_name)
         col = table.columns.get("created_at")
-        assert col is not None, f"Table {table_name} missing created_at column"
-        assert col.server_default is not None, f"Table {table_name}.created_at missing server_default"
+        assert "created_at" in table.columns
+        assert col.server_default is not None, f"Table {table_name}.created_at missing server_default"  # noqa: weak-assertion schema 契约验证 server_default 存在性
 
 
 @pytest_asyncio.fixture

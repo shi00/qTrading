@@ -427,7 +427,7 @@ class TestDatabaseConfigPanelFlags:
         """compact=True 仍包含所有表单字段 (host/port/user/password/database)。"""
         _, _, result, _ = _render_panel(compact=True)
         for label in ("db_host", "db_port", "db_user", "db_password", "db_name"):
-            assert _find_text_field(result, label) is not None
+            assert _find_text_field(result, label) is not None  # noqa: weak-assertion UI 契约测试验证多 label 循环内 text_field 存在性
 
     def test_show_save_button_true_save_visible(self, mock_i18n_state, mock_app_colors_state) -> None:
         """show_save_button=True → 保存按钮 visible=True。"""

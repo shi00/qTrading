@@ -170,13 +170,13 @@ class TestHealthReportDialog:
         from ui.components.health_report_dialog import _build_health_content
 
         content = _build_health_content(self._make_report("yellow"), 600, 600)
-        assert content is not None
+        assert isinstance(content, ft.Container)
 
     def test_build_health_content_red(self):
         from ui.components.health_report_dialog import _build_health_content
 
         content = _build_health_content(self._make_report("red"), 600, 600)
-        assert content is not None
+        assert isinstance(content, ft.Container)
 
     def test_build_health_content_with_reasons(self):
         """B4: _build_health_content 含 reasons 时构建 issues_section。"""

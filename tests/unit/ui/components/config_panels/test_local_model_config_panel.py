@@ -540,7 +540,7 @@ class TestSetupFilePicker:
             # 不应抛异常
             run_mount_effects(component, page=page)
             result = render_once(component)
-            assert result is not None
+            assert isinstance(result, ft.Control)
 
 
 class _ContextWithRaisingPage:

@@ -966,7 +966,7 @@ class TestToastCardLongText:
         container = render_once(component)
 
         expand_btn = _get_expand_button(container)
-        assert expand_btn is not None
+        assert isinstance(expand_btn, ft.IconButton)
 
     def test_short_text_hides_expand_button(self):
         """message ≤ 80 字符 → 不显示展开按钮。"""

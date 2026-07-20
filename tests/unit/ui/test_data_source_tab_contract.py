@@ -863,8 +863,8 @@ class TestDataSourceTabComponentBody:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
         btn = _find_button_by_content(result, "settings_check_health")
-        assert btn is not None, "btn_check_health 应存在"
-        assert btn.on_click is not None
+        assert btn is not None, "btn_check_health 应存在"  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
+        assert callable(btn.on_click)
 
     def test_health_report_icon_button_present(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -876,8 +876,8 @@ class TestDataSourceTabComponentBody:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
         btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
-        assert btn is not None, "btn_health_report 应存在"
-        assert btn.on_click is not None
+        assert btn is not None, "btn_health_report 应存在"  # noqa: weak-assertion UI 契约测试验证 IconButton 存在性,icon 已作为查询键
+        assert callable(btn.on_click)
 
     def test_sync_button_present_idle_state(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -889,8 +889,8 @@ class TestDataSourceTabComponentBody:
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
         btn = _find_button_by_content(result, "settings_init_data")
-        assert btn is not None, "sync_button 应存在 (idle state)"
-        assert btn.on_click is not None
+        assert btn is not None, "sync_button 应存在 (idle state)"  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
+        assert callable(btn.on_click)
 
     def test_history_years_dropdown_has_five_options(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -947,7 +947,7 @@ class TestDataSourceTabStateBranches:
         _patch_data_source_vms(monkeypatch)
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
-        assert _find_button_by_content(result, "settings_init_data") is not None
+        assert _find_button_by_content(result, "settings_init_data") is not None  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
 
     def test_sync_button_shows_wait_when_syncing_not_cancellable(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -961,7 +961,7 @@ class TestDataSourceTabStateBranches:
         )
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
-        assert _find_button_by_content(result, "sys_init_cancel_wait") is not None
+        assert _find_button_by_content(result, "sys_init_cancel_wait") is not None  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
 
     def test_sync_button_shows_cancel_when_cancellable(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -975,7 +975,7 @@ class TestDataSourceTabStateBranches:
         )
         component = make_component(DataSourceTab, show_snack_callback=MagicMock())
         result, _ = _mount(component)
-        assert _find_button_by_content(result, "settings_cancel_sync") is not None
+        assert _find_button_by_content(result, "settings_cancel_sync") is not None  # noqa: weak-assertion UI 契约测试验证按钮存在性,按钮内容已作为查询键
 
     def test_progress_bar_visible_when_init_sync_running(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1621,7 +1621,7 @@ class TestDataSourceTabDialogs:
         render_once(component)
         # HealthReportDialog 被 mock 为 ft.Column([]), 通过 ft.use_dialog 挂载
         # 验证不抛异常即可 (dialog 已 mock)
-        assert page._dialogs.controls is not None
+        assert page._dialogs.controls is not None  # noqa: weak-assertion smoke test 验证 health_report dialog 渲染不抛异常,HealthReportDialog 已被 mock 为空 Column
 
     def test_scan_dialog_renders_when_open(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1639,7 +1639,7 @@ class TestDataSourceTabDialogs:
         btn = _find_icon_button(result, ft.Icons.INFO_OUTLINE)
         btn.on_click(_make_event())
         render_once(component)
-        assert page._dialogs.controls is not None
+        assert page._dialogs.controls is not None  # noqa: weak-assertion smoke test 验证 scan_dialog 路径不抛异常,HealthScanDialog 已被 mock 为空 Column
 
 
 # ============================================================================
