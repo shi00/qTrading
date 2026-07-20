@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import date
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,7 +14,7 @@ import pytest
 from services.task_manager import TaskManager
 from strategies.backtest.config import BacktestConfig
 from ui.viewmodels import Message
-from ui.viewmodels.backtest_view_model import BacktestViewModel
+from ui.viewmodels.backtest_view_model import BacktestState, BacktestViewModel
 
 pytestmark = pytest.mark.unit
 
@@ -753,3 +754,349 @@ class TestBacktestViewModelCoverageGaps:
 
             # 验证 cancel_check 已委托给 TaskManager.is_cancelled
             mock_tm.is_cancelled.assert_called_once_with("task_cancel_check")
+
+
+class TestBacktestStateEquality:
+    """BacktestState 自定义 __eq__/__hash__ 合约测试。
+
+    自定义 equality 的目的（frozen dataclass + L771 合规 + spec.md use_state setter 安全性）:
+    - result 字段用 identity 比较，避免 BacktestResult.__eq__ 触发 DataFrame __eq__ 抛 TypeError
+    - 非 BacktestState 类型返回 NotImplemented（Python 数据模型约定，让反射比较生效）
+    - 自定义 __eq__ 会 disable 默认 __hash__，必须显式重定义才能保持 hashable
+    """
+
+    def test_eq_returns_not_implemented_for_non_backtest_state(self):
+        """非 BacktestState 类型应返回 NotImplemented（不抛异常）。
+
+        覆盖行 54-56: `if not isinstance(other, BacktestState): return NotImplemented`.
+        """
+        state = BacktestState()
+        assert state.__eq__("not a state") is NotImplemented
+        assert state.__eq__(123) is NotImplemented
+        assert state.__eq__(None) is NotImplemented
+
+    def test_eq_uses_identity_for_result_field(self):
+        """result 字段用 identity 比较：不同对象不等，同一对象等。
+
+        回归保障：若误将 `is` 改回 `==`，BacktestResult 内部 DataFrame __eq__
+        会抛 TypeError，本测试可捕获。覆盖行 62: `self.result is other.result`.
+        """
+        result_a = MagicMock(name="result_a")
+        result_b = MagicMock(name="result_b")
+        state_a = BacktestState(result=result_a)
+        state_b = BacktestState(result=result_b)
+        state_c = BacktestState(result=result_a)  # 同一 result identity
+
+        assert state_a != state_b  # 不同 result identity
+        assert state_a == state_c  # 同一 result identity
+
+    def test_eq_false_when_other_fields_differ(self):
+        """任一非 result 字段不等则 __eq__ 返回 False。"""
+        result = MagicMock()
+        base = BacktestState(
+            is_running=True,
+            progress=0.5,
+            progress_message=Message("prog"),
+            status_message=Message("status"),
+            status_color="info",
+            result=result,
+        )
+        # 逐字段变更，验证每个字段都参与比较
+        assert base != replace(base, is_running=False)
+        assert base != replace(base, progress=0.6)
+        assert base != replace(base, progress_message=Message("other"))
+        assert base != replace(base, status_message=Message("other"))
+        assert base != replace(base, status_color="warning")
+
+    def test_hash_is_deterministic_and_usable_as_dict_key(self):
+        """__hash__ 不抛异常、确定性、可作 dict key。
+
+        覆盖行 66-75: 自定义 __hash__ 实现。
+        自定义 __eq__ 会 disable 默认 __hash__，必须显式重定义才能 hashable。
+        """
+        result = MagicMock()
+        state_a = BacktestState(is_running=True, progress=0.5, result=result)
+        state_b = BacktestState(is_running=True, progress=0.5, result=result)
+
+        assert hash(state_a) == hash(state_b)
+
+        # 可作为 dict key（验证 __hash__ + __eq__ 一致性）
+        d: dict = {state_a: "value"}
+        assert d[state_b] == "value"
+
+
+class TestBackgroundTaskLifecycle:
+    """fire-and-forget 后台任务生命周期测试。
+
+    覆盖 _on_background_task_done 三个分支（正常完成/cancelled/异常）
+    与 dispose 取消未完成 background task 的孤儿防护（R.1.1）。
+    """
+
+    def test_on_background_task_done_normal_completion_discards_without_logging(self, caplog: pytest.LogCaptureFixture):
+        """正常完成的任务：从 _background_tasks 移除且不记 error 日志。
+
+        覆盖行 141 (`discard`) + 142-143 (`if task.cancelled(): return` false 分支)
+        + 144-146 (`if exc is not None` false 分支).
+        """
+        import logging
+
+        vm = BacktestViewModel()
+
+        async def _noop() -> None:
+            return None
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            task = loop.create_task(_noop())
+            vm._background_tasks.add(task)
+            loop.run_until_complete(task)
+            assert task.done()
+            assert not task.cancelled()
+
+            with caplog.at_level(logging.ERROR, logger="ui.viewmodels.backtest_view_model"):
+                vm._on_background_task_done(task)
+
+            assert task not in vm._background_tasks
+            assert not any("Background task failed" in r.message for r in caplog.records)
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    def test_on_background_task_done_cancelled_does_not_log_error(self, caplog: pytest.LogCaptureFixture):
+        """被取消的任务：不记录 error 日志（R2 — CancelledError 是正常取消传播）。
+
+        覆盖行 142-143 (`if task.cancelled(): return` true 分支).
+        """
+        import logging
+
+        vm = BacktestViewModel()
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()  # 永不完成
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            task = loop.create_task(_hang())
+            vm._background_tasks.add(task)
+            task.cancel()
+            try:
+                loop.run_until_complete(task)
+            except asyncio.CancelledError:
+                pass
+            assert task.cancelled()
+
+            with caplog.at_level(logging.ERROR, logger="ui.viewmodels.backtest_view_model"):
+                vm._on_background_task_done(task)
+
+            assert task not in vm._background_tasks
+            assert not any("Background task failed" in r.message for r in caplog.records)
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    def test_on_background_task_done_with_exception_logs_error(self, caplog: pytest.LogCaptureFixture):
+        """抛异常的任务：记录 error 日志并读取异常（避免 'Task exception was never retrieved'）。
+
+        覆盖行 144-146 (`exc = task.exception(); if exc is not None: logger.error(...)`).
+        """
+        import logging
+
+        vm = BacktestViewModel()
+
+        async def _boom() -> None:
+            raise RuntimeError("background task boom")
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            task = loop.create_task(_boom())
+            vm._background_tasks.add(task)
+            try:
+                loop.run_until_complete(task)
+            except RuntimeError:
+                pass
+            assert task.done()
+            assert not task.cancelled()
+
+            with caplog.at_level(logging.ERROR, logger="ui.viewmodels.backtest_view_model"):
+                vm._on_background_task_done(task)
+
+            assert task not in vm._background_tasks
+            assert any(
+                "Background task failed" in r.message and "background task boom" in r.message for r in caplog.records
+            )
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    def test_dispose_cancels_pending_background_tasks(self):
+        """dispose() 必须取消未完成的 background task（R.1.1 孤儿任务防护）。
+
+        覆盖行 124-126 (`for t in list(self._background_tasks): if not t.done(): t.cancel()`).
+        """
+        vm = BacktestViewModel()
+
+        # 注入一个未完成的 fake task（避免真实事件循环依赖）
+        fake_task = MagicMock(spec=asyncio.Task)
+        fake_task.done.return_value = False
+        vm._background_tasks.add(fake_task)
+
+        vm.dispose()
+
+        fake_task.cancel.assert_called_once_with()
+        # _background_tasks 不立即 clear（done_callback 负责移除，见 NOTE(lazy) L127-130）
+        # 但 dispose 已对每个未完成任务调用 cancel()
+
+    def test_dispose_skips_done_background_tasks(self):
+        """dispose() 对已完成的 background task 不重复 cancel（幂等性）。"""
+        vm = BacktestViewModel()
+
+        done_task = MagicMock(spec=asyncio.Task)
+        done_task.done.return_value = True
+        vm._background_tasks.add(done_task)
+
+        vm.dispose()
+
+        done_task.cancel.assert_not_called()
+
+
+class TestSplitterWidthPersistence:
+    """splitter 宽度的读写委托测试（P1-1/P2-1: View 经 VM 读写 ConfigHandler）。
+
+    覆盖 get_splitter_width/persist_splitter_width 的全部代码路径，
+    包括 R16 关键路径：同步签名包裹异步写盘，避免 Flet 事件处理器阻塞。
+    """
+
+    def test_get_splitter_width_delegates_to_config_handler(self):
+        """get_splitter_width 应委托给 ConfigHandler.get_typed 并返回其结果。
+
+        覆盖行 155-157. 同时验证 default 透传（mock 返回值就是 default 时也透传）。
+        """
+        vm = BacktestViewModel()
+
+        with patch("utils.config_handler.ConfigHandler.get_typed", return_value=250) as mock_get:
+            result = vm.get_splitter_width("backtest.splitter.left_width", 200)
+
+        mock_get.assert_called_once_with("backtest.splitter.left_width", int, 200)
+        assert result == 250
+
+    def test_persist_splitter_width_no_running_loop_is_noop(self):
+        """无 running loop 时静默跳过（不抛 RuntimeError）。
+
+        覆盖行 177-180 (`except RuntimeError: return`).
+        这是测试环境/CLI 启动前的合法场景。
+        """
+        vm = BacktestViewModel()
+
+        # 无 running loop：不应抛异常、不应创建 task
+        with (
+            patch("utils.config_handler.ConfigHandler.set_typed") as mock_set,
+            patch("utils.thread_pool.ThreadPoolManager") as mock_tpm_cls,
+        ):
+            vm.persist_splitter_width("backtest.splitter.left_width", 300)
+
+        mock_set.assert_not_called()
+        mock_tpm_cls.assert_not_called()
+        assert vm._background_tasks == set()
+
+    def test_persist_splitter_width_creates_background_task_and_writes(
+        self,
+    ):
+        """有 running loop 时创建 background task 并经 ThreadPoolManager 异步写盘。
+
+        覆盖行 166-175 + 181-183: _persist 协程定义、ThreadPoolManager.run_async 提交、
+        task 加入 _background_tasks、add_done_callback 注册.
+        这是 R16 关键路径：同步签名 → 异步写盘，避免 Flet 事件处理器阻塞。
+        """
+        vm = BacktestViewModel()
+
+        async def _run_test():
+            with (
+                patch("utils.config_handler.ConfigHandler.set_typed", return_value=True) as mock_set,
+                patch("utils.thread_pool.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm.run_async = AsyncMock(return_value=None)
+                mock_tpm_cls.return_value = mock_tpm
+
+                vm.persist_splitter_width("backtest.splitter.left_width", 350)
+
+                # task 应已加入 _background_tasks
+                assert len(vm._background_tasks) == 1
+                task = next(iter(vm._background_tasks))
+                assert isinstance(task, asyncio.Task)
+                assert task in vm._background_tasks
+
+                # 等待 task 完成
+                await task
+
+                # 验证 ThreadPoolManager.run_async 被调用，传入 TaskType.IO + set_typed + 参数
+                from utils.thread_pool import TaskType
+
+                mock_tpm.run_async.assert_called_once_with(
+                    TaskType.IO,
+                    mock_set,
+                    "backtest.splitter.left_width",
+                    350,
+                )
+                mock_set.assert_not_called()  # 由 run_async 执行，不直接调用
+
+            # task 完成后 done_callback 应将其从 _background_tasks 移除
+            assert vm._background_tasks == set()
+
+        asyncio.run(_run_test())
+
+    def test_persist_splitter_width_swallows_exception_as_debug_log(self, caplog: pytest.LogCaptureFixture):
+        """写盘失败时异常应被吞为 debug 日志（fire-and-forget 契约：不向调用方抛）。
+
+        覆盖行 172-175 (`except CancelledError: raise; except Exception: logger.debug(...)`).
+        """
+        import logging
+
+        vm = BacktestViewModel()
+
+        async def _run_test():
+            with (
+                patch("utils.config_handler.ConfigHandler.set_typed", side_effect=OSError("disk full")),
+                patch("utils.thread_pool.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm.run_async = AsyncMock(side_effect=OSError("disk full"))
+                mock_tpm_cls.return_value = mock_tpm
+
+                with caplog.at_level(logging.DEBUG, logger="ui.viewmodels.backtest_view_model"):
+                    vm.persist_splitter_width("backtest.splitter.left_width", 400)
+                    # 等待 background task 完成
+                    await asyncio.gather(*vm._background_tasks, return_exceptions=True)
+
+                # 验证异常被吞为 debug 日志，未抛到调用方
+                assert any("persist_splitter_width failed" in r.message for r in caplog.records)
+
+        asyncio.run(_run_test())
+
+    def test_persist_splitter_width_propagates_cancelled_error(self):
+        """CancelledError 不应被通用 except 吞没（R2 红线）。
+
+        覆盖行 172-173 (`except asyncio.CancelledError: raise`).
+        """
+        vm = BacktestViewModel()
+
+        async def _run_test():
+            with (
+                patch("utils.config_handler.ConfigHandler.set_typed"),
+                patch("utils.thread_pool.ThreadPoolManager") as mock_tpm_cls,
+            ):
+                mock_tpm = MagicMock()
+                mock_tpm.run_async = AsyncMock(side_effect=asyncio.CancelledError())
+                mock_tpm_cls.return_value = mock_tpm
+
+                vm.persist_splitter_width("backtest.splitter.left_width", 400)
+                # CancelledError 应传播出 _persist，task 状态为 cancelled
+                done, pending = await asyncio.wait(vm._background_tasks, return_when=asyncio.ALL_COMPLETED)
+                assert len(done) == 1
+                task = done.pop()
+                assert task.cancelled()
+
+        asyncio.run(_run_test())
