@@ -35,6 +35,7 @@ from ui.components.flet_type_helpers import (
     safe_on_select,
 )
 from ui.components.state_views import ErrorState
+from ui.components.toast_manager import open_export_folder
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -63,11 +64,20 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
-    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。"""
+def _safe_show_toast(
+    page: ft.Page,
+    msg: str,
+    msg_type: str = "info",
+    action_text: str | None = None,
+    on_action: typing.Callable[[], None] | None = None,
+) -> None:
+    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。
+
+    P2-10: action_text/on_action 透传 (导出成功"打开文件夹"按钮)。
+    """
     show_toast = typing.cast(typing.Any, page).show_toast
     if show_toast is not None:
-        show_toast(msg, msg_type)
+        show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
 
 
 def _format_cell_value(val: object, col_name: str) -> str:
@@ -364,7 +374,14 @@ def TableViewerTab(
                     msg = I18n.get("data_export_success", file=filename)
                     page = _get_page()
                     if page is not None:
-                        _safe_show_toast(page, msg, "success")
+                        # P2-10: 导出成功 toast 附"打开文件夹" action
+                        _safe_show_toast(
+                            page,
+                            msg,
+                            "success",
+                            action_text=I18n.get("data_export_open_folder"),
+                            on_action=lambda: page.run_task(open_export_folder, filepath),
+                        )
                 except Exception as ex:
                     logger.error("Export write failed: %s", ex, exc_info=True)
                     page = _get_page()

@@ -176,8 +176,9 @@ async def main(page: ft.Page):
 
     page.toast = ToastManager(page)  # type: ignore[attr-defined]  # [reason: 动态挂载 ToastManager 到 Page 实例，ft.Page 类型存根无 toast 属性]
 
-    def show_toast(message, type="info"):
-        page.toast.show(message, type)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
+    def show_toast(message, type="info", action_text=None, on_action=None):
+        # P2-10: action_text/on_action 透传 ToastManager.show (导出引导"打开文件夹")
+        page.toast.show(message, type, action_text=action_text, on_action=on_action)  # type: ignore[attr-defined]  # [reason: 访问动态挂载的 toast 属性，类型存根未声明]
 
     page.show_toast = show_toast  # type: ignore[attr-defined]  # [reason: 动态挂载 show_toast 函数到 Page 实例，供 UI 层通过 page.show_toast 调用]
 
