@@ -906,3 +906,89 @@ class TestDataSourceViewModelCoverageFill:
         assert first_call_args[1] == 0
         # 正常完成, init_sync_final_status=COMPLETED
         assert bound_vm.state.init_sync_final_status == TaskStatus.COMPLETED
+
+
+class TestDataSourceViewModelCancelActiveTask:
+    """P1-5: cancel_active_task — daily_sync / ai_concept_sync 取消按钮入口。
+
+    取消语义:
+    - active_key=None: 无活跃任务, 不动作
+    - active_key="system_init_sync": 走专门 cancel_init_sync 通道, 此处不动作
+    - active_key="daily_sync"/"ai_concept_sync"/"cache_clear" 且 task_id 存在:
+      委托 TaskManager.cancel_task(task_id)
+    - active_key 有值但 _active_task_ids 无记录: 不动作 (防御)
+    """
+
+    def test_cancel_active_task_no_active_key_noop(self, bound_vm, mock_task_manager):
+        """active_key=None 时不调 cancel_task。"""
+        assert bound_vm.state.active_key is None
+        bound_vm.cancel_active_task()
+        mock_task_manager.cancel_task.assert_not_called()
+
+    def test_cancel_active_task_system_init_sync_noop(self, bound_vm, mock_task_manager):
+        """active_key="system_init_sync" 走 cancel_init_sync 专用通道, 此方法不处理。"""
+        bound_vm._set_state(is_syncing=True, active_key="system_init_sync")
+        bound_vm._active_task_ids["system_init_sync"] = "task_init_1"
+        bound_vm.cancel_active_task()
+        mock_task_manager.cancel_task.assert_not_called()
+
+    def test_cancel_active_task_daily_sync_cancels(self, bound_vm, mock_task_manager):
+        """active_key="daily_sync" + task_id 存在 → cancel_task("task_123")。"""
+        bound_vm.execute_full_daily_sync()
+        assert bound_vm.state.active_key == "daily_sync"
+        bound_vm.cancel_active_task()
+        mock_task_manager.cancel_task.assert_called_once_with("task_123")
+
+    def test_cancel_active_task_ai_concept_sync_cancels(self, bound_vm, mock_task_manager):
+        """active_key="ai_concept_sync" + task_id 存在 → cancel_task("task_123")。"""
+        bound_vm.execute_ai_concept_rebuild()
+        assert bound_vm.state.active_key == "ai_concept_sync"
+        bound_vm.cancel_active_task()
+        mock_task_manager.cancel_task.assert_called_once_with("task_123")
+
+    def test_cancel_active_task_missing_task_id_noop(self, bound_vm, mock_task_manager):
+        """active_key 有值但 _active_task_ids 无记录 (状态不一致防御) → 不动作。"""
+        bound_vm._set_state(is_syncing=True, active_key="daily_sync")
+        # 手动清空 task_id 记录, 模拟状态不一致
+        bound_vm._active_task_ids.clear()
+        bound_vm.cancel_active_task()
+        mock_task_manager.cancel_task.assert_not_called()
+
+
+class TestDataSourceViewModelSyncBusyProgressReset:
+    """P1-5: _set_sync_busy 启动/结束时重置 progress 与 progress_message。
+
+    避免 init_sync 与 secondary sync (daily/ai_concept/cache_clear) 的
+    进度条状态互相污染 (state 字段共用, 启动新任务必须清零旧值)。
+    """
+
+    def test_set_sync_busy_true_resets_progress(self, bound_vm):
+        """启动任务: progress=0.0, progress_message=None。"""
+        # 先模拟残留进度
+        bound_vm._set_state(progress=0.7, progress_message=Message("task_progress_checking"))
+        bound_vm._set_sync_busy(True, active_key="daily_sync")
+        assert bound_vm.state.is_syncing is True
+        assert bound_vm.state.active_key == "daily_sync"
+        assert bound_vm.state.progress == 0.0
+        assert bound_vm.state.progress_message is None
+
+    def test_set_sync_busy_false_resets_progress(self, bound_vm):
+        """结束任务: progress=0.0, progress_message=None (下次启动从干净状态开始)。"""
+        bound_vm._set_state(
+            is_syncing=True,
+            active_key="daily_sync",
+            progress=0.9,
+            progress_message=Message("task_progress_analyzing"),
+        )
+        bound_vm._set_sync_busy(False)
+        assert bound_vm.state.is_syncing is False
+        assert bound_vm.state.active_key is None
+        assert bound_vm.state.progress == 0.0
+        assert bound_vm.state.progress_message is None
+
+    def test_set_sync_busy_true_without_active_key(self, bound_vm):
+        """is_busy=True 不传 active_key 时 active_key=None (向后兼容)。"""
+        bound_vm._set_sync_busy(True)
+        assert bound_vm.state.is_syncing is True
+        assert bound_vm.state.active_key is None
+        assert bound_vm.state.progress == 0.0

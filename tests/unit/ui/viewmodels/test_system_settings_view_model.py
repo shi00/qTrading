@@ -393,3 +393,133 @@ class TestThreadPoolOffloadContract:
         await vm.save_thread_pool("16", "8")
         # reload_config 应被调用 (ThreadPoolManager.reload_config)
         mock_thread_pool[0].reload_config.assert_called_once_with()
+
+
+# --- P2-13: _clamp_int 与 set_*_value clamp 行为 ---
+
+
+class TestClampInt:
+    """P2-13: SystemSettingsViewModel._clamp_int 静态方法边界行为。"""
+
+    def test_clamp_int_within_range_returns_unchanged(self):
+        assert SystemSettingsViewModel._clamp_int("10", 1, 32) == "10"
+
+    def test_clamp_int_above_max_returns_max(self):
+        assert SystemSettingsViewModel._clamp_int("99999", 1, 32) == "32"
+
+    def test_clamp_int_below_min_returns_min(self):
+        assert SystemSettingsViewModel._clamp_int("0", 1, 32) == "1"
+
+    def test_clamp_int_negative_returns_min(self):
+        assert SystemSettingsViewModel._clamp_int("-5", 1, 32) == "1"
+
+    def test_clamp_int_non_numeric_returns_unchanged(self):
+        """非数字原样返回 (InputFilter 已拦截字符, 此处防御保留中间输入态)。"""
+        assert SystemSettingsViewModel._clamp_int("abc", 1, 32) == "abc"
+
+    def test_clamp_int_empty_returns_unchanged(self):
+        assert SystemSettingsViewModel._clamp_int("", 1, 32) == ""
+
+    def test_clamp_int_at_min_boundary(self):
+        assert SystemSettingsViewModel._clamp_int("1", 1, 32) == "1"
+
+    def test_clamp_int_at_max_boundary(self):
+        assert SystemSettingsViewModel._clamp_int("32", 1, 32) == "32"
+
+
+class TestPublicRangeConstants:
+    """P2-13: VM 公开常量与私有常量一致 (View 导入渲染 hint_text)。"""
+
+    def test_concurrency_constants_match(self):
+        from ui.viewmodels import system_settings_view_model as m
+
+        assert m.CONCURRENCY_MIN == m._CONCURRENCY_MIN
+        assert m.CONCURRENCY_MAX == m._CONCURRENCY_MAX
+
+    def test_db_pool_constants_match(self):
+        from ui.viewmodels import system_settings_view_model as m
+
+        assert m.DB_POOL_MIN == m._DB_POOL_MIN
+        assert m.DB_POOL_MAX == m._DB_POOL_MAX
+        assert m.DB_OVERFLOW_MIN == m._DB_OVERFLOW_MIN
+        assert m.DB_OVERFLOW_MAX == m._DB_OVERFLOW_MAX
+        assert m.DB_TIMEOUT_MIN == m._DB_TIMEOUT_MIN
+        assert m.DB_TIMEOUT_MAX == m._DB_TIMEOUT_MAX
+
+    def test_workers_constants_match(self):
+        from ui.viewmodels import system_settings_view_model as m
+
+        assert m.IO_WORKERS_MIN == m._IO_WORKERS_MIN
+        assert m.IO_WORKERS_MAX == m._IO_WORKERS_MAX
+        assert m.CPU_WORKERS_MIN == m._CPU_WORKERS_MIN
+        assert m.CPU_WORKERS_MAX == m._CPU_WORKERS_MAX
+
+
+class TestSetValueClamp:
+    """P2-13: set_*_value 超范围输入 clamp 到边界。"""
+
+    def test_set_concurrency_clamps_above_max(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        vm.set_concurrency_value("99999")
+        assert vm.state.concurrency_value == "32"
+
+    def test_set_concurrency_clamps_below_min(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        vm.set_concurrency_value("0")
+        assert vm.state.concurrency_value == "1"
+
+    def test_set_concurrency_keeps_valid_value(self, mock_config_handler):
+        vm = _make_vm(mock_config_handler)
+        vm.set_concurrency_value("16")
+        assert vm.state.concurrency_value == "16"
+
+    def test_set_pool_size_clamps(self, mock_config_handler):
+        from ui.viewmodels import system_settings_view_model as m
+
+        vm = _make_vm(mock_config_handler)
+        vm.set_pool_size_value("99999")
+        assert vm.state.pool_size_value == str(m.DB_POOL_MAX)
+        vm.set_pool_size_value("0")
+        assert vm.state.pool_size_value == str(m.DB_POOL_MIN)
+
+    def test_set_db_overflow_clamps(self, mock_config_handler):
+        from ui.viewmodels import system_settings_view_model as m
+
+        vm = _make_vm(mock_config_handler)
+        vm.set_db_overflow_value("99999")
+        assert vm.state.db_overflow_value == str(m.DB_OVERFLOW_MAX)
+        vm.set_db_overflow_value("-1")
+        assert vm.state.db_overflow_value == str(m.DB_OVERFLOW_MIN)
+
+    def test_set_db_timeout_clamps(self, mock_config_handler):
+        from ui.viewmodels import system_settings_view_model as m
+
+        vm = _make_vm(mock_config_handler)
+        vm.set_db_timeout_value("99999")
+        assert vm.state.db_timeout_value == str(m.DB_TIMEOUT_MAX)
+        vm.set_db_timeout_value("0")
+        assert vm.state.db_timeout_value == str(m.DB_TIMEOUT_MIN)
+
+    def test_set_io_workers_clamps(self, mock_config_handler):
+        from ui.viewmodels import system_settings_view_model as m
+
+        vm = _make_vm(mock_config_handler)
+        vm.set_io_workers_value("99999")
+        assert vm.state.io_workers_value == str(m.IO_WORKERS_MAX)
+        vm.set_io_workers_value("0")
+        assert vm.state.io_workers_value == str(m.IO_WORKERS_MIN)
+
+    def test_set_cpu_workers_clamps(self, mock_config_handler):
+        from ui.viewmodels import system_settings_view_model as m
+
+        vm = _make_vm(mock_config_handler)
+        vm.set_cpu_workers_value("99999")
+        assert vm.state.cpu_workers_value == str(m.CPU_WORKERS_MAX)
+        vm.set_cpu_workers_value("0")
+        assert vm.state.cpu_workers_value == str(m.CPU_WORKERS_MIN)
+
+    def test_set_value_non_numeric_passthrough(self, mock_config_handler):
+        """非数字输入原样保留 (中间输入态由 InputFilter 守护, VM 不破坏)。"""
+        vm = _make_vm(mock_config_handler)
+        vm.set_concurrency_value("")
+        assert vm.state.concurrency_value == ""

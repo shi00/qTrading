@@ -254,6 +254,36 @@ class TestBuildCells:
         assert text.spans[1].text == ".SH"
         assert text.spans[1].style.size == AppStyles.FONT_SIZE_CAPTION
 
+    # --- P3-15 色盲友好: 涨跌前置 +/- 符号 ---
+
+    def test_trend_positive_prefixes_plus_sign(self):
+        """P3-15: pct_chg=1.5% > 0 → 前置 "+" (不依赖颜色区分涨跌)。"""
+        cells = _build_cells(_make_row_data(), _make_columns())
+        text = cells[2].content.content
+        assert text.value.startswith("+")
+        assert text.value == "+1.5%"
+
+    def test_trend_positive_existing_plus_not_duplicated(self):
+        """P3-15: 已带 "+" 前缀不重复添加。"""
+        row = _make_row_data()
+        row["pct_chg"] = "+2.3%"
+        cells = _build_cells(row, _make_columns())
+        text = cells[2].content.content
+        assert text.value == "+2.3%"
+
+    def test_trend_negative_existing_minus_not_duplicated(self):
+        """P3-15: 已带 "-" (U+002D) 前缀负值不重复添加。
+
+        注: U+2212 (数学负号) 输入无法被 float() 解析, trend 分支不可达,
+        代码中的 ``val.replace("−", "-")`` 为防御性 normalize, 无法经数值路径触达。
+        """
+        row = _make_row_data()
+        row["pct_chg"] = "-1.5%"
+        cells = _build_cells(row, _make_columns())
+        text = cells[2].content.content
+        assert text.value == "-1.5%"
+        assert text.color == AppColors.DOWN_GREEN
+
     def test_code_col_without_dot_renders_plain_text(self):
         """ts_code=600000 (无 ".") → 走普通 Text 分支。"""
         row = _make_row_data()
