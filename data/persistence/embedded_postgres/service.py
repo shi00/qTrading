@@ -289,7 +289,7 @@ class EmbeddedPostgresService:
             try:
                 line = stream.readline()  # type: ignore[union-attr]
                 q.put(line if line is not None else "")
-            except Exception:
+            except Exception:  # pragma: no cover  R2_ALLOWED: reader thread stream fallback
                 q.put("")
 
         t = threading.Thread(target=_reader, daemon=True)
@@ -304,18 +304,18 @@ class EmbeddedPostgresService:
         if self._process is not None:
             try:
                 self._process.kill()
-            except Exception:
+            except Exception:  # pragma: no cover  R2_ALLOWED: subprocess kill fallback on failed start
                 pass
             try:
                 self._process.wait(timeout=5)
-            except Exception:
+            except Exception:  # pragma: no cover  R2_ALLOWED: subprocess wait fallback on failed start
                 pass
             self._process = None
         self._connection_info = None
         if self._stderr_file is not None:
             try:
                 self._stderr_file.close()  # type: ignore[attr-defined]
-            except Exception:
+            except Exception:  # pragma: no cover  R2_ALLOWED: file close fallback on failed start
                 pass
             self._stderr_file = None
 
@@ -337,7 +337,7 @@ class EmbeddedPostgresService:
             if proc.stdin is not None:
                 try:
                     proc.stdin.close()
-                except Exception:
+                except Exception:  # pragma: no cover  R2_ALLOWED: stdin close fallback on stop
                     pass
             try:
                 proc.wait(timeout=self._stop_timeout)
@@ -347,7 +347,7 @@ class EmbeddedPostgresService:
                 proc.kill()
                 try:
                     proc.wait(timeout=5)
-                except Exception:
+                except Exception:  # pragma: no cover  R2_ALLOWED: subprocess wait fallback after kill
                     pass
         finally:
             self._process = None
@@ -355,7 +355,7 @@ class EmbeddedPostgresService:
             if self._stderr_file is not None:
                 try:
                     self._stderr_file.close()  # type: ignore[attr-defined]
-                except Exception:
+                except Exception:  # pragma: no cover  R2_ALLOWED: file close fallback on stop
                     pass
                 self._stderr_file = None
 

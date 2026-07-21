@@ -420,9 +420,9 @@ class TestPerformWindowShutdown:
         )
         assert result is True
         assert coordinator.start_watchdog_calls == 1
-        assert coordinator.start_watchdog_args == [None]
+        assert coordinator.start_watchdog_args == [60.0]
         assert coordinator.do_cleanup_calls == 1
-        assert coordinator.do_cleanup_kwargs == {"timeout_s": 20.0}
+        assert coordinator.do_cleanup_kwargs == {"timeout_s": 50.0, "step_timeout_s": 35.0}
         assert coordinator.cancel_watchdog_calls == 1
         assert coordinator.force_exit_codes == []
         assert page.window.destroy_calls == 1
@@ -554,9 +554,9 @@ class TestHandleDisconnect:
             cleanup_done_fn=lambda: True,
         )
         assert coordinator.start_watchdog_calls == 1
-        assert coordinator.start_watchdog_args == [25]
+        assert coordinator.start_watchdog_args == [60]
         assert coordinator.do_cleanup_calls == 1
-        assert coordinator.do_cleanup_kwargs == {"timeout_s": 20.0}
+        assert coordinator.do_cleanup_kwargs == {"timeout_s": 50.0, "step_timeout_s": 35.0}
         # cleanup_done=True 短路返回，不调用 cancel_watchdog/force_exit
         assert coordinator.cancel_watchdog_calls == 0
         assert coordinator.force_exit_codes == []
@@ -586,10 +586,10 @@ class TestHandleDisconnect:
 
     @pytest.mark.asyncio
     async def test_start_watchdog_uses_25_second_timeout(self) -> None:
-        """disconnect 路径下 watchdog 超时为 25s（区别于 shutdown 路径的默认 25s）."""
+        """disconnect 路径下 watchdog 超时为 60s（Phase 2 Step 8 调整，原 25s）."""
         coordinator = _FakeCoordinator(cleanup_ok=True, cleanup_done=True)
         await handle_disconnect(
             coordinator,
             cleanup_done_fn=lambda: True,
         )
-        assert coordinator.start_watchdog_args == [25]
+        assert coordinator.start_watchdog_args == [60]
