@@ -134,3 +134,30 @@ jobs:
           path: ${{ matrix.binary_path }}
           if-no-files-found: error
           retention-days: 14
+
+  audit:
+    name: Security audit (cargo audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sidecars/qtrading-pg-sidecar
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust toolchain (1.97.0)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@4a7dfbd1f4d1b6eb67e5b6ab5f08b9a8cb7ed3c7  # v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        # 检查 Cargo.lock 中的已知漏洞（RustSec Advisory Database）
+        # 与平台无关，仅在 Linux 上跑即可
+        run: cargo audit --deny warnings

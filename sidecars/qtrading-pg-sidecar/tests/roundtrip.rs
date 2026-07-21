@@ -311,6 +311,57 @@ fn test_maintenance_command_lock_rejection() {
     cleanup_sidecar(&mut child, &data_dir);
 }
 
+/// 11. kill_fallback 历史后重启执行系统目录完整性检查（§7.3 / MAJ-1）。
+///
+/// 验证：上次 last_stop_mode=kill_fallback 时，下次 run 追加 pg_catalog 系统目录
+/// 检查（pg_database/pg_namespace/pg_class count > 0）。数据干净时应正常通过。
+///
+/// 测试策略：正常启动 + graceful_stop → 篡改 state.json 模拟 kill_fallback 历史
+/// → 再次 run → 验证 ready JSON 正常出现（说明 post_kill_fallback_check 通过）。
+#[test]
+fn test_kill_fallback_history_post_check() {
+    let (_tmp, data_dir) = unique_data_dir("roundtrip_11");
+
+    // 第一次 run → ready → graceful_stop（正常停止，last_stop_mode=smart）
+    let mut child = spawn_run(&data_dir);
+    let _ready = wait_for_ready(&mut child, READY_TIMEOUT);
+    graceful_stop(&mut child);
+    let exit = wait_for_exit(&mut child, STOP_TIMEOUT);
+    assert_eq!(exit, 0, "first run should exit 0");
+
+    // 篡改 state.json 模拟 kill_fallback 历史
+    // Layout::from_data_dir 用 data_dir.parent() 作为 base17，runtime 在 base17 下
+    let state_path = data_dir
+        .parent()
+        .unwrap()
+        .join("runtime")
+        .join("state.json");
+    assert!(
+        state_path.exists(),
+        "state.json should exist after stop: {}",
+        state_path.display()
+    );
+    let state_content = std::fs::read_to_string(&state_path).unwrap();
+    let mut state_json: serde_json::Value = serde_json::from_str(&state_content).unwrap();
+    state_json["last_stop_mode"] = serde_json::Value::String("kill_fallback".to_string());
+    state_json["kill_fallback_count"] = serde_json::Value::Number(1.into());
+    std::fs::write(
+        &state_path,
+        serde_json::to_string_pretty(&state_json).unwrap(),
+    )
+    .unwrap();
+
+    // 第二次 run → 验证 post_kill_fallback_check 通过（数据干净，系统目录非空）
+    let mut child2 = spawn_run(&data_dir);
+    let ready2 = wait_for_ready(&mut child2, READY_TIMEOUT);
+    assert_eq!(
+        ready2["status"], "running",
+        "should ready after kill_fallback post-check passes"
+    );
+
+    cleanup_sidecar(&mut child2, &data_dir);
+}
+
 // ---- 辅助函数 ----
 
 /// 启动一个短命辅助进程（用于 parent_pid 测试）。

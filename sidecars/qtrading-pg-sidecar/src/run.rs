@@ -165,8 +165,11 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     if let Some(info) = pgbin::read_postmaster_pid(&layout.data_dir) {
         if pgbin::process_alive(info.pid) {
             eprintln!(
-                "[sidecar] PostgreSQL 已运行于该 PGDATA (pid {})，禁止双实例启动",
-                info.pid
+                "[sidecar] PostgreSQL 已运行于该 PGDATA (pid {})，禁止双实例启动。\n\
+                 这通常是上次 sidecar 异常退出（崩溃/被 kill）后残留的 postgres 进程。\n\
+                 请先执行 `qtrading-pg-sidecar stop --data-dir {}` 清理残留进程，再重试 run。",
+                info.pid,
+                layout.data_dir.display()
             );
             return Err(exit_codes::LOCK_CONFLICT);
         }
@@ -180,13 +183,30 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
 
     // 9. 健康检查（§7.5，exit 13；28P01 认证失败 → exit 16）。失败须清理已启动的 postgres。
     if let Err(code) = health_check(&layout, &args, &password, port).await {
-        stop_after_failed_start(&layout, pg_pid).await;
+        stop_after_failed_start(&layout, pg_pid, "health check failed").await;
         return Err(code);
+    }
+
+    // 9.5 kill fallback 后额外系统目录完整性检查（§7.3 / MAJ-1）
+    // 上次 stop_mode=kill_fallback 时，crash recovery 可能掩盖数据页损坏；
+    // 追加 pg_catalog 系统目录查询，任一失败或返回 0 → exit 13。
+    {
+        let prev_stop_mode = state::read(&layout.state_file)
+            .and_then(|s| s.last_stop_mode)
+            .unwrap_or_default();
+        if prev_stop_mode == "kill_fallback" {
+            tracing::warn!("上次停止模式为 kill_fallback，执行系统目录完整性检查（§7.3 / MAJ-1）");
+            if let Err(code) = post_kill_fallback_check(&layout, &args, &password, port).await {
+                stop_after_failed_start(&layout, pg_pid, "post kill_fallback check failed").await;
+                return Err(code);
+            }
+            tracing::info!("系统目录完整性检查通过");
+        }
     }
 
     // 10. create database（exit 14/16）
     if let Err(code) = ensure_database(&postgresql, &args.database).await {
-        stop_after_failed_start(&layout, pg_pid).await;
+        stop_after_failed_start(&layout, pg_pid, "create database failed").await;
         return Err(code);
     }
 
@@ -219,7 +239,7 @@ pub async fn run(args: cli::RunArgs) -> Result<(), u8> {
     );
     if protocol::print_json_line(&ready).is_err() {
         // stdout 管道已坏（父进程死亡）→ 无监督对象，停止 postgres 后退出
-        stop_after_failed_start(&layout, pg_pid).await;
+        stop_after_failed_start(&layout, pg_pid, "stdout pipe broken before ready").await;
         return Err(exit_codes::HEALTH_CHECK_FAILED);
     }
     tracing::info!(
@@ -457,6 +477,68 @@ async fn health_check(
     Ok(())
 }
 
+/// kill fallback 后的系统目录完整性检查（§7.3 / MAJ-1）。
+///
+/// kill fallback (SIGQUIT) 导致 PostgreSQL 立即退出，crash recovery 重放 WAL
+/// 可能让集群进入"in production"状态，但系统目录页损坏仍可能导致后续 SQL 失败。
+/// 追加 pg_catalog 三张核心系统表存在性 + 非空检查：
+/// - pg_database：数据库列表（至少含 postgres/template1）
+/// - pg_namespace：命名空间（至少含 pg_catalog）
+/// - pg_class：所有表/索引/视图元数据（至少含系统表本身）
+///
+/// 任一查询失败或返回 0 → exit 13（HEALTH_CHECK_FAILED）。
+async fn post_kill_fallback_check(
+    layout: &Layout,
+    args: &cli::RunArgs,
+    password: &str,
+    port: u16,
+) -> Result<(), u8> {
+    // 使用 count(*) 而非存在性检查：count 返回数值，psql 输出可解析；
+    // 0 行表示系统目录为空（极端损坏），同样视为失败。
+    let checks: [(&str, &str); 3] = [
+        ("pg_database", "select count(*) from pg_catalog.pg_database"),
+        (
+            "pg_namespace",
+            "select count(*) from pg_catalog.pg_namespace",
+        ),
+        ("pg_class", "select count(*) from pg_catalog.pg_class"),
+    ];
+    for (name, sql) in checks {
+        let out = pgbin::psql(
+            &layout.install_dir,
+            &args.listen,
+            port,
+            &args.username,
+            "postgres",
+            password,
+            sql,
+            Duration::from_secs(10),
+        )
+        .await
+        .map_err(|e| {
+            eprintln!("[sidecar] kill fallback 后系统目录检查失败 ({name}): {e}（§7.3 / MAJ-1）");
+            exit_codes::HEALTH_CHECK_FAILED
+        })?;
+        // psql 输出形如 " count \n-------\n     N\n(1 row)"
+        // 取输出中的数字部分（trim 后第一行非空数字）
+        let count: i64 = out
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_digit()))
+            .and_then(|l| l.parse().ok())
+            .unwrap_or(0);
+        if count <= 0 {
+            eprintln!(
+                "[sidecar] kill fallback 后系统目录 {name} 为空或损坏 (count={count})，\
+                 禁止继续启动以免扩大损坏（§7.3 / MAJ-1）"
+            );
+            return Err(exit_codes::HEALTH_CHECK_FAILED);
+        }
+        tracing::info!("系统目录 {name} count={count} OK");
+    }
+    Ok(())
+}
+
 async fn ensure_database(postgresql: &PostgreSQL, database: &str) -> Result<(), u8> {
     let classify = |e: postgresql_embedded::Error| -> u8 {
         let msg = e.to_string();
@@ -476,8 +558,10 @@ async fn ensure_database(postgresql: &PostgreSQL, database: &str) -> Result<(), 
 }
 
 /// 启动后阶段失败（健康检查/建库/stdout 断裂）的清理：尽力停止，避免留下无主 postgres。
-async fn stop_after_failed_start(layout: &Layout, pg_pid: Option<u32>) {
+/// 同时记录 start failure 到 state.json，供 doctor/用户排查（OBS-1）。
+async fn stop_after_failed_start(layout: &Layout, pg_pid: Option<u32>, err: &str) {
     let _ = pgbin::graded_stop(&layout.install_dir, &layout.data_dir, pg_pid).await;
+    record_start_failure(layout, err);
 }
 
 fn record_start_failure(layout: &Layout, err: &str) {

@@ -372,6 +372,12 @@ pub fn doctor(data_dir: &Path) -> Result<(), u8> {
 struct TempInstance {
     /// 必须保留 ownership：PostgreSQL::drop 会调用 pg_ctl stop（crate 0.21 行为），
     /// 提前 drop 会立即停止 postgres，导致后续 psql 连接失败。
+    ///
+    /// run.rs 的常驻实例不使用 std::mem::forget 阻止 drop：依赖 graded_stop 先于
+    /// PostgreSQL 变量 drop 完成（graded_stop 在 supervise 返回后立即调用，
+    /// postgresql 变量在 run 函数返回时才 drop）。panic 路径下 drop 可能触发
+    /// crate 内部 stop（非分级策略），但 panic 概率极低且残留 postgres 可由
+    /// 下次 `stop` 命令清理（§6.3 契约）。
     #[allow(dead_code)]
     pg: PostgreSQL,
     layout: Layout,
