@@ -386,6 +386,23 @@ class TestBuildRow:
         row.on_click(MagicMock())  # type: ignore[reportCallIssue, reason: Flet stub declares on_click as 0-arg, but runtime passes event]
         on_row_click.assert_called_once_with(data)
 
+    def test_is_hovered_false_uses_odd_even_color(self):
+        """P2-8 MAJ-2: is_hovered=False (默认) → bgcolor 为 ODD/EVEN 色 (非 TABLE_ROW_HOVER)."""
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, None)
+        assert row.bgcolor == AppStyles.data_table_row(0, is_hovered=False)
+        assert row.bgcolor != AppColors.TABLE_ROW_HOVER
+
+    def test_is_hovered_true_uses_hover_color(self):
+        """P2-8 MAJ-2: is_hovered=True → bgcolor 为 TABLE_ROW_HOVER."""
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, None, is_hovered=True)
+        assert row.bgcolor == AppColors.TABLE_ROW_HOVER
+
+    def test_on_hover_attached_when_provided(self):
+        """P2-8 MAJ-2: 传入 on_hover 回调时, Container.on_hover 非空."""
+        on_hover = MagicMock()
+        row = _build_row(0, _make_row_data(), _make_columns(), 800, None, on_hover=on_hover)
+        assert callable(row.on_hover)
+
 
 # ---------------------------------------------------------------------------
 # PaginatedTable 组件体 (lines 251-355)

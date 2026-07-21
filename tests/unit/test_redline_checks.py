@@ -687,6 +687,41 @@ class TestRNoBareFtColorsPureFunction:
         assert len(errs) == 3
         assert warns == []
 
+    # ------------------------------------------------------------------
+    # OBS-6: ast.IfExp hasattr + hex fallback 模式检测
+    # ------------------------------------------------------------------
+
+    def test_hasattr_hex_fallback_warning(self):
+        """OBS-6: ``X if hasattr(...) else '#888888'`` 模式 → warning (不阻断)."""
+        code = "color = AppColors.TEXT_TERTIARY if hasattr(AppColors, 'TEXT_TERTIARY') else '#888888'\n"
+        errs, warns = self._check(code, self._ui_path("ui/components/virtual_table.py"))
+        assert errs == []
+        assert len(warns) == 1
+        assert "hasattr + hex fallback" in warns[0]
+        assert "#888888" in warns[0]
+
+    def test_hasattr_non_hex_fallback_not_flagged(self):
+        """OBS-6: hasattr + 非 hex 字符串 fallback 不应被检测 (避免误报)."""
+        code = "name = obj.name if hasattr(obj, 'name') else 'unknown'\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_hex_fallback_without_hasattr_not_flagged(self):
+        """OBS-6: 非 hasattr 的 ternary + hex fallback 不应被检测 (避免误报)."""
+        # 例: condition 直接为 bool 表达式 (非 hasattr 调用)
+        code = "color = '#FF0000' if use_red else '#00FF00'\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert warns == []
+
+    def test_hasattr_hex_fallback_does_not_block_main(self):
+        """OBS-6: hasattr + hex fallback 为 warning, 不进 errors (main 退出码仍 0)."""
+        code = "color = AppColors.X if hasattr(AppColors, 'X') else '#abcdef'\n"
+        errs, warns = self._check(code, self._ui_path("ui/views/foo.py"))
+        assert errs == []
+        assert len(warns) == 1
+
 
 # ============================================================================
 # R_no_bare_ft_colors_in_ui 辅助函数测试

@@ -479,6 +479,34 @@ def _is_settings_tabs_dir(source_path: Path) -> bool:
     return len(parts) >= 3 and parts[0] == "ui" and parts[1] == "views" and parts[2] == "settings_tabs"
 
 
+def _is_hex_color_constant(node: ast.AST) -> bool:
+    """识别 ``'#RRGGBB'`` / ``'#RRGGBBAA'`` 字符串字面量 (hex color fallback 模式)。"""
+    if not isinstance(node, ast.Constant):
+        return False
+    if not isinstance(node.value, str):
+        return False
+    val = node.value
+    if not val.startswith("#"):
+        return False
+    return len(val) in (7, 9) and all(c in "0123456789abcdefABCDEF" for c in val[1:])
+
+
+def _detect_hasattr_hex_fallback(node: ast.IfExp) -> str | None:
+    """识别 ``X if hasattr(...) else '#hex'`` 模式, 返回 hex 字符串; 非此模式返回 None。
+
+    OBS-6 (review fix): 堵塞 MAJ-1 类 hasattr + hex fallback 逃过 CI 的漏洞。
+    检测: orelse 为 hex color 字符串字面量, test 为 hasattr() 调用。
+    """
+    if not _is_hex_color_constant(node.orelse):
+        return None
+    test = node.test
+    if not isinstance(test, ast.Call):
+        return None
+    if not isinstance(test.func, ast.Name) or test.func.id != "hasattr":
+        return None
+    return node.orelse.value  # type: ignore[return-value]
+
+
 def _check_R_no_bare_ft_colors_in_tree(tree: ast.Module, source_path: Path) -> tuple[list[str], list[str]]:
     """纯函数：检查 AST 中的 ft.Colors.X 裸色引用。
 
@@ -487,6 +515,7 @@ def _check_R_no_bare_ft_colors_in_tree(tree: ast.Module, source_path: Path) -> t
     - 灰阶色 (GREY/WHITE/BLACK/TRANSPARENT) → warning
     - 裸色值 (RED/GREEN/BLUE/YELLOW/ORANGE/PURPLE/TEAL/CYAN/INDIGO) → error
     - settings_tabs/ 目录下 icon_color 装饰色 (BLUE/PURPLE/INDIGO/ORANGE/TEAL) → warning (豁免)
+    - OBS-6: ``X if hasattr(...) else '#hex'`` 模式 → warning (hasattr + hex fallback)
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -494,6 +523,14 @@ def _check_R_no_bare_ft_colors_in_tree(tree: ast.Module, source_path: Path) -> t
     is_settings_tabs = _is_settings_tabs_dir(source_path)
 
     for node in ast.walk(tree):
+        # OBS-6: 先检测 ast.IfExp hasattr+hex fallback 模式 (不与 ft.Colors.X 检测冲突)
+        if isinstance(node, ast.IfExp):
+            hex_val = _detect_hasattr_hex_fallback(node)
+            if hex_val is not None:
+                warnings.append(
+                    f"{rel}:{node.lineno}: hasattr + hex fallback ({hex_val}) 模式建议直接使用 AppColors token"
+                )
+            continue
         attr = _is_ft_colors_attr(node)
         if attr is None:
             continue
