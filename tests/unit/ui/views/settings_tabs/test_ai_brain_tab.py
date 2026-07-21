@@ -591,8 +591,10 @@ class TestAIBrainTabMount:
             "settings_news_prompt",
         ):
             tf = _find_text_field_by_label(env, key)
-            # UI 契约测试验证多 key 循环内 text_field 存在性
-            assert tf is not None
+            # 强断言：验证找到的 TextField label 匹配预期（_find_text_field_by_label
+            # 找不到时已 raise AssertionError，故 tf 必非 None；此处验证 label 属性
+            # 内容，避免弱断言扫描器将 assert tf is not None 误报为唯一终态弱断言）
+            assert tf.label == f"i18n[{key}]"
 
     def test_render_includes_save_button(self, ai_brain_tab_env) -> None:
         """渲染含 1 个 ft.Button (save_ai)。"""
@@ -719,7 +721,7 @@ class TestEventHandlersPageNoneEarlyReturn:
         # _on_reset_ai_prompt 不依赖 page, 仍打开 ConfirmDialog
         _rerender(env)
         on_confirm = env["captured_callbacks"].get("on_confirm")
-        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"
+        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"  # noqa: weak-assertion 后续 show_snack.assert_called_once_with 验证行为
         on_confirm()
         show_snack.assert_called_once_with("i18n[settings_snack_prompt_reset]")
 
@@ -738,7 +740,7 @@ class TestEventHandlersPageNoneEarlyReturn:
             _invoke(reset_news_btn.on_click, _make_event())
         _rerender(env)
         on_confirm = env["captured_callbacks"].get("on_confirm")
-        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"
+        assert on_confirm is not None, "ConfirmDialog on_confirm 未捕获 (open_state 未切换为 True?)"  # noqa: weak-assertion 后续 show_snack.assert_called_once_with 验证行为
         on_confirm()
         show_snack.assert_called_once_with("i18n[settings_snack_prompt_reset]")
 

@@ -186,6 +186,7 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
         if is_trend and numeric_val is not None:
             # P3-15 色盲友好: 涨跌前置 +/- 符号 (U+002D 普通连字符), 不依赖颜色区分
             # 批次 3 #128: 移除 hasattr + hex fallback, 直接使用 AppColors.UP_RED/DOWN_GREEN
+            # MAJ-1 (review fix): 代码后缀色统一用 AppColors.TEXT_HINT (与 on_surface_variant 同源)
             if numeric_val > 0:
                 text_color = AppColors.UP_RED
                 if not val.startswith("+"):
@@ -206,9 +207,7 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
                         "." + parts[1],
                         ft.TextStyle(
                             size=AppStyles.FONT_SIZE_CAPTION,
-                            color=AppColors.TEXT_TERTIARY  # type: ignore[untyped]
-                            if hasattr(AppColors, "TEXT_TERTIARY")
-                            else "#888888",
+                            color=AppColors.TEXT_HINT,
                         ),
                     ),
                 ],
@@ -241,16 +240,24 @@ def _build_row(
     columns: list[dict[str, Any]],
     total_w: int,
     on_row_click: Callable[[dict[str, Any]], None] | None,
+    is_hovered: bool = False,
+    on_hover: Callable[[ft.HoverEvent], None] | None = None,
 ) -> ft.Container:
-    """构建单个绝对定位行 (top = abs_idx * ROW_HEIGHT)。"""
+    """构建单个绝对定位行 (top = abs_idx * ROW_HEIGHT)。
+
+    Args:
+        is_hovered: 当前行是否处于 hover 态 (P2-8: 切换 bgcolor 为 TABLE_ROW_HOVER)。
+        on_hover: hover 事件回调 (P2-8: 由 PaginatedTable 传入 set_hovered_idx 触发重渲染)。
+    """
     row = ft.Container(
         left=0,
         top=abs_idx * ROW_HEIGHT,
         height=ROW_HEIGHT,
         width=total_w,
         ink=True,
-        bgcolor=AppStyles.data_table_row(abs_idx),
+        bgcolor=AppStyles.data_table_row(abs_idx, is_hovered=is_hovered),
         content=ft.Row(safe_controls(_build_cells(row_data, columns)), spacing=0),
+        on_hover=on_hover,
     )
     if on_row_click is not None:
         row.on_click = _make_row_click_handler(on_row_click, row_data)
@@ -289,6 +296,8 @@ def PaginatedTable(
 
     scroll_first, set_scroll_first = ft.use_state(0)
     viewport_h, set_viewport_h = ft.use_state(0.0)
+    # P2-8 MAJ-2 (review fix): hover 触发链路落地 — hovered_idx=-1 表示无 hover
+    hovered_idx, set_hovered_idx = ft.use_state(-1)
     scroll_ref = ft.use_ref(_ScrollCache)
     cache = scroll_ref.current
     assert cache is not None
@@ -307,8 +316,27 @@ def PaginatedTable(
     start, end = compute_window(scroll_first, row_count, viewport_h)
 
     header_controls = _build_header(cols_list, sort_col, sort_asc, on_sort)
+
+    def _make_row_hover(abs_idx: int) -> Callable[[ft.HoverEvent], None]:
+        """P2-8 MAJ-2: 构造单行 hover 回调, 切换 hovered_idx 触发重渲染。"""
+
+        def _on_hover(e: ft.HoverEvent) -> None:
+            # e.data == "true" 表示进入; "false" 表示离开
+            set_hovered_idx(abs_idx if str(e.data) == "true" else -1)
+
+        return _on_hover
+
     visible_rows = [
-        _build_row(abs_idx, rows_list[abs_idx], cols_list, total_w, on_row_click) for abs_idx in range(start, end)
+        _build_row(
+            abs_idx,
+            rows_list[abs_idx],
+            cols_list,
+            total_w,
+            on_row_click,
+            is_hovered=(abs_idx == hovered_idx),
+            on_hover=_make_row_hover(abs_idx),
+        )
+        for abs_idx in range(start, end)
     ]
 
     canvas = ft.Stack(
