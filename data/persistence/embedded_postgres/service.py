@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
+from utils.log_decorators import PerfThreshold, log_async_operation
 from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 
@@ -164,11 +165,18 @@ class EmbeddedPostgresService:
             database=config.embedded_pg_database,
         )
 
+    @log_async_operation(
+        operation_name="embedded_pg_start",
+        threshold_ms=PerfThreshold.GLOBAL_INIT,
+    )
     async def start(self) -> ConnectionInfo:
         """拉起 sidecar 子进程并解析 ready JSON。
 
         使用 ``asyncio.to_thread`` 包装同步 Popen + readline，避免阻塞事件循环（R16）。
         失败时保证清理子进程（kill + wait）。CancelledError 路径触发 stop 兜底。
+
+        H7: 挂 ``@log_async_operation`` 装饰器记录耗时与异常，threshold=GLOBAL_INIT（15s）
+        匹配 sidecar 首次启动 initdb 可能较慢的场景；超过阈值记 WARNING 便于诊断。
         """
         import asyncio
 
@@ -301,10 +309,64 @@ class EmbeddedPostgresService:
         # R9: 注册完整 URL 为 secret，确保日志/异常中带密码的 URL 被 sanitize_error 精确脱敏
         DataSanitizer.register_secret(url)
 
-        self._connection_info = ConnectionInfo(url=url, port=port, pid=pid, data_dir=data_dir_str)
+        # M4: 扩展字段从 ready JSON 解析（缺失字段使用 dataclass 默认值）
+        postgres_version = str(ready.get("postgres_version", ""))
+        host = str(ready.get("host", "")) or self._listen
+        sidecar_pid = int(ready.get("sidecar_pid", 0) or 0)
+        password_source = str(ready.get("password_source", "")) or "password_file"
+
+        self._connection_info = ConnectionInfo(
+            url=url,
+            port=port,
+            pid=pid,
+            data_dir=data_dir_str,
+            postgres_version=postgres_version,
+            host=host,
+            sidecar_pid=sidecar_pid,
+            password_source=password_source,
+        )
         # 日志中 URL 脱敏（R9）：仅记 host:port
         self._svc_logger.info("embedded postgres started on %s:%s (pid=%s)", self._listen, port, pid)
+        # M9: 启动 daemon 线程持续读 sidecar stdout 写入日志文件，避免 stdout 缓冲区满
+        # 阻塞 sidecar（虽然当前 sidecar ready 后不再写 stdout，但防御未来版本变化）
+        self._start_stdout_reader_thread()
         return self._connection_info
+
+    def _start_stdout_reader_thread(self) -> None:
+        """M9: 创建 daemon 线程持续读 sidecar stdout 写入 sidecar.stdout.log。
+
+        - 线程为 daemon，随进程退出自动终止
+        - readline 阻塞直到 EOF（stop_sync 关闭 stdin → sidecar 退出 → stdout 关闭）
+        - 每行写入 ``<log_dir>/sidecar.stdout.log``，便于诊断 sidecar 运行期输出
+        - 线程异常不影响主流程，仅记 debug 日志
+        """
+        if self._process is None or self._process.stdout is None:
+            return
+
+        stdout = self._process.stdout
+        stdout_log_path = self._log_dir / "sidecar.stdout.log"
+
+        def _reader() -> None:
+            try:
+                # 文件句柄需保留到线程结束，不能用 with；SIM115 不适用
+                with open(  # noqa: SIM115
+                    stdout_log_path, "a", encoding="utf-8"
+                ) as log_file:
+                    while True:
+                        line = stdout.readline()
+                        if not line:
+                            break  # EOF
+                        log_file.write(line)
+                        log_file.flush()
+            except Exception as e:  # pragma: no cover  reader thread stdout fallback
+                logger.debug("stdout reader thread fallback: %s", e, exc_info=True)
+
+        t = threading.Thread(
+            target=_reader,
+            name="embedded-pg-stdout-reader",
+            daemon=True,
+        )
+        t.start()
 
     def _verify_sidecar_sha256(self) -> None:
         """§17.6 #7: Popen 前校验 sidecar binary SHA256，防止版本混搭/损坏。
@@ -423,45 +485,57 @@ class EmbeddedPostgresService:
                 logger.debug("cleanup_failed_start close fallback: %s", e, exc_info=True)
             self._stderr_file = None
 
+    @log_async_operation(
+        operation_name="embedded_pg_stop",
+        threshold_ms=PerfThreshold.GLOBAL_INIT,
+    )
     async def stop(self) -> None:
         """幂等停止 sidecar：stdin.close → wait(timeout) → kill 兜底。
 
         清理 _process / _connection_info / _stderr_file。
+
+        H7: 挂 ``@log_async_operation`` 记录 stop 耗时，便于发现 sidecar 关停卡死。
         """
         import asyncio
 
         await asyncio.to_thread(self.stop_sync)
 
     def stop_sync(self) -> None:
-        """同步停止 sidecar（供 asyncio.to_thread 包装，shutdown Step 8 使用）。"""
-        if self._process is None:
-            return
-        proc = self._process
-        try:
-            if proc.stdin is not None:
-                try:
-                    proc.stdin.close()
-                except Exception as e:  # stdin close fallback on stop
-                    logger.debug("stop_sync stdin close fallback: %s", e, exc_info=True)
+        """同步停止 sidecar（供 asyncio.to_thread 包装，shutdown Step 8 使用）。
+
+        M3: 持 ``cls._lock`` 保护，避免 _reset_singleton/_atexit_cleanup 与外部 stop()
+        并发执行时双线程同时操作 ``self._process`` / ``self._stderr_file``。
+        ``cls._lock`` 为 RLock，_reset_singleton/_atexit_cleanup 持锁调用同线程可重入。
+        """
+        with type(self)._lock:
+            if self._process is None:
+                return
+            proc = self._process
             try:
-                proc.wait(timeout=self._stop_timeout)
-                self._svc_logger.info("embedded postgres stopped gracefully")
-            except subprocess.TimeoutExpired:
-                self._svc_logger.warning("sidecar stop timeout after %ss, killing", self._stop_timeout)
-                proc.kill()
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.close()
+                    except Exception as e:  # stdin close fallback on stop
+                        logger.debug("stop_sync stdin close fallback: %s", e, exc_info=True)
                 try:
-                    proc.wait(timeout=5)
-                except Exception as e:  # subprocess wait fallback after kill
-                    logger.debug("stop_sync wait after kill fallback: %s", e, exc_info=True)
-        finally:
-            self._process = None
-            self._connection_info = None
-            if self._stderr_file is not None:
-                try:
-                    self._stderr_file.close()  # type: ignore[attr-defined]
-                except Exception as e:  # file close fallback on stop
-                    logger.debug("stop_sync stderr_file close fallback: %s", e, exc_info=True)
-                self._stderr_file = None
+                    proc.wait(timeout=self._stop_timeout)
+                    self._svc_logger.info("embedded postgres stopped gracefully")
+                except subprocess.TimeoutExpired:
+                    self._svc_logger.warning("sidecar stop timeout after %ss, killing", self._stop_timeout)
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=5)
+                    except Exception as e:  # subprocess wait fallback after kill
+                        logger.debug("stop_sync wait after kill fallback: %s", e, exc_info=True)
+            finally:
+                self._process = None
+                self._connection_info = None
+                if self._stderr_file is not None:
+                    try:
+                        self._stderr_file.close()  # type: ignore[attr-defined]
+                    except Exception as e:  # file close fallback on stop
+                        logger.debug("stop_sync stderr_file close fallback: %s", e, exc_info=True)
+                    self._stderr_file = None
 
     def collect_logs_summary(self, tail_bytes: int = 8192) -> dict[str, str]:
         """收集四类日志尾部内容，供 doctor 命令/UI 诊断面板调用（§3.7）。

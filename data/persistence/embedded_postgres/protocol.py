@@ -18,9 +18,17 @@ class ConnectionInfo:
         port: PostgreSQL 监听端口（>0）。
         pid: PostgreSQL 主进程 pid（来自 ready JSON ``pid`` 字段，可能为 0 表示 sidecar 未取到）。
         data_dir: PGDATA 绝对路径（来自 ready JSON ``data_dir`` 字段）。
+        postgres_version: PostgreSQL 版本字符串（如 "17.2.0"），M4 扩展字段，默认空。
+        host: PostgreSQL 监听 host（如 "127.0.0.1"），M4 扩展字段，默认空。
+        sidecar_pid: sidecar 子进程 pid（区别于 postgres 主进程 pid），M4 扩展字段，默认 0。
+        password_source: 密码来源（"password_file" / "keyring" 等），M4 扩展字段，默认空。
     """
 
     url: str
     port: int
     pid: int
     data_dir: str
+    postgres_version: str = ""
+    host: str = ""
+    sidecar_pid: int = 0
+    password_source: str = ""

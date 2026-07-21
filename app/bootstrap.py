@@ -354,6 +354,17 @@ async def prepare_database_runtime() -> None:
 
     mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
     if mode != "embedded":
+        # M5: mode=external 但 config.embedded_pg_enabled=True → 记 WARNING（用户可能误配置）
+        from utils.config_handler import ConfigHandler
+        from utils.config_models import AppConfig
+
+        config = AppConfig.model_validate(ConfigHandler.load_config())
+        if config.embedded_pg_enabled:
+            logger.warning(
+                "[Bootstrap] QTRADING_DATABASE_MODE=%s but embedded_pg_enabled=True; "
+                "embedded PostgreSQL service will NOT start (external mode takes precedence)",
+                mode,
+            )
         return
 
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService

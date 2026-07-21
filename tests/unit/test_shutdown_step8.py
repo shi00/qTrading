@@ -32,7 +32,10 @@ def test_step8_in_cleanup_steps_at_index_8() -> None:
 
 @pytest.mark.asyncio(loop_scope="function")
 async def test_step8_noop_when_service_not_registered(monkeypatch) -> None:
-    """EmbeddedPostgresService._reset_singleton() 后 → Step 8 无操作，不抛异常。"""
+    """EmbeddedPostgresService._reset_singleton() 后 → Step 8 无操作，不抛异常。
+
+    H8: 补强断言验证 noop 副作用 — cleanup_done 仍为 False，step_results 为空。
+    """
     from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
     EmbeddedPostgresService._reset_singleton()
@@ -46,6 +49,12 @@ async def test_step8_noop_when_service_not_registered(monkeypatch) -> None:
     coordinator = ShutdownCoordinator()
     # Step 8 应无操作且不抛异常
     await coordinator._step8_stop_embedded_postgres()
+
+    # H8: 补强断言 — noop 不应改动 coordinator 状态
+    assert coordinator.cleanup_done is False, (
+        f"noop Step 8 不应触发 cleanup_done=True，实际：{coordinator.cleanup_done}"
+    )
+    assert coordinator.step_results == [], f"noop Step 8 不应追加 step_results，实际：{coordinator.step_results}"
 
 
 @pytest.mark.asyncio(loop_scope="function")

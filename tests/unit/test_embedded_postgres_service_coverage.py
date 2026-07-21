@@ -14,14 +14,13 @@ Mock 策略：
 约束：
 - 不启动真实 Rust sidecar
 - @pytest.mark.asyncio(loop_scope="function") 标记 async 测试
-- Unix-only 测试用 pytest.mark.skipif(os.name == "nt")
+- 跨平台：异常分支通过 mock subprocess.Popen 触发，不依赖 Unix 权限模型
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -165,19 +164,24 @@ def _make_service(tmp_path: Path) -> EmbeddedPostgresService:
 class TestEmbeddedPostgresServiceCoverage:
     """覆盖率补齐测试（8 个，对应 service.py 未覆盖分支）。"""
 
-    @pytest.mark.skipif(os.name == "nt", reason="Unix permission model required for PermissionError")
     @pytest.mark.asyncio(loop_scope="function")
     async def test_start_raises_permission_error(self, tmp_path: Path) -> None:
-        """sidecar_binary 无执行权限 → PermissionError → EmbeddedPostgresStartError。"""
+        """M11: sidecar_binary 无执行权限 → PermissionError → EmbeddedPostgresStartError。
+
+        跨平台实现：mock subprocess.Popen 抛 PermissionError，避免依赖 Unix 权限模型。
+        原实现用 skipif(os.name == "nt") 在 Windows 跳过，覆盖率损失。
+        """
+        from unittest.mock import patch
+
+        from data.persistence.embedded_postgres import service as svc_module
         from data.persistence.embedded_postgres.service import (
             EmbeddedPostgresService,
             EmbeddedPostgresStartError,
         )
 
-        # 创建无执行权限的 sidecar_binary（chmod 0o644）
         sidecar_binary = tmp_path / "noexec_sidecar.sh"
         sidecar_binary.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
-        sidecar_binary.chmod(0o644)  # 无执行位
+        # 跨平台：mock Popen 抛 PermissionError，不依赖 chmod
 
         service = EmbeddedPostgresService(
             sidecar_binary=sidecar_binary,
@@ -185,8 +189,13 @@ class TestEmbeddedPostgresServiceCoverage:
             install_dir=tmp_path / "postgres" / "17" / "install",
         )
         try:
-            with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not executable"):
-                await service.start()
+            with patch.object(
+                svc_module.subprocess,
+                "Popen",
+                side_effect=PermissionError(13, "Permission denied"),
+            ):
+                with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not executable"):
+                    await service.start()
         finally:
             await service.stop()
             EmbeddedPostgresService._reset_singleton()
@@ -522,7 +531,7 @@ class TestEmbeddedPostgresServiceExceptionFallbacks:
 
         EmbeddedPostgresService._reset_singleton()
 
-    def test_reader_thread_handles_stream_error(self) -> None:
+    def test_reader_thread_handles_stream_error(self, tmp_path: Path) -> None:
         """_readline_with_timeout 中 stream.readline 抛 OSError → 返回 ""，不阻塞。
 
         注：reader thread 竞态分支仍保留 pragma: no cover，本测试通过 mock stream 直接
@@ -536,15 +545,15 @@ class TestEmbeddedPostgresServiceExceptionFallbacks:
         mock_stream.readline.side_effect = OSError("stream read failed")
 
         # 使用已初始化的 service 实例（直接调 _readline_with_timeout 不需要单例）
-        # 用 __new__ 绕过 __init__ 以避免 tmp_path 依赖
         EmbeddedPostgresService._reset_singleton()
-        # 构造一个最小可用实例
-        import pathlib
 
+        # 显式传入 tmp_path 作为 log_dir，避免 log_dir 默认推导为 /postgres-logs
+        # 在 Linux 上无权限创建根目录导致 PermissionError
         service = EmbeddedPostgresService(
-            sidecar_binary=pathlib.Path("/fake"),
-            data_dir=pathlib.Path("/fake/data"),
-            install_dir=pathlib.Path("/fake/install"),
+            sidecar_binary=tmp_path / "fake",
+            data_dir=tmp_path / "fake" / "data",
+            install_dir=tmp_path / "fake" / "install",
+            log_dir=tmp_path / "logs",
         )
         try:
             # 用短 timeout 避免测试卡住
@@ -553,3 +562,316 @@ class TestEmbeddedPostgresServiceExceptionFallbacks:
             assert result == ""
         finally:
             EmbeddedPostgresService._reset_singleton()
+
+
+class TestEmbeddedPostgresServiceCoverageGapFill:
+    """覆盖率补齐测试（Step 15 缺口行）。
+
+    补齐 service.py 中以下未覆盖分支：
+    - Line 100: sidecar_binary 为空时 raise ValueError
+    - Line 198: H5 快速路径返回（已启动时再次 start）
+    - Line 255-257: FileNotFoundError (sidecar binary 不存在)
+    - Line 265-268: ready_line 为空 (sidecar exited before ready)
+    - Line 300-302: password_file FileNotFoundError
+    - Line 344: _start_stdout_reader_thread 提前返回（process None 或 stdout None）
+    - Line 385-400: sha256 校验通过 / mismatch / OSError
+    - Line 420-447: _format_sidecar_exit_error 各 exit code 映射
+    - Line 465-466: _readline_with_timeout queue.Empty 超时
+    - Line 515->520: stop_sync proc.stdin is None 分支
+    - Line 602: _atexit_cleanup 未初始化时安全返回
+    """
+
+    def test_init_raises_value_error_when_sidecar_binary_empty(self, tmp_path: Path) -> None:
+        """Line 100: sidecar_binary 为空字符串 → raise ValueError。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+        with pytest.raises(ValueError, match="sidecar_binary is required"):
+            EmbeddedPostgresService(
+                sidecar_binary="",
+                data_dir=tmp_path / "postgres" / "17" / "data",
+                install_dir=tmp_path / "postgres" / "17" / "install",
+            )
+        EmbeddedPostgresService._reset_singleton()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_fast_path_returns_existing_connection_info(self, tmp_path: Path) -> None:
+        """Line 198: H5 快速路径 — 已启动时再次 start() 直接返回缓存 ConnectionInfo。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.protocol import ConnectionInfo
+
+        EmbeddedPostgresService = svc_module.EmbeddedPostgresService
+        service = _make_service(tmp_path)
+        try:
+            # 构造已启动状态：_connection_info 已设、_process.poll() 返回 None（仍在运行）
+            cached_info = ConnectionInfo(
+                url="postgresql+asyncpg://u:p@127.0.0.1:55432/db",
+                port=55432,
+                pid=12345,
+                data_dir=str(tmp_path / "postgres" / "17" / "data"),
+            )
+            service._connection_info = cached_info
+
+            from unittest.mock import MagicMock
+
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None  # 仍在运行
+            service._process = mock_proc
+
+            # 再次 start 应走快速路径，不触发 Popen
+            popen_calls = {"n": 0}
+
+            def popen_factory(*args, **kwargs):
+                popen_calls["n"] += 1
+                return _FakePopen(*args, **kwargs)
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+
+            # 验证返回缓存的 ConnectionInfo，且未触发 Popen
+            assert info is cached_info
+            assert popen_calls["n"] == 0
+        finally:
+            # 清理 mock 状态，避免 stop() 调用 mock_proc.wait() 卡住
+            service._process = None
+            service._connection_info = None
+            EmbeddedPostgresService._reset_singleton()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_raises_filenotfounderror_when_sidecar_missing(self, tmp_path: Path) -> None:
+        """Line 255-257: sidecar_binary 路径不存在 → FileNotFoundError → EmbeddedPostgresStartError。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = svc_module.EmbeddedPostgresService(
+            sidecar_binary=tmp_path / "nonexistent_sidecar.exe",
+            data_dir=tmp_path / "postgres" / "17" / "data",
+            install_dir=tmp_path / "postgres" / "17" / "install",
+        )
+        try:
+            with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary not found"):
+                await service.start()
+        finally:
+            await service.stop()
+            svc_module.EmbeddedPostgresService._reset_singleton()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_raises_when_ready_line_empty(self, tmp_path: Path) -> None:
+        """Line 265-268: ready_line 为空（sidecar exited before ready）→ EmbeddedPostgresStartError。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = _make_service(tmp_path)
+        try:
+
+            def popen_factory(*args, **kwargs):
+                inst = _FakePopen(*args, **kwargs)
+                # 不 set_stdout_line，readline 返回空字符串
+                inst.set_stdout_line("")
+                # mock poll 返回非 None（已退出）
+                inst.set_poll(60)
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                with pytest.raises(EmbeddedPostgresStartError, match="sidecar crashed"):
+                    await service.start()
+        finally:
+            await service.stop()
+            svc_module.EmbeddedPostgresService._reset_singleton()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_raises_when_password_file_not_found(self, tmp_path: Path) -> None:
+        """Line 300-302: password_file 不存在 → FileNotFoundError → EmbeddedPostgresStartError。"""
+        from data.persistence.embedded_postgres import service as svc_module
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+        service = _make_service(tmp_path)
+        try:
+
+            def popen_factory(*args, **kwargs):
+                inst = _FakePopen(*args, **kwargs)
+                inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+                # 不创建 password_file，触发 FileNotFoundError
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                with pytest.raises(EmbeddedPostgresStartError, match="password_file not found"):
+                    await service.start()
+        finally:
+            await service.stop()
+            svc_module.EmbeddedPostgresService._reset_singleton()
+
+    def test_start_stdout_reader_thread_returns_when_process_none(self, tmp_path: Path) -> None:
+        """Line 344: _start_stdout_reader_thread 在 _process 为 None 时安全返回。"""
+        service = _make_service(tmp_path)
+        # _process 为 None（未启动），应安全返回不抛异常
+        assert service._process is None
+        service._start_stdout_reader_thread()  # 不应抛异常
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_verify_sha256_passes_when_matching(self, tmp_path: Path) -> None:
+        """Line 385-393: sha256 校验通过（actual == expected）。"""
+        import hashlib
+
+        service = _make_service(tmp_path)
+        # 写 sidecar binary 内容 + 对应 .sha256 文件
+        content = b"fake binary content"
+        service._sidecar_binary.write_bytes(content)
+        expected_hash = hashlib.sha256(content).hexdigest()
+        sha256_path = service._sidecar_binary.with_suffix(service._sidecar_binary.suffix + ".sha256")
+        sha256_path.write_text(f"{expected_hash}  {service._sidecar_binary.name}", encoding="utf-8")
+
+        # 不应抛异常
+        service._verify_sidecar_sha256()
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_verify_sha256_raises_on_mismatch(self, tmp_path: Path) -> None:
+        """Line 398-408: sha256 mismatch → EmbeddedPostgresStartError。"""
+        from data.persistence.embedded_postgres.service import (
+            EmbeddedPostgresService,
+            EmbeddedPostgresStartError,
+        )
+
+        service = _make_service(tmp_path)
+        service._sidecar_binary.write_bytes(b"actual content")
+        sha256_path = service._sidecar_binary.with_suffix(service._sidecar_binary.suffix + ".sha256")
+        # 写一个不匹配的 hash
+        sha256_path.write_text(
+            "0000000000000000000000000000000000000000000000000000000000000000  fake", encoding="utf-8"
+        )
+
+        with pytest.raises(EmbeddedPostgresStartError, match="sha256 mismatch"):
+            service._verify_sidecar_sha256()
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_verify_sha256_raises_when_binary_read_fails(self, tmp_path: Path) -> None:
+        """Line 394-396: sidecar_binary.read_bytes 抛 OSError → EmbeddedPostgresStartError。"""
+        from data.persistence.embedded_postgres.service import (
+            EmbeddedPostgresService,
+            EmbeddedPostgresStartError,
+        )
+
+        service = _make_service(tmp_path)
+        # 写 .sha256 文件让校验进入读取 binary 阶段
+        sha256_path = service._sidecar_binary.with_suffix(service._sidecar_binary.suffix + ".sha256")
+        sha256_path.write_text("abcdef  fake", encoding="utf-8")
+        # mock read_bytes 抛 OSError
+        with patch.object(Path, "read_bytes", side_effect=OSError("disk read failed")):
+            with pytest.raises(EmbeddedPostgresStartError, match="sidecar binary read failed during sha256"):
+                service._verify_sidecar_sha256()
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_format_sidecar_exit_error_all_mapped_codes(self, tmp_path: Path) -> None:
+        """Line 420-447: _format_sidecar_exit_error 全部 exit code 映射 + 默认分支。"""
+        service = _make_service(tmp_path)
+
+        # None → 通用消息
+        assert "exit=None" in service._format_sidecar_exit_error(None)
+        # 11 → initdb failed
+        assert "initdb failed (exit=11)" in service._format_sidecar_exit_error(11)
+        # 15 → disk full
+        assert "disk full (exit=15)" in service._format_sidecar_exit_error(15)
+        # 16 → password error
+        assert "password error (exit=16)" in service._format_sidecar_exit_error(16)
+        # 50 → already running
+        assert "already running (exit=50)" in service._format_sidecar_exit_error(50)
+        # 60 → sidecar crashed
+        assert "sidecar crashed (exit=60)" in service._format_sidecar_exit_error(60)
+        # 未知 exit code → 默认消息
+        assert "exit=99" in service._format_sidecar_exit_error(99)
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_readline_with_timeout_returns_empty_on_queue_empty(self, tmp_path: Path) -> None:
+        """Line 465-466: _readline_with_timeout queue.Empty 超时返回 ''。"""
+        import time
+
+        service = _make_service(tmp_path)
+
+        # 构造一个永远不会返回数据的 stream（readline 阻塞）
+        from unittest.mock import MagicMock
+
+        blocking_stream = MagicMock()
+
+        def blocking_readline():
+            # 长时间阻塞，确保 queue.Empty 触发
+            time.sleep(5)
+            return ""
+
+        blocking_stream.readline.side_effect = blocking_readline
+
+        # 用极短 timeout 触发 queue.Empty
+        result = service._readline_with_timeout(blocking_stream, timeout=0.1)
+        assert result == ""
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_stop_sync_handles_none_stdin(self, tmp_path: Path) -> None:
+        """Line 515->520: stop_sync 中 proc.stdin is None → 跳过 stdin.close()。"""
+        from unittest.mock import MagicMock
+
+        service = _make_service(tmp_path)
+        mock_proc = MagicMock()
+        # stdin 为 None，触发跳过 stdin.close() 分支
+        mock_proc.stdin = None
+        mock_proc.wait.return_value = 0
+        service._process = mock_proc
+
+        # 不应抛异常
+        service.stop_sync()
+        assert service._process is None
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_atexit_cleanup_safe_when_not_initialized(self) -> None:
+        """Line 602: _atexit_cleanup 在未初始化时安全返回。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+        # 未构造单例时调用 _atexit_cleanup 应安全不抛异常
+        EmbeddedPostgresService._atexit_cleanup()
+        assert EmbeddedPostgresService._instance is None
+
+    def test_get_instance_returns_initialized_singleton(self, tmp_path: Path) -> None:
+        """Line 576: get_instance 在 singleton 已初始化时返回实例。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+        service = EmbeddedPostgresService(
+            sidecar_binary=tmp_path / "fake.exe",
+            data_dir=tmp_path / "postgres" / "17" / "data",
+            install_dir=tmp_path / "postgres" / "17" / "install",
+        )
+        try:
+            # 已初始化时 get_instance 应返回同一实例
+            assert EmbeddedPostgresService.get_instance() is service
+        finally:
+            EmbeddedPostgresService._reset_singleton()
+
+    def test_verify_sha256_skips_on_sha256_read_oserror(self, tmp_path: Path) -> None:
+        """Line 389-391: sha256 文件读取抛 OSError → 跳过校验，记 WARNING。"""
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        service = _make_service(tmp_path)
+        # 写 .sha256 文件让其进入读取分支
+        sha256_path = service._sidecar_binary.with_suffix(service._sidecar_binary.suffix + ".sha256")
+        sha256_path.write_text("abcdef  fake", encoding="utf-8")
+        # mock read_text 抛 OSError
+        with patch.object(Path, "read_text", side_effect=OSError("sha256 read failed")):
+            # 不应抛异常，跳过校验
+            service._verify_sidecar_sha256()
+
+        EmbeddedPostgresService._reset_singleton()

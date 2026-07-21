@@ -57,9 +57,55 @@ async def test_prepare_database_runtime_noop_when_mode_external(monkeypatch, tmp
         "utils.config_handler.ConfigHandler.save_db_config",
         staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs)),
     )
+    # M5: mock load_config 返回 embedded_pg_enabled=False，避免触发 WARNING
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=False)),
+    )
 
     await prepare_database_runtime()
 
+    assert from_config_calls == []
+    assert save_db_config_calls == []
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_warns_when_external_mode_but_config_enabled(
+    monkeypatch, tmp_path: Path, caplog
+) -> None:
+    """M5: mode=external 但 embedded_pg_enabled=True → 记 WARNING（用户可能误配置）。"""
+    import logging
+
+    monkeypatch.delenv("QTRADING_DATABASE_MODE", raising=False)
+
+    from app.bootstrap import prepare_database_runtime
+
+    # mock load_config 返回 dict（embedded_pg_enabled=True）
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True)),
+    )
+
+    from_config_calls: list[int] = []
+    save_db_config_calls: list[tuple] = []
+
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: from_config_calls.append(1) or MagicMock()),
+    )
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.save_db_config",
+        staticmethod(lambda **kwargs: save_db_config_calls.append(kwargs)),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.bootstrap"):
+        await prepare_database_runtime()
+
+    # 验证 WARNING 日志含关键信息
+    assert any("embedded_pg_enabled=True" in r.message and "will NOT start" in r.message for r in caplog.records), (
+        f"期望 WARNING 日志含误配置提示，实际：{[r.message for r in caplog.records]}"
+    )
+    # 验证不启动 service
     assert from_config_calls == []
     assert save_db_config_calls == []
 

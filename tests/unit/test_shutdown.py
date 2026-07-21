@@ -939,7 +939,8 @@ class TestRunCleanupStepsDeep:
         coord._step7_close_database_managers = step_ok
         coord._step8_stop_embedded_postgres = step_ok
 
-        # step_timeout_s=0.5 远小于各 step 的 default（1.0~5.0）
+        # step_timeout_s=0.5 远小于各 step 的 default（1.0~35.0，Step 8=35.0）
+        # M13: 更新注释 — Step 8 加入后 default 上限由 5.0 提升至 35.0
         results = await coord._run_cleanup_steps(step_timeout_s=0.5)
         assert len(results) == 9
         # 全部成功（mock step 立即返回，不超时）

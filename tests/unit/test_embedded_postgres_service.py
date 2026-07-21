@@ -621,6 +621,57 @@ class TestEmbeddedPostgresServiceStart:
         finally:
             await service.stop()
 
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_stdout_reader_task_started_after_start(self, fake_paths) -> None:
+        """M9: start() 后启动 daemon 线程读 stdout 写入 sidecar.stdout.log。
+
+        验证：
+        1. start() 后 sidecar.stdout.log 文件存在
+        2. 文件内容含 ready JSON 行（reader 线程读取的第一行）
+        3. ConnectionInfo 含 M4 扩展字段（postgres_version/host/sidecar_pid/password_source）
+        """
+        import time
+
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+                # M4 断言: 扩展字段已从 ready JSON 解析
+                assert info.postgres_version == FAKE_READY["postgres_version"], (
+                    f"postgres_version 字段错误，实际：{info.postgres_version!r}"
+                )
+                assert info.host == FAKE_READY["host"], f"host 字段错误，实际：{info.host!r}"
+                assert info.sidecar_pid == FAKE_READY["sidecar_pid"], (
+                    f"sidecar_pid 字段错误，实际：{info.sidecar_pid!r}"
+                )
+                assert info.password_source == FAKE_READY["password_source"], (
+                    f"password_source 字段错误，实际：{info.password_source!r}"
+                )
+                # M9 断言: 等 reader 线程写入 sidecar.stdout.log（最多 2s）
+                stdout_log = service._log_dir / "sidecar.stdout.log"
+                for _ in range(20):
+                    if stdout_log.exists() and stdout_log.read_text(encoding="utf-8"):
+                        break
+                    time.sleep(0.1)
+                assert stdout_log.exists(), f"M9: start() 后应创建 sidecar.stdout.log，实际未存在：{stdout_log}"
+                content = stdout_log.read_text(encoding="utf-8")
+                assert json.dumps(FAKE_READY) in content, (
+                    f"M9: sidecar.stdout.log 应含 ready JSON 行，实际：{content!r}"
+                )
+        finally:
+            await service.stop()
+
 
 # =============================================================================
 # TestEmbeddedPostgresServiceStop: 1 TDD + 10 stop 行为测试 = 11 个
@@ -628,12 +679,21 @@ class TestEmbeddedPostgresServiceStart:
 class TestEmbeddedPostgresServiceStop:
     @pytest.mark.asyncio(loop_scope="function")
     async def test_stop_is_idempotent(self, fake_paths) -> None:
-        """TDD 红灯翻绿：stop 幂等。"""
+        """TDD 红灯翻绿：stop 幂等。
+
+        H9: 补强断言 — 两次 stop 后 _process / _connection_info 均为 None，
+        确保第二次调用不是静默误调用（如错把 _process 仍当作有值处理）。
+        """
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
         service = EmbeddedPostgresService(**fake_paths)
         await service.stop()
         await service.stop()  # 第二次调用不抛异常（AM-9 幂等）
+        # H9: 补强断言
+        assert service._process is None, f"两次 stop 后 _process 应为 None，实际：{service._process}"
+        assert service._connection_info is None, (
+            f"两次 stop 后 _connection_info 应为 None，实际：{service._connection_info}"
+        )
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_stop_closes_stdin_and_waits(self, fake_paths) -> None:
@@ -684,22 +744,40 @@ class TestEmbeddedPostgresServiceStop:
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_stop_idempotent_multiple_calls(self, fake_paths) -> None:
-        """连续 3 次 stop 不抛异常。"""
+        """连续 3 次 stop 不抛异常。
+
+        H9: 补强断言 — 3 次 stop 后 _process / _connection_info 均为 None，
+        确保多次幂等调用没有副作用累积。
+        """
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
         service = EmbeddedPostgresService(**fake_paths)
         await service.stop()
         await service.stop()
         await service.stop()
+        # H9: 补强断言
+        assert service._process is None, f"3 次 stop 后 _process 应为 None，实际：{service._process}"
+        assert service._connection_info is None, (
+            f"3 次 stop 后 _connection_info 应为 None，实际：{service._connection_info}"
+        )
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_stop_safe_when_not_started(self, fake_paths) -> None:
-        """未 start 时 stop 无操作。"""
+        """未 start 时 stop 无操作。
+
+        H9: 补强断言 — 未 start 时 _process 本就为 None，stop 后仍为 None（含
+        _connection_info），确保 stop 不在未启动时误置状态。
+        """
         from data.persistence.embedded_postgres.service import EmbeddedPostgresService
 
         service = EmbeddedPostgresService(**fake_paths)
         # _process 默认就是 None
         await service.stop()
+        # H9: 补强断言
+        assert service._process is None, f"未 start 时 stop 后 _process 应为 None，实际：{service._process}"
+        assert service._connection_info is None, (
+            f"未 start 时 stop 后 _connection_info 应为 None，实际：{service._connection_info}"
+        )
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_stop_closes_stderr_file_handle(self, fake_paths) -> None:
@@ -824,6 +902,82 @@ class TestEmbeddedPostgresServiceFromConfig:
         # 二次 from_config 返回同一实例（单例）
         service2 = EmbeddedPostgresService.from_config(config)
         assert service is service2
+
+    def test_from_config_default_paths_resolution(self, monkeypatch, tmp_path: Path) -> None:
+        """M6: from_config 默认路径解析 — 未显式配置时使用 platformdirs 默认值。
+
+        验证：
+        1. embedded_pg_sidecar_path 为空 → 默认 sidecars/qtrading-pg-sidecar[.exe]
+        2. embedded_pg_data_root 为空 → 默认 <app_data>/postgres/17/data
+        3. embedded_pg_install_root 为空 → 默认 <data_root>/install
+        4. embedded_pg_log_dir 为空 → 默认从 data_dir 推导（<root>/postgres-logs）
+        """
+        import platformdirs
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from utils.config_models import AppConfig
+
+        # mock platformdirs.user_data_dir 返回 tmp_path/app_data
+        monkeypatch.setattr(
+            platformdirs,
+            "user_data_dir",
+            lambda _app: str(tmp_path / "app_data"),
+        )
+
+        EmbeddedPostgresService._reset_singleton()
+        config = AppConfig()  # 所有 embedded_pg_* 默认空
+        service = EmbeddedPostgresService.from_config(config)
+
+        # 断言 1: sidecar_binary 默认 sidecars/qtrading-pg-sidecar[.exe]
+        expected_suffix = ".exe" if os.name == "nt" else ""
+        assert service._sidecar_binary == Path("sidecars") / f"qtrading-pg-sidecar{expected_suffix}", (
+            f"sidecar_binary 默认值错误，实际：{service._sidecar_binary}"
+        )
+        # 断言 2: data_dir 默认 <app_data>/postgres/17/data
+        expected_data_dir = tmp_path / "app_data" / "postgres" / "17" / "data"
+        assert service._data_dir == expected_data_dir, (
+            f"data_dir 默认值错误，实际：{service._data_dir}，期望：{expected_data_dir}"
+        )
+        # 断言 3: install_dir 默认 <data_root>/install
+        expected_install_dir = tmp_path / "app_data" / "postgres" / "17" / "install"
+        assert service._install_dir == expected_install_dir, (
+            f"install_dir 默认值错误，实际：{service._install_dir}，期望：{expected_install_dir}"
+        )
+        # 断言 4: log_dir 从 data_dir 推导 → <root>/postgres-logs
+        # data_dir = <app_data>/postgres/17/data → root = data_dir.parent.parent.parent = <app_data>
+        expected_log_dir = tmp_path / "app_data" / "postgres-logs"
+        assert service._log_dir == expected_log_dir, (
+            f"log_dir 默认值错误，实际：{service._log_dir}，期望：{expected_log_dir}"
+        )
+
+
+# =============================================================================
+# TestEmbeddedPostgresServiceCrossMethodIdempotent: M7 跨方法幂等测试
+# =============================================================================
+class TestEmbeddedPostgresServiceCrossMethodIdempotent:
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_stop_then_stop_sync_is_idempotent(self, fake_paths) -> None:
+        """M7: async stop() 后再调 sync stop_sync() 不抛异常（跨方法幂等）。
+
+        验证 stop() 和 stop_sync() 共享 _process 状态，任一方法清理后另一方法早 return。
+        """
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        fake_proc = _FakePopen(["fake"])
+        fake_proc.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+        service._process = fake_proc
+        service._connection_info = svc_module.ConnectionInfo(
+            url="postgresql+asyncpg://u:p@h:1/d", port=1, pid=1, data_dir="/d"
+        )
+
+        # 先调 async stop() 清理 _process
+        await service.stop()
+        assert service._process is None
+        # 再调 sync stop_sync() 不抛异常
+        service.stop_sync()
+        assert service._process is None
+        assert service._connection_info is None
 
 
 # =============================================================================
