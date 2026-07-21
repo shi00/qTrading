@@ -527,10 +527,36 @@ async def _load_chart_async(
         )
 
         set_chart_content(
-            ft.Image(
-                src=b64_png,
-                fit=ft.BoxFit.CONTAIN,
+            ft.Column(
+                [
+                    ft.Image(
+                        src=b64_png,
+                        fit=ft.BoxFit.CONTAIN,
+                        expand=True,
+                    ),
+                    # P3-15 色盲友好: K 线图例文字标注涨/跌, 不依赖颜色区分
+                    ft.Row(
+                        [
+                            ft.Icon(ft.Icons.CIRCLE, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.UP_RED),
+                            ft.Text(
+                                I18n.get("detail_kline_rise"),
+                                size=AppStyles.FONT_SIZE_BODY_SM,
+                                color=AppColors.TEXT_SECONDARY,
+                            ),
+                            ft.Container(width=AppStyles.SPACING_MD),
+                            ft.Icon(ft.Icons.CIRCLE, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.DOWN_GREEN),
+                            ft.Text(
+                                I18n.get("detail_kline_fall"),
+                                size=AppStyles.FONT_SIZE_BODY_SM,
+                                color=AppColors.TEXT_SECONDARY,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        spacing=AppStyles.SPACING_XS,
+                    ),
+                ],
                 expand=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             )
         )
 

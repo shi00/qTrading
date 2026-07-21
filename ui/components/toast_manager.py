@@ -22,6 +22,8 @@
 
 import asyncio
 import logging
+import os
+import platform
 import threading
 import typing
 from collections.abc import Callable
@@ -33,6 +35,7 @@ from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_cl
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.async_utils import gather_for_shutdown_cleanup
+from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +56,28 @@ MAX_TOAST_COUNT = 5
 
 @dataclass
 class ToastData:
-    """单个 toast 的不可变数据（传递给 ToastCard 组件）。"""
+    """单个 toast 的不可变数据（传递给 ToastCard 组件）。
+
+    P2-10: 新增 action_text/on_action 支持操作按钮（如"打开文件夹"）。
+    """
 
     id: int
     message: str
     icon: str
     color: str
     duration: int
+    action_text: str | None = None
+    on_action: Callable[[], None] | None = None
+
+    def __eq__(self, other: object) -> bool:
+        """仅按 id 比较 — Callable 字段不参与相等性判断（P2-10）。
+
+        ft.observable 的 list 赋值会触发元素比较；on_action 是 Callable，
+        逐字段比较有歧义，id 已足够标识唯一 toast。
+        """
+        if not isinstance(other, ToastData):
+            return NotImplemented
+        return self.id == other.id
 
 
 @ft.observable
@@ -123,6 +141,25 @@ def _reset_state_for_test() -> None:
 
 
 # ============================================================================
+# 导出引导 (P2-10)
+# ============================================================================
+
+
+async def open_export_folder(filepath: str) -> None:
+    """打开导出文件所在文件夹 (桌面端 action toast 回调).
+
+    跨平台守卫 (§0.5.12.2 #52): os.startfile 仅 Windows 可用, 其他平台静默跳过.
+    R16: os.startfile 经 ThreadPoolManager 提交, 不阻塞事件循环.
+    """
+    if platform.system() != "Windows":
+        return
+    folder = os.path.dirname(os.path.abspath(filepath))
+    if not folder or not os.path.isdir(folder):
+        return
+    await ThreadPoolManager().run_async(TaskType.IO, os.startfile, folder)  # type: ignore[attr-defined]  # [reason: os.startfile 仅 Windows 存在, 已有 platform 守卫, 类型存根跨平台缺失]
+
+
+# ============================================================================
 # 颜色/图标映射
 # ============================================================================
 
@@ -164,13 +201,22 @@ class ToastManager:
         self._is_stopping = False
         self._next_id = 0
 
-    def show(self, message: str, toast_type: str = "info", duration: int = 10) -> None:
+    def show(
+        self,
+        message: str,
+        toast_type: str = "info",
+        duration: int = 10,
+        action_text: str | None = None,
+        on_action: Callable[[], None] | None = None,
+    ) -> None:
         """显示 toast 通知。
 
         Args:
             message: 显示文本
             toast_type: 'info' / 'success' / 'error' / 'warning'
             duration: 自动消失秒数
+            action_text: 操作按钮文本 (P2-10); None 时不显示按钮
+            on_action: 操作按钮回调 (P2-10); action_text 非空时必填
         """
         if not self.page or self._is_stopping:
             return
@@ -185,6 +231,10 @@ class ToastManager:
 
         color, icon = _resolve_color_icon(toast_type)
 
+        # P2-10: action toast 用更长 duration (30s), 给用户足够时间点击操作
+        if action_text is not None:
+            duration = 30
+
         with self._lock:
             self._next_id += 1
             new_toast = ToastData(
@@ -193,6 +243,8 @@ class ToastManager:
                 icon=icon,
                 color=color,
                 duration=duration,
+                action_text=action_text,
+                on_action=on_action,
             )
             state = get_global_state()
             new_list = [*state.toasts, new_toast]
@@ -391,6 +443,38 @@ def ToastCard(data: ToastData, on_dismiss: Callable[[int], None]) -> ft.Containe
             return
         set_is_dismissing(True)
         on_dismiss(data.id)
+
+    def _on_action_click(e: ft.ControlEvent) -> None:
+        """P2-10: 执行 action 回调并 dismiss toast。"""
+        if is_dismissing:
+            return
+        if data.on_action is not None:
+            try:
+                data.on_action()
+            except Exception as exc:
+                logger.warning("[ToastManager] Action callback failed: %s", exc, exc_info=True)
+        set_is_dismissing(True)
+        on_dismiss(data.id)
+
+    # P2-10: action 按钮 (Material Snackbar 范式, 文本下方右侧)
+    if data.action_text is not None:
+        content_col_controls.append(
+            ft.Row(
+                [
+                    ft.Container(expand=True),
+                    ft.TextButton(
+                        data.action_text,
+                        on_click=safe_on_click(_on_action_click),
+                        style=ft.ButtonStyle(
+                            color=data.color,
+                            padding=0,
+                        ),
+                    ),
+                ],
+                alignment=ft.MainAxisAlignment.END,
+                height=28,
+            ),
+        )
 
     return ft.Container(
         content=ft.Row(
