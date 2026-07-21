@@ -1,137 +1,91 @@
-# Windows 环境下安装 Rust 编译构建环境实施计划
+# 免提权 Rust GNU 编译环境安装实施计划 (完全自动化)
 
 > **For Antigravity:** REQUIRED WORKFLOW: Use `.agent/workflows/execute-plan.md` to execute this plan in single-flow mode.
 
-**Goal:** 在本地 Windows 机器上安装 Rust 官方编译构建环境（含 MSVC 工具链和 C++ 编译工具），并通过端到端测试进行验证。
+**Goal:** 在无管理员权限、无 UAC 弹窗的限制下，全自动配置 Rust 开发环境（GNU 工具链）并验证构建。
 
-**Architecture:** 
-1. 在工作区下新建 `.rust_install` 临时目录。
-2. 自动化下载 `vs_buildtools.exe` 和 `rustup-init.exe`。
-3. 调用 Windows PowerShell 的 `Start-Process -Verb RunAs` 运行 `vs_buildtools.exe` 以静默方式在后台执行安装，触发用户 UAC 授权确认。
-4. 调用 `rustup-init.exe -y` 静默配置 Rust。
-5. 清理目录，刷新 PATH，并使用一个测试的 `main.rs` 文件测试构建。
+**Architecture:**
+1. 在用户家目录下载并解压免安装的 `w64devkit` (包含极简的 GCC、Make 及链接器，仅 ~80MB 下载，体积小且免安装)。
+2. 配置当前用户 PATH 环境变量以包含 `w64devkit` 编译器路径。
+3. 静默安装 Rust 官方 `x86_64-pc-windows-gnu` 工具链。
+4. 验证构建。
 
-**Tech Stack:** PowerShell, rustup, MSVC Build Tools 2022
+**Tech Stack:** w64devkit (MinGW-w64), rustup (GNU toolchain)
 
 ---
 
 ## User Review Required
 
-> [!IMPORTANT]
-> - **用户配合操作**：在执行 **Task 2 (安装 C++ Build Tools)** 时，系统会弹出 UAC (用户账户控制) 提权申请。您必须点击**“是”**允许安装器运行，否则安装将会被阻断。
-> - **磁盘空间**：安装 C++ Build Tools 大约需要 2~3 GB 磁盘空间。请确保您的系统盘（C盘）有足够的剩余空间。
-
-## Open Questions
-
-无。方案在设计讨论阶段已与用户达成一致。
+> [!NOTE]
+> - 本方案**完全不需要管理员权限**，也不需要任何 UAC 弹窗确认，Agent 可完全自动执行完毕。
+> - 使用的是 GNU 编译器链而非 MSVC 链，但对于标准 Rust 库的构建与运行完全足够。
 
 ---
 
 ## Proposed Changes
 
-由于本任务属于环境配置任务，不修改任何项目源代码。
-
-### [NEW] [2026-07-21-rust-environment-setup-implementation.md](file:///d:/workspace/Quantitative%20Trading/astock_screener/docs/plans/2026-07-21-rust-environment-setup-implementation.md)
-* 项目目录下的实施计划存盘。
+不修改现有项目代码。
 
 ---
 
 ## 计划分解与执行步骤
 
-### Task 1: 准备下载目录与文件
+### Task 1: 配置免安装 MinGW (w64devkit) 编译环境
 
-**Files:**
-- Create: `d:\workspace\Quantitative Trading\astock_screener\.rust_install\download.ps1`
-
-**Step 1: 编写下载脚本**
-在工作区创建临时目录，并下载必要的安装程序。编写以下 PowerShell 脚本：
+**Step 1: 下载并解压 w64devkit**
+- 运行 PowerShell 脚本下载 w64devkit 压缩包：
 ```powershell
-$tempDir = "d:\workspace\Quantitative Trading\astock_screener\.rust_install"
-if (!(Test-Path $tempDir)) {
-    New-Item -ItemType Directory -Path $tempDir
-}
-Write-Host "Downloading VS Build Tools..."
-Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vs_buildtools.exe" -OutFile "$tempDir\vs_buildtools.exe"
-Write-Host "Downloading Rustup..."
-Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile "$tempDir\rustup-init.exe"
-Write-Host "Downloads completed."
+$targetPath = "$env:USERPROFILE\.w64devkit"
+if (!(Test-Path $targetPath)) { New-Item -ItemType Directory -Path $targetPath }
+Invoke-WebRequest -Uri "https://github.com/skeeto/w64devkit/releases/download/v2.0.0/w64devkit-2.0.0.zip" -OutFile "$targetPath\w64devkit.zip"
+Expand-Archive -Path "$targetPath\w64devkit.zip" -DestinationPath $targetPath -Force
 ```
 
-**Step 2: 运行并验证下载文件**
-- 运行：`powershell -File "d:\workspace\Quantitative Trading\astock_screener\.rust_install\download.ps1"`
-- 期望结果：在 `.rust_install` 目录下成功下载 `vs_buildtools.exe` (约 1~4MB) 和 `rustup-init.exe` (约 7~10MB)。
+**Step 2: 验证 GCC 是否就绪**
+- 临时配置 PATH 并运行：
+```powershell
+$env:Path += ";$env:USERPROFILE\.w64devkit\w64devkit\bin"
+gcc --version
+```
+- 期望：输出 `gcc (w64devkit) 14.1.0`。
 
 ---
 
-### Task 2: 安装 VS C++ Build Tools (MSVC)
+### Task 2: 静默安装 Rust GNU 工具链
 
-**Step 1: 执行静默安装**
+**Step 1: 运行 Rustup 且配置为 GNU 默认链**
 - 运行：
 ```powershell
-Start-Process -FilePath "d:\workspace\Quantitative Trading\astock_screener\.rust_install\vs_buildtools.exe" -ArgumentList "--quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" -Verb RunAs -Wait
+Start-Process -FilePath "d:\workspace\Quantitative Trading\astock_screener\.rust_install\rustup-init.exe" -ArgumentList "-y --default-host x86_64-pc-windows-gnu" -Wait
 ```
-- 期望：系统弹出 UAC 提权界面，用户同意后，安装程序在后台执行安装。由于添加了 `-Wait` 参数，该命令将直到安装彻底结束后才返回。
+- 期望：成功安装 Rust GNU 环境，不产生阻塞。
 
-**Step 2: 验证安装是否成功**
-- 运行：
+**Step 2: 清理与 PATH 环境变量持久化**
+- 将 Rust (`.cargo\bin`) 和 MinGW (`.w64devkit\bin`) 永久（当前用户级别）加入系统的 PATH 中，以便后续使用：
 ```powershell
-Test-Path "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-```
-且检查在该工具下是否能检测到可用的开发实例。
-
----
-
-### Task 3: 安装 Rustup 与工具链
-
-**Step 1: 运行 Rustup 静默安装**
-- 运行：
-```powershell
-Start-Process -FilePath "d:\workspace\Quantitative Trading\astock_screener\.rust_install\rustup-init.exe" -ArgumentList "-y --default-host x86_64-pc-windows-msvc" -Wait
-```
-- 期望：静默安装成功，不产生任何阻塞性的控制台输入提示。
-
-**Step 2: 验证 Rust 安装及清理**
-- 运行以下命令刷新临时会话环境变量并检查版本：
-```powershell
-$env:Path += ";$env:USERPROFILE\.cargo\bin"
-rustc --version
-cargo --version
-```
-- 期望结果：打印出正确的 `rustc` 和 `cargo` 版本。
-- 运行清理命令：
-```powershell
-Remove-Item -Recurse -Force "d:\workspace\Quantitative Trading\astock_screener\.rust_install"
+$oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+$newPath = "$oldPath;$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.w64devkit\w64devkit\bin"
+[Environment]::SetEnvironmentVariable("Path", $newPath, "User")
 ```
 
 ---
 
-### Task 4: 端到端构建测试
+### Task 3: 验证 Rust 构建
 
-**Step 1: 创建测试项目并运行构建**
-- 在临时目录中测试 cargo：
+**Step 1: 创建测试项目测试 GNU 构建**
+- 运行：
 ```powershell
-$env:Path += ";$env:USERPROFILE\.cargo\bin"
+$env:Path += ";$env:USERPROFILE\.cargo\bin;$env:USERPROFILE\.w64devkit\w64devkit\bin"
 cd "d:\workspace\Quantitative Trading\astock_screener\"
-cargo new .rust_install_test --bin
-cd .rust_install_test
+cargo new .rust_gnu_test --bin
+cd .rust_gnu_test
 cargo run
 ```
-- 期望：成功编译并输出 `Hello, world!`。
+- 期望：打印出 `Hello, world!`，说明 Rust 能够成功调用 GNU gcc 编译器和 ld 链接器完成构建。
 
 **Step 2: 清理测试项目**
 - 运行：
 ```powershell
 cd "d:\workspace\Quantitative Trading\astock_screener\"
-Remove-Item -Recurse -Force .rust_install_test
+Remove-Item -Recurse -Force .rust_gnu_test
 ```
-
----
-
-## Verification Plan
-
-### Automated Tests
-无。
-
-### Manual Verification
-1. 观察 `rustc --version` 与 `cargo --version` 是否成功输出。
-2. 观察 `cargo run` 在新建测试项目 `.rust_install_test` 下是否能无错输出 `Hello, world!`。
