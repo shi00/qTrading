@@ -329,78 +329,135 @@ class FletPage:
         logger.debug("select_dropdown: initial_visible=%s", initial_visible)
 
         if not initial_visible:
-            trigger_targets = []
-
-            # V1 M3 优先：Dropdown 触发器是 flt-semantics[role="button"][aria-expanded]
-            # 无 aria-label，文本内容是当前选中值。aria-expanded 是触发器强特征（其他按钮无此属性）。
-            # 策略 1：在 group 内查找触发器（label 在 group 的 aria-label 中合并）
-            for key in match_keys:
-                trigger_targets.append(
-                    self.page.locator(f'flt-semantics[role="group"][aria-label*="{key}" i]')
-                    .locator('flt-semantics[role="button"][aria-expanded]')
-                    .first
-                )
-            # 策略 2：所有带 aria-expanded 的 button 中，文本匹配 match_keys（当前选中值）
-            for key in match_keys:
-                trigger_targets.append(
-                    self.page.locator('flt-semantics[role="button"][aria-expanded]').filter(has_text=key).first
-                )
-            # 策略 3：所有带 aria-expanded 的 button（兜底，无文本匹配）
-            trigger_targets.append(self.page.locator('flt-semantics[role="button"][aria-expanded]').first)
-
-            # 旧兜底（保留兼容）：input / combobox / button with aria-label
-            # Prioritize inputs across all keys
-            for key in match_keys:
-                trigger_targets.append(self.page.locator(f'input[aria-label*="{key}" i]').first)
-
-            # Prioritize comboboxes and buttons across all keys
-            for key in match_keys:
-                trigger_targets.append(self.page.locator(f'[role="combobox"][aria-label*="{key}" i]').first)
-            for key in match_keys:
-                trigger_targets.append(self.page.locator(f'[role="button"][aria-label*="{key}" i]').first)
-
-            # Generic aria-label fallback across all keys
-            for key in match_keys:
-                trigger_targets.append(self.page.locator(f'[aria-label*="{key}" i]').first)
-
-            trigger_targets.append(self.page.get_by_text(current_or_label, exact=False).first)
-
+            # V1 M3 策略 0（最高优先级）：基于 JavaScript 的精确触发器定位。
+            # 背景：run 29736885686 中，3 个 Dropdown 共存时（table_selector + filter_col +
+            # filter_op），策略 1 的 CSS 选择器 `flt-semantics[role="group"][aria-label*="过滤列" i]`
+            # 匹配到了包含所有 3 个 Dropdown 的父级 group（其 aria-label 是合并文本
+            # "选择数据表\n过滤列\n操作符"），导致 `.first` 误选第一个 Dropdown（table_selector），
+            # 触发暴力搜索模式，最终 Chromium 资源耗尽、xdist worker crash。
+            # 本策略用 JavaScript 遍历每个 aria-expanded 触发器，检查其 closest('group') 的
+            # aria-label 是否精确等于或以目标 label 开头，避免匹配到合并了多个 label 的父级 group。
+            js_find_trigger_by_label = """
+            (targetLabel) => {
+                const triggers = document.querySelectorAll('flt-semantics[role="button"][aria-expanded]');
+                for (const trigger of triggers) {
+                    const group = trigger.closest('flt-semantics[role="group"]');
+                    if (group) {
+                        const ariaLabel = group.getAttribute('aria-label') || '';
+                        if (ariaLabel === targetLabel || ariaLabel.startsWith(targetLabel)) {
+                            return trigger;
+                        }
+                    }
+                }
+                return null;
+            }
+            """
             last_clicked_target = None
             triggered = False
-            for idx, target in enumerate(trigger_targets):
-                try:
-                    if await target.count() > 0:
-                        if logger.isEnabledFor(logging.DEBUG):
-                            desc = await target.evaluate("""e => ({
-                                tag: e.tagName,
-                                role: e.getAttribute('role'),
-                                aria: e.getAttribute('aria-label') || '',
-                                text: e.textContent || '',
-                                rect: e.getBoundingClientRect().toJSON()
-                            })""")
-                            logger.debug(
-                                "尝试点击触发器候选[%d]: tag=%s, role=%s, aria='%s', text='%s', rect=%s",
-                                idx,
-                                desc["tag"],
-                                desc["role"],
-                                desc["aria"],
-                                desc["text"],
-                                desc["rect"],
-                            )
-                        await target.click(timeout=self._tm(3000), force=True)
-                        triggered = True
-                        last_clicked_target = target
-                        logger.debug("触发器候选[%d]点击成功", idx)
-                        break
-                except Exception as ex:  # noqa: BLE001
-                    logger.debug("触发器候选[%d]点击失败: %s", idx, ex)
-                    continue
+            try:
+                trigger_handle = await self.page.evaluate_handle(js_find_trigger_by_label, current_or_label)
+                trigger_element = trigger_handle.as_element()
+                if trigger_element:
+                    if logger.isEnabledFor(logging.DEBUG):
+                        desc = await trigger_element.evaluate("""e => ({
+                            tag: e.tagName,
+                            role: e.getAttribute('role'),
+                            aria: e.getAttribute('aria-label') || '',
+                            text: (e.textContent || '').slice(0, 50),
+                            rect: e.getBoundingClientRect().toJSON()
+                        })""")
+                        logger.debug(
+                            "JS 策略 0 命中触发器: tag=%s, role=%s, aria='%s', text='%s', rect=%s",
+                            desc["tag"],
+                            desc["role"],
+                            desc["aria"],
+                            desc["text"],
+                            desc["rect"],
+                        )
+                    await trigger_element.click(timeout=self._tm(3000), force=True)
+                    triggered = True
+                    last_clicked_target = trigger_element
+                    logger.debug("select_dropdown: JS 策略 0 触发器点击成功")
+                    for _ in range(15):
+                        await self.page.wait_for_timeout(300)
+                        if await check_option_visible():
+                            break
+                else:
+                    logger.debug("select_dropdown: JS 策略 0 未找到匹配触发器，回退到 CSS 策略")
+            except Exception as ex:  # noqa: BLE001
+                logger.debug("select_dropdown: JS 策略 0 失败: %s", ex)
 
-            if triggered:
-                for _ in range(15):
-                    await self.page.wait_for_timeout(300)
-                    if await check_option_visible():
-                        break
+            if not triggered:
+                trigger_targets = []
+
+                # V1 M3 优先：Dropdown 触发器是 flt-semantics[role="button"][aria-expanded]
+                # 无 aria-label，文本内容是当前选中值。aria-expanded 是触发器强特征（其他按钮无此属性）。
+                # 策略 1：在 group 内查找触发器（label 在 group 的 aria-label 中合并）
+                for key in match_keys:
+                    trigger_targets.append(
+                        self.page.locator(f'flt-semantics[role="group"][aria-label*="{key}" i]')
+                        .locator('flt-semantics[role="button"][aria-expanded]')
+                        .first
+                    )
+                # 策略 2：所有带 aria-expanded 的 button 中，文本匹配 match_keys（当前选中值）
+                for key in match_keys:
+                    trigger_targets.append(
+                        self.page.locator('flt-semantics[role="button"][aria-expanded]').filter(has_text=key).first
+                    )
+                # 策略 3：所有带 aria-expanded 的 button（兜底，无文本匹配）
+                trigger_targets.append(self.page.locator('flt-semantics[role="button"][aria-expanded]').first)
+
+                # 旧兜底（保留兼容）：input / combobox / button with aria-label
+                # Prioritize inputs across all keys
+                for key in match_keys:
+                    trigger_targets.append(self.page.locator(f'input[aria-label*="{key}" i]').first)
+
+                # Prioritize comboboxes and buttons across all keys
+                for key in match_keys:
+                    trigger_targets.append(self.page.locator(f'[role="combobox"][aria-label*="{key}" i]').first)
+                for key in match_keys:
+                    trigger_targets.append(self.page.locator(f'[role="button"][aria-label*="{key}" i]').first)
+
+                # Generic aria-label fallback across all keys
+                for key in match_keys:
+                    trigger_targets.append(self.page.locator(f'[aria-label*="{key}" i]').first)
+
+                trigger_targets.append(self.page.get_by_text(current_or_label, exact=False).first)
+
+                for idx, target in enumerate(trigger_targets):
+                    try:
+                        if await target.count() > 0:
+                            if logger.isEnabledFor(logging.DEBUG):
+                                desc = await target.evaluate("""e => ({
+                                    tag: e.tagName,
+                                    role: e.getAttribute('role'),
+                                    aria: e.getAttribute('aria-label') || '',
+                                    text: e.textContent || '',
+                                    rect: e.getBoundingClientRect().toJSON()
+                                })""")
+                                logger.debug(
+                                    "尝试点击触发器候选[%d]: tag=%s, role=%s, aria='%s', text='%s', rect=%s",
+                                    idx,
+                                    desc["tag"],
+                                    desc["role"],
+                                    desc["aria"],
+                                    desc["text"],
+                                    desc["rect"],
+                                )
+                            await target.click(timeout=self._tm(3000), force=True)
+                            triggered = True
+                            last_clicked_target = target
+                            logger.debug("触发器候选[%d]点击成功", idx)
+                            break
+                    except Exception as ex:  # noqa: BLE001
+                        logger.debug("触发器候选[%d]点击失败: %s", idx, ex)
+                        continue
+
+                if triggered:
+                    for _ in range(15):
+                        await self.page.wait_for_timeout(300)
+                        if await check_option_visible():
+                            break
 
         wait_cycles = max(1, self._tm(timeout_ms) // 200)
         option_ready = False
@@ -423,24 +480,24 @@ class FletPage:
             # V1 M3: Dropdown 触发器在未获得焦点时文本为空，文本匹配可能失败。
             # 进入暴力搜索模式：依次点击每个 aria-expanded 触发器，检查弹出的选项是否匹配。
             # 这避免了依赖触发器文本定位 Dropdown，适配 V1 M3 的渲染特性。
-            # NOTE(lazy): 暴力搜索上限 8 个触发器，每触发器等待 1s. ceiling: 页面上同时超过 8 个 Dropdown. upgrade: 改进触发器定位策略避免暴力搜索.
+            # NOTE(lazy): 暴力搜索上限 4 个触发器，每触发器等待 1s. ceiling: 页面上同时超过 4 个 Dropdown. upgrade: 改进触发器定位策略避免暴力搜索（策略 0 已覆盖多数场景）.
             #
-            # Brute-force total deadline: 30s base (scaled by _tm), so CI multiplier=2.0 → 60s.
-            # Without this deadline, brute force on CanvasKit + CI high load can exhaust
-            # Chromium resources and cause xdist worker crash (run 29665883855:
-            # worker gw0 down after brute force iterated through dropdown options
-            # daily_quotes → fina_audit → financial_reports → index_weight, each click
-            # triggered vm.set_table → DB query → resource accumulation → crash).
-            # Fail fast with RuntimeError instead of letting worker hang/crash.
-            brute_force_deadline_s = time.monotonic() + self._tm(30000) / 1000
+            # Brute-force total deadline: 15s base (scaled by _tm), so CI multiplier=2.0 → 30s.
+            # 原 30s deadline 在 CI 高负载下导致 Chromium 渲染线程死锁、xdist worker crash
+            # (run 29736885686: worker gw0 down after 暴力搜索遍历 3 个 Dropdown 触发器，
+            # 每次点击触发 vm.set_table → DB query → CanvasKit 重渲染 → 资源累积 → crash)。
+            # 策略 0 已覆盖多数多 Dropdown 场景，暴力搜索仅作为最后兜底，缩短 deadline + 限制
+            # 触发器数量 + 增加 wait 以降低资源压力。Fail fast with RuntimeError instead of
+            # letting worker hang/crash.
+            brute_force_deadline_s = time.monotonic() + self._tm(15000) / 1000
             all_triggers = self.page.locator('flt-semantics[role="button"][aria-expanded]')
             trigger_count = await all_triggers.count()
-            max_triggers = min(trigger_count, 8)
+            max_triggers = min(trigger_count, 4)
             logger.debug("select_dropdown: 暴力搜索模式，共 %d 个触发器，扫描前 %d 个", trigger_count, max_triggers)
             for idx in range(max_triggers):
                 if time.monotonic() > brute_force_deadline_s:
                     logger.debug(
-                        "select_dropdown: 暴力搜索总超时 %.0fs，已扫描 %d 个触发器", self._tm(30000) / 1000, idx
+                        "select_dropdown: 暴力搜索总超时 %.0fs，已扫描 %d 个触发器", self._tm(15000) / 1000, idx
                     )
                     break
                 try:
@@ -449,21 +506,22 @@ class FletPage:
                         continue
                     await trigger.click(timeout=self._tm(3000), force=True)
                     logger.debug("暴力搜索: 点击触发器[%d]", idx)
-                    for _ in range(5):
-                        await self.page.wait_for_timeout(200)
+                    # 增加 wait 从 200ms 到 300ms，给 CanvasKit 更多渲染时间，降低资源争用
+                    for _ in range(4):
+                        await self.page.wait_for_timeout(300)
                         if await check_option_visible():
                             option_ready = True
                             break
                     if option_ready:
                         break
-                    # 选项不匹配，关闭菜单（按 Escape）后尝试下一个触发器
+                    # 选项不匹配，关闭菜单（按 Escape）后增加 400ms wait 让 CanvasKit 完成清理
                     await self.page.keyboard.press("Escape")
-                    await self.page.wait_for_timeout(200)
+                    await self.page.wait_for_timeout(400)
                 except Exception as ex:  # noqa: BLE001
                     logger.debug("暴力搜索: 触发器[%d] 失败: %s", idx, ex)
                     try:
                         await self.page.keyboard.press("Escape")
-                        await self.page.wait_for_timeout(200)
+                        await self.page.wait_for_timeout(400)
                     except Exception:  # noqa: BLE001
                         pass
 
