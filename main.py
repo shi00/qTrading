@@ -102,6 +102,11 @@ async def main(page: ft.Page):
 
     ConfigHandler.ensure_defaults()
 
+    # Phase 2 §3.4：embedded 模式下启动 sidecar 并注入 URL
+    from app.bootstrap import prepare_database_runtime
+
+    await prepare_database_runtime()
+
     ProxyManager.apply_smart_proxy_policy()
 
     I18n.initialize(ConfigHandler.get_locale())
