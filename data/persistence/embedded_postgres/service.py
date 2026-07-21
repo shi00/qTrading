@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from data.persistence.embedded_postgres.protocol import ConnectionInfo
+from utils.sanitizers import DataSanitizer
 from utils.singleton_registry import register_singleton
 
 if TYPE_CHECKING:
@@ -115,6 +116,8 @@ class EmbeddedPostgresService:
             self._process: subprocess.Popen[str] | None = None
             self._connection_info: ConnectionInfo | None = None
             self._stderr_file: object | None = None
+            # H5: 串行化并发 start()，避免双 Popen（两个协程同时进入 _start_sync）
+            self._start_lock = threading.Lock()
             self._svc_logger = _setup_service_logger(self._log_dir)
             self._initialized = True
 
@@ -177,9 +180,25 @@ class EmbeddedPostgresService:
             raise
 
     def _start_sync(self) -> ConnectionInfo:
-        """同步启动 sidecar（供 asyncio.to_thread 包装）。"""
+        """同步启动 sidecar（供 asyncio.to_thread 包装）。
+
+        H5: 使用 _start_lock 串行化并发调用，避免双 Popen。快速路径无锁检查
+        已启动状态，避免已启动场景的锁竞争；获取锁后双检锁再次检查。
+        """
+        # 快速路径：已启动直接返回（无锁，避免已启动场景的锁竞争）
         if self._connection_info is not None and self._process is not None and self._process.poll() is None:
             return self._connection_info
+        # H5: 串行化并发 start()，避免双 Popen
+        with self._start_lock:
+            # 双检锁：获取锁后再次检查（另一线程可能已启动完成）
+            if self._connection_info is not None and self._process is not None and self._process.poll() is None:
+                return self._connection_info
+            return self._start_sync_impl()
+
+    def _start_sync_impl(self) -> ConnectionInfo:
+        """实际启动逻辑（由 _start_sync 在 _start_lock 内调用）。"""
+        # §17.6 #7: Popen 前校验 sidecar binary SHA256，防止版本混搭/损坏
+        self._verify_sidecar_sha256()
 
         runtime_dir = self._data_dir.parent / "runtime"
         runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -238,7 +257,7 @@ class EmbeddedPostgresService:
             exit_code = self._process.poll()
             self._svc_logger.error("sidecar exited before ready line (exit=%s)", exit_code)
             self._cleanup_failed_start()
-            raise EmbeddedPostgresStartError(f"sidecar exited before ready line (exit={exit_code})")
+            raise EmbeddedPostgresStartError(self._format_sidecar_exit_error(exit_code))
 
         try:
             ready = json.loads(ready_line)
@@ -250,7 +269,11 @@ class EmbeddedPostgresService:
         if ready.get("schema") != _READY_SCHEMA:
             self._svc_logger.error("unexpected ready schema: %s", ready.get("schema"))
             self._cleanup_failed_start()
-            raise EmbeddedPostgresStartError(f"unexpected ready schema: {ready.get('schema')}")
+            # §17.6 #33: schema 主版本号不匹配提示重新安装
+            raise EmbeddedPostgresStartError(
+                f"unexpected ready schema: {ready.get('schema')}; "
+                f"expected {_READY_SCHEMA}; please reinstall qTrading to fix version mismatch"
+            )
         if ready.get("status") != "running":
             self._svc_logger.error("unexpected ready status: %s", ready.get("status"))
             self._cleanup_failed_start()
@@ -275,11 +298,91 @@ class EmbeddedPostgresService:
             raise EmbeddedPostgresStartError(f"password_file read failed: {exc}") from exc
 
         url = f"postgresql+asyncpg://{self._username}:{password}@{self._listen}:{port}/{self._database}"
+        # R9: 注册完整 URL 为 secret，确保日志/异常中带密码的 URL 被 sanitize_error 精确脱敏
+        DataSanitizer.register_secret(url)
 
         self._connection_info = ConnectionInfo(url=url, port=port, pid=pid, data_dir=data_dir_str)
         # 日志中 URL 脱敏（R9）：仅记 host:port
         self._svc_logger.info("embedded postgres started on %s:%s (pid=%s)", self._listen, port, pid)
         return self._connection_info
+
+    def _verify_sidecar_sha256(self) -> None:
+        """§17.6 #7: Popen 前校验 sidecar binary SHA256，防止版本混搭/损坏。
+
+        读取 ``<sidecar_binary>.sha256`` 文件（每行格式：``<hex>  <filename>``），
+        与 sidecar_binary 实际 SHA256 比对。不匹配则抛 EmbeddedPostgresStartError
+        提示重新安装。缺失 .sha256 文件时跳过校验（开发场景容错）。
+        """
+        import hashlib
+
+        sha256_path = self._sidecar_binary.with_suffix(self._sidecar_binary.suffix + ".sha256")
+        if not sha256_path.exists():
+            self._svc_logger.debug("sha256 file missing, skip verification: %s", sha256_path)
+            return
+
+        try:
+            expected_line = sha256_path.read_text(encoding="utf-8").strip()
+            # 标准格式："<hex>  <filename>"，取首个空白前部分
+            expected = expected_line.split()[0].lower()
+        except OSError as exc:
+            self._svc_logger.warning("sha256 file read failed, skip verification: %s", exc)
+            return
+
+        try:
+            actual = hashlib.sha256(self._sidecar_binary.read_bytes()).hexdigest().lower()
+        except OSError as exc:
+            self._svc_logger.error("sidecar binary read failed for sha256: %s", exc)
+            raise EmbeddedPostgresStartError(f"sidecar binary read failed during sha256 verification: {exc}") from exc
+
+        if actual != expected:
+            self._svc_logger.error(
+                "sidecar sha256 mismatch: expected=%s actual=%s; please reinstall qTrading",
+                expected,
+                actual,
+            )
+            raise EmbeddedPostgresStartError(
+                f"sidecar binary sha256 mismatch (expected={expected[:8]}..., actual={actual[:8]}...); "
+                f"please reinstall qTrading to fix version mismatch"
+            )
+
+    def _format_sidecar_exit_error(self, exit_code: int | None) -> str:
+        """§17.6: 将 sidecar exit code 映射到用户可理解的错误信息。
+
+        映射表（与 Rust sidecar main.rs ExitCode 常量对齐）：
+        - 11 → initdb_failed
+        - 15 → disk_full
+        - 16 → password_error
+        - 50 → already_running
+        - 60 → sidecar_crashed
+        """
+        if exit_code is None:
+            return "sidecar exited before ready line (exit=None; process still running but no output)"
+        if exit_code == 11:
+            return (
+                f"initdb failed (exit=11); PostgreSQL data directory initialization failed. "
+                f"Check disk space and permissions; data_dir={self._data_dir}"
+            )
+        if exit_code == 15:
+            return (
+                f"disk full (exit=15); PostgreSQL data directory disk space < 500MB. "
+                f"Free up disk space and restart qTrading; data_dir={self._data_dir}"
+            )
+        if exit_code == 16:
+            return (
+                f"password error (exit=16); run 'qtrading-pg-sidecar reset-password "
+                f"--data-dir {self._data_dir}' to reset, then restart qTrading"
+            )
+        if exit_code == 50:
+            return (
+                "qTrading already running (exit=50); another qTrading instance may be using "
+                "the same data directory. Close other instances or use a different data_dir"
+            )
+        if exit_code == 60:
+            return (
+                f"sidecar crashed (exit=60); restart qTrading. "
+                f"If persistent, check sidecar.log at {self._log_dir / 'sidecar.log'}"
+            )
+        return f"sidecar exited before ready line (exit={exit_code})"
 
     def _readline_with_timeout(self, stream: object, timeout: float) -> str:
         """带超时的 readline，避免阻塞事件循环。"""
@@ -289,7 +392,8 @@ class EmbeddedPostgresService:
             try:
                 line = stream.readline()  # type: ignore[union-attr]
                 q.put(line if line is not None else "")
-            except Exception:  # pragma: no cover  R2_ALLOWED: reader thread stream fallback
+            except Exception as e:  # pragma: no cover  reader thread stream fallback (竞态难复现)
+                logger.debug("reader thread stream fallback: %s", e, exc_info=True)
                 q.put("")
 
         t = threading.Thread(target=_reader, daemon=True)
@@ -304,19 +408,19 @@ class EmbeddedPostgresService:
         if self._process is not None:
             try:
                 self._process.kill()
-            except Exception:  # pragma: no cover  R2_ALLOWED: subprocess kill fallback on failed start
-                pass
+            except Exception as e:  # subprocess kill fallback on failed start
+                logger.debug("cleanup_failed_start kill fallback: %s", e, exc_info=True)
             try:
                 self._process.wait(timeout=5)
-            except Exception:  # pragma: no cover  R2_ALLOWED: subprocess wait fallback on failed start
-                pass
+            except Exception as e:  # subprocess wait fallback on failed start
+                logger.debug("cleanup_failed_start wait fallback: %s", e, exc_info=True)
             self._process = None
         self._connection_info = None
         if self._stderr_file is not None:
             try:
                 self._stderr_file.close()  # type: ignore[attr-defined]
-            except Exception:  # pragma: no cover  R2_ALLOWED: file close fallback on failed start
-                pass
+            except Exception as e:  # file close fallback on failed start
+                logger.debug("cleanup_failed_start close fallback: %s", e, exc_info=True)
             self._stderr_file = None
 
     async def stop(self) -> None:
@@ -337,8 +441,8 @@ class EmbeddedPostgresService:
             if proc.stdin is not None:
                 try:
                     proc.stdin.close()
-                except Exception:  # pragma: no cover  R2_ALLOWED: stdin close fallback on stop
-                    pass
+                except Exception as e:  # stdin close fallback on stop
+                    logger.debug("stop_sync stdin close fallback: %s", e, exc_info=True)
             try:
                 proc.wait(timeout=self._stop_timeout)
                 self._svc_logger.info("embedded postgres stopped gracefully")
@@ -347,16 +451,16 @@ class EmbeddedPostgresService:
                 proc.kill()
                 try:
                     proc.wait(timeout=5)
-                except Exception:  # pragma: no cover  R2_ALLOWED: subprocess wait fallback after kill
-                    pass
+                except Exception as e:  # subprocess wait fallback after kill
+                    logger.debug("stop_sync wait after kill fallback: %s", e, exc_info=True)
         finally:
             self._process = None
             self._connection_info = None
             if self._stderr_file is not None:
                 try:
                     self._stderr_file.close()  # type: ignore[attr-defined]
-                except Exception:  # pragma: no cover  R2_ALLOWED: file close fallback on stop
-                    pass
+                except Exception as e:  # file close fallback on stop
+                    logger.debug("stop_sync stderr_file close fallback: %s", e, exc_info=True)
                 self._stderr_file = None
 
     def collect_logs_summary(self, tail_bytes: int = 8192) -> dict[str, str]:

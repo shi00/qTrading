@@ -24,8 +24,9 @@ class TestConnectionInfo:
 
     def test_connection_info_is_frozen(self) -> None:
         info = ConnectionInfo(url="u", port=1, pid=2, data_dir="d")
-        with pytest.raises(dataclasses.FrozenInstanceError):
+        with pytest.raises(dataclasses.FrozenInstanceError, match="port") as exc_info:
             info.port = 9999  # type: ignore[misc]
+        assert "port" in str(exc_info.value)
 
     def test_connection_info_uses_slots(self) -> None:
         info = ConnectionInfo(url="u", port=1, pid=2, data_dir="d")

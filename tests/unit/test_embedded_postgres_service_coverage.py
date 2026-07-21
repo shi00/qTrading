@@ -349,3 +349,207 @@ class TestEmbeddedPostgresServiceCoverage:
             assert service._log_dir == custom_log_dir
         finally:
             EmbeddedPostgresService._reset_singleton()
+
+
+class TestEmbeddedPostgresServiceExceptionFallbacks:
+    """异常 fallback 分支覆盖测试（7 个，对应 service.py 中原 pragma 分支）。
+
+    每个测试 mock 一个会抛异常的 Popen/file 对象，验证 except 分支不抛异常 + 记 logger.debug。
+    """
+
+    def _make_service(self, tmp_path: Path) -> EmbeddedPostgresService:
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        sidecar_binary = tmp_path / "fake_sidecar.exe"
+        sidecar_binary.write_text("placeholder", encoding="utf-8")
+        return EmbeddedPostgresService(
+            sidecar_binary=sidecar_binary,
+            data_dir=tmp_path / "postgres" / "17" / "data",
+            install_dir=tmp_path / "postgres" / "17" / "install",
+        )
+
+    def test_cleanup_failed_start_handles_kill_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """_cleanup_failed_start 中 Popen.kill 抛 OSError → 不抛异常，记 logger.debug。"""
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        # 构造 mock proc，kill 抛 OSError，wait 正常返回 0
+        mock_proc = MagicMock()
+        mock_proc.kill.side_effect = OSError("kill failed")
+        mock_proc.wait.return_value = 0
+        service._process = mock_proc
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            # 不应抛异常
+            service._cleanup_failed_start()
+
+        # 验证 _process 已清空
+        assert service._process is None
+        # 验证 logger.debug 被调用
+        assert any("cleanup_failed_start kill fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'cleanup_failed_start kill fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_cleanup_failed_start_handles_wait_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """_cleanup_failed_start 中 Popen.wait 抛 TimeoutExpired → 不抛异常，记 logger.debug。"""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.kill.return_value = None  # kill 正常
+        mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd=["fake"], timeout=5)
+        service._process = mock_proc
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            service._cleanup_failed_start()
+
+        assert service._process is None
+        assert any("cleanup_failed_start wait fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'cleanup_failed_start wait fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_cleanup_failed_start_handles_close_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """_cleanup_failed_start 中 _stderr_file.close 抛 OSError → 不抛异常，记 logger.debug。"""
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.wait.return_value = 0
+        service._process = mock_proc
+        # mock stderr_file.close 抛 OSError
+        mock_file = MagicMock()
+        mock_file.close.side_effect = OSError("close failed")
+        service._stderr_file = mock_file
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            service._cleanup_failed_start()
+
+        assert service._process is None
+        assert service._stderr_file is None
+        assert any("cleanup_failed_start close fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'cleanup_failed_start close fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_stop_sync_handles_stdin_close_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """stop_sync 中 proc.stdin.close 抛 OSError → 不抛异常，记 logger.debug。"""
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.stdin.close.side_effect = OSError("stdin close failed")
+        mock_proc.wait.return_value = 0
+        service._process = mock_proc
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            # 不应抛异常
+            service.stop_sync()
+
+        assert service._process is None
+        assert any("stop_sync stdin close fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'stop_sync stdin close fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_stop_sync_handles_wait_after_kill_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """stop_sync 中 wait 第一次 TimeoutExpired 触发 kill，第二次 wait 也抛 → 不抛异常，记 logger.debug。"""
+        import subprocess
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        mock_proc = MagicMock()
+        # stdin.close 正常
+        mock_proc.stdin.close.return_value = None
+        # wait 第一次抛 TimeoutExpired（触发 kill 路径），第二次也抛 Exception（fallback 分支）
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd=["fake"], timeout=60),
+            OSError("wait after kill failed"),
+        ]
+        service._process = mock_proc
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            service.stop_sync()
+
+        assert service._process is None
+        # 验证 kill 被调用；强断言：调用一次且无参数（kill() 无参调用）
+        mock_proc.kill.assert_called_once_with()
+        assert any("stop_sync wait after kill fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'stop_sync wait after kill fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_stop_sync_handles_stderr_file_close_error(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """stop_sync 中 _stderr_file.close 抛 OSError → 不抛异常，记 logger.debug。"""
+        from unittest.mock import MagicMock
+
+        service = self._make_service(tmp_path)
+        mock_proc = MagicMock()
+        mock_proc.stdin.close.return_value = None
+        mock_proc.wait.return_value = 0
+        service._process = mock_proc
+        mock_file = MagicMock()
+        mock_file.close.side_effect = OSError("stderr close failed")
+        service._stderr_file = mock_file
+
+        with caplog.at_level(logging.DEBUG, logger="qtrading.embedded_postgres"):
+            service.stop_sync()
+
+        assert service._process is None
+        assert service._stderr_file is None
+        assert any("stop_sync stderr_file close fallback" in r.message for r in caplog.records), (
+            f"期望 DEBUG 日志含 'stop_sync stderr_file close fallback'，实际：{[r.message for r in caplog.records]}"
+        )
+
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+        EmbeddedPostgresService._reset_singleton()
+
+    def test_reader_thread_handles_stream_error(self) -> None:
+        """_readline_with_timeout 中 stream.readline 抛 OSError → 返回 ""，不阻塞。
+
+        注：reader thread 竞态分支仍保留 pragma: no cover，本测试通过 mock stream 直接
+        抛 OSError 触发 except 分支，验证 fallback 路径（q.put("")）正确执行。
+        """
+        from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+        from unittest.mock import MagicMock
+
+        # 构造一个会抛 OSError 的 stream
+        mock_stream = MagicMock()
+        mock_stream.readline.side_effect = OSError("stream read failed")
+
+        # 使用已初始化的 service 实例（直接调 _readline_with_timeout 不需要单例）
+        # 用 __new__ 绕过 __init__ 以避免 tmp_path 依赖
+        EmbeddedPostgresService._reset_singleton()
+        # 构造一个最小可用实例
+        import pathlib
+
+        service = EmbeddedPostgresService(
+            sidecar_binary=pathlib.Path("/fake"),
+            data_dir=pathlib.Path("/fake/data"),
+            install_dir=pathlib.Path("/fake/install"),
+        )
+        try:
+            # 用短 timeout 避免测试卡住
+            result = service._readline_with_timeout(mock_stream, timeout=2.0)
+            # 验证返回空字符串（fallback 路径）
+            assert result == ""
+        finally:
+            EmbeddedPostgresService._reset_singleton()

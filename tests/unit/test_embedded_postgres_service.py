@@ -19,11 +19,14 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+from utils.sanitizers import DataSanitizer
 
 FAKE_READY = {
     "schema": "qtrading.embedded_postgres.run.ready.v1",
@@ -218,6 +221,8 @@ def _reset_popen_instances() -> Iterator[None]:
                 h.close()
             except Exception:
                 pass
+    # R9: 清空 DataSanitizer._known_secrets，避免 start() 注册的 URL 跨测试残留
+    DataSanitizer._reset_known_secrets()
     yield
     _FakePopen.instances.clear()
     # 测试后再清理一次，避免泄漏到下一个测试
@@ -228,6 +233,7 @@ def _reset_popen_instances() -> Iterator[None]:
                 h.close()
             except Exception:
                 pass
+    DataSanitizer._reset_known_secrets()
 
 
 # =============================================================================
@@ -505,7 +511,7 @@ class TestEmbeddedPostgresServiceStart:
                 return inst
 
             with patch.object(svc_module.subprocess, "Popen", popen_factory):
-                with pytest.raises(EmbeddedPostgresStartError):
+                with pytest.raises(EmbeddedPostgresStartError, match="JSON parse failed"):
                     await service.start()
                 # kill 应该被 _cleanup_failed_start 调用
                 assert any(inst._kill_calls > 0 for inst in _FakePopen.instances)
@@ -529,13 +535,90 @@ class TestEmbeddedPostgresServiceStart:
 
         try:
             monkeypatch.setattr(asyncio, "to_thread", raise_cancelled)
-            with pytest.raises(asyncio.CancelledError):
+            # CancelledError 无消息可 match；用 as exc_info 捕获后断言类型，
+            # 后续 assert cleanup_called 验证 _cleanup_failed_start 副作用
+            with pytest.raises(asyncio.CancelledError) as exc_info:
                 await service.start()
+            assert isinstance(exc_info.value, asyncio.CancelledError)
             assert cleanup_called["v"] is True
         finally:
             # 先恢复 asyncio.to_thread，再调 stop 避免被 mock 影响
             monkeypatch.undo()
             service._cleanup_failed_start = original_cleanup  # type: ignore[assignment]  # [reason: 测试 monkeypatch 恢复实例方法]
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_registers_url_secret(self, fake_paths) -> None:
+        """R9: start() 构造 URL 后必须调 DataSanitizer.register_secret(url)。
+
+        验证：
+        1. start() 后 info.url 已注册到 DataSanitizer._known_secrets
+        2. DataSanitizer.sanitize_error 能将该 URL 中的密码替换为 ***
+        """
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        try:
+
+            def popen_factory(cmd, **kwargs):
+                inst = _FakePopen(cmd, **kwargs)
+                inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+                runtime_dir = fake_paths["data_dir"].parent / "runtime"
+                runtime_dir.mkdir(parents=True, exist_ok=True)
+                # 写入长度 >= 8 的密码以满足 _MIN_SECRET_LEN 阈值
+                (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+                return inst
+
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info = await service.start()
+                # 断言 1: URL 已注册到 _known_secrets
+                assert info.url in DataSanitizer._known_secrets, (
+                    f"URL 未注册到 DataSanitizer._known_secrets: {info.url}"
+                )
+                # 断言 2: sanitize_error 能精确替换该 URL 中的密码
+                error_msg = f"connect failed: {info.url}"
+                sanitized = DataSanitizer.sanitize_error(error_msg)
+                assert info.url not in sanitized, f"sanitize_error 未脱敏 URL，原始 URL 仍存在于: {sanitized}"
+                assert "mock_pg_password_55432" not in sanitized, f"sanitize_error 未脱敏密码: {sanitized}"
+        finally:
+            await service.stop()
+
+    @pytest.mark.asyncio(loop_scope="function")
+    async def test_start_concurrent_returns_same_connection_info(self, fake_paths) -> None:
+        """H5: 两个协程并发 await service.start() → 返回同一 ConnectionInfo，Popen 仅调用 1 次。
+
+        验证双检锁 + _start_lock 串行化的正确性：
+        1. 并发调用 start() 返回同一 ConnectionInfo 对象（is 比较）
+        2. Popen 仅被调用 1 次（避免双 Popen）
+        3. URL / port 字段与 FAKE_READY 一致
+        """
+        import asyncio
+
+        from data.persistence.embedded_postgres import service as svc_module
+
+        service = svc_module.EmbeddedPostgresService(**fake_paths)
+        popen_call_count = {"n": 0}
+        popen_call_lock = threading.Lock()
+
+        def popen_factory(cmd, **kwargs):
+            with popen_call_lock:
+                popen_call_count["n"] += 1
+            inst = _FakePopen(cmd, **kwargs)
+            inst.set_stdout_line(json.dumps(FAKE_READY) + "\n")
+            runtime_dir = fake_paths["data_dir"].parent / "runtime"
+            runtime_dir.mkdir(parents=True, exist_ok=True)
+            (runtime_dir / "password").write_text("mock_pg_password_55432", encoding="utf-8")
+            return inst
+
+        try:
+            with patch.object(svc_module.subprocess, "Popen", popen_factory):
+                info1, info2 = await asyncio.gather(service.start(), service.start())
+                assert info1 is info2, f"期望两个协程返回同一 ConnectionInfo，实际：{info1!r} vs {info2!r}"
+                assert info1.port == FAKE_READY["port"]
+                assert popen_call_count["n"] == 1, (
+                    f"期望 Popen 仅调用 1 次（H5 双检锁防双 Popen），实际：{popen_call_count['n']}"
+                )
+        finally:
             await service.stop()
 
 
@@ -669,8 +752,10 @@ class TestEmbeddedPostgresServiceStop:
             raise asyncio.CancelledError()
 
         monkeypatch.setattr(asyncio, "to_thread", raise_cancelled)
-        with pytest.raises(asyncio.CancelledError):
+        # CancelledError 无消息可 match；用 as exc_info 捕获后断言类型（R2 红线验证）
+        with pytest.raises(asyncio.CancelledError) as exc_info:
             await service.stop()
+        assert isinstance(exc_info.value, asyncio.CancelledError)
 
     @pytest.mark.asyncio(loop_scope="function")
     async def test_stop_does_not_block_event_loop(self, fake_paths) -> None:

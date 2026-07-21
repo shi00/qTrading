@@ -420,9 +420,10 @@ class TestPerformWindowShutdown:
         )
         assert result is True
         assert coordinator.start_watchdog_calls == 1
-        assert coordinator.start_watchdog_args == [60.0]
+        # Phase 2 Step 8 调整：watchdog 70s + do_cleanup 60s 容纳 55s 步骤之和 + 5s margin
+        assert coordinator.start_watchdog_args == [70.0]
         assert coordinator.do_cleanup_calls == 1
-        assert coordinator.do_cleanup_kwargs == {"timeout_s": 50.0, "step_timeout_s": 35.0}
+        assert coordinator.do_cleanup_kwargs == {"timeout_s": 60.0, "step_timeout_s": 35.0}
         assert coordinator.cancel_watchdog_calls == 1
         assert coordinator.force_exit_codes == []
         assert page.window.destroy_calls == 1
@@ -491,7 +492,7 @@ class TestPerformUpgradeExit:
             is_web_mode_fn=lambda: False,
         )
         assert coordinator.do_cleanup_calls == 1
-        assert coordinator.do_cleanup_kwargs == {"timeout_s": 5.0, "step_timeout_s": 1.0}
+        assert coordinator.do_cleanup_kwargs == {"timeout_s": 5.0, "step_timeout_s": 10.0}
         assert page.window.destroy_calls == 1
         assert page.window.prevent_close is False
         assert coordinator.force_exit_codes == [1]
@@ -554,9 +555,10 @@ class TestHandleDisconnect:
             cleanup_done_fn=lambda: True,
         )
         assert coordinator.start_watchdog_calls == 1
-        assert coordinator.start_watchdog_args == [60]
+        # Phase 2 Step 8 调整：watchdog 70s + do_cleanup 60s
+        assert coordinator.start_watchdog_args == [70]
         assert coordinator.do_cleanup_calls == 1
-        assert coordinator.do_cleanup_kwargs == {"timeout_s": 50.0, "step_timeout_s": 35.0}
+        assert coordinator.do_cleanup_kwargs == {"timeout_s": 60.0, "step_timeout_s": 35.0}
         # cleanup_done=True 短路返回，不调用 cancel_watchdog/force_exit
         assert coordinator.cancel_watchdog_calls == 0
         assert coordinator.force_exit_codes == []
@@ -585,11 +587,12 @@ class TestHandleDisconnect:
         assert coordinator.force_exit_codes == [1]
 
     @pytest.mark.asyncio
-    async def test_start_watchdog_uses_25_second_timeout(self) -> None:
-        """disconnect 路径下 watchdog 超时为 60s（Phase 2 Step 8 调整，原 25s）."""
+    async def test_start_watchdog_uses_70_second_timeout(self) -> None:
+        """disconnect 路径下 watchdog 超时为 70s（Phase 2 Step 8 调整，容纳 55s 步骤和 + margin）."""
         coordinator = _FakeCoordinator(cleanup_ok=True, cleanup_done=True)
         await handle_disconnect(
             coordinator,
             cleanup_done_fn=lambda: True,
         )
-        assert coordinator.start_watchdog_args == [60]
+        # Phase 2 Step 8 调整：watchdog 70s
+        assert coordinator.start_watchdog_args == [70]

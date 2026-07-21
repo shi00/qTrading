@@ -67,7 +67,8 @@ async def test_step8_noop_when_service_not_initialized(monkeypatch) -> None:
     await coordinator._step8_stop_embedded_postgres()
 
     # stop_sync 应被调用（即使 _process is None，也是 graceful no-op）
-    mock_service.stop_sync.assert_called_once()
+    # 强断言：验证调用一次且无参数（to_thread(service.stop_sync) 无参调用）
+    mock_service.stop_sync.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -95,8 +96,8 @@ async def test_step8_calls_stop_sync_via_to_thread(monkeypatch) -> None:
     assert len(to_thread_calls) == 1, f"期望 asyncio.to_thread 调用 1 次，实际：{len(to_thread_calls)}"
     func, args, kwargs = to_thread_calls[0]
     assert func == mock_service.stop_sync, f"期望 func=mock_service.stop_sync，实际：{func}"
-    # stop_sync 应被调用
-    mock_service.stop_sync.assert_called_once()
+    # stop_sync 应被调用；强断言：调用一次且无参数（与 to_thread(service.stop_sync) 一致）
+    mock_service.stop_sync.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -148,3 +149,83 @@ def test_step8_timeout_not_limited_by_min_logic() -> None:
     assert old_effective == 5.0, (
         f"旧默认 step_timeout_s=5.0 时 effective_timeout 应为 5.0（被钳制），实际：{old_effective}"
     )
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_step8_abandons_thread_on_timeout(monkeypatch, caplog) -> None:
+    """H1: asyncio.wait_for 超时 → 记 WARNING 'abandoning thread'，不阻塞，不抛异常。
+
+    模拟 stop_sync 阻塞 60s（无法在测试中真实等待），通过 mock asyncio.wait_for
+    直接抛 asyncio.TimeoutError 验证超时分支。
+    """
+    import asyncio
+    import logging
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    mock_service = MagicMock()
+    mock_service.stop_sync = MagicMock(return_value=None)
+    monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+    # mock asyncio.to_thread 返回一个不会完成的 coroutine
+    async def _fake_to_thread(func, *args, **kwargs):
+        await asyncio.sleep(60)  # 模拟阻塞 60s
+        return None
+
+    monkeypatch.setattr("utils.shutdown.asyncio.to_thread", _fake_to_thread)
+
+    # mock asyncio.wait_for 直接抛 TimeoutError（避免真实等待 30s）
+    async def _fake_wait_for(coro, timeout):
+        # 关闭未完成的 coroutine 避免未消费警告
+        coro.close()
+        raise TimeoutError()
+
+    monkeypatch.setattr("utils.shutdown.asyncio.wait_for", _fake_wait_for)
+
+    coordinator = ShutdownCoordinator()
+    with caplog.at_level(logging.WARNING, logger="utils.shutdown"):
+        # 不应抛异常，不应阻塞
+        await coordinator._step8_stop_embedded_postgres()
+
+    # 验证 WARNING 日志含 'abandoning thread'
+    assert any("abandoning thread" in r.message for r in caplog.records), (
+        f"期望 WARNING 日志含 'abandoning thread'，实际：{[r.message for r in caplog.records]}"
+    )
+    # 验证 ERROR 日志未触发（超时不是错误）
+    assert not any(r.levelname == "ERROR" for r in caplog.records), (
+        f"超时不应触发 ERROR 日志，实际：{[(r.levelname, r.message) for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_step8_cancelled_error_propagates(monkeypatch) -> None:
+    """M8/R2: asyncio.wait_for raise CancelledError → Step 8 重新 raise（R2 合规）。
+
+    CancelledError 是 BaseException 子类，不被 `except Exception` 捕获，
+    必须传播至 _run_async_step → do_cleanup 配合优雅停机。
+    """
+    import asyncio
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+
+    mock_service = MagicMock()
+    mock_service.stop_sync = MagicMock(return_value=None)
+    monkeypatch.setattr(EmbeddedPostgresService, "get_instance", classmethod(lambda cls: mock_service))
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        await asyncio.sleep(60)
+        return None
+
+    monkeypatch.setattr("utils.shutdown.asyncio.to_thread", _fake_to_thread)
+
+    # mock asyncio.wait_for 抛 CancelledError
+    async def _fake_wait_for(coro, timeout):
+        coro.close()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("utils.shutdown.asyncio.wait_for", _fake_wait_for)
+
+    coordinator = ShutdownCoordinator()
+    # CancelledError 应传播（不被 except Exception 捕获）
+    # CancelledError 无消息可 match；用 as exc_info 捕获后断言类型（R2 红线验证）
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await coordinator._step8_stop_embedded_postgres()
+    assert isinstance(exc_info.value, asyncio.CancelledError)

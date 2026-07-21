@@ -28,13 +28,14 @@ class TestEmbeddedPgFields:
         assert config.embedded_pg_database == "qtrading"
 
     def test_app_config_embedded_pg_fields_validate_ranges(self) -> None:
-        with pytest.raises(ValidationError):
+        # match= 验证错误确实来自对应字段校验（而非其他字段的连带错误）
+        with pytest.raises(ValidationError, match="embedded_pg_start_timeout_s"):
             AppConfig(embedded_pg_start_timeout_s=5.0)  # < 10.0
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="embedded_pg_start_timeout_s"):
             AppConfig(embedded_pg_start_timeout_s=700.0)  # > 600.0
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="embedded_pg_stop_timeout_s"):
             AppConfig(embedded_pg_stop_timeout_s=2.0)  # < 5.0
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="embedded_pg_stop_timeout_s"):
             AppConfig(embedded_pg_stop_timeout_s=200.0)  # > 120.0
 
     def test_app_config_embedded_pg_enabled_can_be_toggled(self) -> None:

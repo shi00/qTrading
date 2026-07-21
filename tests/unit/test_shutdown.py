@@ -72,15 +72,16 @@ class TestCleanupSteps:
             assert timeout > 0, f"Step {name} timeout must be positive"
 
     def test_total_step_timeouts_within_overall_budget(self):
-        """ASYNC-005: Sum of step timeouts should fit within production window shutdown budget.
+        """ASYNC-005: Sum of step timeouts must fit within production window shutdown budget.
 
-        Phase 2 Step 8 (_step8_stop_embedded_postgres, 35.0s) 加入后，默认 do_cleanup()
-        的 20.0s 整体超时不再覆盖最坏情况和。生产路径 perform_window_shutdown 使用
-        timeout_s=50.0s 容纳 Step 8；此处校验 sum <= 55.0s (50.0s + 5.0s margin)。
+        Phase 2 Step 8 (_step8_stop_embedded_postgres, 35.0s) 加入后，步骤超时和 = 55.0s。
+        生产路径 perform_window_shutdown 使用 do_cleanup(timeout_s=60.0) 容纳 55s + 5s margin；
+        此处校验 sum <= 65.0s (60.0s do_cleanup 整体超时 + 5.0s CI 抖动 margin)。
         """
         total_step_time = sum(step[3] for step in _CLEANUP_STEPS)
-        assert total_step_time <= 55.0, (
-            f"Sum of step timeouts ({total_step_time}s) exceeds production overall budget (55.0s)"
+        # 60.0s do_cleanup 整体超时 + 5.0s CI 慢机器抖动 margin
+        assert total_step_time <= 65.0, (
+            f"Sum of step timeouts ({total_step_time}s) exceeds production overall budget (65.0s)"
         )
 
     def test_step0_timeout_accommodates_join_timeout(self):
@@ -915,6 +916,7 @@ class TestRunCleanupStepsDeep:
         coord._step5_unload_ai_model = step_ok
         coord._step6_shutdown_thread_pools = step_ok
         coord._step7_close_database_managers = step_ok
+        coord._step8_stop_embedded_postgres = step_ok
 
         with pytest.raises(asyncio.CancelledError):
             await coord._run_cleanup_steps(step_timeout_s=2.0)

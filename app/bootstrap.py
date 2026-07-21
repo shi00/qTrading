@@ -366,7 +366,12 @@ async def prepare_database_runtime() -> None:
         return
 
     service = EmbeddedPostgresService.from_config(config)
-    info = await service.start()
+    # H3: start 失败时清理单例，避免后续 CacheManager 误用残留状态
+    try:
+        info = await service.start()
+    except Exception:
+        EmbeddedPostgresService._reset_singleton()
+        raise
     # URL 由 service 构造为 postgresql+asyncpg://user:password@host:port/db
     parsed = urlparse(info.url)
     password = parsed.password or ""

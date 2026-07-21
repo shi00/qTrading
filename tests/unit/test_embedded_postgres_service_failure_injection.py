@@ -1,11 +1,20 @@
-"""EmbeddedPostgresService 失败注入测试（Phase 2 §3.6 / pg_plan §17.6）。
+"""EmbeddedPostgresService 失败注入单元测试（补充覆盖）。
 
-测试分组（5 个，对应 §17.6 #1/#5/#6/#7/#10）：
-- fi_01_sidecar_binary_missing (#1)：sidecar_binary 不存在 → FileNotFoundError → EmbeddedPostgresStartError
-- fi_05_ready_timeout (#5)：readline 阻塞 + start_timeout=0.5 → EmbeddedPostgresStartError，子进程 kill 被调
-- fi_06_ready_json_invalid (#6)：readline 返回非 JSON → EmbeddedPostgresStartError，子进程 kill 被调
-- fi_07_password_file_missing (#7)：FAKE_READY 返回但不写 password_file → EmbeddedPostgresStartError
-- fi_10_stop_kill_fallback (#10)：wait raise TimeoutExpired → kill 被调 + 二次 wait(timeout=5)
+注意：本文件原设计为对应 §17.6 #1/#5/#6/#7/#10，但实际场景与 §17.6 规范条目
+不精确对应（见 phase2-review-fix-plan.md Step 5 C2 分析）。真正的 §17.6
+对应测试已迁移至 tests/integration/test_embedded_postgres_failure_injection.py。
+
+本文件保留作为补充覆盖，测试场景为：
+- fi_01_sidecar_binary_missing: sidecar_binary 不存在 → FileNotFoundError
+  （补充覆盖 FileNotFoundError 分支，非 §17.6 #1 的 initdb_failed exit code 映射）
+- fi_05_ready_timeout: readline 阻塞 + start_timeout=0.5 → 超时
+  （补充覆盖 _readline_with_timeout 超时分支，非 §17.6 #5 的 exit 50 映射）
+- fi_06_ready_json_invalid: readline 返回非 JSON → JSON 解析失败
+  （补充覆盖 json.JSONDecodeError 分支，非 §17.6 #6 的 exit 15 映射）
+- fi_07_password_file_missing: FAKE_READY 返回但不写 password_file
+  （补充覆盖 password_file FileNotFoundError 分支，非 §17.6 #7 的 sha256 校验）
+- fi_10_stop_kill_fallback: wait raise TimeoutExpired → kill 兜底
+  （补充覆盖 stop_sync kill fallback，非 §17.6 #10 的 cancel 传播清理）
 
 Mock 策略：
 - 独立 _FakePopen 实现（避免与 test_embedded_postgres_service.py 的 fixture 冲突）
@@ -228,7 +237,8 @@ class TestFi05ReadyTimeout:
                     return inst
 
                 with patch.object(svc_module.subprocess, "Popen", popen_factory):
-                    with pytest.raises(EmbeddedPostgresStartError):
+                    # ready 超时 → readline 返回 "" → "sidecar exited before ready line"
+                    with pytest.raises(EmbeddedPostgresStartError, match="exited before ready"):
                         await service.start()
 
                 # 验证子进程被 kill（_cleanup_failed_start 调 kill + wait）

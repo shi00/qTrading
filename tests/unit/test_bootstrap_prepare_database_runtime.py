@@ -187,3 +187,78 @@ async def test_prepare_database_runtime_propagates_start_failure(monkeypatch, tm
         await prepare_database_runtime()
 
     assert save_db_config_calls == []
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_resets_singleton_on_failure(monkeypatch, tmp_path: Path) -> None:
+    """H3: service.start 失败 → 调用 _reset_singleton 清理单例，再 re-raise。
+
+    验证 H3 红线：start 失败后单例必须被重置，避免后续 CacheManager 误用残留状态。
+    R2 合规：except Exception 不捕获 CancelledError（BaseException 子类）。
+    """
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    from app.bootstrap import prepare_database_runtime
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresStartError
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True)),
+    )
+
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(side_effect=EmbeddedPostgresStartError("fake start failure"))
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    reset_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService._reset_singleton",
+        classmethod(lambda cls: reset_calls.append(1)),
+    )
+
+    with pytest.raises(EmbeddedPostgresStartError, match="fake start failure"):
+        await prepare_database_runtime()
+
+    assert reset_calls == [1], f"期望 _reset_singleton 被调用 1 次，实际：{reset_calls}"
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_prepare_database_runtime_does_not_reset_singleton_on_cancelled(monkeypatch, tmp_path: Path) -> None:
+    """R2 合规：CancelledError 不被 except Exception 捕获，不调用 _reset_singleton。
+
+    CancelledError 是 BaseException 子类，必须传播以配合优雅停机。
+    单例清理由后续 ShutdownCoordinator Step 8 负责。
+    """
+    monkeypatch.setenv("QTRADING_DATABASE_MODE", "embedded")
+
+    import asyncio
+
+    from app.bootstrap import prepare_database_runtime
+
+    monkeypatch.setattr(
+        "utils.config_handler.ConfigHandler.load_config",
+        staticmethod(lambda: _make_config_dict(embedded_pg_enabled=True)),
+    )
+
+    mock_service = MagicMock()
+    mock_service.start = AsyncMock(side_effect=asyncio.CancelledError())
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService.from_config",
+        classmethod(lambda cls, _cfg: mock_service),
+    )
+
+    reset_calls: list[int] = []
+    monkeypatch.setattr(
+        "data.persistence.embedded_postgres.service.EmbeddedPostgresService._reset_singleton",
+        classmethod(lambda cls: reset_calls.append(1)),
+    )
+
+    # CancelledError 无消息可 match；用 as exc_info 捕获后断言类型（R2 红线验证）
+    with pytest.raises(asyncio.CancelledError) as exc_info:
+        await prepare_database_runtime()
+    assert isinstance(exc_info.value, asyncio.CancelledError)
+
+    assert reset_calls == [], f"CancelledError 不应触发 _reset_singleton，实际：{reset_calls}"
