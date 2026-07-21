@@ -25,6 +25,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # postgresql_embedded/postgresql_archive build script 通过 GitHub API 下载
+  # PostgreSQL binaries 清单，未认证请求 60 次/小时/IP，多平台并行易触发 403。
+  # 传入 GITHUB_TOKEN 提升至 5000 次/小时。
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   lint-test:
