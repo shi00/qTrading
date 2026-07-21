@@ -35,7 +35,6 @@ from ui.components.flet_type_helpers import safe_controls, safe_icon, safe_on_cl
 from ui.i18n import I18n
 from ui.theme import AppColors, AppStyles
 from utils.async_utils import gather_for_shutdown_cleanup
-from utils.thread_pool import TaskType, ThreadPoolManager
 
 logger = logging.getLogger(__name__)
 
@@ -149,14 +148,14 @@ async def open_export_folder(filepath: str) -> None:
     """打开导出文件所在文件夹 (桌面端 action toast 回调).
 
     跨平台守卫 (§0.5.12.2 #52): os.startfile 仅 Windows 可用, 其他平台静默跳过.
-    R16: os.startfile 经 ThreadPoolManager 提交, 不阻塞事件循环.
+    R16: os.startfile 经 asyncio.to_thread 提交 (Python stdlib, 不阻塞事件循环).
     """
     if platform.system() != "Windows":
         return
     folder = os.path.dirname(os.path.abspath(filepath))
     if not folder or not os.path.isdir(folder):
         return
-    await ThreadPoolManager().run_async(TaskType.IO, os.startfile, folder)  # type: ignore[attr-defined]  # [reason: os.startfile 仅 Windows 存在, 已有 platform 守卫, 类型存根跨平台缺失]
+    await asyncio.to_thread(os.startfile, folder)  # type: ignore[attr-defined]  # [reason: os.startfile 仅 Windows 存在, 已有 platform 守卫, 类型存根跨平台缺失]
 
 
 # ============================================================================
