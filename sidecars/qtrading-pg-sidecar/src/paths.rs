@@ -89,6 +89,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn derives_windows_layout() {
         let layout = Layout::from_data_dir(
             Path::new(r"C:\Users\u\AppData\Local\qTrading\postgres\17\data"),
