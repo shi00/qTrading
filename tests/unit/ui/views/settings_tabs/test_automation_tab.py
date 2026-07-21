@@ -14,7 +14,7 @@
 import asyncio
 import inspect
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import flet as ft
 import pytest
@@ -1095,3 +1095,223 @@ class TestDisabledState:
 
         dropdown = _find_dropdown_by_label(env, "settings_news_interval")
         assert dropdown.disabled is True
+
+
+# ============================================================================
+# View except Exception 路径覆盖 (patch VM save_xxx 直接 raise, 绕过 VM 内部 try/except)
+# ============================================================================
+#
+# 背景: VM 的 save_xxx 方法内部 try/except Exception 吞异常返回 False,
+# 导致 View 的 except Exception 块在常规路径下不可达 (走 if not success 分支).
+# 为覆盖 View 的 except Exception 块 (automation_tab.py 7 个 async handler 的
+# lines 140-144 / 157-160 / 176-180 / 193-196 / 209-212 / 479-483 / 497-500),
+# 直接 patch VM 类方法 raise RuntimeError, 绕过 VM 内部 try/except.
+
+
+class TestDoScheduleToggleViewExceptionPath:
+    """_do_schedule_toggle except Exception 路径 (automation_tab.py L140-144)."""
+
+    def test_view_exception_path_rolls_back_and_snack(self, automation_tab_env, monkeypatch) -> None:
+        """VM save_auto_update_enabled raise RuntimeError → View except Exception:
+        - logger.error 记录异常
+        - settings_vm.set_auto_enabled(not new_enabled) 回滚 state
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = automation_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_auto_update_enabled",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        switch = _find_switch_by_label(env, "settings_auto_update")
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(switch.on_change, _make_event(True))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+        # 回滚验证: render_once 后 switch.value=False (回滚 not True=False)
+        _rerender(env)
+        switch = _find_switch_by_label(env, "settings_auto_update")
+        assert switch.value is False
+
+
+class TestDoScheduleTimeChangeViewExceptionPath:
+    """_do_schedule_time_change except Exception 路径 (automation_tab.py L157-160)."""
+
+    def test_view_exception_path_calls_snack(self, automation_tab_env, monkeypatch) -> None:
+        """VM save_auto_update_time raise RuntimeError → View except Exception:
+        - logger.error 记录异常 (无 state 回滚)
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = automation_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_auto_update_time",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        dropdown = _find_dropdown_by_label(env, "settings_update_time")
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdown.on_select, _make_event("17:00"))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+
+class TestDoAiConceptToggleViewExceptionPath:
+    """_do_ai_concept_toggle except Exception 路径 (automation_tab.py L176-180)."""
+
+    def test_view_exception_path_rolls_back_and_snack(self, automation_tab_env, monkeypatch) -> None:
+        """VM save_ai_concept_enabled raise RuntimeError → View except Exception:
+        - logger.error 记录异常
+        - settings_vm.set_ai_enabled(not new_enabled) 回滚 state
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = automation_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_ai_concept_enabled",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(switch.on_change, _make_event(True))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+        # 回滚验证: render_once 后 switch.value=False (回滚 not True=False)
+        _rerender(env)
+        switch = _find_switch_by_label(env, "settings_ai_concept_update")
+        assert switch.value is False
+
+
+class TestDoAiConceptTimeChangeViewExceptionPath:
+    """_do_ai_concept_time_change except Exception 路径 (automation_tab.py L193-196)."""
+
+    def test_view_exception_path_calls_snack(self, automation_tab_env, monkeypatch) -> None:
+        """VM save_ai_concept_time raise RuntimeError → View except Exception:
+        - logger.error 记录异常 (无 state 回滚)
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = automation_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_ai_concept_time",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        dropdowns = _get_dropdowns(env)
+        ai_time_dropdown = dropdowns[1]
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(ai_time_dropdown.on_select, _make_event("20:00"))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+
+class TestDoAiConceptEngineChangeViewExceptionPath:
+    """_do_ai_concept_engine_change except Exception 路径 (automation_tab.py L209-212)."""
+
+    def test_view_exception_path_calls_snack(self, automation_tab_env, monkeypatch) -> None:
+        """VM save_ai_concept_engine raise RuntimeError → View except Exception:
+        - logger.error 记录异常 (无 state 回滚)
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = automation_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_ai_concept_engine",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        dropdown = _find_dropdown_by_label(env, "settings_ai_concept_search_engine")
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdown.on_select, _make_event("search_pro"))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+
+
+class TestDoNewsToggleViewExceptionPath:
+    """_do_news_toggle except Exception 路径 (automation_tab.py L479-483)."""
+
+    def test_view_exception_path_rolls_back_and_snack(self, notifications_tab_env, monkeypatch) -> None:
+        """VM save_news_enabled raise RuntimeError → View except Exception:
+        - logger.error 记录异常
+        - settings_vm.set_news_enabled(not new_enabled) 回滚 state
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = notifications_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_news_enabled",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        switch = _find_switch_by_label(env, "settings_news_alerts")
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(switch.on_change, _make_event(False))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
+        # 回滚验证: 初始 news_enabled=True, toggle 到 False 失败 → 回滚到 True
+        _rerender(env)
+        switch = _find_switch_by_label(env, "settings_news_alerts")
+        assert switch.value is True
+
+
+class TestDoIntervalChangeViewExceptionPath:
+    """_do_interval_change except Exception 路径 (automation_tab.py L497-500)."""
+
+    def test_view_exception_path_calls_snack(self, notifications_tab_env, monkeypatch) -> None:
+        """VM save_news_interval raise RuntimeError → View except Exception:
+        - logger.error 记录异常 (无 state 回滚)
+        - show_snack_callback(sys_snack_save_err, color=ERROR)
+
+        注意: 此路径与 VM 内部吞异常的 if not success 路径不同:
+        - if not success → snack(sys_snack_num_fmt, color=ERROR)
+        - except Exception → snack(sys_snack_save_err, color=ERROR)
+        """
+        from ui.viewmodels.automation_settings_view_model import AutomationSettingsViewModel
+
+        env = notifications_tab_env
+        monkeypatch.setattr(
+            AutomationSettingsViewModel,
+            "save_news_interval",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        )
+
+        dropdown = _find_dropdown_by_label(env, "settings_news_interval")
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdown.on_select, _make_event("60"))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        env["show_snack"].assert_called_once_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
