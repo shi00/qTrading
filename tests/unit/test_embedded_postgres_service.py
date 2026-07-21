@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -205,7 +206,7 @@ class _FakePopen:
 
 
 @pytest.fixture(autouse=True)
-def _reset_popen_instances() -> None:
+def _reset_popen_instances() -> Iterator[None]:
     """每个测试前清空 FakePopen 实例记录 + 清理全局 logger handler 隔离。"""
     _FakePopen.instances.clear()
     # 清理 qtrading.embedded_postgres logger 的 _embedded_pg_handler，避免跨测试残留
