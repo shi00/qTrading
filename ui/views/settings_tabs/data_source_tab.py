@@ -428,6 +428,11 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         if page is not None:
             page.run_task(_do_show_health_report)
 
+    def _on_cancel_active_task(e: ft.ControlEvent) -> None:
+        """P1-5: 取消 daily_sync/ai_concept_sync 活跃任务 (cache_clear 不显示此按钮)."""
+        UILogger.log_action("DataSourceTab", "Click", "btn_cancel_active_task")
+        vm.cancel_active_task()
+
     def _on_health_report_close() -> None:
         set_health_report_open(False)
         set_health_report_data({})
@@ -695,6 +700,41 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
         is_loading=action_clear_cache_loading,
     )
 
+    # --- P1-5: Secondary progress 区域 (daily_sync/ai_concept_sync/cache_clear) ---
+    # 复刻 backtest 范式: ProgressBar + 进度文本 + 取消按钮; 复用 state.progress/active_key
+    # cache_clear (cancellable=False) 不显示取消按钮且无进度回调 → ProgressBar indeterminate
+    secondary_progress_visible = state.is_syncing and state.active_key in (
+        "daily_sync",
+        "ai_concept_sync",
+        "cache_clear",
+    )
+    secondary_cancellable = state.active_key in ("daily_sync", "ai_concept_sync")
+    if secondary_progress_visible and state.progress_message is not None:
+        secondary_progress_text_value = f"{state.progress * 100:.1f}% - {_render_message(state.progress_message)}"
+    elif secondary_progress_visible and state.active_key != "cache_clear":
+        secondary_progress_text_value = f"{state.progress * 100:.1f}%"
+    else:
+        secondary_progress_text_value = ""
+
+    secondary_progress_bar = ft.ProgressBar(
+        # cache_clear 无进度回调 → value=None 显示 indeterminate 动画
+        value=state.progress if state.active_key != "cache_clear" else None,
+        visible=secondary_progress_visible,
+        expand=True,
+    )
+    secondary_progress_text = ft.Text(
+        secondary_progress_text_value,
+        size=AppStyles.FONT_SIZE_BODY_SM,
+        color=AppColors.INFO,
+        visible=bool(secondary_progress_text_value),
+    )
+    secondary_cancel_button = ft.Button(
+        content=I18n.get("common_cancel"),
+        on_click=safe_on_click(_on_cancel_active_task),
+        visible=secondary_progress_visible and secondary_cancellable,
+        style=AppStyles.danger_button(),
+    )
+
     action_console = DashboardCard(
         content=ft.Column(
             [
@@ -707,6 +747,12 @@ def DataSourceTab(show_snack_callback: Callable) -> ft.Container:
                         ft.Column([action_clear_cache], col={"sm": 12, "md": 4}),
                     ],
                     run_spacing=10,
+                ),
+                # P1-5: 长任务进度反馈区域 (ProgressBar + 进度文本 + 取消按钮)
+                ft.Row(
+                    [secondary_progress_bar, secondary_progress_text, secondary_cancel_button],
+                    spacing=8,
+                    visible=secondary_progress_visible,
                 ),
             ],
         ),

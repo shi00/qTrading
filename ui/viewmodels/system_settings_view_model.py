@@ -42,6 +42,21 @@ _IO_WORKERS_MAX = 512
 _CPU_WORKERS_MIN = 1
 _CPU_WORKERS_MAX = 64
 
+# --- 公开别名 (P2-13: View 从 VM 导入渲染 hint_text, 消除 View 硬编码范围常量双重定义;
+# 私有常量保留, VM save_* 范围检查兜底逻辑不变) ---
+CONCURRENCY_MIN = _CONCURRENCY_MIN
+CONCURRENCY_MAX = _CONCURRENCY_MAX
+DB_POOL_MIN = _DB_POOL_MIN
+DB_POOL_MAX = _DB_POOL_MAX
+DB_OVERFLOW_MIN = _DB_OVERFLOW_MIN
+DB_OVERFLOW_MAX = _DB_OVERFLOW_MAX
+DB_TIMEOUT_MIN = _DB_TIMEOUT_MIN
+DB_TIMEOUT_MAX = _DB_TIMEOUT_MAX
+IO_WORKERS_MIN = _IO_WORKERS_MIN
+IO_WORKERS_MAX = _IO_WORKERS_MAX
+CPU_WORKERS_MIN = _CPU_WORKERS_MIN
+CPU_WORKERS_MAX = _CPU_WORKERS_MAX
+
 
 @dataclass(frozen=True)
 class SystemSettingsState:
@@ -105,6 +120,19 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
 
     # --- Update commands (View 通过 set_* 更新本地 state) ---
 
+    @staticmethod
+    def _clamp_int(value: str, min_val: int, max_val: int) -> str:
+        """将字符串数字 clamp 到 [min_val, max_val] (P2-13).
+
+        非数字/空字符串原样返回（保留中间输入态，如 '' 由 InputFilter 拦截数字外字符）；
+        有效数字超范围时 clamp 到边界值。save_* 仍保留范围检查作为兜底（场景遗漏 33a）。
+        """
+        try:
+            val = int(value)
+        except (ValueError, TypeError):
+            return value
+        return str(max(min_val, min(max_val, val)))
+
     def set_language_value(self, value: str) -> None:
         self._set_state(language_value=value)
 
@@ -112,25 +140,31 @@ class SystemSettingsViewModel(ObservableViewModelMixin[SystemSettingsState]):
         self._set_state(theme_value=value)
 
     def set_concurrency_value(self, value: str) -> None:
-        self._set_state(concurrency_value=value)
+        # P2-13: clamp 到 [CONCURRENCY_MIN, CONCURRENCY_MAX]
+        self._set_state(concurrency_value=self._clamp_int(value, _CONCURRENCY_MIN, _CONCURRENCY_MAX))
 
     def set_log_level_value(self, value: str) -> None:
         self._set_state(log_level_value=value)
 
     def set_pool_size_value(self, value: str) -> None:
-        self._set_state(pool_size_value=value)
+        # P2-13: clamp 到 [DB_POOL_MIN, DB_POOL_MAX]
+        self._set_state(pool_size_value=self._clamp_int(value, _DB_POOL_MIN, _DB_POOL_MAX))
 
     def set_db_overflow_value(self, value: str) -> None:
-        self._set_state(db_overflow_value=value)
+        # P2-13: clamp 到 [DB_OVERFLOW_MIN, DB_OVERFLOW_MAX]
+        self._set_state(db_overflow_value=self._clamp_int(value, _DB_OVERFLOW_MIN, _DB_OVERFLOW_MAX))
 
     def set_db_timeout_value(self, value: str) -> None:
-        self._set_state(db_timeout_value=value)
+        # P2-13: clamp 到 [DB_TIMEOUT_MIN, DB_TIMEOUT_MAX]
+        self._set_state(db_timeout_value=self._clamp_int(value, _DB_TIMEOUT_MIN, _DB_TIMEOUT_MAX))
 
     def set_io_workers_value(self, value: str) -> None:
-        self._set_state(io_workers_value=value)
+        # P2-13: clamp 到 [IO_WORKERS_MIN, IO_WORKERS_MAX]
+        self._set_state(io_workers_value=self._clamp_int(value, _IO_WORKERS_MIN, _IO_WORKERS_MAX))
 
     def set_cpu_workers_value(self, value: str) -> None:
-        self._set_state(cpu_workers_value=value)
+        # P2-13: clamp 到 [CPU_WORKERS_MIN, CPU_WORKERS_MAX]
+        self._set_state(cpu_workers_value=self._clamp_int(value, _CPU_WORKERS_MIN, _CPU_WORKERS_MAX))
 
     def set_no_proxy_value(self, value: str) -> None:
         self._set_state(no_proxy_value=value)
