@@ -1,7 +1,5 @@
-# Rust 编译环境安装任务列表 (GNU方案)
-
-| 任务名称 | 描述 | 状态 |
-|---|---|---|
-| Task 1 | 配置免安装 MinGW (w64devkit) 编译环境 | Not Started |
-| Task 2 | 静默安装 Rust GNU 工具链 | Not Started |
-| Task 3 | 验证 Rust 构建 | Not Started |
+| 任务 | 状态 | 说明 |
+| :--- | :---: | :--- |
+| Task 1: Write Unit Tests | [x] | 编写分支分析与过滤逻辑的单元测试（已确认测试正常失败） |
+| Task 2: Implement core logic | [x] | 实现 scripts/safe_cleanup_branches.py 中的核心逻辑（已测试通过） |
+| Task 3: Implement CLI & Execution | [x] | 实现 CLI 界面、二次确认与物理删除操作（已进行 Dry-Run 校验，逻辑完备） |
