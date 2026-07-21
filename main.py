@@ -1,12 +1,14 @@
 import asyncio
 import logging
 import os
+import sys
 from collections.abc import Callable
 from typing import Any
 
 import flet as ft
 
 from app.bootstrap import mask_sensitive
+from app.error_logging import log_exception_with_severity
 from app.startup_controller import StartupController
 from app.window_lifecycle import (
     WindowDialogManager,
@@ -101,6 +103,17 @@ async def main(page: ft.Page):
         pass
 
     ConfigHandler.ensure_defaults()
+
+    # Phase 2 §3.4：embedded 模式下启动 sidecar 并注入 URL
+    from app.bootstrap import prepare_database_runtime
+
+    # H2: prepare_database_runtime 失败时记 critical 日志并退出（不让 CacheManager 在无 DB 时启动）
+    try:
+        await prepare_database_runtime()
+    except Exception as e:
+        logger.critical("[Main] prepare_database_runtime failed: %s", e, exc_info=True)
+        log_exception_with_severity(e, context="general", operation_label="prepare_database_runtime failed")
+        sys.exit(1)
 
     ProxyManager.apply_smart_proxy_policy()
 

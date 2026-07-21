@@ -88,29 +88,54 @@ def get_diff_added_lines(base: str) -> dict[str, list[int]]:
     raise RuntimeError(f"git diff 失败（base={base}）: {last_error}")
 
 
-def load_coverage(coverage_file: Path) -> dict[str, set[int]]:
-    """加载 coverage.json，返回 {filepath: set(executed_lines)}。"""
+def load_coverage(coverage_file: Path) -> dict[str, dict[str, set[int]]]:
+    """加载 coverage.json，返回 {filepath: {"executed": set, "statements": set}}。
+
+    statements = executed_lines ∪ missing_lines，即 coverage.py 识别的所有可执行行
+    （含文档字符串，不含空行/纯注释）。用于过滤 diff 中的非可执行行。
+
+    路径规范化：coverage.py 在 Windows 上生成反斜杠路径（``app\\bootstrap.py``），
+    而 git diff 始终使用正斜杠（``app/bootstrap.py``）。统一为正斜杠避免跨平台不匹配。
+    """
     with open(coverage_file, encoding="utf-8") as f:
         cov = json.load(f)
-    return {fp: set(d.get("executed_lines", [])) for fp, d in cov.get("files", {}).items()}
+    result: dict[str, dict[str, set[int]]] = {}
+    for fp, d in cov.get("files", {}).items():
+        # 统一为 POSIX 风格路径（正斜杠），与 git diff 输出一致
+        normalized_fp = fp.replace("\\", "/")
+        executed = set(d.get("executed_lines", []))
+        missing = set(d.get("missing_lines", []))
+        result[normalized_fp] = {"executed": executed, "statements": executed | missing}
+    return result
 
 
 def compute_diff_coverage(
-    diff_lines: dict[str, list[int]], coverage: dict[str, set[int]]
+    diff_lines: dict[str, list[int]],
+    coverage: dict[str, dict[str, set[int]]],
 ) -> tuple[int, int, dict[str, list[int]]]:
     """计算 diff-coverage。
 
-    返回 (covered_count, total_count, {filepath: [uncovered_lines]})。
+    只统计 diff 中属于 coverage.py statements 的行（排除空行、纯注释、
+    被 omit 的文件）。返回 (covered_count, total_count, {filepath: [uncovered_lines]})。
     """
     covered = 0
     total = 0
     uncovered_by_file: dict[str, list[int]] = {}
 
     for filepath, lines in diff_lines.items():
-        executed = coverage.get(filepath, set())
-        line_set = set(lines)
+        file_cov = coverage.get(filepath, {"executed": set(), "statements": set()})
+        executed = file_cov["executed"]
+        statements = file_cov["statements"]
+        # 文件被 omit 或未被 coverage 统计 → 跳过（不惩罚 omit 文件的新增行）
+        if not statements:
+            continue
+        # 只统计 diff 中属于 statements 的行（排除空行/注释/文档字符串等非可执行行）
+        relevant = [ln for ln in lines if ln in statements]
+        if not relevant:
+            continue
+        line_set = set(relevant)
         covered += len(line_set & executed)
-        total += len(lines)
+        total += len(line_set)
         file_uncovered = sorted(line_set - executed)
         if file_uncovered:
             uncovered_by_file[filepath] = file_uncovered

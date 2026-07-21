@@ -1,0 +1,167 @@
+name: qtrading-pg-sidecar CI
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - 'sidecars/qtrading-pg-sidecar/**'
+      - '.github/workflows/sidecar.yml'
+  pull_request:
+    paths:
+      - 'sidecars/qtrading-pg-sidecar/**'
+      - '.github/workflows/sidecar.yml'
+  workflow_dispatch:
+  schedule:
+    # 每天凌晨 2:00 UTC（北京时间 10:00）flaky 检测
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-sidecar-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # postgresql_embedded/postgresql_archive build script 通过 GitHub API 下载
+  # PostgreSQL binaries 清单，未认证请求 60 次/小时/IP，多平台并行易触发 403。
+  # 传入 GITHUB_TOKEN 提升至 5000 次/小时。
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  lint-test:
+    name: Lint & Test (${{ matrix.os }}/${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos
+            runner: macos-14
+            target: aarch64-apple-darwin
+    defaults:
+      run:
+        working-directory: sidecars/qtrading-pg-sidecar
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust toolchain (1.97.0)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          components: clippy, rustfmt
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        with:
+          workspaces: sidecars/qtrading-pg-sidecar
+          key: ${{ matrix.target }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+
+      - name: cargo test (bin, unit tests)
+        run: cargo test --target ${{ matrix.target }} --bins
+
+      - name: cargo test (roundtrip integration, serial)
+        run: cargo test --target ${{ matrix.target }} --test roundtrip -- --test-threads=1
+
+      - name: cargo test (failure_injection integration, serial)
+        run: cargo test --target ${{ matrix.target }} --test failure_injection -- --test-threads=1
+
+  build-artifacts:
+    name: Build release artifact (${{ matrix.os }}/${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    needs: lint-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: qtrading-pg-sidecar-windows-x86_64.exe
+            binary_path: sidecars/qtrading-pg-sidecar/target/x86_64-pc-windows-msvc/release/qtrading-pg-sidecar.exe
+          - os: linux
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: qtrading-pg-sidecar-linux-x86_64
+            binary_path: sidecars/qtrading-pg-sidecar/target/x86_64-unknown-linux-gnu/release/qtrading-pg-sidecar
+          - os: macos
+            runner: macos-14
+            target: aarch64-apple-darwin
+            artifact_name: qtrading-pg-sidecar-macos-aarch64
+            binary_path: sidecars/qtrading-pg-sidecar/target/aarch64-apple-darwin/release/qtrading-pg-sidecar
+    defaults:
+      run:
+        working-directory: sidecars/qtrading-pg-sidecar
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust toolchain (1.97.0)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo registry & target
+        uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc  # v2.9.1
+        with:
+          workspaces: sidecars/qtrading-pg-sidecar
+          key: release-${{ matrix.target }}
+
+      - name: cargo build --release
+        run: cargo build --target ${{ matrix.target }} --release
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08  # v4.6.0
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  audit:
+    name: Security audit (cargo audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sidecars/qtrading-pg-sidecar
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Install Rust toolchain (1.97.0)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.0
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9  # v2.84.0
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        # 检查 Cargo.lock 中的已知漏洞（RustSec Advisory Database）
+        # 与平台无关，仅在 Linux 上跑即可
+        run: cargo audit --deny warnings

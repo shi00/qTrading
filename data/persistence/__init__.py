@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 # Subpackages that should be importable via attribute access on this module.
 # Needed because some tests re-create this module via ``del sys.modules[...]``,
 # which leaves the subpackage attribute unset on the new module object.
-_SUBPACKAGES = frozenset({"daos"})
+_SUBPACKAGES = frozenset({"daos", "embedded_postgres"})
 
 
 def __getattr__(name):

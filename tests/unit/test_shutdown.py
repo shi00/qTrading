@@ -56,7 +56,7 @@ class TestCleanupSteps:
     """验证 _CLEANUP_STEPS 步骤定义的结构、超时预算与顺序约束。"""
 
     def test_steps_defined(self):
-        assert len(_CLEANUP_STEPS) == 8
+        assert len(_CLEANUP_STEPS) == 9
         assert _CLEANUP_STEPS[0][0] == "Step 0"
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
         assert _CLEANUP_STEPS[0][2] is True
@@ -72,11 +72,16 @@ class TestCleanupSteps:
             assert timeout > 0, f"Step {name} timeout must be positive"
 
     def test_total_step_timeouts_within_overall_budget(self):
-        """ASYNC-005: Sum of step timeouts must not exceed default overall timeout."""
+        """ASYNC-005: Sum of step timeouts must fit within production window shutdown budget.
+
+        Phase 2 Step 8 (_step8_stop_embedded_postgres, 35.0s) 加入后，步骤超时和 = 55.0s。
+        生产路径 perform_window_shutdown 使用 do_cleanup(timeout_s=60.0) 容纳 55s + 5s margin；
+        此处校验 sum <= 65.0s (60.0s do_cleanup 整体超时 + 5.0s CI 抖动 margin)。
+        """
         total_step_time = sum(step[3] for step in _CLEANUP_STEPS)
-        # Default overall timeout is 20.0s, need some margin for scheduling overhead
-        assert total_step_time <= 20.0, (
-            f"Sum of step timeouts ({total_step_time}s) exceeds default overall budget (20.0s)"
+        # 60.0s do_cleanup 整体超时 + 5.0s CI 慢机器抖动 margin
+        assert total_step_time <= 65.0, (
+            f"Sum of step timeouts ({total_step_time}s) exceeds production overall budget (65.0s)"
         )
 
     def test_step0_timeout_accommodates_join_timeout(self):
@@ -752,7 +757,7 @@ class TestShutdownStepOrdering:
         assert _CLEANUP_STEPS[0][1] == "_step0_cancel_tasks"
 
     def test_shutdown_pools_is_last_step(self):
-        assert _CLEANUP_STEPS[-1][1] == "_step7_close_database_managers"
+        assert _CLEANUP_STEPS[-1][1] == "_step8_stop_embedded_postgres"
 
     def test_step2_is_flush_db_writes(self):
         assert _CLEANUP_STEPS[2][1] == "_step2_flush_db_writes"
@@ -878,10 +883,11 @@ class TestRunCleanupStepsDeep:
         coord._step5_unload_ai_model = step_ok
         coord._step6_shutdown_thread_pools = step_ok
         coord._step7_close_database_managers = step_ok
+        coord._step8_stop_embedded_postgres = step_ok
 
         results = await coord._run_cleanup_steps(step_timeout_s=2.0)
-        # 8 个步骤全部执行
-        assert len(results) == 8
+        # 9 个步骤全部执行
+        assert len(results) == 9
         # Step 0 失败但其余执行
         assert results[0].ok is False
         assert results[0].critical is True
@@ -889,7 +895,7 @@ class TestRunCleanupStepsDeep:
             assert r.ok is True
         # 所有步骤都被调用（critical failure 不中断流程）
         assert "step0" in call_log
-        assert call_log.count("step_ok") == 7
+        assert call_log.count("step_ok") == 8
 
     @pytest.mark.asyncio
     async def test_cancelled_step_propagates_after_loop(self):
@@ -910,6 +916,7 @@ class TestRunCleanupStepsDeep:
         coord._step5_unload_ai_model = step_ok
         coord._step6_shutdown_thread_pools = step_ok
         coord._step7_close_database_managers = step_ok
+        coord._step8_stop_embedded_postgres = step_ok
 
         with pytest.raises(asyncio.CancelledError):
             await coord._run_cleanup_steps(step_timeout_s=2.0)
@@ -930,10 +937,12 @@ class TestRunCleanupStepsDeep:
         coord._step5_unload_ai_model = step_ok
         coord._step6_shutdown_thread_pools = step_ok
         coord._step7_close_database_managers = step_ok
+        coord._step8_stop_embedded_postgres = step_ok
 
-        # step_timeout_s=0.5 远小于各 step 的 default（1.0~5.0）
+        # step_timeout_s=0.5 远小于各 step 的 default（1.0~35.0，Step 8=35.0）
+        # M13: 更新注释 — Step 8 加入后 default 上限由 5.0 提升至 35.0
         results = await coord._run_cleanup_steps(step_timeout_s=0.5)
-        assert len(results) == 8
+        assert len(results) == 9
         # 全部成功（mock step 立即返回，不超时）
         for r in results:
             assert r.ok is True
