@@ -467,6 +467,21 @@ class ConfigHandler:
     def set_onboarding_complete(complete=True):
         return ConfigHandler.save_config({"onboarding_complete": complete})
 
+    @classmethod
+    def is_embedded_mode(cls) -> bool:
+        """判断是否为 embedded PostgreSQL 模式（R-B1 单一入口点）。
+
+        判定条件：QTRADING_DATABASE_MODE == "embedded" AND AppConfig.embedded_pg_enabled == True
+        默认 external（与 app.bootstrap.prepare_database_runtime 现有逻辑一致）。
+        """
+        mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+        if mode != "embedded":
+            return False
+        try:
+            return bool(cls.load_config().get("embedded_pg_enabled", False))
+        except Exception:
+            return False
+
     @staticmethod
     def is_auto_update_enabled():
         return ConfigHandler.get_typed("auto_update_enabled", bool, False)
