@@ -1,0 +1,8 @@
+# 构建期环境变量: postgresql_embedded bundled feature 在 build.rs 读取
+# POSTGRESQL_VERSION 决定打包进二进制的 PostgreSQL 归档版本。
+# 与 pg_plan §7.1 POSTGRESQL_VERSION=17.2.0 单一权威保持一致；
+# pyproject.toml 侧版本声明在 Phase 1（T1.12 三方校验）补齐。
+[env]
+# 精确 pin（等号前缀）：caret 语义会解析为 17 系列最新归档（Spike 实测 17.10.0），
+# 见 pg_plan §7.1 "POSTGRESQL_VERSION 语义陷阱"。
+POSTGRESQL_VERSION = "=17.2.0"
