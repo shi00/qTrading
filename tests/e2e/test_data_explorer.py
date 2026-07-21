@@ -74,12 +74,12 @@ async def test_table_viewer_filter(e2e_page):
     # 等待 Flet on_change 处理完成（内部状态变更，无法通过 DOM 观察）
     await e2e_page.page.wait_for_timeout(1000)
 
-    # 设置过滤器：列=代码(ts_code)，操作符==，值=000001.SZ
+    # 设置过滤器：列=代码(ts_code)，操作符==（默认值），值=000001.SZ
+    # 注：filter_op 的默认值已是 "="（见 ui/views/data_view.py 的 _build_filter_op_options），
+    #     无需显式选择。省略此步可减少多 Dropdown 共存场景，避免触发 select_dropdown
+    #     暴力搜索模式导致的 worker crash（见 run 29736885686）。
     filter_col_label = I18n.get("data_filter_col")
     await e2e_page.select_dropdown(filter_col_label, I18n.get("col_ts_code"), timeout_ms=TIMEOUTS.TITLE)
-
-    filter_op_label = I18n.get("data_filter_op")
-    await e2e_page.select_dropdown(filter_op_label, "=", timeout_ms=TIMEOUTS.TITLE)
 
     filter_val_label = I18n.get("data_filter_val")
     await e2e_page.fill_textbox(filter_val_label, "000001.SZ", timeout_ms=TIMEOUTS.INTERACTION)
