@@ -181,8 +181,8 @@ async def perform_window_shutdown(
         True 表示 cleanup 成功；False 表示 cleanup 不完整（已 force_exit）
     """
     logger.info("[Main] Window close confirmed by user.")
-    coordinator.start_watchdog()
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
+    coordinator.start_watchdog(60.0)
+    cleanup_ok = await coordinator.do_cleanup(timeout_s=50.0, step_timeout_s=35.0)
     try:
         if not is_web_mode_fn():
             page.window.prevent_close = False
@@ -254,8 +254,8 @@ async def handle_disconnect(
     4. cleanup_ok=True：cancel_watchdog，log info，返回（等待 runtime 自然终止）
     5. cleanup_ok=False：log error，sleep 0.2s，force_exit(1)
     """
-    coordinator.start_watchdog(25)
-    cleanup_ok = await coordinator.do_cleanup(timeout_s=20.0)
+    coordinator.start_watchdog(60)
+    cleanup_ok = await coordinator.do_cleanup(timeout_s=50.0, step_timeout_s=35.0)
     if cleanup_done_fn():
         return
     if cleanup_ok:
