@@ -169,6 +169,36 @@ class TestSystemTabContract:
         assert "page_ref" not in params, "SystemTab 不应接收 page_ref 参数"
         assert "show_snack_callback" in params, "SystemTab 必须接收 show_snack_callback"
 
+    def test_no_bare_red_color_replaced_with_error(self):
+        """P1-2 契约: system_tab 不再裸用 ft.Colors.RED (除装饰色外)。
+
+        L681 ft.Colors.RED 已替换为 AppColors.ERROR。
+        """
+        source = _raw_source()
+        # 拦截所有 ft.Colors.RED 裸用 (排除 RED_400)
+        import re
+
+        red_bare = re.findall(r"ft\.Colors\.RED\b(?!_)", source)
+        assert not red_bare, f"system_tab 不应裸用 ft.Colors.RED (P1-2): 发现 {len(red_bare)} 处"
+        # 正向守护 AppColors.ERROR 已被使用
+        assert "AppColors.ERROR" in source, "system_tab 必须使用 AppColors.ERROR (P1-2)"
+
+    def test_decorative_icon_colors_preserved(self):
+        """P1-2 契约: system_tab 5 个 icon_color 装饰色保留 (check_R 装饰色豁免)。
+
+        §0.5.11.1 #94: L572 BLUE/L582 PURPLE/L627 INDIGO/L647 ORANGE/L667 TEAL
+        是装饰色非语义色，保留 ft.Colors.* 或改 Layer 2 token。
+        """
+        source = _raw_source()
+        # 装饰色清单 (5 个)
+        decorative_colors = ["BLUE", "PURPLE", "INDIGO", "ORANGE", "TEAL"]
+        preserved = [c for c in decorative_colors if f"ft.Colors.{c}" in source]
+        # 至少保留 3 个装饰色 (允许部分迁移到 Layer 2 token)
+        assert len(preserved) >= 3, (
+            f"system_tab 应保留至少 3 个装饰色 (BLUE/PURPLE/INDIGO/ORANGE/TEAL), "
+            f"实际保留 {len(preserved)} 个: {preserved}"
+        )
+
 
 # ============================================================================
 # R2 CancelledError 传播契约 (CLAUDE.md §3 红线 R2)

@@ -31,7 +31,21 @@ from ui.components.settings_widgets import DashboardCard, SectionHeader, Setting
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles, ThemeName
-from ui.viewmodels.system_settings_view_model import SystemSettingsViewModel
+from ui.viewmodels.system_settings_view_model import (
+    CONCURRENCY_MAX,
+    CONCURRENCY_MIN,
+    CPU_WORKERS_MAX,
+    CPU_WORKERS_MIN,
+    DB_OVERFLOW_MAX,
+    DB_OVERFLOW_MIN,
+    DB_POOL_MAX,
+    DB_POOL_MIN,
+    DB_TIMEOUT_MAX,
+    DB_TIMEOUT_MIN,
+    IO_WORKERS_MAX,
+    IO_WORKERS_MIN,
+    SystemSettingsViewModel,
+)
 from ui.viewmodels.system_viewmodel import SystemViewModel
 from ui.views.settings_tabs.tier_api_panel import TierApiPanel
 from utils.log_decorators import UILogger
@@ -113,9 +127,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     # --- Pure UI state (diagnostics_exporting 为纯 UI state, 不下沉 VM) ---
     # 其余字段直接消费 settings_state.* (VM 单一真值源, set_* 触发 _notify → 重渲染)
     diagnostics_exporting, set_diagnostics_exporting = ft.use_state(False)
+    # P3-17: 语言切换 loading 态 (纯 UI state, VM 不感知 locale 故不下沉 VM)
+    is_changing_language, set_is_changing_language = ft.use_state(False)
 
     # --- Async handlers (R2: CancelledError 显式 raise; 调用 VM commands) ---
     async def _do_language_change(new_locale: str) -> None:
+        set_is_changing_language(True)  # P3-17: 切换期间 Dropdown disabled + ProgressRing
         try:
             success = await settings_vm.save_language(new_locale)
             if not success:
@@ -141,6 +158,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                             exc_info=True,
                         )
             if show_snack_callback:
+                # P3-17: 文案更新 — 提示部分模块需重启后完全生效
                 show_snack_callback(I18n.get("settings_language_changed"))
         except asyncio.CancelledError:
             raise  # R2: 必须传播
@@ -149,6 +167,8 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
             logger.debug("[SystemTab] Language | Change failed traceback", exc_info=True)
             if show_snack_callback:
                 show_snack_callback(DataSanitizer.sanitize_error(ex), color=AppColors.ERROR)
+        finally:
+            set_is_changing_language(False)  # P3-17
 
     async def _do_theme_change(new_theme: str) -> None:
         try:
@@ -188,12 +208,10 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     async def _do_save_concurrency(raw_val: str) -> None:
+        # P2-13: raw_val 来自 VM state (set_*_value 已 clamp), View 不再硬编码范围检查;
+        # VM save_* 保留范围检查作为兜底 (场景遗漏 33a).
         try:
-            val = int(raw_val)
-            if val < 1 or val > 32:
-                if show_snack_callback:
-                    show_snack_callback(I18n.get("sys_snack_concurrency_range"), color=AppColors.ERROR)
-                return
+            int(raw_val)  # 仅校验数字格式, 范围由 VM clamp + save 兜底
             success = await settings_vm.save_concurrency(raw_val)
             if not success:
                 if show_snack_callback:
@@ -215,29 +233,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     async def _do_save_db_pool(pool_size_str: str, max_overflow_str: str, timeout_str: str) -> None:
+        # P2-13: 参数来自 VM state (set_*_value 已 clamp), View 不再硬编码范围检查;
+        # VM save_db_pool 保留范围检查作为兜底 (场景遗漏 33a).
         try:
-            pool_size = int(pool_size_str)
-            max_overflow = int(max_overflow_str)
-            timeout = int(timeout_str)
-            if pool_size < 1 or pool_size > 50:
-                if show_snack_callback:
-                    show_snack_callback(I18n.get("sys_snack_pool_range"), color=AppColors.ERROR)
-                return
-            if max_overflow < 0 or max_overflow > 50:
-                if show_snack_callback:
-                    show_snack_callback(
-                        I18n.get("settings_db_overflow") + ": 0-50",
-                        color=AppColors.ERROR,
-                    )
-                return
-            if timeout < 5 or timeout > 300:
-                if show_snack_callback:
-                    show_snack_callback(
-                        I18n.get("settings_db_timeout") + ": 5-300",
-                        color=AppColors.ERROR,
-                    )
-                return
-
+            int(pool_size_str)
+            int(max_overflow_str)
+            int(timeout_str)
             success = await settings_vm.save_db_pool(pool_size_str, max_overflow_str, timeout_str)
             if not success:
                 if show_snack_callback:
@@ -256,22 +257,15 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
                 show_snack_callback(I18n.get("sys_snack_save_err"), color=AppColors.ERROR)
 
     async def _do_save_thread_pool(io_str: str, cpu_str: str) -> None:
+        # P2-13: 参数来自 VM state (set_*_value 已 clamp), View 不再硬编码范围检查;
+        # VM save_thread_pool 保留范围检查作为兜底 (场景遗漏 33a).
         try:
             if not io_str or not cpu_str:
                 if show_snack_callback:
                     show_snack_callback(I18n.get("sys_snack_threads_empty"), color=AppColors.ERROR)
                 return
-            io_val = int(io_str)
-            cpu_val = int(cpu_str)
-            if io_val < 4 or io_val > 512:
-                if show_snack_callback:
-                    show_snack_callback(I18n.get("sys_snack_io_range"), color=AppColors.ERROR)
-                return
-            if cpu_val < 1 or cpu_val > 64:
-                if show_snack_callback:
-                    show_snack_callback(I18n.get("sys_snack_cpu_range"), color=AppColors.ERROR)
-                return
-
+            int(io_str)
+            int(cpu_str)
             if show_snack_callback:
                 show_snack_callback(I18n.get("common_preparing"))
             success = await settings_vm.save_thread_pool(io_str, cpu_str)
@@ -404,7 +398,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get_language_label(),
         value=settings_state.language_value,
         width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
         content_padding=10,
         options=_build_language_options(),
@@ -412,13 +406,29 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         bgcolor=AppColors.INPUT_BG,
         color=AppColors.INPUT_TEXT,
         border_color=AppColors.INPUT_BORDER,
+        disabled=is_changing_language,  # P3-17: 切换期间禁用, 防重复提交
+    )
+    # P3-17: 切换期间显示 ProgressRing (复用 backtest loading 范式)
+    language_control: ft.Control = ft.Row(
+        [
+            language_dropdown,
+            ft.ProgressRing(
+                width=20,
+                height=20,
+                stroke_width=2,
+                color=AppColors.PRIMARY,
+                visible=is_changing_language,
+            ),
+        ],
+        spacing=8,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
     theme_dropdown = ft.Dropdown(
         label=I18n.get("settings_theme"),
         value=settings_state.theme_value,
         width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
         content_padding=10,
         options=_build_theme_options(),
@@ -432,11 +442,13 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("settings_concurrency"),
         value=settings_state.concurrency_value,
         width=AppStyles.CONTROL_WIDTH_SM,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         keyboard_type=ft.KeyboardType.NUMBER,
         input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
         suffix=I18n.get("sys_suffix_threads"),
+        # P2-13: hint_text 提示范围 (VM 公开别名, 消除硬编码双重定义)
+        hint_text=I18n.get("sys_hint_range_fmt", min=CONCURRENCY_MIN, max=CONCURRENCY_MAX),
         border_radius=8,
         on_change=lambda e: settings_vm.set_concurrency_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -448,7 +460,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("settings_log_level"),
         value=settings_state.log_level_value,
         width=AppStyles.CONTROL_WIDTH_MD,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         border_radius=8,
         content_padding=10,
         options=_build_log_level_options(),
@@ -462,11 +474,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("settings_db_pool"),
         value=settings_state.pool_size_value,
         width=AppStyles.CONTROL_WIDTH_SM,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         keyboard_type=ft.KeyboardType.NUMBER,
         input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
         suffix=I18n.get("common_items"),
+        hint_text=I18n.get("sys_hint_range_fmt", min=DB_POOL_MIN, max=DB_POOL_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_pool_size_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -478,11 +491,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("settings_db_overflow"),
         value=settings_state.db_overflow_value,
         width=AppStyles.CONTROL_WIDTH_SM,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         keyboard_type=ft.KeyboardType.NUMBER,
         input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
         suffix=I18n.get("common_items"),
+        hint_text=I18n.get("sys_hint_range_fmt", min=DB_OVERFLOW_MIN, max=DB_OVERFLOW_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_db_overflow_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -494,11 +508,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("settings_db_timeout"),
         value=settings_state.db_timeout_value,
         width=AppStyles.CONTROL_WIDTH_SM,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         keyboard_type=ft.KeyboardType.NUMBER,
         input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
         suffix=I18n.get("common_seconds"),
+        hint_text=I18n.get("sys_hint_range_fmt", min=DB_TIMEOUT_MIN, max=DB_TIMEOUT_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_db_timeout_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -510,11 +525,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("sys_pool_io"),
         value=settings_state.io_workers_value,
         width=AppStyles.CONTROL_WIDTH_SM,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         keyboard_type=ft.KeyboardType.NUMBER,
         input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
         suffix=I18n.get("sys_suffix_threads"),
+        hint_text=I18n.get("sys_hint_range_fmt", min=IO_WORKERS_MIN, max=IO_WORKERS_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_io_workers_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -526,11 +542,12 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         label=I18n.get("sys_pool_cpu"),
         value=settings_state.cpu_workers_value,
         width=AppStyles.CONTROL_WIDTH_SM,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         keyboard_type=ft.KeyboardType.NUMBER,
         input_filter=ft.InputFilter(allow=True, regex_string=r"[0-9]"),
         suffix=I18n.get("sys_suffix_threads"),
+        hint_text=I18n.get("sys_hint_range_fmt", min=CPU_WORKERS_MIN, max=CPU_WORKERS_MAX),  # P2-13
         border_radius=8,
         on_change=lambda e: settings_vm.set_cpu_workers_value(e.control.value),
         bgcolor=AppColors.INPUT_BG,
@@ -541,7 +558,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
     no_proxy_input = ft.TextField(
         value=settings_state.no_proxy_value,
         expand=True,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         content_padding=10,
         hint_text=I18n.get("settings_no_proxy_hint"),
         border_radius=8,
@@ -572,7 +589,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
         icon_color=ft.Colors.BLUE,
         title=I18n.get("settings_language"),
         subtitle=I18n.get("settings_language_desc"),
-        control=language_dropdown,
+        control=language_control,  # P3-17: Row(dropdown + ProgressRing)
         title_key="settings_language",
         subtitle_key="settings_language_desc",
     )
@@ -678,7 +695,7 @@ def SystemTab(show_snack_callback: Callable) -> ft.Container:
 
     row_diagnostics = SettingRow(
         icon=safe_icon_str(ft.Icons.ANALYTICS_ROUNDED),
-        icon_color=ft.Colors.RED,
+        icon_color=AppColors.ERROR,
         title=I18n.get("settings_diagnostics"),
         subtitle=I18n.get("settings_diagnostics_desc"),
         control=diagnostics_button,

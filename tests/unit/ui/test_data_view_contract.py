@@ -343,6 +343,21 @@ class TestDataViewDeclarativeContract:
         assert "class SQLConsoleTab(" not in _code_source()
         assert "class DataExplorerView(" not in _code_source()
 
+    def test_no_bare_ft_colors_red_green_blue(self):
+        """P1-2 契约: data_view 不再裸用 ft.Colors.RED/GREEN/BLUE/YELLOW/ORANGE/PURPLE/TEAL/CYAN/INDIGO。
+
+        这些裸色值必须替换为 AppColors token (RED→ERROR/GREEN→SUCCESS/BLUE→INFO 等)。
+        灰阶色 (GREY/WHITE/BLACK/TRANSPARENT) 与 Layer 1 语义 token (SURFACE/ON_SURFACE 等)
+        不在拦截名单内 (灰阶豁免 warning / Layer 1 完全放行)。
+        """
+        source = _raw_source()
+        bare_colors = ["RED", "RED_400", "GREEN", "BLUE", "YELLOW", "ORANGE", "PURPLE", "TEAL", "CYAN", "INDIGO"]
+        for color in bare_colors:
+            forbidden = f"ft.Colors.{color}"
+            assert forbidden not in source, (
+                f"P1-2 契约违反: data_view.py 含裸色值 {forbidden}, 必须替换为 AppColors token"
+            )
+
 
 # ============================================================================
 # FakeVM 基础设施

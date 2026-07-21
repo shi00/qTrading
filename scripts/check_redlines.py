@@ -1,4 +1,4 @@
-"""红线自动化检查脚本（R4/R12/R13/R14/R15）。
+"""红线自动化检查脚本（R4/R12/R13/R14/R15 + UI 裸 ft.Colors 拦截）。
 
 依据 CLAUDE.md §3.1 红线表，对项目代码进行静态分析：
 - R4  SQL 注入：扫描 asyncpg 原生查询中的 %s 占位符（必须用 $1, $2, ...）
@@ -6,6 +6,7 @@
 - R13 DAO 未注册：对比 daos/ 下的 DAO 类与 CacheManager.__init__ 实例化清单
 - R14 策略未注册：扫描继承 BaseStrategy/PolarsBaseStrategy 的类是否使用 @register_strategy
 - R15 单例未注册：扫描带 _instance/__new__ 的单例类是否使用 @register_singleton
+- R_no_bare_ft_colors_in_ui: 扫描 UI 层裸 ft.Colors.<COLOR> 引用 (必须替换为 AppColors token)
 
 退出码：0 通过，1 失败。供 pre-commit `redline-check` hook 与 pytest 契约测试调用。
 
@@ -395,6 +396,170 @@ def check_R15() -> list[str]:
 
 
 # ============================================================================
+# R_no_bare_ft_colors_in_ui: UI 层裸 ft.Colors.<COLOR> 引用拦截
+# ============================================================================
+
+# 灰阶色 (warning 提示，不阻断)
+_GRAYSCALE_COLORS = frozenset({"GREY", "WHITE", "BLACK", "TRANSPARENT"})
+
+# Layer 1 语义 token (已合规，完全放行)
+_LAYER1_SEMANTIC_TOKENS = frozenset(
+    {
+        "SURFACE",
+        "ON_SURFACE",
+        "ON_SURFACE_VARIANT",
+        "SURFACE_CONTAINER_HIGHEST",
+        "PRIMARY",
+        "PRIMARY_CONTAINER",
+        "ON_PRIMARY",
+        "ON_PRIMARY_CONTAINER",
+        "SECONDARY",
+        "SECONDARY_CONTAINER",
+        "ON_SECONDARY",
+        "ON_SECONDARY_CONTAINER",
+        "TERTIARY",
+        "ERROR",
+        "ERROR_CONTAINER",
+        "ON_ERROR",
+        "ON_ERROR_CONTAINER",
+        "OUTLINE",
+        "OUTLINE_VARIANT",
+        "SHADOW",
+        "SCRIM",
+        "INVERSE_PRIMARY",
+        "INVERSE_SURFACE",
+        "ON_INVERSE_SURFACE",
+        "BACKGROUND",
+        "ON_BACKGROUND",
+    }
+)
+
+# 裸色值拦截名单 (非零退出)
+_BARE_COLOR_INTERCEPT = frozenset(
+    {
+        "RED",
+        "RED_400",
+        "GREEN",
+        "BLUE",
+        "YELLOW",
+        "ORANGE",
+        "PURPLE",
+        "TEAL",
+        "CYAN",
+        "INDIGO",
+    }
+)
+
+# settings_tabs/ 目录下 icon_color 装饰色豁免 (warning 不阻断)
+# 仅装饰性色值: system_tab 的 BLUE/PURPLE/INDIGO/ORANGE/TEAL + data_source_tab 的 PURPLE
+_SETTINGS_TABS_DECORATIVE = frozenset({"BLUE", "PURPLE", "INDIGO", "ORANGE", "TEAL"})
+
+
+def _is_ft_colors_attr(node: ast.AST) -> str | None:
+    """识别 ``ft.Colors.X`` 表达式，返回 X 名字；非此模式返回 None。"""
+    if not isinstance(node, ast.Attribute):
+        return None
+    if not isinstance(node.value, ast.Attribute):
+        return None
+    inner = node.value
+    if not isinstance(inner.value, ast.Name) or inner.value.id != "ft":
+        return None
+    if inner.attr != "Colors":
+        return None
+    return node.attr
+
+
+def _is_settings_tabs_dir(source_path: Path) -> bool:
+    """判断文件是否位于 ui/views/settings_tabs/ 目录下 (装饰色豁免范围)。"""
+    try:
+        rel = source_path.relative_to(ROOT)
+    except ValueError:
+        return False
+    parts = rel.parts
+    return len(parts) >= 3 and parts[0] == "ui" and parts[1] == "views" and parts[2] == "settings_tabs"
+
+
+def _check_R_no_bare_ft_colors_in_tree(tree: ast.Module, source_path: Path) -> tuple[list[str], list[str]]:
+    """纯函数：检查 AST 中的 ft.Colors.X 裸色引用。
+
+    返回 (errors, warnings) 元组。
+    - Layer 1 语义 token (SURFACE/ON_SURFACE/...) → 完全放行
+    - 灰阶色 (GREY/WHITE/BLACK/TRANSPARENT) → warning
+    - 裸色值 (RED/GREEN/BLUE/YELLOW/ORANGE/PURPLE/TEAL/CYAN/INDIGO) → error
+    - settings_tabs/ 目录下 icon_color 装饰色 (BLUE/PURPLE/INDIGO/ORANGE/TEAL) → warning (豁免)
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    rel = source_path.relative_to(ROOT)
+    is_settings_tabs = _is_settings_tabs_dir(source_path)
+
+    for node in ast.walk(tree):
+        attr = _is_ft_colors_attr(node)
+        if attr is None:
+            continue
+        # Layer 1 语义 token 完全放行
+        if attr in _LAYER1_SEMANTIC_TOKENS:
+            continue
+        # 灰阶色 → warning
+        if attr in _GRAYSCALE_COLORS:
+            warnings.append(f"{rel}:{node.lineno}: 灰阶色 ft.Colors.{attr} 建议改用 AppColors token")
+            continue
+        # 裸色值拦截
+        if attr in _BARE_COLOR_INTERCEPT:
+            # settings_tabs/ 目录下 icon_color 装饰色场景豁免（仅 warning）
+            if is_settings_tabs and attr in _SETTINGS_TABS_DECORATIVE:
+                warnings.append(
+                    f"{rel}:{node.lineno}: 装饰色 ft.Colors.{attr} 建议改用 AppColors token "
+                    f"(settings_tabs icon_color 场景豁免)"
+                )
+                continue
+            errors.append(
+                f"R_no_bare_ft_colors_in_ui: {rel}:{node.lineno}: 裸色值 ft.Colors.{attr} "
+                f"必须替换为 AppColors token (RED→ERROR/GREEN→SUCCESS/BLUE→INFO 等)"
+            )
+    return errors, warnings
+
+
+def check_R_no_bare_ft_colors_in_ui() -> list[str]:
+    """扫描 UI 层裸 ft.Colors.<COLOR> 色值引用。
+
+    扫描范围: ui/views/, ui/components/, ui/startup_views.py (不扫 tests)
+    退出码: 0 通过；返回非空 list 表示有 error (1 失败)。
+    warnings 输出到 stderr (不阻断)。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    scan_paths: list[Path] = []
+    # ui/views/ + ui/components/
+    for sub in ("ui/views", "ui/components"):
+        d = ROOT / sub
+        if d.exists():
+            for p in _iter_py_files(d):
+                scan_paths.append(p)
+    # ui/startup_views.py
+    startup = ROOT / "ui" / "startup_views.py"
+    if startup.exists():
+        scan_paths.append(startup)
+
+    for p in scan_paths:
+        tree = _parse_module(p)
+        if tree is None:
+            continue
+        errs, warns = _check_R_no_bare_ft_colors_in_tree(tree, p)
+        errors.extend(errs)
+        warnings.extend(warns)
+
+    # 输出 warnings 到 stderr (不阻断)
+    if warnings:
+        print("[WARN] UI 灰阶/装饰色 ft.Colors 引用建议替换为 AppColors token：", file=sys.stderr)
+        for w in warnings:
+            print(f"  - {w}", file=sys.stderr)
+
+    return errors
+
+
+# ============================================================================
 # CLI 入口
 # ============================================================================
 
@@ -407,6 +572,7 @@ def main() -> int:
         ("R13 DAO 未注册", check_R13()),
         ("R14 策略未注册", check_R14()),
         ("R15 单例未注册", check_R15()),
+        ("R_no_bare_ft_colors_in_ui", check_R_no_bare_ft_colors_in_ui()),
     ]
     all_errors: list[str] = []
     for _, errs in checks:
@@ -418,7 +584,7 @@ def main() -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
-    print("[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15）")
+    print("[PASS] 红线自动化检查通过（R4/R12/R13/R14/R15 + R_no_bare_ft_colors_in_ui）")
     return 0
 
 

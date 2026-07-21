@@ -148,7 +148,7 @@ def _build_header(
         text = ft.Text(
             label,
             weight=ft.FontWeight.BOLD,
-            size=12,
+            size=AppStyles.FONT_SIZE_BODY_SM,
             color=AppColors.TABLE_HEADER_TEXT,
             no_wrap=True,
         )
@@ -184,10 +184,18 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
 
         is_trend = col_id in _TREND_COLS
         if is_trend and numeric_val is not None:
+            # P3-15 色盲友好: 涨跌前置 +/- 符号 (U+002D 普通连字符), 不依赖颜色区分
+            # 批次 3 #128: 移除 hasattr + hex fallback, 直接使用 AppColors.UP_RED/DOWN_GREEN
             if numeric_val > 0:
-                text_color = AppColors.UP_RED if hasattr(AppColors, "UP_RED") else "#F44336"
+                text_color = AppColors.UP_RED
+                if not val.startswith("+"):
+                    val = "+" + val
             elif numeric_val < 0:
-                text_color = AppColors.DOWN_GREEN if hasattr(AppColors, "DOWN_GREEN") else "#4CAF50"
+                text_color = AppColors.DOWN_GREEN
+                # 统一为 U+002D 普通连字符 (避免 U+2212 在某些字体下渲染异常)
+                val = val.replace("−", "-")
+                if not val.startswith("-"):
+                    val = "-" + val
 
         if col_id in _CODE_COLS and "." in val:
             parts = val.split(".", maxsplit=1)
@@ -197,20 +205,20 @@ def _build_cells(row_data: dict[str, Any], columns: list[dict[str, Any]]) -> lis
                     ft.TextSpan(
                         "." + parts[1],
                         ft.TextStyle(
-                            size=10,
+                            size=AppStyles.FONT_SIZE_CAPTION,
                             color=AppColors.TEXT_TERTIARY  # type: ignore[untyped]
                             if hasattr(AppColors, "TEXT_TERTIARY")
                             else "#888888",
                         ),
                     ),
                 ],
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 no_wrap=True,
             )
         else:
             text = ft.Text(
                 val,
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 no_wrap=True,
                 weight=ft.FontWeight.BOLD if is_trend else None,
                 color=text_color,

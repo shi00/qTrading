@@ -174,12 +174,12 @@ def DatabaseConfigPanel(
     status_icon = ft.Icon(
         status_icon_name,
         visible=status_text != "",
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=status_color,
     )
     status_text_ctrl = ft.Text(
         status_text,
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=status_color,
     )
 
@@ -187,7 +187,7 @@ def DatabaseConfigPanel(
     db_info_text = _render_message(state.db_info)
     db_info_text_ctrl = ft.Text(
         db_info_text,
-        size=11,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=AppColors.TEXT_SECONDARY,
         text_align=ft.TextAlign.CENTER,
     )
@@ -216,7 +216,7 @@ def DatabaseConfigPanel(
         children.append(
             ft.Text(
                 I18n.get("db_connection_settings"),
-                size=16,
+                size=AppStyles.FONT_SIZE_TITLE,
                 weight=ft.FontWeight.W_500,
                 color=AppColors.TEXT_PRIMARY,
                 text_align=ft.TextAlign.CENTER,
@@ -271,7 +271,7 @@ def DatabaseConfigPanel(
                 ft.Container(height=25),
                 ft.Text(
                     I18n.get("db_info"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                     text_align=ft.TextAlign.CENTER,

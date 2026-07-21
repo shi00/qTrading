@@ -34,6 +34,8 @@ from ui.components.flet_type_helpers import (
     safe_on_click,
     safe_on_select,
 )
+from ui.components.state_views import ErrorState
+from ui.components.toast_manager import open_export_folder
 from ui.components.virtual_table import PaginatedTable
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
@@ -62,11 +64,20 @@ def _get_page() -> ft.Page | None:
         return None
 
 
-def _safe_show_toast(page: ft.Page, msg: str, msg_type: str = "info") -> None:
-    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。"""
+def _safe_show_toast(
+    page: ft.Page,
+    msg: str,
+    msg_type: str = "info",
+    action_text: str | None = None,
+    on_action: typing.Callable[[], None] | None = None,
+) -> None:
+    """page.show_toast 是 main.py 动态挂载的，ft.Page 类型存根未声明。
+
+    P2-10: action_text/on_action 透传 (导出成功"打开文件夹"按钮)。
+    """
     show_toast = typing.cast(typing.Any, page).show_toast
     if show_toast is not None:
-        show_toast(msg, msg_type)
+        show_toast(msg, msg_type, action_text=action_text, on_action=on_action)
 
 
 def _format_cell_value(val: object, col_name: str) -> str:
@@ -363,7 +374,14 @@ def TableViewerTab(
                     msg = I18n.get("data_export_success", file=filename)
                     page = _get_page()
                     if page is not None:
-                        _safe_show_toast(page, msg, "success")
+                        # P2-10: 导出成功 toast 附"打开文件夹" action
+                        _safe_show_toast(
+                            page,
+                            msg,
+                            "success",
+                            action_text=I18n.get("data_export_open_folder"),
+                            on_action=lambda: page.run_task(open_export_folder, filepath),
+                        )
                 except Exception as ex:
                     logger.error("Export write failed: %s", ex, exc_info=True)
                     page = _get_page()
@@ -396,6 +414,13 @@ def TableViewerTab(
         page = _get_page()
         if page is not None:
             page.run_task(_do_refresh)
+
+    def _on_retry_load() -> None:
+        """ErrorState on_retry: 清除错误 + 重新加载 schema (P1-3 批次 2)."""
+        vm.clear_error()
+        page = _get_page()
+        if page is not None:
+            page.run_task(_load_schema_and_data)
 
     def _on_sort(col_id: str, new_asc: bool) -> None:
         try:
@@ -457,7 +482,7 @@ def TableViewerTab(
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         options=_build_table_selector_options(state.tables_list, vm),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=10,
     )
 
@@ -472,7 +497,7 @@ def TableViewerTab(
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         options=_build_filter_col_options(state.current_table, state.table_columns, vm),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=10,
     )
 
@@ -487,7 +512,7 @@ def TableViewerTab(
         border_color=AppColors.INPUT_BORDER,
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=5,
     )
 
@@ -502,7 +527,7 @@ def TableViewerTab(
         border_color=AppColors.INPUT_BORDER,
         text_style=ft.TextStyle(color=AppColors.INPUT_TEXT),
         height=36,
-        text_size=13,
+        text_size=AppStyles.FONT_SIZE_BODY,
         content_padding=10,
     )
 
@@ -511,14 +536,14 @@ def TableViewerTab(
         tooltip=I18n.get("common_query"),
         on_click=safe_on_click(_on_query_click),
         icon_color=AppColors.PRIMARY,
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
         disabled=is_loading,
     )
     btn_refresh = ft.IconButton(
         ft.Icons.REFRESH,
         tooltip=I18n.get("common_refresh"),
         on_click=safe_on_click(_on_refresh_click),
-        icon_size=20,
+        icon_size=AppStyles.FONT_SIZE_HEADLINE,
         disabled=is_loading,
     )
 
@@ -540,13 +565,13 @@ def TableViewerTab(
                 ft.Container(height=16),
                 ft.Text(
                     I18n.get("data_loading"),
-                    size=16,
+                    size=AppStyles.FONT_SIZE_TITLE,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Text(
                     I18n.get("data_loading_hint"),
-                    size=13,
+                    size=AppStyles.FONT_SIZE_BODY,
                     color=AppColors.TEXT_SECONDARY,
                 ),
             ],
@@ -561,8 +586,16 @@ def TableViewerTab(
         border=ft.Border.all(1, ft.Colors.with_opacity(0.1, AppColors.BORDER)),
     )
 
-    # 表格区域: 加载中显示 loading widget, 否则显示 PaginatedTable
-    if is_loading:
+    # 表格区域: P1-3 批次 2 三态 (error > loading > table > loading placeholder)
+    if state.error_message is not None:
+        grid_content = ErrorState(
+            icon=ft.Icons.ERROR_OUTLINE,
+            title=I18n.get("error_state_load_failed_title"),
+            message=I18n.get("error_state_load_failed_message"),
+            on_retry=_on_retry_load,
+            retry_text=I18n.get("common_retry"),
+        )
+    elif is_loading:
         grid_content = loading_widget
     elif state.table_columns:
         grid_content = PaginatedTable(
@@ -635,8 +668,8 @@ def TableViewerTab(
                 [
                     ft.Text(
                         I18n.get("data_total_rows").format(count=state.total_rows),
-                        size=12,
-                        color=ft.Colors.GREY,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
+                        color=AppColors.TEXT_SECONDARY,
                     ),
                     ft.Container(expand=True),
                     ft.IconButton(
@@ -703,7 +736,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
             return
         UILogger.log_action("SQLConsoleTab", "Click", "btn_run_query")
         set_status_text(I18n.get("data_status_executing"))
-        set_status_color(ft.Colors.BLUE)
+        set_status_color(AppColors.INFO)
         try:
             start_time = time.time()
             await vm.execute_sql(sql_text)
@@ -722,7 +755,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                         )
                     else:
                         set_status_text(I18n.get("data_sql_success").format(time=elapsed, rows=row_count))
-                    set_status_color(ft.Colors.GREEN)
+                    set_status_color(AppColors.SUCCESS)
                 else:
                     set_status_text(I18n.get("data_sql_error"))
                     set_status_color(AppColors.ERROR)
@@ -759,7 +792,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
         multiline=True,
         min_lines=5,
         max_lines=10,
-        text_size=14,
+        text_size=AppStyles.FONT_SIZE_LG,
         label=I18n.get("data_sql_label"),
         hint_text=I18n.get("data_sql_hint"),
         value=sql_text,
@@ -793,13 +826,13 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
     empty_hint_text = ft.Text(
         I18n.get("data_sql_empty_hint"),
         color=AppColors.TEXT_HINT,
-        size=14,
+        size=AppStyles.FONT_SIZE_LG,
     )
     empty_state = ft.Container(
         content=ft.Column(
             [
                 ft.Container(height=40),
-                ft.Icon(ft.Icons.TERMINAL, size=48, color=AppColors.TEXT_HINT),
+                ft.Icon(ft.Icons.TERMINAL, size=AppStyles.ICON_SIZE_XL, color=AppColors.TEXT_HINT),
                 empty_hint_text,
             ],
             alignment=ft.MainAxisAlignment.CENTER,
@@ -828,7 +861,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                                 ft.Container(expand=True),
                                 ft.Text(
                                     I18n.get("data_date_fmt_hint"),
-                                    size=11,
+                                    size=AppStyles.FONT_SIZE_CAPTION,
                                     color=AppColors.TEXT_HINT,
                                 ),
                                 ft.OutlinedButton(
@@ -859,7 +892,7 @@ def SQLConsoleTab(vm: DataExplorerViewModel) -> ft.Column:
                 padding=10,
             ),
             ft.Container(
-                content=ft.Text(status_text, size=12, color=status_color),
+                content=ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
                 padding=5,
                 bgcolor=AppColors.SURFACE_VARIANT,
             ),

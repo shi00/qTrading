@@ -216,6 +216,11 @@ class _FakeHomeState:
     market_indices: tuple = ()
     market_hsgt: Any = None
     market_hot_concepts: tuple = ()
+    # P1-3 批次 2: 三态字段 (对齐 HomeState 新增 4 字段)
+    is_loading: bool = False
+    has_market_data: bool = False
+    has_news_data: bool = False
+    load_error: Any = None
 
 
 class _FakeHomeViewModel:
@@ -308,6 +313,16 @@ class _FakeHomeViewModel:
         self.method_calls.append("clear_state")
         self.last_market_data = {}
         self.news_data = None
+
+    def set_load_error(self, message: Any) -> None:
+        """P1-3 批次 2: Mock set_load_error."""
+        self.method_calls.append(f"set_load_error:{message}")
+        self._set_state(load_error=message)
+
+    def set_loading(self, is_loading: bool) -> None:
+        """P1-3 批次 2: Mock set_loading."""
+        self.method_calls.append(f"set_loading:{is_loading}")
+        self._set_state(is_loading=is_loading)
 
 
 @pytest.fixture

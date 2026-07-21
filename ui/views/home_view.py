@@ -26,10 +26,12 @@ import flet as ft
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.components.market_dashboard import MarketDashboard
 from ui.components.news_feed import NewsFeed
+from ui.components.state_views import ErrorState
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.pubsub_topics import CACHE_CLEARED_TOPIC
-from ui.theme import AppColors
+from ui.pubsub_topics import CACHE_CLEARED_TOPIC, TOPIC_NAVIGATE
+from ui.theme import AppColors, AppStyles
+from ui.viewmodels import Message
 from ui.viewmodels.home_view_model import HomeViewModel
 from ui.views.viewport_state import ViewportState
 from utils.correlation import ensure_correlation_id
@@ -88,6 +90,26 @@ def HomeView(
         except RuntimeError:
             logger.debug("[HomeView] page not available for refresh")
 
+    def _on_retry_load() -> None:
+        """ErrorState on_retry: 触发 _refresh_clicked 逻辑 (P1-3 批次 2).
+
+        _refresh_clicked 内部 e 参数未使用, 可安全传 None。
+        """
+        _refresh_clicked(typing.cast(ft.ControlEvent, None))
+
+    def _navigate_to_data_source() -> None:
+        """ErrorState CTA: PubSub 广播导航到 data_source 设置页 (P1-3 批次 2 #55).
+
+        home_view 无 page.go() 路由, 通过 PubSub TOPIC_NAVIGATE 广播,
+        app_layout 订阅后切换 NavigationRail selected_index。
+        """
+        try:
+            page = ft.context.page
+            if page is not None:
+                page.pubsub.send_all_on_topic(TOPIC_NAVIGATE, "settings")
+        except RuntimeError:
+            logger.debug("[HomeView] page not available for navigation")
+
     async def _on_load_more_click(e: ft.ControlEvent) -> None:
         try:
             await vm.load_next_page()  # state 自动更新, 无需 View 持有快照
@@ -99,6 +121,9 @@ def HomeView(
     # --- Data loading ---
 
     async def _load_data() -> None:
+        # P1-3 批次 2: 包装 set_loading/set_load_error 实现加载态/错误态
+        vm.set_loading(True)
+        vm.set_load_error(None)
         try:
             await vm.load_market_data()
             await vm.refresh_news()
@@ -106,6 +131,9 @@ def HomeView(
             raise  # R2: 必须传播
         except Exception as exc:
             logger.error("[HomeView] Load failed: %s", DataSanitizer.sanitize_error(exc))
+            vm.set_load_error(Message("home_load_failed_title", {}))
+        finally:
+            vm.set_loading(False)
 
     async def _init_and_load() -> None:
         if not active:
@@ -152,9 +180,9 @@ def HomeView(
     header = ft.Row(
         safe_controls(
             [
-                ft.Text(I18n.get("home_title"), size=24, weight=ft.FontWeight.BOLD),
+                ft.Text(I18n.get("home_title"), size=AppStyles.FONT_SIZE_XL, weight=ft.FontWeight.BOLD),
                 ft.Container(expand=True),
-                ft.Text(date_text_value, size=12, color=AppColors.TEXT_SECONDARY),
+                ft.Text(date_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                 ft.IconButton(
                     ft.Icons.REFRESH,
                     on_click=safe_on_click(_refresh_clicked),
@@ -166,25 +194,49 @@ def HomeView(
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
+    # P1-3 批次 2: 三态渲染 (load_error → ErrorState; is_loading → ProgressRing; 否则正常)
+    content_controls: list[ft.Control] = [header, ft.Divider()]
+    if state.load_error is not None:
+        content_controls.append(
+            ErrorState(
+                icon=ft.Icons.ERROR_OUTLINE,
+                title=I18n.get("home_load_failed_title"),
+                message=I18n.get("home_load_failed_message"),
+                on_retry=_on_retry_load,
+                retry_text=I18n.get("common_retry"),
+                on_cta=_navigate_to_data_source,
+                cta_text=I18n.get("home_goto_data_source"),
+            )
+        )
+    elif state.is_loading:
+        content_controls.append(
+            ft.Container(
+                content=ft.ProgressRing(width=48, height=48, stroke_width=4),
+                alignment=ft.Alignment.CENTER,
+                expand=True,
+                padding=40,
+            )
+        )
+    else:
+        content_controls.extend(
+            [
+                MarketDashboard(
+                    indices=state.market_indices,
+                    hsgt=state.market_hsgt,
+                    hot_concepts=state.market_hot_concepts,
+                ),
+                ft.Text(I18n.get("home_live_news"), size=AppStyles.FONT_SIZE_HEADLINE, weight=ft.FontWeight.BOLD),
+                NewsFeed(
+                    news_rows=state.news_rows,
+                    has_more=state.has_more_news,
+                    on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
+                ),
+            ]
+        )
+
     return ft.Container(
         content=ft.Column(
-            safe_controls(
-                [
-                    header,
-                    ft.Divider(),
-                    MarketDashboard(
-                        indices=state.market_indices,
-                        hsgt=state.market_hsgt,
-                        hot_concepts=state.market_hot_concepts,
-                    ),
-                    ft.Text(I18n.get("home_live_news"), size=20, weight=ft.FontWeight.BOLD),
-                    NewsFeed(
-                        news_rows=state.news_rows,
-                        has_more=state.has_more_news,
-                        on_load_more_click=typing.cast("Callable[[ft.ControlEvent], None]", _on_load_more_click),
-                    ),
-                ]
-            ),
+            safe_controls(content_controls),
             scroll=None,
             expand=True,
         ),

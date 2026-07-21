@@ -255,12 +255,12 @@ def LocalModelConfigPanel(
     status_icon = ft.Icon(
         status_icon_name,
         visible=status_text != "",
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=status_color,
     )
     status_text_ctrl = ft.Text(
         status_text,
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=status_color,
     )
 
@@ -293,12 +293,12 @@ def LocalModelConfigPanel(
     # --- Advanced tile ---
     advanced_title = ft.Text(
         I18n.get("ai_advanced_settings"),
-        size=14 if not compact else 12,
+        size=AppStyles.FONT_SIZE_LG if not compact else 12,
         weight=ft.FontWeight.BOLD,
     )
     advanced_subtitle = ft.Text(
         I18n.get("settings_hint_restart"),
-        size=11,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=AppColors.WARNING,
     )
     advanced_tile = ft.ExpansionTile(
@@ -310,14 +310,14 @@ def LocalModelConfigPanel(
                 [
                     ft.Column(
                         [
-                            ft.Text(I18n.get("settings_local_threads"), size=12),
+                            ft.Text(I18n.get("settings_local_threads"), size=AppStyles.FONT_SIZE_BODY_SM),
                             threads_input,
                         ],
                         col={"sm": 12, "md": 6},
                     ),
                     ft.Column(
                         [
-                            ft.Text(I18n.get("settings_local_gpu_layers"), size=12),
+                            ft.Text(I18n.get("settings_local_gpu_layers"), size=AppStyles.FONT_SIZE_BODY_SM),
                             gpu_auto_switch,
                             gpu_layers_input,
                         ],
@@ -340,7 +340,7 @@ def LocalModelConfigPanel(
 
     desc_text = ft.Text(
         value=I18n.get("settings_local_ai_desc"),
-        size=12,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=AppColors.TEXT_SECONDARY,
         visible=not compact,
     )

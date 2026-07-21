@@ -1139,3 +1139,141 @@ class TestR7ResetStateForTest:
         # 此测试开始时, autouse fixture 已调用 _reset_state_for_test
         # _state 应为 None (除非本测试前的代码创建了 state, 但 fixture 已清理)
         assert tm_module._state is None or len(tm_module._state.toasts) == 0
+
+
+# ============================================================================
+# 20. P2-10: Toast action 扩展 (action_text / on_action)
+# ============================================================================
+
+
+class TestToastAction:
+    """P2-10: show() action_text/on_action 参数与 ToastCard action 按钮行为。"""
+
+    def _make_page(self):
+        page = MagicMock()
+        page.controls = [MagicMock()]
+        return page
+
+    def test_show_with_action_text_extends_duration(self):
+        """action toast duration 强制 30s (用户需时间点击操作)。"""
+        page = self._make_page()
+        manager = ToastManager(page)
+        manager.show("exported", toast_type="success", duration=5, action_text="打开文件夹", on_action=MagicMock())
+
+        state = get_global_state()
+        assert len(state.toasts) == 1
+        assert state.toasts[0].duration == 30
+
+    def test_show_with_action_stores_action_fields(self):
+        """ToastData 保存 action_text / on_action。"""
+        page = self._make_page()
+        manager = ToastManager(page)
+        cb = MagicMock()
+        manager.show("exported", action_text="打开文件夹", on_action=cb)
+
+        state = get_global_state()
+        toast = state.toasts[0]
+        assert toast.action_text == "打开文件夹"
+        assert toast.on_action is cb
+
+    def test_show_without_action_keeps_duration(self):
+        """无 action_text 时 duration 不被覆盖。"""
+        page = self._make_page()
+        manager = ToastManager(page)
+        manager.show("plain", duration=7)
+
+        state = get_global_state()
+        assert state.toasts[0].duration == 7
+        assert state.toasts[0].action_text is None
+        assert state.toasts[0].on_action is None
+
+    def _make_action_toast(self, on_action: Any = None) -> ToastData:
+        return ToastData(
+            id=1,
+            message="exported",
+            icon=ft.Icons.CHECK_CIRCLE,
+            color="#000",
+            duration=30,
+            action_text="打开文件夹",
+            on_action=on_action or MagicMock(),
+        )
+
+    def _get_action_button(self, container: ft.Container) -> ft.TextButton:
+        for ctrl in _walk_all_controls(container):
+            if isinstance(ctrl, ft.TextButton):
+                return ctrl
+        raise AssertionError("action TextButton not found")
+
+    def test_action_button_rendered_when_action_text(self):
+        """action_text 非空 → 渲染 action TextButton。"""
+        page = _make_fake_page()
+        toast = self._make_action_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        btn = self._get_action_button(container)
+        assert btn.content == "打开文件夹"
+
+    def test_action_button_absent_without_action_text(self):
+        """action_text=None → 不渲染 action TextButton。"""
+        page = _make_fake_page()
+        toast = _make_toast()
+        component = make_component(ToastCard, data=toast, on_dismiss=MagicMock())
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        buttons = [c for c in _walk_all_controls(container) if isinstance(c, ft.TextButton)]
+        assert buttons == []
+
+    def test_action_click_invokes_callback_and_dismiss(self):
+        """点击 action → 调 on_action + dismiss toast。"""
+        page = _make_fake_page()
+        on_action = MagicMock()
+        on_dismiss = MagicMock()
+        toast = self._make_action_toast(on_action=on_action)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        btn = self._get_action_button(container)
+        _invoke(btn.on_click, MagicMock())
+
+        on_action.assert_called_once_with()
+        on_dismiss.assert_called_once_with(toast.id)
+
+    def test_action_click_callback_exception_still_dismisses(self):
+        """on_action 抛异常 → logger.warning 记录, toast 仍 dismiss (不阻断)。"""
+        page = _make_fake_page()
+        on_action = MagicMock(side_effect=RuntimeError("explorer failed"))
+        on_dismiss = MagicMock()
+        toast = self._make_action_toast(on_action=on_action)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+        container = render_once(component)
+
+        btn = self._get_action_button(container)
+        _invoke(btn.on_click, MagicMock())  # 不应抛出
+
+        on_dismiss.assert_called_once_with(toast.id)
+
+    def test_action_click_when_dismissing_returns_early(self):
+        """is_dismissing=True 时再次点击 action → on_action 只调一次。"""
+        page = _make_fake_page()
+        on_action = MagicMock()
+        on_dismiss = MagicMock()
+        toast = self._make_action_toast(on_action=on_action)
+        component = make_component(ToastCard, data=toast, on_dismiss=on_dismiss)
+        run_mount_effects(component, page=page)
+
+        container = render_once(component)
+        btn = self._get_action_button(container)
+        _invoke(btn.on_click, MagicMock())
+        assert on_action.call_count == 1
+
+        # 重渲染 (is_dismissing=True) → 再次点击早返回
+        container = render_once(component)
+        btn = self._get_action_button(container)
+        _invoke(btn.on_click, MagicMock())
+        assert on_action.call_count == 1
+        assert on_dismiss.call_count == 1

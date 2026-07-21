@@ -5,3 +5,6 @@
 
 CACHE_CLEARED_TOPIC = "cache_cleared"
 """缓存清除事件主题。data_source_tab 发送, home_view/data_view 订阅。"""
+
+TOPIC_NAVIGATE = "navigate"
+"""导航事件主题。home_view 发送 (ErrorState CTA), app_layout 订阅切换 NavigationRail selected_index。"""

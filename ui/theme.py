@@ -72,6 +72,7 @@ class ThemeColors(TypedDict):
     TABLE_HEADER_TEXT: str
     TABLE_ROW_ODD: str
     TABLE_ROW_EVEN: str
+    TABLE_ROW_HOVER: str  # P2-8: 表格行 hover 色 (独立 key, 与 ODD/EVEN 区分)
     TABLE_CELL_TEXT: str
     TABLE_CELL_NUMERIC: str
     TABLE_BORDER: str
@@ -81,6 +82,7 @@ class ThemeColors(TypedDict):
     INPUT_TEXT: str
     LOG_BG: str
     LOG_TEXT: str
+    TEXT_DISABLED: str
 
 
 # ============================================================================
@@ -100,6 +102,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_HEADER_TEXT": "#E0E0E0",
         "TABLE_ROW_ODD": "#1E1E1E",
         "TABLE_ROW_EVEN": "#181818",
+        "TABLE_ROW_HOVER": "#2A2A2A",  # P2-8: Dark 主题 hover (比 ODD 略亮)
         "TABLE_CELL_TEXT": "#CCCCCC",
         "TABLE_CELL_NUMERIC": "#FFFFFF",
         "TABLE_BORDER": "#333333",
@@ -109,19 +112,27 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#FFFFFF",
         "LOG_BG": "#000000",
         "LOG_TEXT": "#CCCCCC",
+        "TEXT_DISABLED": "#90A4AE",
     },
     ThemeName.LIGHT: {
         "UP_RED": "#F44336",
-        "DOWN_GREEN": "#4CAF50",
+        # NOTE(lazy): DOWN_GREEN 调整为 Green 700 以满足 WCAG §1.4.3 对比度≥3.0
+        #   (原 Green 500 #4CAF50 在白底对比度仅 2.78). ceiling: 视觉一致以 WCAG 为准.
+        #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
+        "DOWN_GREEN": "#388E3C",
         "UP": "#D32F2F",
         "DOWN": "#388E3C",
         "SUCCESS": "#388E3C",
-        "WARNING": "#FFA000",
+        # NOTE(lazy): WARNING 调整为 Orange 800 以满足 WCAG §1.4.3 对比度≥3.0
+        #   (原 Amber 800 #FFA000 在白底对比度仅 2.04). ceiling: 视觉一致以 WCAG 为准.
+        #   upgrade: 调整为 Dracula/其他主题统一规范时一并刷新.
+        "WARNING": "#EF6C00",
         "INFO": "#1976D2",
         "TABLE_HEADER_BG": "#FAFAFA",
         "TABLE_HEADER_TEXT": "#424242",
         "TABLE_ROW_ODD": "#FFFFFF",
         "TABLE_ROW_EVEN": "#F5F5F5",
+        "TABLE_ROW_HOVER": "#E8E8E8",  # P2-8: Light 主题 hover (比 EVEN 略深)
         "TABLE_CELL_TEXT": "#424242",
         "TABLE_CELL_NUMERIC": "#212121",
         "TABLE_BORDER": "#EEEEEE",
@@ -131,6 +142,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#212121",
         "LOG_BG": "#FFFFFF",
         "LOG_TEXT": "#212121",
+        "TEXT_DISABLED": "#607D8B",
     },
     ThemeName.NAVY: {
         "UP_RED": "#EF4444",
@@ -144,6 +156,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_HEADER_TEXT": "#E2E8F0",
         "TABLE_ROW_ODD": "#1E293B",
         "TABLE_ROW_EVEN": "#11192E",
+        "TABLE_ROW_HOVER": "#2A3A52",  # P2-8: Navy 主题 hover (比 ODD 略亮)
         "TABLE_CELL_TEXT": "#CBD5E1",
         "TABLE_CELL_NUMERIC": "#F8FAFC",
         "TABLE_BORDER": "#334155",
@@ -153,6 +166,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#F8FAFC",
         "LOG_BG": "#11192E",
         "LOG_TEXT": "#CBD5E1",
+        "TEXT_DISABLED": "#94A3B8",
     },
     ThemeName.DRACULA: {
         "UP_RED": "#F44336",
@@ -166,6 +180,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "TABLE_HEADER_TEXT": "#F8F8F2",
         "TABLE_ROW_ODD": "#282A36",  # Background
         "TABLE_ROW_EVEN": "#44475A",  # Current Line (Alternating)
+        "TABLE_ROW_HOVER": "#3A3C4E",  # P2-8: Dracula 主题 hover (比 ODD 略亮)
         "TABLE_CELL_TEXT": "#F8F8F2",
         "TABLE_CELL_NUMERIC": "#BD93F9",  # Purple
         "TABLE_BORDER": "#6272A4",  # Comment (Grey-ish)
@@ -175,6 +190,7 @@ CUSTOM_COLOR_PRESETS: dict[str, ThemeColors] = {
         "INPUT_TEXT": "#F8F8F2",
         "LOG_BG": "#282A36",
         "LOG_TEXT": "#F8F8F2",
+        "TEXT_DISABLED": "#6272A4",
     },
 }
 
@@ -269,7 +285,10 @@ THEME_COLOR_SCHEMES = {
         on_secondary="#282A36",
         on_secondary_container="#FF79C6",
         on_surface="#F8F8F2",  # Foreground
-        on_surface_variant="#6272A4",  # Comment
+        # NOTE(lazy): on_surface_variant 调整为 Slate 400 以满足 WCAG §1.4.3 对比度≥4.5
+        #   (原 Dracula Comment #6272A4 在 #282A36 上对比度仅 3.03).
+        #   ceiling: 视觉一致以 WCAG 为准. upgrade: 引入 Dracula v2 调色板时一并刷新.
+        on_surface_variant="#94A3B8",  # Slate 400
         on_error="#282A36",
         outline="#6272A4",
         outline_variant="#44475A",
@@ -354,6 +373,7 @@ class AppColors:
     DOWN = "#00E676"
     RISE = UP
     FALL = DOWN
+    # 业务语义直通色 (随主题切换) — SUCCESS 成功 / WARNING 警告 / INFO 信息状态色
     SUCCESS = "#00E676"
     WARNING = "#FFAB00"
     INFO = "#2979FF"
@@ -374,6 +394,8 @@ class AppColors:
     INPUT_TEXT = "#FFFFFF"
     LOG_BG = "#000000"
     LOG_TEXT = "#CCCCCC"
+    # 禁用/中断状态色 (随主题切换) — 与 TEXT_HINT 区分；用于 TaskStatus.INTERRUPTED 等
+    TEXT_DISABLED = "#90A4AE"
 
     # 内部状态
     _CURRENT_THEME_MODE = ft.ThemeMode.DARK
@@ -432,6 +454,23 @@ class AppColors:
 class AppStyles:
     """应用组件样式工厂 — 全部使用语义 Token"""
 
+    # --- Font Size Tokens (P1-1: 8 档字号, 消除魔术数字) ---
+    # 映射: 11→CAPTION, 12→BODY_SM, 13→BODY, 14→LG, 16→TITLE, 18→HEADLINE, 20→HEADLINE, 22→XL, 24→XL, 28→DISPLAY
+    FONT_SIZE_CAPTION = 11  # 辅助说明文字
+    FONT_SIZE_BODY_SM = 12  # 小号正文 (表格/卡片)
+    FONT_SIZE_BODY = 13  # 正文 (默认)
+    FONT_SIZE_LG = 14  # 大号正文
+    FONT_SIZE_TITLE = 16  # 标题
+    FONT_SIZE_HEADLINE = 20  # 大标题 (对话框/卡片标题)
+    FONT_SIZE_XL = 24  # 特大标题
+    FONT_SIZE_DISPLAY = 28  # 展示级 (仪表盘大数字)
+
+    # --- Icon Size Tokens (P1-1 扩展: 图标尺寸 token 化, 消除魔术数字) ---
+    ICON_SIZE_LG = 32  # 卡片/空态配图
+    ICON_SIZE_XL = 48  # 空态/错误态主图标
+    ICON_SIZE_XXL = 64  # 引导页/特性图标
+    ICON_SIZE_HERO = 80  # 展示级 (完成页/庆祝)
+
     # --- Size Tokens (统一控件宽度，消除魔术数字) ---
     CONTROL_WIDTH_XS = 80  # 超小型控件：短标签、小按钮
     CONTROL_WIDTH_SM = 120  # 小型控件：数字输入、线程数、连接池
@@ -452,15 +491,9 @@ class AppStyles:
     COL_QUARTER = {"xs": 6, "sm": 4, "md": 3, "lg": 2}
     COL_TWO_THIRDS = {"xs": 12, "sm": 6, "md": 8}
 
-    # --- Responsive Breakpoints (响应式断点，见 CONTRIBUTING.md §5.9 规范 1) ---
-    # 基于 handle_resize 接收的 width 参数的 4 级断点（min_width=1280 约束下）
-    BREAKPOINT_COMPACT = 1200  # < 此值视为紧凑模式（min_width=1280 下不可达）
-    BREAKPOINT_STANDARD = 1600  # < 此值视为标准模式
-    BREAKPOINT_ULTRA_WIDE = 2400  # ≥ 此值视为超宽屏
-
     @staticmethod
     def card(
-        padding: int = 15,
+        padding: int = 16,  # P2-12: 15 → 16 收敛 (与 SPACING_LG 对齐; 类内默认值不能引用类属性)
         border_radius: int = 4,
         with_shadow: bool = False,
         with_border: bool = True,
@@ -484,7 +517,7 @@ class AppStyles:
         return style
 
     @staticmethod
-    def dashboard_card(padding: int = 15) -> DashboardCardStyle:
+    def dashboard_card(padding: int = 16) -> DashboardCardStyle:  # P2-12: 15 → 16 (同 card)
         """仪表盘卡片"""
         return {
             "bgcolor": ft.Colors.SURFACE,
@@ -545,10 +578,23 @@ class AppStyles:
         )
 
     @staticmethod
+    def danger_button() -> ft.ButtonStyle:
+        """危险操作按钮 (取消/删除等)。bgcolor=ERROR, color=ON_ERROR (随主题切换)."""
+        return ft.ButtonStyle(
+            color=ft.Colors.ON_ERROR,
+            icon_color=ft.Colors.ON_ERROR,
+            bgcolor=ft.Colors.ERROR,
+            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
+            shape=ft.RoundedRectangleBorder(radius=2),
+            elevation=0,
+            text_style=ft.TextStyle(weight=ft.FontWeight.BOLD),
+        )
+
+    @staticmethod
     def data_table_row(index: int, is_hovered: bool = False) -> str:
         """表格行颜色 (Layer 2 — 自定义色)"""
         if is_hovered:
-            return AppColors.TABLE_ROW_ODD  # Hover uses slightly different shade
+            return AppColors.TABLE_ROW_HOVER  # P2-8: 修复 hover 逻辑漏洞 (原误返回 ODD)
         return AppColors.TABLE_ROW_ODD if index % 2 == 0 else AppColors.TABLE_ROW_EVEN
 
     @staticmethod

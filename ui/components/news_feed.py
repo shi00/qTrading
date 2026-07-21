@@ -84,17 +84,17 @@ def _build_news_item(row: NewsRow, news_id: str) -> ft.Container:
                             translated_tag,
                             color=AppColors.ACCENT,
                             weight=ft.FontWeight.BOLD,
-                            size=12,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                         ),
                         ft.Text(
                             time_str[-8:],
                             color=AppColors.TEXT_SECONDARY,
-                            size=12,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                         ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                ft.Text(content, size=14, color=AppColors.TEXT_PRIMARY),
+                ft.Text(content, size=AppStyles.FONT_SIZE_LG, color=AppColors.TEXT_PRIMARY),
             ],
         ),
         padding=10,
@@ -140,7 +140,7 @@ def NewsFeed(
                     [
                         ft.Icon(
                             ft.Icons.ARTICLE_OUTLINED,
-                            size=48,
+                            size=AppStyles.ICON_SIZE_XL,
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(
@@ -171,7 +171,7 @@ def NewsFeed(
                 content=ft.Button(
                     content=ft.Text(
                         I18n.get("news_load_more"),
-                        color=ft.Colors.WHITE,
+                        color=AppColors.TEXT_ON_PRIMARY,
                     ),
                     style=ft.ButtonStyle(
                         bgcolor={ft.ControlState.DEFAULT: AppColors.PRIMARY},

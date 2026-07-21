@@ -34,7 +34,7 @@ from ui.components.flet_type_helpers import (
     safe_on_select,
 )
 from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ def BacktestConfigPanel(
         expand=True,
         on_change=safe_on_change(_on_commission_change),
     )
-    commission_text = ft.Text(f"{commission:g}‱", size=12, color=AppColors.TEXT_SECONDARY)
+    commission_text = ft.Text(f"{commission:g}‱", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
 
     stamp_duty_auto_checkbox = ft.Checkbox(
         label=I18n.get("backtest_stamp_duty_auto"),
@@ -316,7 +316,7 @@ def BacktestConfigPanel(
         stamp_duty_text_value = I18n.get("backtest_stamp_duty_auto")
     else:
         stamp_duty_text_value = f"{stamp_duty_rate:.1f}‰"
-    stamp_duty_text = ft.Text(stamp_duty_text_value, size=12, color=AppColors.TEXT_SECONDARY)
+    stamp_duty_text = ft.Text(stamp_duty_text_value, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
 
     def _on_slippage_change(e: ft.ControlEvent) -> None:
         val = get_control_value(e.control, ft.Slider)
@@ -331,7 +331,7 @@ def BacktestConfigPanel(
         expand=True,
         on_change=safe_on_change(_on_slippage_change),
     )
-    slippage_text = ft.Text(f"{slippage:g} bps", size=12, color=AppColors.TEXT_SECONDARY)
+    slippage_text = ft.Text(f"{slippage:g} bps", size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY)
 
     run_btn = ft.Button(
         content=I18n.get("backtest_run"),
@@ -350,14 +350,14 @@ def BacktestConfigPanel(
             [
                 ft.Text(
                     I18n.get("backtest_config_title"),
-                    size=18,
+                    size=AppStyles.FONT_SIZE_HEADLINE,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Divider(color=AppColors.DIVIDER),
                 ft.Text(
                     I18n.get("backtest_date_range"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
@@ -365,7 +365,11 @@ def BacktestConfigPanel(
                     [
                         ft.Column(
                             [
-                                ft.Text(I18n.get("backtest_start_date"), size=12, color=AppColors.TEXT_SECONDARY),
+                                ft.Text(
+                                    I18n.get("backtest_start_date"),
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
                                 start_date_btn,
                             ],
                             spacing=4,
@@ -374,7 +378,11 @@ def BacktestConfigPanel(
                         ),
                         ft.Column(
                             [
-                                ft.Text(I18n.get("backtest_end_date"), size=12, color=AppColors.TEXT_SECONDARY),
+                                ft.Text(
+                                    I18n.get("backtest_end_date"),
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
+                                    color=AppColors.TEXT_SECONDARY,
+                                ),
                                 end_date_btn,
                             ],
                             spacing=4,
@@ -387,7 +395,7 @@ def BacktestConfigPanel(
                 ft.Container(height=16),
                 ft.Text(
                     I18n.get("backtest_portfolio_settings"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     weight=ft.FontWeight.W_500,
                     color=AppColors.TEXT_PRIMARY,
                 ),
@@ -422,7 +430,7 @@ def BacktestConfigPanel(
                                     [
                                         ft.Text(
                                             I18n.get("backtest_commission_rate"),
-                                            size=12,
+                                            size=AppStyles.FONT_SIZE_BODY_SM,
                                             color=AppColors.TEXT_SECONDARY,
                                         ),
                                         commission_slider,
@@ -437,7 +445,7 @@ def BacktestConfigPanel(
                                             [
                                                 ft.Text(
                                                     I18n.get("backtest_stamp_duty_rate"),
-                                                    size=12,
+                                                    size=AppStyles.FONT_SIZE_BODY_SM,
                                                     color=AppColors.TEXT_SECONDARY,
                                                 ),
                                                 stamp_duty_slider,
@@ -450,7 +458,11 @@ def BacktestConfigPanel(
                                 ),
                                 ft.Row(
                                     [
-                                        ft.Text(I18n.get("backtest_slippage"), size=12, color=AppColors.TEXT_SECONDARY),
+                                        ft.Text(
+                                            I18n.get("backtest_slippage"),
+                                            size=AppStyles.FONT_SIZE_BODY_SM,
+                                            color=AppColors.TEXT_SECONDARY,
+                                        ),
                                         slippage_slider,
                                         slippage_text,
                                     ],

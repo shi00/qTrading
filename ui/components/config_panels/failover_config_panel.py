@@ -235,8 +235,10 @@ def ProviderCredentialDialog(vm: FailoverConfigPanelViewModel) -> ft.Control:
     status_row = (
         ft.Row(
             [
-                ft.Icon(status_icon_name, visible=status_text != "", size=16, color=status_color),
-                ft.Text(status_text, size=12, color=status_color),
+                ft.Icon(
+                    status_icon_name, visible=status_text != "", size=AppStyles.FONT_SIZE_TITLE, color=status_color
+                ),
+                ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
             ],
             spacing=5,
         )
@@ -306,49 +308,49 @@ def _build_list_item(
     """构建单个 failover 列表项（纯函数，由 state.failover_items 驱动）。"""
     status_icon = ft.Icon(
         ft.Icons.CHECK_CIRCLE,
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         color=AppColors.SUCCESS if item.has_credential else AppColors.WARNING,
     )
     status_text = ft.Text(
         I18n.get("failover_credential_ok") if item.has_credential else I18n.get("failover_credential_missing"),
-        size=11,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=AppColors.SUCCESS if item.has_credential else AppColors.WARNING,
     )
 
     btn_up = ft.IconButton(
         ft.Icons.ARROW_UPWARD,
-        icon_size=16,
+        icon_size=AppStyles.FONT_SIZE_TITLE,
         on_click=safe_on_click(_run_task_factory(vm.move_item, index, -1)),
         disabled=index == 0,
         tooltip=I18n.get("failover_move_up"),
     )
     btn_down = ft.IconButton(
         ft.Icons.ARROW_DOWNWARD,
-        icon_size=16,
+        icon_size=AppStyles.FONT_SIZE_TITLE,
         on_click=safe_on_click(_run_task_factory(vm.move_item, index, 1)),
         disabled=index == total - 1,
         tooltip=I18n.get("failover_move_down"),
     )
     btn_edit = ft.IconButton(
         ft.Icons.EDIT,
-        icon_size=16,
+        icon_size=AppStyles.FONT_SIZE_TITLE,
         on_click=safe_on_click(_run_task_factory(vm.open_edit_dialog, index)),
         tooltip=I18n.get("failover_edit"),
     )
     btn_delete = ft.IconButton(
         ft.Icons.DELETE_OUTLINE,
-        icon_size=16,
+        icon_size=AppStyles.FONT_SIZE_TITLE,
         on_click=safe_on_click(_run_task_factory(vm.delete_item, index)),
         tooltip=I18n.get("failover_delete"),
     )
 
     left_section = ft.Row(
         [
-            ft.Text(f"{index + 1}.", size=13, weight=ft.FontWeight.BOLD, width=24),
+            ft.Text(f"{index + 1}.", size=AppStyles.FONT_SIZE_BODY, weight=ft.FontWeight.BOLD, width=24),
             status_icon,
             ft.Text(
                 f"{item.display_name} / {item.model}",
-                size=13,
+                size=AppStyles.FONT_SIZE_BODY,
                 weight=ft.FontWeight.W_500,
             ),
         ],
@@ -412,7 +414,7 @@ def FailoverConfigPanel(
             ft.Container(
                 content=ft.Text(
                     I18n.get("failover_empty_hint"),
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.TEXT_HINT,
                     italic=True,
                 ),
@@ -432,8 +434,10 @@ def FailoverConfigPanel(
     status_row = (
         ft.Row(
             [
-                ft.Icon(status_icon_name, visible=status_text != "", size=16, color=status_color),
-                ft.Text(status_text, size=12, color=status_color),
+                ft.Icon(
+                    status_icon_name, visible=status_text != "", size=AppStyles.FONT_SIZE_TITLE, color=status_color
+                ),
+                ft.Text(status_text, size=AppStyles.FONT_SIZE_BODY_SM, color=status_color),
             ],
             spacing=5,
         )
@@ -473,7 +477,7 @@ def FailoverConfigPanel(
             ft.Row(
                 [
                     SectionHeader(I18n.get("failover_title")),
-                    ft.Icon(ft.Icons.BOLT, size=20, color=AppColors.PRIMARY),
+                    ft.Icon(ft.Icons.BOLT, size=AppStyles.FONT_SIZE_HEADLINE, color=AppColors.PRIMARY),
                     ft.Container(expand=True),
                     btn_add,
                 ],
@@ -481,7 +485,7 @@ def FailoverConfigPanel(
             ),
             ft.Text(
                 I18n.get("failover_hint"),
-                size=11,
+                size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.TEXT_HINT,
             ),
             ft.Container(height=8),

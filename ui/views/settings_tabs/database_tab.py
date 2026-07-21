@@ -19,7 +19,7 @@ import flet as ft
 from ui.components.config_panels import DatabaseConfigPanel
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
     # --- Build UI ---
     title_text = ft.Text(
         I18n.get("settings_db_title"),
-        size=24,
+        size=AppStyles.FONT_SIZE_XL,
         weight=ft.FontWeight.W_500,
         color=AppColors.TEXT_PRIMARY,
     )
@@ -83,7 +83,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
                 ft.Container(height=20),
                 ft.Row(
                     [
-                        ft.Icon(ft.Icons.STORAGE, size=32, color=AppColors.PRIMARY),
+                        ft.Icon(ft.Icons.STORAGE, size=AppStyles.ICON_SIZE_LG, color=AppColors.PRIMARY),
                         title_text,
                     ],
                 ),

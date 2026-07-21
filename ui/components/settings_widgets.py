@@ -70,11 +70,11 @@ def MetricCard(
     resolved_color = status_color if status_color else ft.Colors.PRIMARY
     status_controls: list[ft.Control] = []
     if icon:
-        status_controls.append(ft.Icon(safe_icon(icon), size=14, color=resolved_color))
+        status_controls.append(ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_LG, color=resolved_color))
     if trend:
         trend_color = AppColors.UP if trend_up else AppColors.DOWN
         status_controls.append(
-            ft.Text(trend, size=11, color=trend_color, weight=ft.FontWeight.BOLD),
+            ft.Text(trend, size=AppStyles.FONT_SIZE_CAPTION, color=trend_color, weight=ft.FontWeight.BOLD),
         )
     if not status_controls:
         status_controls.append(ft.Container())
@@ -85,13 +85,13 @@ def MetricCard(
                 [
                     ft.Text(
                         label.upper() if label else "",
-                        size=11,
+                        size=AppStyles.FONT_SIZE_CAPTION,
                         weight=ft.FontWeight.BOLD,
                         color=ft.Colors.ON_SURFACE_VARIANT,
                     ),
                     ft.Text(
                         typing.cast(str, value),
-                        size=22,
+                        size=AppStyles.FONT_SIZE_XL,
                         weight=ft.FontWeight.BOLD,
                         color=ft.Colors.PRIMARY,
                     ),
@@ -146,7 +146,7 @@ def ActionChip(
         disabled = True
         opacity = 0.8
     else:
-        trailing = ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=16)
+        trailing = ft.Icon(ft.Icons.CHEVRON_RIGHT, color=sub_color, size=AppStyles.FONT_SIZE_TITLE)
         disabled = False
         opacity = 1.0
 
@@ -154,7 +154,7 @@ def ActionChip(
         content=ft.Row(
             [
                 ft.Container(
-                    content=ft.Icon(safe_icon(icon), color=text_color, size=24),
+                    content=ft.Icon(safe_icon(icon), color=text_color, size=AppStyles.FONT_SIZE_XL),
                     padding=10,
                     bgcolor=ft.Colors.with_opacity(icon_bg_opacity, icon_bg_base),
                     border_radius=10,
@@ -163,11 +163,11 @@ def ActionChip(
                     [
                         ft.Text(
                             title,
-                            size=14,
+                            size=AppStyles.FONT_SIZE_LG,
                             weight=ft.FontWeight.BOLD,
                             color=text_color,
                         ),
-                        ft.Text(subtitle, size=11, color=sub_color),
+                        ft.Text(subtitle, size=AppStyles.FONT_SIZE_CAPTION, color=sub_color),
                     ],
                     spacing=2,
                     expand=True,
@@ -198,9 +198,11 @@ def StatusBadge(
     Color is a prop — consumer resolves and pushes new text/color via props
     (replacing the old ``set_text`` imperative API).
     """
-    content_row: list[ft.Control] = [ft.Text(text, size=10, color=color, weight=ft.FontWeight.BOLD)]
+    content_row: list[ft.Control] = [
+        ft.Text(text, size=AppStyles.FONT_SIZE_CAPTION, color=color, weight=ft.FontWeight.BOLD)
+    ]
     if icon:
-        content_row.insert(0, ft.Icon(safe_icon(icon), size=10, color=color))
+        content_row.insert(0, ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_CAPTION, color=color))
     return ft.Container(
         content=ft.Row(
             content_row,
@@ -241,7 +243,7 @@ def SectionHeader(
                 ),
                 ft.Text(
                     display_title,
-                    size=16,
+                    size=AppStyles.FONT_SIZE_TITLE,
                     weight=ft.FontWeight.BOLD,
                     color=ft.Colors.ON_SURFACE,
                 ),
@@ -284,7 +286,7 @@ def SettingRow(
     color = icon_color if icon_color else ft.Colors.PRIMARY
 
     icon_container = ft.Container(
-        content=ft.Icon(safe_icon(icon), size=24, color=color),
+        content=ft.Icon(safe_icon(icon), size=AppStyles.FONT_SIZE_XL, color=color),
         padding=10,
         border_radius=10,
         bgcolor=ft.Colors.with_opacity(0.1, color),
@@ -297,13 +299,13 @@ def SettingRow(
                 [
                     ft.Text(
                         display_title,
-                        size=16,
+                        size=AppStyles.FONT_SIZE_TITLE,
                         weight=ft.FontWeight.BOLD,
                         color=ft.Colors.ON_SURFACE,
                     ),
                     ft.Text(
                         display_subtitle,
-                        size=12,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
                         color=ft.Colors.ON_SURFACE_VARIANT,
                     ),
                 ],

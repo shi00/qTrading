@@ -17,7 +17,7 @@ from data.constants import (
 from ui.components.flet_type_helpers import safe_controls
 from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 from ui.viewmodels.health_scan_view_model import HealthScanViewModel
 
 logger = logging.getLogger(__name__)
@@ -65,17 +65,17 @@ def _build_health_score_card(status: str, tables_count: int) -> ft.Container:
     return ft.Container(
         content=ft.Row(
             controls=[
-                ft.Icon(icon, color=color, size=48),
+                ft.Icon(icon, color=color, size=AppStyles.ICON_SIZE_XL),
                 ft.Column(
                     controls=[
                         ft.Text(
                             I18n.get("health_report_title"),
-                            size=14,
+                            size=AppStyles.FONT_SIZE_LG,
                             color=AppColors.TEXT_SECONDARY,
                         ),
                         ft.Text(
                             text,
-                            size=24,
+                            size=AppStyles.FONT_SIZE_XL,
                             weight=ft.FontWeight.BOLD,
                             color=color,
                         ),
@@ -87,7 +87,7 @@ def _build_health_score_card(status: str, tables_count: int) -> ft.Container:
                     controls=[
                         ft.Text(
                             I18n.get("health_checked_count").format(count=tables_count),
-                            size=12,
+                            size=AppStyles.FONT_SIZE_BODY_SM,
                             color=AppColors.TEXT_HINT,
                         ),
                     ],
@@ -114,16 +114,16 @@ def _build_metric_tile(
     由旧 ``MetricTile(ft.Container)`` class 转换。
     """
     controls: list[ft.Control] = [
-        ft.Text(label, size=12, color=AppColors.TEXT_SECONDARY),
+        ft.Text(label, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
         ft.Text(
             str(value),
-            size=18,
+            size=AppStyles.FONT_SIZE_HEADLINE,
             weight=ft.FontWeight.BOLD,
             color=trend_color,
         ),
     ]
     if sub_text:
-        controls.append(ft.Text(sub_text, size=10, color=AppColors.TEXT_HINT))
+        controls.append(ft.Text(sub_text, size=AppStyles.FONT_SIZE_CAPTION, color=AppColors.TEXT_HINT))
 
     return ft.Container(
         content=ft.Column(
@@ -158,7 +158,7 @@ def _build_key_metrics_grid(market: dict, fundamentals: dict) -> ft.Column:
             ft.Text(
                 I18n.get("health_market_ts"),
                 weight=ft.FontWeight.BOLD,
-                size=14,
+                size=AppStyles.FONT_SIZE_LG,
                 color=AppColors.TEXT_PRIMARY,
             ),
             ft.Row(
@@ -195,7 +195,7 @@ def _build_section_header(i18n_key: str) -> ft.Container:
         padding=ft.Padding.symmetric(vertical=5),
         content=ft.Row(
             [
-                ft.Icon(ft.Icons.SUBTITLES, size=16, color=AppColors.PRIMARY),
+                ft.Icon(ft.Icons.SUBTITLES, size=AppStyles.FONT_SIZE_TITLE, color=AppColors.PRIMARY),
                 ft.Text(
                     I18n.get(i18n_key),
                     weight=ft.FontWeight.BOLD,
@@ -216,7 +216,7 @@ def _build_depth_breadth_items(stats: dict) -> list[ft.Text]:
         items.append(
             ft.Text(
                 I18n.get("health_depth", ratio=f"{depth_ratio * 100:.0f}%"),
-                size=10,
+                size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.WARNING if depth_ratio < HEALTH_DEPTH_WARNING_RATIO else AppColors.TEXT_HINT,
             ),
         )
@@ -224,7 +224,7 @@ def _build_depth_breadth_items(stats: dict) -> list[ft.Text]:
         items.append(
             ft.Text(
                 I18n.get("health_breadth", ratio=f"{breadth_ratio * 100:.0f}%"),
-                size=10,
+                size=AppStyles.FONT_SIZE_CAPTION,
                 color=AppColors.WARNING if breadth_ratio < HEALTH_THRESHOLD_BREADTH else AppColors.TEXT_HINT,
             ),
         )
@@ -260,11 +260,11 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
 
     name_row = ft.Row(
         [
-            ft.Icon(status_icon, size=14, color=icon_color),
+            ft.Icon(status_icon, size=AppStyles.FONT_SIZE_LG, color=icon_color),
             ft.Text(
                 name,
                 width=120,
-                size=12,
+                size=AppStyles.FONT_SIZE_BODY_SM,
                 weight=ft.FontWeight.BOLD,
                 color=AppColors.TEXT_PRIMARY,
                 no_wrap=True,
@@ -288,7 +288,7 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                     ft.Container(
                         content=ft.Text(
                             value_text,
-                            size=11,
+                            size=AppStyles.FONT_SIZE_CAPTION,
                             color=icon_color,
                             weight=ft.FontWeight.BOLD,
                         ),
@@ -299,13 +299,11 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                         alignment=ft.Alignment.CENTER,
                     ),
                     ft.Container(width=10),
-                    ft.Text(
-                        "✓" if ratio > 0 else "✗",
-                        size=16,
-                        weight=ft.FontWeight.BOLD,
+                    # P2-7: ✓/✗ 文本符号 → ft.Icon, 避免 UI 依赖 emoji/dingbat 字体
+                    ft.Icon(
+                        ft.Icons.CHECK if ratio > 0 else ft.Icons.CLOSE,
+                        size=AppStyles.FONT_SIZE_TITLE,
                         color=icon_color,
-                        width=60,
-                        text_align=ft.TextAlign.CENTER,
                     ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
@@ -332,7 +330,7 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                             [
                                 ft.Text(
                                     f"{ratio * 100:.1f}%",
-                                    size=12,
+                                    size=AppStyles.FONT_SIZE_BODY_SM,
                                     weight=ft.FontWeight.BOLD,
                                     color=AppColors.TEXT_PRIMARY,
                                 ),
@@ -341,7 +339,7 @@ def _create_coverage_row(table_key: str, stats: dict) -> ft.Container:
                                         "health_freshness",
                                         ratio=f"{fresh_ratio * 100:.0f}%",
                                     ),
-                                    size=10,
+                                    size=AppStyles.FONT_SIZE_CAPTION,
                                     color=AppColors.TEXT_HINT,
                                 ),
                             ]
@@ -447,8 +445,8 @@ def _build_health_content(report: dict, width: int, height: int) -> ft.Container
         issues_list = [
             ft.Row(
                 [
-                    ft.Icon(ft.Icons.WARNING_AMBER, color=AppColors.ERROR, size=14),
-                    ft.Text(r, size=12, color=AppColors.ERROR),
+                    ft.Icon(ft.Icons.WARNING_AMBER, color=AppColors.ERROR, size=AppStyles.FONT_SIZE_LG),
+                    ft.Text(r, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.ERROR),
                 ],
             )
             for r in reasons
@@ -459,7 +457,7 @@ def _build_health_content(report: dict, width: int, height: int) -> ft.Container
                     ft.Text(
                         I18n.get("common_reason"),
                         weight=ft.FontWeight.BOLD,
-                        size=12,
+                        size=AppStyles.FONT_SIZE_BODY_SM,
                         color=AppColors.TEXT_PRIMARY,
                     ),
                     *issues_list,
@@ -550,7 +548,7 @@ def HealthReportDialog(
         ft.AlertDialog(
             content_padding=0,
             modal=True,
-            title=ft.Text(I18n.get("health_report_title"), size=16, weight=ft.FontWeight.BOLD),
+            title=ft.Text(I18n.get("health_report_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
             title_padding=0,
             content=_build_health_content(report, width, height),
             actions=[
@@ -613,18 +611,18 @@ def _build_scan_result(result: dict) -> ft.Column:
             ft.Container(height=20),
             ft.Row(
                 [
-                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=color, size=40),
+                    ft.Icon(ft.Icons.CHECK_CIRCLE, color=color, size=AppStyles.ICON_SIZE_XL),
                     ft.Column(
                         [
                             ft.Text(
                                 f"{I18n.get('health_score_title')}: {score}",
-                                size=20,
+                                size=AppStyles.FONT_SIZE_HEADLINE,
                                 weight=ft.FontWeight.BOLD,
                                 color=color,
                             ),
                             ft.Text(
                                 f"{I18n.get('quality_tier_' + str(tier))}",
-                                size=14,
+                                size=AppStyles.FONT_SIZE_LG,
                                 color=AppColors.TEXT_PRIMARY,
                             ),
                         ],
@@ -639,12 +637,12 @@ def _build_scan_result(result: dict) -> ft.Column:
                         [
                             ft.Text(
                                 I18n.get("health_continuity"),
-                                size=12,
+                                size=AppStyles.FONT_SIZE_BODY_SM,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             ft.Text(
                                 f"{avg_cont * 100:.1f}%",
-                                size=16,
+                                size=AppStyles.FONT_SIZE_TITLE,
                                 weight=ft.FontWeight.BOLD,
                             ),
                         ],
@@ -653,12 +651,12 @@ def _build_scan_result(result: dict) -> ft.Column:
                         [
                             ft.Text(
                                 I18n.get("health_avg_recency"),
-                                size=12,
+                                size=AppStyles.FONT_SIZE_BODY_SM,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             ft.Text(
                                 f"{avg_lag:.1f} {I18n.get('health_days')}",
-                                size=16,
+                                size=AppStyles.FONT_SIZE_TITLE,
                                 weight=ft.FontWeight.BOLD,
                             ),
                         ],
@@ -667,12 +665,12 @@ def _build_scan_result(result: dict) -> ft.Column:
                         [
                             ft.Text(
                                 I18n.get("health_sample_size"),
-                                size=12,
+                                size=AppStyles.FONT_SIZE_BODY_SM,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             ft.Text(
                                 f"{result.get('sample_size', 0)}",
-                                size=16,
+                                size=AppStyles.FONT_SIZE_TITLE,
                                 weight=ft.FontWeight.BOLD,
                             ),
                         ],
@@ -687,12 +685,12 @@ def _build_scan_result(result: dict) -> ft.Column:
                         [
                             ft.Text(
                                 I18n.get("health_fundamental_completeness"),
-                                size=12,
+                                size=AppStyles.FONT_SIZE_BODY_SM,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
                             ft.Text(
                                 f"{avg_fundamental * 100:.1f}%",
-                                size=16,
+                                size=AppStyles.FONT_SIZE_TITLE,
                                 weight=ft.FontWeight.BOLD,
                                 color=fundamental_color,
                             ),
@@ -702,13 +700,13 @@ def _build_scan_result(result: dict) -> ft.Column:
                         [
                             ft.Text(
                                 I18n.get("health_fin_recency"),
-                                size=12,
+                                size=AppStyles.FONT_SIZE_BODY_SM,
                                 color=AppColors.TEXT_SECONDARY,
                             ),
-                            ft.Text(
-                                "✓" if fin_recency_ok else "✗",
-                                size=16,
-                                weight=ft.FontWeight.BOLD,
+                            # P2-7: ✓/✗ 文本符号 → ft.Icon, 避免 UI 依赖 emoji/dingbat 字体
+                            ft.Icon(
+                                ft.Icons.CHECK if fin_recency_ok else ft.Icons.CLOSE,
+                                size=AppStyles.FONT_SIZE_TITLE,
                                 color=AppColors.SUCCESS if fin_recency_ok else AppColors.ERROR,
                             ),
                         ],
@@ -757,7 +755,7 @@ def _build_scan_content(
         content=ft.Column(
             [
                 ft.Container(height=20),
-                ft.Text(status_display, size=12, color=AppColors.TEXT_SECONDARY),
+                ft.Text(status_display, size=AppStyles.FONT_SIZE_BODY_SM, color=AppColors.TEXT_SECONDARY),
                 ft.ProgressBar(
                     value=progress_value,
                     width=400,
@@ -838,7 +836,7 @@ def HealthScanDialog(
     dialog = (
         ft.AlertDialog(
             modal=True,
-            title=ft.Text(I18n.get("scan_title"), size=16, weight=ft.FontWeight.BOLD),
+            title=ft.Text(I18n.get("scan_title"), size=AppStyles.FONT_SIZE_TITLE, weight=ft.FontWeight.BOLD),
             content=content,
             actions=[
                 ft.TextButton(I18n.get("common_close"), on_click=_close),

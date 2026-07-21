@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import flet as ft
 import pytest
 
-from ui.theme import AppColors
+from ui.theme import AppColors, AppStyles
 
 pytestmark = pytest.mark.unit
 
@@ -519,11 +519,11 @@ class TestSettingsViewComponentBody:
         mock_i18n_state,
         mock_app_colors_state,
     ):
-        """挂载后包含 header_title Text (size=24, weight=BOLD)。"""
+        """挂载后包含 header_title Text (size=FONT_SIZE_XL=24, weight=BOLD) (P1-1: 24 → token)。"""
         _, result = self._mount(mock_i18n_state, mock_app_colors_state)
         texts = [c for c in _collect_controls(result) if isinstance(c, ft.Text)]
-        # 至少有一个 size=24 的 Text (header)
-        assert any(getattr(t, "size", None) == 24 for t in texts)
+        # 至少有一个 size=FONT_SIZE_XL 的 Text (header)
+        assert any(getattr(t, "size", None) == AppStyles.FONT_SIZE_XL for t in texts)
 
     def test_mount_renders_divider(
         self,

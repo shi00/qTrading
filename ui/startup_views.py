@@ -27,6 +27,7 @@ import flet as ft
 from app.startup_controller import StartupContext, StartupController, StartupState
 from ui.components.flet_type_helpers import safe_controls, safe_on_click
 from ui.i18n import I18n, get_observable_state
+from ui.theme import AppColors, AppStyles
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def _build_loading_view() -> ft.Container:
         content=ft.Column(
             [
                 ft.ProgressRing(width=40, height=40, stroke_width=3),
-                ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=16),
+                ft.Text(I18n.get("wizard_status_init") or "Initializing...", size=AppStyles.FONT_SIZE_TITLE),
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             alignment=ft.MainAxisAlignment.CENTER,
@@ -167,18 +168,18 @@ def _build_error_view(
         content=ft.Column(
             safe_controls(
                 [
-                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=ft.Colors.RED, size=48),
+                    ft.Icon(ft.Icons.ERROR_OUTLINE, color=AppColors.ERROR, size=AppStyles.ICON_SIZE_XL),
                     ft.Text(
                         I18n.get("error_db_init_failed")
                         if error != "db_engine_missing"
                         else I18n.get("error_db_engine_missing"),
-                        size=20,
+                        size=AppStyles.FONT_SIZE_HEADLINE,
                         weight=ft.FontWeight.BOLD,
                     ),
                     ft.Text(
                         _get_localized_detail(context.detail or "")[:200],
-                        color=ft.Colors.RED_400,
-                        size=14,
+                        color=AppColors.ERROR,
+                        size=AppStyles.FONT_SIZE_LG,
                     ),
                     ft.Row(
                         safe_controls(
@@ -303,7 +304,7 @@ def StartupView(
             try:
                 page = ft.context.page
                 if page is not None and hasattr(page, "toast") and page.toast:  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
-                    page.toast.show(f"📰 {msg}", toast_type="info")  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
+                    page.toast.show(msg, toast_type="info")  # type: ignore[attr-defined]  # [reason: 动态挂载 toast 属性, ft.Page 存根未声明]
             except RuntimeError:
                 pass
 

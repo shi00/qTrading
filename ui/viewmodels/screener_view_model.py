@@ -460,7 +460,8 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
             # locale 切换后不自动刷新. ceiling: VM state 非 Message, 无 *_key params 翻译机制.
             # upgrade: desc 改为 Message 结构或引入 desc_key+params 时统一修复 (与 R.2.5 同类, R.3 一并处理).
             if dep_info.get("missing_apis"):
-                warning_suffix = f"\n⚠️ {I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
+                # P2-7: ⚠️ emoji 前缀删除, 由 color="warning" 在 View 层表达警示语义
+                warning_suffix = f"\n{I18n.get('strategy_missing_apis')}: {', '.join(dep_info['missing_apis'])}"
                 desc = f"{desc}{warning_suffix}"
                 color = "warning"
             else:
@@ -802,6 +803,20 @@ class ScreenerViewModel(ObservableViewModelMixin[ScreenerState]):
         if new_size > 0 and new_size != self._state.page_size:
             self._update_pagination(page_size=new_size, page_no=1)
             self._notify()
+
+    def clear_filters(self) -> None:
+        """重置筛选/排序/分页/档位提示至默认值 (P1-3 #71).
+
+        EmptyState 的 ``on_cta`` 回调调用本命令，清空当前筛选状态以便用户重新执行策略。
+        不清除 ``_full_results`` (保留上次结果供用户参考); 仅重置 state 中的
+        ``page_no`` / ``sort_column`` / ``sort_ascending`` / ``tier_hint`` 字段。
+        """
+        self._set_state(
+            page_no=1,
+            sort_column=None,
+            sort_ascending=True,
+            tier_hint=None,
+        )
 
     def get_current_page_data(self):
         """Get data for current page (Synchronous, fast slicing)"""

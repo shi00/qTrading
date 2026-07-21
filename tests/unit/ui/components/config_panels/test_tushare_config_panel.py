@@ -40,6 +40,7 @@ from ui.components.config_panels.tushare_config_panel import (
     _on_verify_click_factory,
     _render_message,
 )
+from ui.theme import AppStyles
 from ui.viewmodels import Message
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel, TushareConfigState
 
@@ -488,6 +489,10 @@ def _render_panel(
         stack.enter_context(patch.object(panel_module, "AppColors"))
         mock_styles = stack.enter_context(patch.object(panel_module, "AppStyles"))
         mock_styles.secondary_button.return_value = ft.ButtonStyle()
+        # P1-1: 字号 token 用真实数值 (patch.object 后类属性 int 变成 MagicMock)
+        from ui.theme import AppStyles as _RealAppStyles
+
+        mock_styles.FONT_SIZE_BODY_SM = _RealAppStyles.FONT_SIZE_BODY_SM
 
         component = make_component(
             TushareConfigPanel,
@@ -677,8 +682,10 @@ class TestTushareConfigPanelStateBinding:
         state = TushareConfigState(status_message=None, status_type="info")
         _, _, result, _ = _render_panel(state=state)
         ctrls = _walk_controls(result)
-        # status_icon size=12, 用于区分其他 Icon
-        status_icons = [c for c in ctrls if isinstance(c, ft.Icon) and getattr(c, "size", None) == 12]
+        # status_icon size=FONT_SIZE_BODY_SM (=12, P1-1), 用于区分其他 Icon
+        status_icons = [
+            c for c in ctrls if isinstance(c, ft.Icon) and getattr(c, "size", None) == AppStyles.FONT_SIZE_BODY_SM
+        ]
         assert len(status_icons) == 1
         assert status_icons[0].visible is False
 

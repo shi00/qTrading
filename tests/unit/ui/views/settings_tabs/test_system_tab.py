@@ -818,6 +818,87 @@ class TestDoLanguageChange:
         assert isinstance(exc_info.value, asyncio.CancelledError)
 
 
+class TestLanguageChangeLoadingState:
+    """P3-17: 语言切换 loading 态 (is_changing_language)。
+
+    契约:
+    - 初始渲染: ProgressRing visible=False, language Dropdown 未禁用
+    - _do_language_change: set_is_changing_language(True) 在 try 之前调用,
+      set_is_changing_language(False) 在 finally 块 (成功/失败/取消均恢复)
+    - Dropdown.disabled / ProgressRing.visible 绑定 is_changing_language (源码守护)
+    """
+
+    def test_initial_render_progress_ring_hidden(self, system_tab_env) -> None:
+        """初始渲染: ProgressRing visible=False (无 loading)。"""
+        env = system_tab_env
+        rings = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.ProgressRing)]
+        assert len(rings) == 1, "language 切换 ProgressRing 应存在"
+        assert rings[0].visible is False
+
+    def test_initial_render_language_dropdown_enabled(self, system_tab_env) -> None:
+        """初始渲染: language Dropdown 未禁用。"""
+        env = system_tab_env
+        dropdowns = _get_dropdowns(env)
+        assert dropdowns[0].disabled in (False, None)
+
+    def test_source_guard_loading_set_true_before_try(self) -> None:
+        """源码守护: set_is_changing_language(True) 在 try 之前 (P3-17)。"""
+        source = _source_without_docstrings(_read_source())
+        func_start = source.index("async def _do_language_change")
+        func_src = source[func_start : func_start + 3000]
+        set_true_pos = func_src.index("set_is_changing_language(True)")
+        try_pos = func_src.index("try:")
+        assert set_true_pos < try_pos, "set_is_changing_language(True) 必须在 try 之前"
+
+    def test_source_guard_loading_set_false_in_finally(self) -> None:
+        """源码守护: finally 块中 set_is_changing_language(False) (异常/取消也恢复)。"""
+        source = _source_without_docstrings(_read_source())
+        func_start = source.index("async def _do_language_change")
+        # 函数到下一个 async def 结束
+        next_func = source.index("async def ", func_start + 10)
+        func_src = source[func_start:next_func]
+        finally_pos = func_src.index("finally:")
+        set_false_pos = func_src.index("set_is_changing_language(False)")
+        assert finally_pos < set_false_pos, "set_is_changing_language(False) 必须在 finally 块"
+
+    def test_source_guard_dropdown_binds_loading_state(self) -> None:
+        """源码守护: Dropdown.disabled 与 ProgressRing.visible 绑定 is_changing_language。"""
+        source = _source_without_docstrings(_read_source())
+        assert "disabled=is_changing_language" in source
+        assert "visible=is_changing_language" in source
+
+    def test_loading_state_restored_after_success(self, system_tab_env) -> None:
+        """运行时: 成功路径结束后 loading 恢复 (重渲染 ProgressRing visible=False)。"""
+        env = system_tab_env
+        dropdowns = _get_dropdowns(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdowns[0].on_select, _make_event("en_US"))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        _rerender(env)
+        rings = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.ProgressRing)]
+        assert rings[0].visible is False
+        new_dropdowns = _get_dropdowns(env)
+        assert new_dropdowns[0].disabled in (False, None)
+
+    def test_loading_state_restored_after_failure(self, system_tab_env) -> None:
+        """运行时: 失败路径结束后 loading 恢复 (finally 生效)。"""
+        env = system_tab_env
+        env["mock_config"].set_locale.return_value = False
+        dropdowns = _get_dropdowns(env)
+        page = env["page"]
+        page.run_task.reset_mock()
+        _invoke(dropdowns[0].on_select, _make_event("en_US"))
+        handler, args, _ = _await_run_task_handler(page)
+        asyncio.run(handler(*args))
+
+        _rerender(env)
+        rings = [c for c in _walk_all_controls(env["result"]) if isinstance(c, ft.ProgressRing)]
+        assert rings[0].visible is False
+
+
 class TestDoThemeChange:
     """_do_theme_change: 成功/page=None/异常/CancelledError。"""
 
@@ -990,7 +1071,7 @@ class TestDoSaveConcurrency:
         )
 
     def test_out_of_range_lower(self, system_tab_env) -> None:
-        """val=0 (< 1) → snack range 错误, 不调 setter。"""
+        """P2-13 语义: on_change 输入 "0" 被 VM set clamp 为 "1" → save 保存 clamp 后合法值。"""
         env = system_tab_env
         fields = _get_text_fields(env)
         _invoke(fields[0].on_change, _make_event("0"))
@@ -998,7 +1079,8 @@ class TestDoSaveConcurrency:
         handler, args, _ = self._trigger(env)
         asyncio.run(handler(*args))
 
-        env["mock_config"].set_sync_max_concurrent_heavy.assert_not_called()
+        # P2-13: clamp 到 min=1 后保存成功
+        env["mock_config"].set_sync_max_concurrent_heavy.assert_called_once_with(1)
 
     def test_value_error_path(self, system_tab_env) -> None:
         """raw_val 非数字 → ValueError → snack num_fmt。"""
@@ -1056,38 +1138,38 @@ class TestDoSaveDbPool:
         )
 
     def test_pool_size_out_of_range(self, system_tab_env) -> None:
-        """pool_size=0 (< 1) → snack range 错误, 不调 setter。"""
+        """P2-13 语义: 直接调 handler 绕过 set clamp → VM save 兜底范围检查失败 → snack sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("0", "10", "30"))
 
         env["mock_config"].set_db_connection_pool_size.assert_not_called()
         env["show_snack"].assert_called_once_with(
-            "i18n[sys_snack_pool_range]",
+            "i18n[sys_snack_save_err]",
             color=AppColors.ERROR,
         )
 
     def test_max_overflow_out_of_range(self, system_tab_env) -> None:
-        """max_overflow=100 (> 50) → snack overflow 错误, 不调 setter。"""
+        """P2-13 语义: max_overflow=100 绕过 clamp → VM 兜底失败 → snack sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("5", "100", "30"))
 
         env["mock_config"].set_db_max_overflow.assert_not_called()
         env["show_snack"].assert_called_once_with(
-            "i18n[settings_db_overflow]: 0-50",
+            "i18n[sys_snack_save_err]",
             color=AppColors.ERROR,
         )
 
     def test_timeout_out_of_range(self, system_tab_env) -> None:
-        """timeout=1 (< 5) → snack timeout 错误, 不调 setter。"""
+        """P2-13 语义: timeout=1 绕过 clamp → VM 兜底失败 → snack sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("5", "10", "1"))
 
         env["mock_config"].set_db_pool_timeout.assert_not_called()
         env["show_snack"].assert_called_once_with(
-            "i18n[settings_db_timeout]: 5-300",
+            "i18n[sys_snack_save_err]",
             color=AppColors.ERROR,
         )
 
@@ -1158,22 +1240,23 @@ class TestDoSaveThreadPool:
         )
 
     def test_io_out_of_range(self, system_tab_env) -> None:
-        """io_val=2 (< 4) → snack io_range, 不调 setter。"""
+        """P2-13 语义: io=2 绕过 clamp → VM 兜底失败 → snack 末次为 sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("2", "4"))
 
         env["mock_config"].set_max_io_workers.assert_not_called()
-        env["show_snack"].assert_called_once_with("i18n[sys_snack_io_range]", color=AppColors.ERROR)
+        # 先显示 common_preparing, 失败后显示 sys_snack_save_err (共 2 次)
+        env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_cpu_out_of_range(self, system_tab_env) -> None:
-        """cpu_val=100 (> 64) → snack cpu_range, 不调 setter。"""
+        """P2-13 语义: cpu=100 绕过 clamp → VM 兜底失败 → snack 末次为 sys_snack_save_err。"""
         env = system_tab_env
         handler, _, _ = self._trigger(env)
         asyncio.run(handler("8", "100"))
 
         env["mock_config"].set_max_cpu_workers.assert_not_called()
-        env["show_snack"].assert_called_once_with("i18n[sys_snack_cpu_range]", color=AppColors.ERROR)
+        env["show_snack"].assert_called_with("i18n[sys_snack_save_err]", color=AppColors.ERROR)
 
     def test_value_error_path(self, system_tab_env) -> None:
         """io_str 非数字 → ValueError → snack num_fmt。"""

@@ -39,19 +39,19 @@ def _build_index_card(title_key: str, info: MarketIndexRow) -> ft.Container:
             [
                 ft.Text(
                     I18n.get(title_key),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     no_wrap=True,
                 ),
                 ft.Text(
                     info.value,
-                    size=20,
+                    size=AppStyles.FONT_SIZE_HEADLINE,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                 ),
                 ft.Text(
                     info.change,
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     weight=ft.FontWeight.BOLD,
                     color=_resolve_color(info.color),
                 ),
@@ -75,19 +75,19 @@ def _build_hsgt_card(info: HsgtRow) -> ft.Container:
             [
                 ft.Text(
                     I18n.get("home_northbound"),
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     color=AppColors.TEXT_SECONDARY,
                     no_wrap=True,
                 ),
                 ft.Text(
                     info.value,
-                    size=20,
+                    size=AppStyles.FONT_SIZE_HEADLINE,
                     weight=ft.FontWeight.BOLD,
                     color=_resolve_color(info.color),
                 ),
                 ft.Text(
                     info.sub,
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.TEXT_SECONDARY,
                 ),
             ],
@@ -113,17 +113,17 @@ def _build_concept_card(item: HotConceptRow) -> ft.Container:
             [
                 ft.Text(
                     item.name,
-                    size=14,
+                    size=AppStyles.FONT_SIZE_LG,
                     weight=ft.FontWeight.BOLD,
                     color=AppColors.TEXT_PRIMARY,
                     no_wrap=True,
                 ),
                 ft.Row(
                     [
-                        ft.Icon(icon, size=16, color=color),
+                        ft.Icon(icon, size=AppStyles.FONT_SIZE_TITLE, color=color),
                         ft.Text(
                             item.change,
-                            size=16,
+                            size=AppStyles.FONT_SIZE_TITLE,
                             weight=ft.FontWeight.BOLD,
                             color=color,
                         ),
@@ -178,7 +178,7 @@ def MarketDashboard(
     # --- Hot concepts section ---
     concepts_title = ft.Text(
         I18n.get("home_hot_concepts"),
-        size=16,
+        size=AppStyles.FONT_SIZE_TITLE,
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )
@@ -193,7 +193,7 @@ def MarketDashboard(
                 col=typing.cast("ft.ResponsiveNumber", AppStyles.COL_FULL),
                 content=ft.Text(
                     I18n.get("home_hot_concepts_empty"),
-                    size=12,
+                    size=AppStyles.FONT_SIZE_BODY_SM,
                     color=AppColors.TEXT_HINT,
                 ),
             )

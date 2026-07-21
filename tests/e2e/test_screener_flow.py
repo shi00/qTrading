@@ -230,3 +230,24 @@ async def test_detail_dialog_outside_click_close(e2e_page):
     # timeout 用 TIMEOUTS.INTERACTION（8s）足够等待对话框关闭动画
     pe_locator = e2e_page.page.get_by_text(pe_label, exact=False)
     await pe_locator.wait_for(state="hidden", timeout=TIMEOUTS.INTERACTION)
+
+
+async def test_screener_pct_chg_positive_prefix(e2e_page):
+    """P3-15: 涨跌前置 +/- 符号 (色盲友好) — 平安银行 pct_chg > 0 应显示 "+" 前缀。
+
+    种子数据中平安银行 pct_chg 显式高于 VolumeBreakoutStrategy 阈值 (正数)，
+    virtual_table P3-15 对正数 trend 列前置 "+" (U+002D 普通连字符用于负数)。
+    验证表格中存在 "+数字" 格式文本，不依赖颜色区分涨跌。
+    """
+    screener = ScreenerPage(e2e_page)
+    await screener.open()
+    await screener.select_strategy("volume_breakout")
+    await screener.run()
+    await screener.expect_result("平安银行")
+
+    # pct_chg 列为 _TREND_COLS 成员, 正值前置 "+" (virtual_table.py L189-192)
+    # 种子数据 round(rng.uniform(*_PA_PCT_CHG_RANGE), 4) → 4 位小数正数
+    # 用正则定位 "+数字.数字" 格式文本 (CanvasKit 语义节点)
+    plus_prefix_loc = e2e_page.page.locator("text=/\\+\\d+\\.\\d+/")
+    await plus_prefix_loc.first.wait_for(state="attached", timeout=TIMEOUTS.INTERACTION)
+    assert await plus_prefix_loc.count() > 0, "P3-15: 正值 pct_chg 未显示 '+' 前缀 (色盲友好)"

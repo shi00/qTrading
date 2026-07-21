@@ -39,10 +39,6 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # UI Constants
 # ============================================================================
-_FONT_SIZE_TITLE = 16
-_FONT_SIZE_BODY = 14
-_FONT_SIZE_SMALL = 12
-_FONT_SIZE_HINT = 11
 _ICON_SIZE_SMALL = 16
 _DROPDOWN_WIDTH = AppStyles.CONTROL_WIDTH_MD
 _SPACING_DEFAULT = 20
@@ -273,7 +269,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     )
     schedule_status = ft.Text(
         _get_schedule_status_text(settings_state.auto_enabled),
-        size=_FONT_SIZE_SMALL,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=schedule_status_color,
     )
 
@@ -295,7 +291,7 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
     )
     ai_concept_status = ft.Text(
         _get_schedule_status_text(settings_state.ai_enabled),
-        size=_FONT_SIZE_SMALL,
+        size=AppStyles.FONT_SIZE_BODY_SM,
         color=ai_status_color,
     )
     ai_concept_engine_dropdown = ft.Dropdown(
@@ -402,18 +398,18 @@ def AutomationTab(show_snack_callback: Callable) -> ft.Container:
 
     txt_title = ft.Text(
         I18n.get("settings_auto_update"),
-        size=_FONT_SIZE_TITLE,
+        size=AppStyles.FONT_SIZE_TITLE,
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )
     txt_desc = ft.Text(
         I18n.get("settings_auto_desc"),
-        size=_FONT_SIZE_BODY,
+        size=AppStyles.FONT_SIZE_LG,
         color=AppColors.TEXT_SECONDARY,
     )
     txt_hint = ft.Text(
         I18n.get("settings_hint_bg_run"),
-        size=_FONT_SIZE_HINT,
+        size=AppStyles.FONT_SIZE_CAPTION,
         color=AppColors.TEXT_HINT,
     )
 
@@ -567,13 +563,13 @@ def NotificationsTab(show_snack_callback: Callable) -> ft.Container:
 
     txt_title = ft.Text(
         I18n.get("settings_notify_title"),
-        size=_FONT_SIZE_TITLE,
+        size=AppStyles.FONT_SIZE_TITLE,
         weight=ft.FontWeight.BOLD,
         color=AppColors.TEXT_PRIMARY,
     )
     txt_desc = ft.Text(
         I18n.get("settings_notify_desc"),
-        size=_FONT_SIZE_BODY,
+        size=AppStyles.FONT_SIZE_LG,
         color=AppColors.TEXT_SECONDARY,
     )
 

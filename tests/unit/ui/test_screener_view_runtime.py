@@ -19,7 +19,7 @@ import datetime
 import inspect
 from dataclasses import replace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import flet as ft
 import pandas as pd
@@ -376,6 +376,16 @@ class _FakeScreenerViewModel:
         self.method_calls.append("switch_to_realtime")
         self._set_state(mode="REALTIME")
 
+    def clear_filters(self) -> None:
+        """P1-3 批次 2 #71: Mock clear_filters (EmptyState on_cta 回调)."""
+        self.method_calls.append("clear_filters")
+        self._set_state(
+            page_no=1,
+            sort_column=None,
+            sort_ascending=True,
+            tier_hint=None,
+        )
+
     def subscribe_task_manager(self) -> None:
         self.method_calls.append("subscribe_task_manager")
 
@@ -531,10 +541,23 @@ def _patch_screener_view_mocks(mod, monkeypatch: pytest.MonkeyPatch, fake_vm: _F
 
 @pytest.fixture
 def screener_view_env(mock_i18n_state, mock_app_colors_state, monkeypatch):
-    """挂载 ScreenerView (默认 REALTIME 模式 + 空参数), 返回 env dict."""
+    """挂载 ScreenerView (默认 REALTIME 模式 + 含数据), 返回 env dict.
+
+    P1-3 批次 2: 默认提供非空 _current_page_data, 让 PaginatedTable 渲染捕获回调。
+    EmptyState 分支在 formatted_rows 为空时替代 PaginatedTable, 导致 on_sort/on_row_click
+    回调未捕获。默认有数据更接近真实使用场景, 测试空态时显式清空数据。
+    """
     from ui.views import screener_view as mod
 
     fake_vm = _FakeScreenerViewModel()
+    fake_vm._current_page_data = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000002.SZ"],
+            "name": ["平安银行", "万科A"],
+            "close": [10.5, 9.8],
+        }
+    )
+    fake_vm._set_state(total_items=2, total_pages=1, strategies_loaded=True)
     mocks = _patch_screener_view_mocks(mod, monkeypatch, fake_vm)
 
     component = make_component(mod.ScreenerView)
@@ -1069,7 +1092,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[data_export_no_data]", "error")
+        page.show_toast.assert_called_once_with("i18n[data_export_no_data]", "error", action_text=None, on_action=None)
 
     def test_empty_filepath_early_return(self, screener_view_env) -> None:
         """file_picker.save_file 返回空 → 早返回, 不调 export_results."""
@@ -1118,7 +1141,9 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[data_export_success]", "success")
+        page.show_toast.assert_called_once_with(
+            "i18n[data_export_success]", "success", action_text="i18n[data_export_open_folder]", on_action=ANY
+        )
 
     def test_export_fail_shows_error_toast(self, screener_view_env) -> None:
         """export_results 返回 (None, error) → show_toast("data_export_fail", "error")."""
@@ -1142,7 +1167,7 @@ class TestOnExportClick:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error")
+        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
 
     def test_export_exception_calls_sanitizer(self, screener_view_env) -> None:
         """R9: export_results 抛 Exception → DataSanitizer.sanitize_error + show_toast."""
@@ -1182,7 +1207,7 @@ class TestOnExportClick:
         assert isinstance(san_args[0], RuntimeError)
         assert str(san_args[0]) == "export crash"
         # show_toast 被调用 (error)
-        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error")
+        page.show_toast.assert_called_once_with("i18n[data_export_fail]", "error", action_text=None, on_action=None)
 
 
 class TestOnExportExcelClick:
@@ -1216,7 +1241,9 @@ class TestOnExportExcelClick:
         # 验证未误调 CSV 导出方法
         assert not any(c.startswith("export_results:") for c in fake_vm.method_calls)
         # 成功 toast
-        page.show_toast.assert_called_once_with("i18n[data_export_success]", "success")
+        page.show_toast.assert_called_once_with(
+            "i18n[data_export_success]", "success", action_text="i18n[data_export_open_folder]", on_action=ANY
+        )
 
     def test_excel_export_uses_xlsx_extension(self, screener_view_env) -> None:
         """Excel 导出 → file_picker.save_file 的 allowed_extensions=["xlsx"]."""
@@ -1308,7 +1335,7 @@ class TestLoadHistoryTree:
         handler, args, _ = _await_run_task_handler(page)
         asyncio.run(handler(*args))
 
-        page.show_toast.assert_called_once_with("i18n[screener_load_failed]", "error")
+        page.show_toast.assert_called_once_with("i18n[screener_load_failed]", "error", action_text=None, on_action=None)
 
     def test_cancelled_error_propagates(self, screener_view_env) -> None:
         """R2: vm.load_history_tree 抛 CancelledError → 传播."""
@@ -1581,7 +1608,9 @@ class TestDoRestoreDefaultAsync:
             asyncio.run(handler(*args))
 
             mock_reset.assert_awaited_once()
-            page.show_toast.assert_called_once_with("i18n[ai_settings_restored]", "info")
+            page.show_toast.assert_called_once_with(
+                "i18n[ai_settings_restored]", "info", action_text=None, on_action=None
+            )
 
     def test_restore_exception_shows_error(self, screener_view_with_params_env) -> None:
         """vm.reset_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
@@ -1609,7 +1638,9 @@ class TestDoRestoreDefaultAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            page.show_toast.assert_called_once_with("i18n[sys_snack_save_err]", "error")
+            page.show_toast.assert_called_once_with(
+                "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
+            )
 
 
 class TestDoSavePromptAsync:
@@ -1647,8 +1678,10 @@ class TestDoSavePromptAsync:
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值
-            page.show_toast.assert_called_once_with("⚠ i18n[prompt_err_length]", "warning")
+            # warning 路径: show_toast 第一参数含 prompt_err_length 翻译值 (P2-7: ⚠ emoji 前缀删除)
+            page.show_toast.assert_called_once_with(
+                "i18n[prompt_err_length]", "warning", action_text=None, on_action=None
+            )
 
     def test_valid_prompt_saves_successfully(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 返回 (True, None) → show_toast("ai_settings_saved")."""
@@ -1677,7 +1710,9 @@ class TestDoSavePromptAsync:
             asyncio.run(handler(*args))
 
             mock_save.assert_awaited_once()
-            page.show_toast.assert_called_once_with("i18n[ai_settings_saved]", "success")
+            page.show_toast.assert_called_once_with(
+                "i18n[ai_settings_saved]", "success", action_text=None, on_action=None
+            )
 
     def test_save_exception_shows_error(self, screener_view_with_params_env) -> None:
         """vm.save_strategy_prompt 抛 Exception → show_toast("sys_snack_save_err", "error")."""
@@ -1705,7 +1740,9 @@ class TestDoSavePromptAsync:
             handler, args, _ = _await_run_task_handler(page)
             asyncio.run(handler(*args))
 
-            page.show_toast.assert_called_once_with("i18n[sys_snack_save_err]", "error")
+            page.show_toast.assert_called_once_with(
+                "i18n[sys_snack_save_err]", "error", action_text=None, on_action=None
+            )
 
 
 # ============================================================================
@@ -1992,12 +2029,12 @@ class TestStatusRendering:
         env = screener_view_env
         fake_vm = env["fake_vm"]
 
-        fake_vm._set_state(strategy_desc="⚠️ 警告", strategy_desc_color="warning", strategies_loaded=True)
+        fake_vm._set_state(strategy_desc="(!) 警告", strategy_desc_color="warning", strategies_loaded=True)
         _rerender(env)
 
-        # 验证不抛异常 (颜色映射逻辑正确)
+        # 验证不抛异常 (颜色映射逻辑正确) (P2-7: ⚠️ → 文本符号)
         texts = _get_texts(env)
-        assert any("⚠️ 警告" in (t.value or "") for t in texts)
+        assert any("(!) 警告" in (t.value or "") for t in texts)
 
     def test_task_unlocked_resets_disabled(self, screener_view_env) -> None:
         """Task 3.2: run_disabled 派生自 state.loading + state.selected_strategy.
@@ -2024,13 +2061,26 @@ class TestStatusRendering:
 class TestTableDataRendering:
     """表格数据渲染: 有数据/无数据."""
 
-    def test_no_data_renders_empty_table(self, screener_view_env) -> None:
-        """vm.get_current_page_data() 返回空 DataFrame → 表格为空."""
+    def test_no_data_renders_empty_state(self, screener_view_env) -> None:
+        """vm.get_current_page_data() 返回空 DataFrame → EmptyState 渲染 (P1-3 批次 2 #70).
+
+        EmptyState 分支替代 PaginatedTable: 无 on_sort/on_row_click 回调捕获。
+        清空 captured_callbacks 后 _rerender, 验证无新增回调 (PaginatedTable mock 未被调用)。
+        """
         env = screener_view_env
-        # 默认 _current_page_data=None → get_current_page_data 返回空 DataFrame
-        # PaginatedTable 被 mock, 验证 captured_callbacks 存在
-        assert callable(env["captured_callbacks"]["on_sort"])
-        assert callable(env["captured_callbacks"]["on_row_click"])
+        fake_vm = env["fake_vm"]
+
+        # 清空数据触发 EmptyState 分支
+        fake_vm._current_page_data = pd.DataFrame()
+        fake_vm._set_state(total_items=0, total_pages=0, strategies_loaded=True)
+        # 清空 captured_callbacks (初始渲染时已捕获回调), 验证 _rerender 不再新增
+        env["captured_callbacks"].clear()
+        _rerender(env)
+
+        # 验证 captured_callbacks 不含 on_sort/on_row_click (EmptyState 渲染, PaginatedTable 未调用)
+        assert "on_sort" not in env["captured_callbacks"]
+        assert "on_row_click" not in env["captured_callbacks"]
+        assert env["captured_callbacks"] == {}
 
     def test_with_data_renders_table(self, screener_view_env) -> None:
         """vm.get_current_page_data() 返回非空 DataFrame → 表格渲染数据."""

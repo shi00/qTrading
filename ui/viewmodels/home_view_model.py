@@ -9,6 +9,7 @@ import pandas as pd
 from data.data_processor import DataProcessor
 from data.domain_services.market_data_service import MarketDataService
 from services.news_subscription_service import NewsSubscriptionService
+from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 from utils.sanitizers import DataSanitizer
 
@@ -74,6 +75,11 @@ class HomeState:
     market_hot_concepts: tuple[HotConceptRow, ...] = ()
     market_date: str = "--"
     market_stale: bool = False
+    # P1-3 批次 2: 三态字段 (EmptyState/ErrorState/加载态)
+    is_loading: bool = False
+    has_market_data: bool = False
+    has_news_data: bool = False
+    load_error: Message | None = None
 
 
 class HomeViewModel(ObservableViewModelMixin[HomeState]):
@@ -183,7 +189,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         """
         data = MarketDataService().get_cached_data()
         if data:
-            self._set_state(**_market_data_to_state_fields(data))
+            self._set_state(**_market_data_to_state_fields(data), has_market_data=True)
 
     # --- Data Actions ---
 
@@ -208,7 +214,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
                 raise
 
         if data:
-            self._set_state(**_market_data_to_state_fields(data))
+            self._set_state(**_market_data_to_state_fields(data), has_market_data=True)
 
         return data
 
@@ -216,7 +222,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         """Get data immediately from service cache, update state."""
         data = MarketDataService().get_cached_data()
         if data:
-            self._set_state(**_market_data_to_state_fields(data))
+            self._set_state(**_market_data_to_state_fields(data), has_market_data=True)
         return data
 
     async def refresh_news(self):
@@ -231,7 +237,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
         has_more = self._state.has_more_news  # batch 为 None 时保持不变
         if batch is not None:
             if batch.empty:
-                self._set_state(news_rows=(), news_page=0, has_more_news=False)
+                self._set_state(news_rows=(), news_page=0, has_more_news=False, has_news_data=False)
                 has_more = False
             else:
                 new_rows = _df_to_news_rows(batch)
@@ -240,6 +246,7 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
                     news_rows=new_rows,
                     news_page=0,
                     has_more_news=has_more,
+                    has_news_data=True,
                 )
 
         return batch, has_more
@@ -302,17 +309,35 @@ class HomeViewModel(ObservableViewModelMixin[HomeState]):
             return None
 
     def clear_state(self):
-        """Reset state (e.g. on cache clear)"""
+        """Reset state (e.g. on cache clear).
+
+        P1-3 批次 2: 扩展重置 is_loading_more (修复 bug: 原 clear_state 不重置导致卡在 True)
+        + 新增的 is_loading/has_market_data/has_news_data/load_error 字段。
+        """
         self._set_state(
             news_rows=(),
             news_page=0,
             has_more_news=False,
+            is_loading_more=False,  # P1-3: 修复 bug (原 clear_state 不重置)
             market_indices=(),
             market_hsgt=HsgtRow(),
             market_hot_concepts=(),
             market_date="--",
             market_stale=False,
+            # P1-3 批次 2: 新增 4 字段
+            is_loading=False,
+            has_market_data=False,
+            has_news_data=False,
+            load_error=None,
         )
+
+    def set_load_error(self, message: Message | None) -> None:
+        """设置/清除加载错误状态 (P1-3 批次 2)."""
+        self._set_state(load_error=message)
+
+    def set_loading(self, is_loading: bool) -> None:
+        """设置加载状态 (P1-3 批次 2)."""
+        self._set_state(is_loading=is_loading)
 
 
 # ============================================================

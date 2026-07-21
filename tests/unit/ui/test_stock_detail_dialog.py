@@ -879,9 +879,11 @@ class TestLoadChartAsyncFunction:
             mock_tpm.return_value.run_async = AsyncMock(return_value="base64pngdata")
             await _load_chart_async(mock_dp, {"name": "测试股票"}, "000001.SZ", calls.append, 860, 340)
 
-        # 最终设置 ft.Image
-        assert isinstance(calls[-1], ft.Image)
-        assert calls[-1].src == "base64pngdata"
+        # P3-15: set_chart_content 改为 ft.Column (含 ft.Image + K 线图例 Row)
+        assert isinstance(calls[-1], ft.Column)
+        image_ctrl = next((c for c in calls[-1].controls if isinstance(c, ft.Image)), None)
+        assert image_ctrl is not None
+        assert image_ctrl.src == "base64pngdata"
 
     @pytest.mark.asyncio
     async def test_success_with_existing_vol_column(self):
@@ -900,7 +902,9 @@ class TestLoadChartAsyncFunction:
             mock_tpm.return_value.run_async = AsyncMock(return_value="b64")
             await _load_chart_async(mock_dp, {"name": "测试"}, "000001.SZ", calls.append, 860, 340)
 
-        assert isinstance(calls[-1], ft.Image)
+        assert isinstance(calls[-1], ft.Column)
+        image_ctrl = next((c for c in calls[-1].controls if isinstance(c, ft.Image)), None)
+        assert image_ctrl is not None
         # vol 列已存在，不应被覆盖
         assert list(df["vol"]) == [100, 200]
 

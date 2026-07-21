@@ -213,8 +213,16 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
     # --- Internal helpers ---
 
     def _set_sync_busy(self, is_busy: bool, active_key: str | None = None):
-        """Update sync busy state and notify View."""
-        self._set_state(is_syncing=is_busy, active_key=active_key)
+        """Update sync busy state and notify View.
+
+        P1-5: 任务启动/结束时重置 progress/progress_message, 避免 init_sync 与
+        daily_sync/ai_concept_sync/cache_clear 进度字段复用错乱 (场景遗漏 #16).
+        init_sync 终态走 _reset_init_sync (不经本方法 is_busy=False 分支), 不受影响.
+        """
+        if is_busy:
+            self._set_state(is_syncing=True, active_key=active_key, progress=0.0, progress_message=None)
+        else:
+            self._set_state(is_syncing=False, active_key=None, progress=0.0, progress_message=None)
 
     def _reset_init_sync(self, final_status: TaskStatus = TaskStatus.COMPLETED):
         """Reset init sync state and notify View to reset UI."""
@@ -293,9 +301,14 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
 
         async def _daily_logic(task_id: str, **kwargs):
             def _progress(c, t, msg):
+                # P1-5: 同步进度上报到 VM state (View ProgressBar 渲染);
+                # NOTE(lazy) 范式与 _combined_progress 一致: msg 是 service 层已翻译字符串,
+                # 包 Message(key) 透传, I18n.get 未命中时原样返回 key.
+                progress_val = c / t if t else 0
+                self._set_state(progress=progress_val, progress_message=Message(str(msg)))
                 # T8 fix: 若 update_progress 返回 False（任务已取消/不再 RUNNING），抛 CancelledError 早退
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
-                if not self._tm.update_progress(task_id, c / t if t else 0, msg):
+                if not self._tm.update_progress(task_id, progress_val, msg):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
 
             try:
@@ -306,11 +319,14 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 )
                 return Message("ds_daily_update_done")
             except asyncio.CancelledError:
-                if self._state.is_syncing:
-                    self._emit_snack(
-                        Message("settings_msg_sync_cancelled"),
-                        "warning",
-                    )
+                # 不设 is_syncing 守卫: 真实 TaskManager 取消时 handle_task_update
+                # (经 _cancel_task_impl 内同步 _notify_subscribers) 先于本 except 块恢复
+                # is_syncing=False, 守卫会导致取消 snack 永远被跳过 (集成测试
+                # test_cancel_active_task_cancels_and_recovers 实证)
+                self._emit_snack(
+                    Message("settings_msg_sync_cancelled"),
+                    "warning",
+                )
                 raise
             except Exception as ex:
                 classify_error(ex, context="general")
@@ -348,6 +364,8 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                 # M3 fix: CancelledError 带消息，便于日志区分"用户取消"与"框架取消"
                 if not self._tm.update_progress(task_id, 0.05, Message("ds_ai_concept_rebuild_start")):
                     raise asyncio.CancelledError("task cancelled by user (update_progress returned False)")
+                # P1-5: 起始进度上报到 VM state (View ProgressBar 渲染)
+                self._set_state(progress=0.05, progress_message=Message("ds_ai_concept_rebuild_start"))
                 # Manual trigger: manual_trigger=True → execute LLM-driven concept tagging.
                 # ai_service injected via kwargs to satisfy R1 (data/ must not import services/).
                 await self._processor.run_ai_concept_tagging(
@@ -356,14 +374,16 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
                     manual_trigger=True,
                     ai_service=self._ai_service,
                 )
+                # P1-5: 完成进度 100% (任务结束 finally 重置为 0, 此处先让用户看到完成态)
+                self._set_state(progress=1.0, progress_message=Message("ds_ai_concept_rebuild_done"))
                 self._emit_snack(Message("snack_ai_concept_done"), "success")
                 return Message("ds_ai_concept_rebuild_done")
             except asyncio.CancelledError:
-                if self._state.is_syncing:
-                    self._emit_snack(
-                        Message("settings_msg_sync_cancelled"),
-                        "warning",
-                    )
+                # 同 _daily_logic: 不设 is_syncing 守卫 (真实取消时序下守卫必跳过 snack)
+                self._emit_snack(
+                    Message("settings_msg_sync_cancelled"),
+                    "warning",
+                )
                 raise
             except Exception as ex:
                 classify_error(ex, context="general")
@@ -504,6 +524,20 @@ class DataSourceViewModel(ObservableViewModelMixin[DataSourceState]):
         """Cancel running init sync."""
         await self._processor.request_cancel()
         task_id = self._active_task_ids.get("system_init_sync")
+        if task_id:
+            self._tm.cancel_task(task_id)
+
+    def cancel_active_task(self) -> None:
+        """取消当前活跃任务 (P1-5: daily_sync/ai_concept_sync 取消按钮).
+
+        按 state.active_key 定位 task_id 并委托 TaskManager 取消。
+        cache_clear (cancellable=False) 由 View 层隐藏取消按钮, 此处不重复检查;
+        cancel_task 对非 cancellable 任务是 no-op (TaskManager 记 warning, 不抛异常).
+        """
+        active_key = self._state.active_key
+        if active_key is None or active_key == "system_init_sync":
+            return
+        task_id = self._active_task_ids.get(active_key)
         if task_id:
             self._tm.cancel_task(task_id)
 

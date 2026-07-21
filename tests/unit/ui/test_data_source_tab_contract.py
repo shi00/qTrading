@@ -535,6 +535,10 @@ class _FakeDataSourceViewModel:
     def recover_stale_state(self) -> None:
         self.method_calls.append(("recover_stale_state", {}))
 
+    def cancel_active_task(self) -> None:
+        """P1-5: daily_sync/ai_concept_sync 取消按钮入口。"""
+        self.method_calls.append(("cancel_active_task", {}))
+
 
 class _FakeTushareConfigPanelViewModel:
     """模拟 TushareConfigPanelViewModel (use_ref 持久化, 外部 VM 模式订阅)。"""
@@ -996,7 +1000,9 @@ class TestDataSourceTabStateBranches:
         result, _ = _mount(component)
         bars = _find_by_type(result, ft.ProgressBar)
         assert len(bars) >= 1
-        assert bars[0].visible is True
+        # P1-5 后树中存在 2 个 ProgressBar (action_console secondary 在前, init sync 主进度条在后);
+        # init_sync_running=True 时主进度条 visible=True, secondary (active_key 非 daily/ai/cache) visible=False
+        assert any(b.visible for b in bars)
 
     def test_progress_text_cancelled_status(
         self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
@@ -1110,6 +1116,111 @@ class TestDataSourceTabStateBranches:
         # metric_sync_value = f"{I18n.get('time_today')} 15:30"
         # I18n.get mock 返回 key, 所以值 = "time_today 15:30"
         assert any("time_today" in (t.value or "") and "15:30" in (t.value or "") for t in texts)
+
+    # --- P1-5: Secondary progress 区域 (daily_sync/ai_concept_sync/cache_clear) ---
+
+    def _mount_with_state(self, monkeypatch, state: _FakeDataSourceState):
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        _patch_data_source_vms(monkeypatch, fake_vm=_FakeDataSourceViewModel(state=state))
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        return _mount(component)
+
+    def test_secondary_progress_visible_when_daily_sync(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: is_syncing=True + active_key="daily_sync" → secondary ProgressBar visible + 带进度值。"""
+        result, _ = self._mount_with_state(
+            monkeypatch,
+            _FakeDataSourceState(is_syncing=True, active_key="daily_sync", progress=0.4),
+        )
+        bars = _find_by_type(result, ft.ProgressBar)
+        # secondary bar (带 value=0.4) 应可见
+        secondary = [b for b in bars if b.value == 0.4]
+        assert len(secondary) == 1
+        assert secondary[0].visible is True
+
+    def test_secondary_progress_hidden_when_idle(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: is_syncing=False → secondary ProgressBar visible=False。"""
+        result, _ = self._mount_with_state(monkeypatch, _FakeDataSourceState())
+        bars = _find_by_type(result, ft.ProgressBar)
+        # 所有 ProgressBar 均不可见 (init bar + secondary bar)
+        assert all(b.visible is False for b in bars)
+
+    def test_secondary_cancel_button_visible_when_daily_sync(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: active_key="daily_sync" (cancellable) → 取消按钮 visible。"""
+        result, _ = self._mount_with_state(
+            monkeypatch,
+            _FakeDataSourceState(is_syncing=True, active_key="daily_sync", progress=0.2),
+        )
+        cancel_btn = _find_button_by_content(result, "common_cancel")
+        assert cancel_btn is not None
+        assert cancel_btn.visible is True
+
+    def test_secondary_cancel_button_hidden_when_cache_clear(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: active_key="cache_clear" (不可取消) → 取消按钮隐藏 + ProgressBar indeterminate。"""
+        result, _ = self._mount_with_state(
+            monkeypatch,
+            _FakeDataSourceState(is_syncing=True, active_key="cache_clear"),
+        )
+        cancel_btn = _find_button_by_content(result, "common_cancel")
+        # 按钮存在但 visible=False
+        assert cancel_btn is not None
+        assert cancel_btn.visible is False
+        # cache_clear 无进度回调 → value=None (indeterminate)
+        bars = _find_by_type(result, ft.ProgressBar)
+        indeterminate = [b for b in bars if b.value is None and b.visible is True]
+        assert len(indeterminate) == 1
+
+    def test_secondary_progress_text_with_percentage(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: progress=0.4 无 message → 文本 "40.0%"。"""
+        result, _ = self._mount_with_state(
+            monkeypatch,
+            _FakeDataSourceState(is_syncing=True, active_key="daily_sync", progress=0.4),
+        )
+        texts = _find_by_type(result, ft.Text)
+        assert any((t.value or "") == "40.0%" for t in texts)
+
+    def test_secondary_progress_text_with_message(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: progress + progress_message → 文本 "50.0% - <msg key>"。"""
+        result, _ = self._mount_with_state(
+            monkeypatch,
+            _FakeDataSourceState(
+                is_syncing=True,
+                active_key="ai_concept_sync",
+                progress=0.5,
+                progress_message=Message("ds_ai_concept_rebuild_start"),
+            ),
+        )
+        texts = _find_by_type(result, ft.Text)
+        assert any("50.0%" in (t.value or "") and "ds_ai_concept_rebuild_start" in (t.value or "") for t in texts)
+
+    def test_cancel_button_click_invokes_vm_cancel_active_task(
+        self, mock_i18n_state, mock_app_colors_state, _mock_data_source_deps, monkeypatch
+    ):
+        """P1-5: 点击取消按钮 → vm.cancel_active_task()。"""
+        from ui.views.settings_tabs.data_source_tab import DataSourceTab
+
+        fake_vm = _FakeDataSourceViewModel(state=_FakeDataSourceState(is_syncing=True, active_key="daily_sync"))
+        _patch_data_source_vms(monkeypatch, fake_vm=fake_vm)
+        component = make_component(DataSourceTab, show_snack_callback=MagicMock())
+        result, _ = _mount(component)
+
+        cancel_btn = _find_button_by_content(result, "common_cancel")
+        assert cancel_btn is not None
+        cancel_btn.on_click(_make_event())
+
+        assert ("cancel_active_task", {}) in fake_vm.method_calls
 
 
 # ============================================================================

@@ -182,7 +182,7 @@ class TestBuildStrategyOptions:
         assert result[0].text == "动量策略"
 
     def test_missing_apis_adds_warning_suffix(self):
-        """missing_apis 非空时追加 ⚠️ 标记。"""
+        """missing_apis 非空时追加 (!) 标记 (P2-7: ⚠️ → 文本符号)。"""
         mock_mgr = MagicMock()
         mock_mgr.get_strategy.return_value = None
         result = _build_strategy_options(
@@ -190,7 +190,7 @@ class TestBuildStrategyOptions:
             mock_mgr,
         )
         assert result[0].text is not None
-        assert "⚠️" in result[0].text
+        assert "(!)" in result[0].text
 
     def test_empty_strategies(self):
         """空策略字典返回空列表。"""
