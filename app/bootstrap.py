@@ -333,3 +333,52 @@ def mask_sensitive(value):
     后短 token（< 32）全部隐藏为 ***，长 token 部分脱敏（前 3 + *** + 后 4）。
     """
     return DataSanitizer.sanitize_token(value)
+
+
+async def prepare_database_runtime() -> None:
+    """根据数据库模式准备运行时（Phase 2 §3.4）。
+
+    - embedded: 启动 EmbeddedPostgresService → save_db_config 注入 URL（Priority 2 路径）
+    - external: 无操作（沿用既有 DATABASE_URL/db_* 配置）
+
+    必须在 ``CacheManager()`` 之前调用（CacheManager 构造时建引擎）。
+
+    模式判定：``QTRADING_DATABASE_MODE`` 环境变量（embedded|external，默认 external）。
+
+    Raises:
+        EmbeddedPostgresStartError: sidecar 启动失败时透传（不吞没，R2 红线要求
+            CancelledError 也透传）。
+    """
+    import os
+    from urllib.parse import urlparse
+
+    mode = os.environ.get("QTRADING_DATABASE_MODE", "external").lower()
+    if mode != "embedded":
+        return
+
+    from data.persistence.embedded_postgres.service import EmbeddedPostgresService
+    from utils.config_handler import ConfigHandler
+    from utils.config_models import AppConfig
+
+    config = AppConfig.model_validate(ConfigHandler.load_config())
+    if not config.embedded_pg_enabled:
+        logger.warning("[Bootstrap] QTRADING_DATABASE_MODE=embedded but embedded_pg_enabled=False; skip")
+        return
+
+    service = EmbeddedPostgresService.from_config(config)
+    info = await service.start()
+    # URL 由 service 构造为 postgresql+asyncpg://user:password@host:port/db
+    parsed = urlparse(info.url)
+    password = parsed.password or ""
+    ConfigHandler.save_db_config(
+        host=config.embedded_pg_listen,
+        port=info.port,
+        user=config.embedded_pg_username,
+        password=password,
+        database=config.embedded_pg_database,
+    )
+    logger.info(
+        "[Bootstrap] embedded postgres ready on %s:%s",
+        config.embedded_pg_listen,
+        info.port,
+    )
