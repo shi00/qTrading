@@ -178,7 +178,7 @@ class TestDatabaseConfigPanelRouting:
     ) -> None:
         """external 模式 → 调用 ExternalPgForm, 不调用 EmbeddedStatusCard。"""
         mock_external, mock_embedded, _, _ = _render_panel_with_mocked_children(embedded_mode=False)
-        assert mock_external.called
+        assert mock_external.call_count >= 1
         assert not mock_embedded.called
 
     def test_external_mode_passes_vm_and_flags_to_external_pg_form(
@@ -210,7 +210,7 @@ class TestDatabaseConfigPanelRouting:
     ) -> None:
         """embedded 模式 → 调用 EmbeddedStatusCard, 不调用 ExternalPgForm。"""
         mock_external, mock_embedded, _, _ = _render_panel_with_mocked_children(embedded_mode=True)
-        assert mock_embedded.called
+        assert mock_embedded.call_count >= 1
         assert not mock_external.called
 
     def test_embedded_mode_calls_embedded_status_card_without_vm(

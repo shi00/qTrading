@@ -204,7 +204,8 @@ class TestExternalPgFormRendering:
         """DoD: 渲染所有 5 个表单字段 (host/port/user/password/database)。"""
         _, _, result, _ = _render_form()
         for label in ("db_host", "db_port", "db_user", "db_password", "db_name"):
-            assert _find_text_field(result, label) is not None
+            tf = _find_text_field(result, label)
+            assert isinstance(tf, ft.TextField), f"未找到 {label} 对应的 TextField"
 
     def test_renders_create_checkbox(self, mock_i18n_state, mock_app_colors_state) -> None:
         """DoD: 渲染 create_if_not_exists checkbox。"""

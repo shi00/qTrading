@@ -211,10 +211,11 @@ class TestBackupRestorePanelVMLifecycle:
         """挂载后通过 use_viewmodel(factory=...) 实例化内部 VM."""
         _, _, _, component = _render_panel()
         assert component is not None
+        assert hasattr(component, "fn"), "Component 应已实例化 (有 fn 属性)"
 
     def test_unmount_disposes_internal_vm(self, mock_i18n_state, mock_app_colors_state) -> None:
         """DoD: 卸载时 dispose 内部 VM (use_viewmodel factory 模式默认 dispose_on_unmount=True)."""
         with patch("ui.components.config_panels.backup_restore_panel.BackupRestoreViewModel.dispose") as mock_dispose:
             _, _, _, component = _render_panel()
             run_unmount_effects(component)
-        mock_dispose.assert_called_once()
+        mock_dispose.assert_called_once_with()

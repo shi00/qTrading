@@ -27,7 +27,7 @@ class TestEmbeddedStatusCardState:
     def test_state_is_frozen(self) -> None:
         """DoD: state 必须 frozen (MVVM §3.2 不可变 snapshot)。"""
         state = EmbeddedStatusCardState()
-        with pytest.raises(FrozenInstanceError):
+        with pytest.raises(FrozenInstanceError, match="cannot assign to field"):
             state.status_message = Message("test")  # type: ignore[misc]
 
     def test_default_status_type_is_info(self) -> None:

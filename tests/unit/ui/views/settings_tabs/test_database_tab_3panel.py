@@ -124,9 +124,9 @@ class TestDatabaseTab3Panel:
         """DoD 1: 默认渲染含 EmbeddedStatusCard + DatabaseStatusPanel + BackupRestorePanel。"""
         _, mocks, _ = _render_tab(db_show_advanced=False)
 
-        assert mocks["embedded_status_card"].called, "默认应渲染 EmbeddedStatusCard"
-        assert mocks["database_status_panel"].called, "默认应渲染 DatabaseStatusPanel"
-        assert mocks["backup_restore_panel"].called, "默认应渲染 BackupRestorePanel"
+        assert mocks["embedded_status_card"].call_count >= 1, "默认应渲染 EmbeddedStatusCard"
+        assert mocks["database_status_panel"].call_count >= 1, "默认应渲染 DatabaseStatusPanel"
+        assert mocks["backup_restore_panel"].call_count >= 1, "默认应渲染 BackupRestorePanel"
 
     def test_advanced_toggle_off_by_default(self, mock_i18n_state: Any, mock_app_colors_state: Any) -> None:
         """DoD 2: db_show_advanced=False 时不渲染 ExternalPgForm。"""
@@ -140,7 +140,7 @@ class TestDatabaseTab3Panel:
         """DoD 3: 开启后渲染 ExternalPgForm。"""
         _, mocks, _ = _render_tab(db_show_advanced=True)
 
-        assert mocks["external_pg_form"].called, "高级模式开启时应渲染 ExternalPgForm"
+        assert mocks["external_pg_form"].call_count >= 1, "高级模式开启时应渲染 ExternalPgForm"
         # 验证 ExternalPgForm 接收正确的参数
         call_kwargs = mocks["external_pg_form"].call_args.kwargs
         assert call_kwargs.get("show_header") is True
@@ -189,9 +189,9 @@ class TestDatabaseTab3Panel:
         _, mocks, _ = _render_tab(db_show_advanced=True)
 
         # 验证 load_config 被调用 (use_effect 挂载时执行)
-        mocks["load_config_mock"].assert_called()
+        assert mocks["load_config_mock"].call_count >= 1
         # 验证 ExternalPgForm 被渲染 (说明 show_advanced 已被 use_effect 设置为 True)
-        assert mocks["external_pg_form"].called, (
+        assert mocks["external_pg_form"].call_count >= 1, (
             "use_effect 应从 AppConfig 读取 db_show_advanced=True 并触发 ExternalPgForm 渲染"
         )
 

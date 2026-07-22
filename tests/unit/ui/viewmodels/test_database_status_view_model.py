@@ -77,7 +77,7 @@ def vm(mock_maintenance_service, mock_config_dict):
 
 class TestStateImmutability:
     def test_state_is_frozen(self, vm):
-        with pytest.raises(FrozenInstanceError):
+        with pytest.raises(FrozenInstanceError, match="cannot assign to field"):
             vm.state.is_running = True  # type: ignore[misc]
 
     def test_state_default_values(self, mock_maintenance_service, mock_config_dict):
@@ -104,7 +104,7 @@ class TestRefreshStatus:
     @pytest.mark.asyncio
     async def test_refresh_status_calls_doctor(self, vm, mock_maintenance_service):
         await vm.refresh_status()
-        mock_maintenance_service.doctor.assert_called_once()
+        mock_maintenance_service.doctor.assert_called_once_with()
 
     @pytest.mark.asyncio
     async def test_refresh_status_updates_running_state(self, vm):
@@ -209,7 +209,7 @@ class TestOpenDir:
 
             asyncio.run(vm.refresh_status())
             vm.open_data_dir()
-        mock_popen.assert_called_once()
+        assert mock_popen.call_count == 1
         args = mock_popen.call_args[0][0]
         assert args[0] == "explorer"
         assert "/fake/data" in args
@@ -225,7 +225,7 @@ class TestOpenDir:
 
             asyncio.run(vm.refresh_status())
             vm.open_data_dir()
-        mock_popen.assert_called_once()
+        assert mock_popen.call_count == 1
         args = mock_popen.call_args[0][0]
         assert args[0] == "open"
 
@@ -240,7 +240,7 @@ class TestOpenDir:
 
             asyncio.run(vm.refresh_status())
             vm.open_data_dir()
-        mock_popen.assert_called_once()
+        assert mock_popen.call_count == 1
         args = mock_popen.call_args[0][0]
         assert args[0] == "xdg-open"
 
@@ -255,7 +255,7 @@ class TestOpenDir:
 
             asyncio.run(vm.refresh_status())
             vm.open_log_dir()
-        mock_popen.assert_called_once()
+        assert mock_popen.call_count == 1
         args = mock_popen.call_args[0][0]
         assert args[0] == "explorer"
         assert "/fake/log_dir" in args

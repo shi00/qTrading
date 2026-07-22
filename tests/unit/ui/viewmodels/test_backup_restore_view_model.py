@@ -71,7 +71,7 @@ def vm(mock_maintenance_service):
 
 class TestStateImmutability:
     def test_state_is_frozen(self, vm):
-        with pytest.raises(FrozenInstanceError):
+        with pytest.raises(FrozenInstanceError, match="cannot assign to field"):
             vm.state.is_backing_up = True  # type: ignore[misc]
 
     def test_state_default_values(self, mock_maintenance_service):
@@ -199,7 +199,7 @@ class TestConfirmRestore:
             await vm.start_restore_wizard(input_path)
         # 再确认
         await vm.confirm_restore()
-        mock_maintenance_service.restore.assert_called_once()
+        mock_maintenance_service.restore.assert_called_once_with(input_path)
         called_path = mock_maintenance_service.restore.call_args[0][0]
         assert isinstance(called_path, Path)
         # Path("/tmp/...") 在 Windows 上会规范化为 \tmp\..., 比较应用 Path 而非 str
