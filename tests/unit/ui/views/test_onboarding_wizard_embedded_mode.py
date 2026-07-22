@@ -14,11 +14,10 @@ import inspect
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 from ui.viewmodels.onboarding_view_model import STEP_CONFIGS
 from ui.views import onboarding_wizard as wizard_module
 from ui.views.onboarding_wizard import (
@@ -35,19 +34,21 @@ def _read_source() -> str:
 
 
 class _FakeDatabaseVm:
-    """模拟 DatabaseConfigPanelViewModel, 仅暴露 save_config bound method 契约."""
+    """模拟 DatabaseConfigPanelViewModel, 仅暴露 save_config + is_embedded_mode 契约."""
 
     def __init__(self) -> None:
         self.save_config = MagicMock(return_value=True)
+        self.is_embedded_mode = False  # 默认 external 模式
 
 
-def _make_fake_vm() -> DatabaseConfigPanelViewModel:
-    """创建 _FakeDatabaseVm 并 cast 为 DatabaseConfigPanelViewModel (测试 mock).
+def _make_fake_vm() -> Any:
+    """创建 _FakeDatabaseVm 并 cast 为 Any (测试 mock).
 
     pyright: _FakeDatabaseVm 不继承 DatabaseConfigPanelViewModel 以避免完整初始化开销,
-    通过 cast 满足 _resolve_database_validator 的类型签名。
+    返回 Any 以允许测试中给 is_embedded_mode 属性赋值 (property 在真实 VM 上只读,
+    但 _FakeDatabaseVm 用普通属性模拟)。
     """
-    return cast(DatabaseConfigPanelViewModel, _FakeDatabaseVm())
+    return _FakeDatabaseVm()
 
 
 # ============================================================================
@@ -92,8 +93,8 @@ class TestResolveDatabaseValidator:
     def test_embedded_mode_returns_embedded_validator(self) -> None:
         """DoD: embedded 模式 → 返回 _validate_database_embedded (不调 save_config)."""
         vm = _make_fake_vm()
-        with patch.object(wizard_module.ConfigHandler, "is_embedded_mode", return_value=True):
-            validator = _resolve_database_validator(vm)
+        vm.is_embedded_mode = True
+        validator = _resolve_database_validator(vm)
         assert validator is _validate_database_embedded
         # 守护: embedded 模式不调用 save_config
         assert not cast(MagicMock, vm.save_config).called
@@ -101,27 +102,26 @@ class TestResolveDatabaseValidator:
     def test_external_mode_returns_save_config(self) -> None:
         """DoD: external 模式 → 返回 database_vm.save_config (保留原行为)."""
         vm = _make_fake_vm()
-        with patch.object(wizard_module.ConfigHandler, "is_embedded_mode", return_value=False):
-            validator = _resolve_database_validator(vm)
+        vm.is_embedded_mode = False
+        validator = _resolve_database_validator(vm)
         assert validator is vm.save_config
 
     def test_external_mode_validator_is_not_embedded_validator(self) -> None:
         """DoD: external 模式 validator 不应是 _validate_database_embedded."""
         vm = _make_fake_vm()
-        with patch.object(wizard_module.ConfigHandler, "is_embedded_mode", return_value=False):
-            validator = _resolve_database_validator(vm)
+        vm.is_embedded_mode = False
+        validator = _resolve_database_validator(vm)
         assert validator is not _validate_database_embedded
 
-    def test_embedded_mode_calls_is_embedded_mode(self) -> None:
-        """DoD: _resolve_database_validator 调用 ConfigHandler.is_embedded_mode() 决策."""
+    def test_validator_routes_by_vm_is_embedded_mode(self) -> None:
+        """DoD: _resolve_database_validator 根据 vm.is_embedded_mode 属性路由."""
         vm = _make_fake_vm()
-        with patch.object(
-            wizard_module.ConfigHandler,
-            "is_embedded_mode",
-            return_value=True,
-        ) as mock_mode:
-            _resolve_database_validator(vm)
-        assert mock_mode.call_count >= 1
+        # external 模式 → save_config
+        vm.is_embedded_mode = False
+        assert _resolve_database_validator(vm) is vm.save_config
+        # embedded 模式 → _validate_database_embedded
+        vm.is_embedded_mode = True
+        assert _resolve_database_validator(vm) is _validate_database_embedded
 
     def test_embedded_validator_returns_true_when_invoked(self) -> None:
         """DoD: embedded 模式下完整调用链 → validator() 返回 True.
@@ -130,8 +130,8 @@ class TestResolveDatabaseValidator:
         resolve → validator → await → bool.
         """
         vm = _make_fake_vm()
-        with patch.object(wizard_module.ConfigHandler, "is_embedded_mode", return_value=True):
-            validator = _resolve_database_validator(vm)
+        vm.is_embedded_mode = True
+        validator = _resolve_database_validator(vm)
         # validator() 返回 Awaitable[bool], asyncio.run 期望 Coroutine
         result = asyncio.run(cast(Coroutine[Any, Any, bool], validator()))
         assert result is True
@@ -180,11 +180,6 @@ class TestStepConfigsContract:
 class TestOnboardingWizardSourceContract:
     """OnboardingWizard 源码契约守护: bind 决策使用 _resolve_database_validator."""
 
-    def test_imports_config_handler(self) -> None:
-        """DoD: onboarding_wizard.py 导入 ConfigHandler (用于 is_embedded_mode 决策)."""
-        source = _read_source()
-        assert "from utils.config_handler import ConfigHandler" in source
-
     def test_defines_validate_database_embedded(self) -> None:
         """DoD: onboarding_wizard.py 定义 _validate_database_embedded 函数."""
         source = _read_source()
@@ -203,10 +198,10 @@ class TestOnboardingWizardSourceContract:
         source = _read_source()
         assert "fn_validate_database=_resolve_database_validator(database_vm)" in source
 
-    def test_resolve_database_validator_uses_is_embedded_mode(self) -> None:
-        """DoD: _resolve_database_validator 内部调用 ConfigHandler.is_embedded_mode()."""
+    def test_resolve_database_validator_uses_vm_is_embedded_mode(self) -> None:
+        """DoD: _resolve_database_validator 内部访问 database_vm.is_embedded_mode (MVVM)."""
         source = _read_source()
-        assert "ConfigHandler.is_embedded_mode()" in source
+        assert "database_vm.is_embedded_mode" in source
 
     def test_no_direct_save_config_in_bind(self) -> None:
         """DoD: bind 不再直接传 database_vm.save_config (必须经路由)."""

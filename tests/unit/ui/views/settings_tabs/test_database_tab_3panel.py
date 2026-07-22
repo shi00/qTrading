@@ -32,6 +32,8 @@ class _FakeDatabaseVM:
         self.state = MagicMock()
         self.reload_config = MagicMock()
         self.dispose_called = False
+        self.load_show_advanced = MagicMock(return_value=False)
+        self.save_show_advanced = MagicMock()
 
     def subscribe(self, callback: Any) -> Any:
         self._subscribers.append(callback)
@@ -76,22 +78,17 @@ def _render_tab(
         - backup_restore_panel
         - external_pg_form
         - database_config_vm_cls (DatabaseConfigPanelViewModel mock)
-        - load_config_mock
-        - save_config_mock
-        - config_handler_mock (整个 ConfigHandler mock, with 块外仍可访问)
+        - load_config_mock (fake_vm.load_show_advanced)
+        - save_config_mock (fake_vm.save_show_advanced)
 
-    注意: ConfigHandler mock 在 with 块外仍可访问, 因为 on_change 闭包在 with
-    块外被调用时仍引用 mod.ConfigHandler (此时已恢复为真实类), 但 mock 本身的
-    save_config 调用记录需通过 config_handler_mock 持久化捕获.
+    通过 fake_vm 的 load_show_advanced/save_show_advanced 方法控制 db_show_advanced
+    配置读写 (MVVM: View 不直接 import ConfigHandler)。
     """
     from ui.views.settings_tabs import database_tab as mod
 
     fake_vm = _FakeDatabaseVM()
+    fake_vm.load_show_advanced.return_value = db_show_advanced
     mock_components: dict[str, MagicMock] = {}
-    # ConfigHandler mock 在 with 块外仍可访问 (供 on_change 闭包调用记录)
-    config_handler_mock = MagicMock()
-    config_handler_mock.load_config.return_value = {"db_show_advanced": db_show_advanced}
-    config_handler_mock.save_config = MagicMock(return_value=True)
 
     with (
         patch.object(mod, "EmbeddedStatusCard") as mock_esc,
@@ -99,7 +96,6 @@ def _render_tab(
         patch.object(mod, "BackupRestorePanel") as mock_brp,
         patch.object(mod, "ExternalPgForm") as mock_epf,
         patch.object(mod, "DatabaseConfigPanelViewModel", return_value=fake_vm) as mock_vm_cls,
-        patch.object(mod, "ConfigHandler", config_handler_mock),
     ):
         component = make_component(mod.DatabaseTab, show_snack_callback=MagicMock())
         run_mount_effects(component)
@@ -110,9 +106,8 @@ def _render_tab(
         mock_components["backup_restore_panel"] = mock_brp
         mock_components["external_pg_form"] = mock_epf
         mock_components["database_config_vm_cls"] = mock_vm_cls
-        mock_components["load_config_mock"] = config_handler_mock.load_config
-        mock_components["save_config_mock"] = config_handler_mock.save_config
-        mock_components["config_handler_mock"] = config_handler_mock
+        mock_components["load_config_mock"] = fake_vm.load_show_advanced
+        mock_components["save_config_mock"] = fake_vm.save_show_advanced
 
     return result, mock_components, component
 
@@ -152,15 +147,13 @@ class TestDatabaseTab3Panel:
         assert call_kwargs.get("show_save_button") is True
 
     def test_toggle_persists_to_appconfig(self, mock_i18n_state: Any, mock_app_colors_state: Any) -> None:
-        """DoD 4: 切换开关调用 ConfigHandler.save_config 持久化 db_show_advanced。"""
+        """DoD 4: 切换开关调用 vm.save_show_advanced 持久化 db_show_advanced。"""
         from ui.views.settings_tabs import database_tab as mod
 
         from tests.unit.ui.component_renderer import make_component, render_once, run_mount_effects
 
         fake_vm = _FakeDatabaseVM()
-        config_handler_mock = MagicMock()
-        config_handler_mock.load_config.return_value = {"db_show_advanced": False}
-        config_handler_mock.save_config = MagicMock(return_value=True)
+        fake_vm.load_show_advanced.return_value = False
 
         with (
             patch.object(mod, "EmbeddedStatusCard"),
@@ -168,7 +161,6 @@ class TestDatabaseTab3Panel:
             patch.object(mod, "BackupRestorePanel"),
             patch.object(mod, "ExternalPgForm"),
             patch.object(mod, "DatabaseConfigPanelViewModel", return_value=fake_vm),
-            patch.object(mod, "ConfigHandler", config_handler_mock),
         ):
             component = make_component(mod.DatabaseTab, show_snack_callback=MagicMock())
             run_mount_effects(component)
@@ -187,8 +179,8 @@ class TestDatabaseTab3Panel:
             # 实际是 _on_advanced_toggle(e: ControlEvent) -> None，接受 1 个参数
             cast(Callable[[Any], Any], advanced_switch.on_change)(e)
 
-        # 验证 save_config 被调用, 参数含 {"db_show_advanced": True}
-        config_handler_mock.save_config.assert_called_once_with({"db_show_advanced": True})
+        # 验证 save_show_advanced 被调用, 参数为 True
+        fake_vm.save_show_advanced.assert_called_once_with(True)
 
     def test_loads_advanced_state_from_config_on_mount(self, mock_i18n_state: Any, mock_app_colors_state: Any) -> None:
         """DoD 5: use_effect 从 AppConfig 读取初始状态。"""

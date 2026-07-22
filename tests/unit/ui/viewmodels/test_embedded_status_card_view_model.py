@@ -9,7 +9,6 @@
 """
 
 from dataclasses import FrozenInstanceError
-from unittest.mock import patch
 
 import pytest
 
@@ -64,11 +63,11 @@ class TestEmbeddedStatusCardViewModelInit:
         assert vm.state.info_message is not None
         assert vm.state.info_message.key == "embedded_pg_no_config_needed"
 
-    def test_init_does_not_call_i18n_get(self) -> None:
-        """DoD: VM 不感知 locale, state 用 Message 产出 key, 不调 I18n.get (MVVM §3.2)。"""
-        with patch("ui.viewmodels.embedded_status_card_view_model.I18n") as mock_i18n:
-            EmbeddedStatusCardViewModel()
-        mock_i18n.get.assert_not_called()
+    def test_init_does_not_import_i18n(self) -> None:
+        """DoD: VM 不 import I18n (避免 flet 污染, MVVM §3.2 + i18n 分层矩阵)."""
+        import ui.viewmodels.embedded_status_card_view_model as mod
+
+        assert not hasattr(mod, "I18n"), "VM 不应 import I18n (应从 core.i18n 导入, 避免 flet 污染)"
 
 
 class TestEmbeddedStatusCardViewModelProtocol:

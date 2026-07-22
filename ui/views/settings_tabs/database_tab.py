@@ -29,7 +29,6 @@ from ui.hooks import use_viewmodel
 from ui.i18n import I18n, get_observable_state
 from ui.theme import AppColors, AppStyles
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
-from utils.config_handler import ConfigHandler
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
     def _load_advanced_state() -> None:
         """挂载时从 AppConfig 读取高级模式开关初始值。"""
         try:
-            saved = ConfigHandler.load_config().get("db_show_advanced", False)
+            saved = database_config_vm.load_show_advanced()
             set_show_advanced(bool(saved))
         except Exception:  # noqa: BLE001  # NOTE(lazy): 配置读取失败降级为默认 False. ceiling: 配置文件不可读. upgrade: 引入配置可读性预检.
             logger.debug("[DatabaseTab] Failed to load db_show_advanced, using default False")
@@ -95,7 +94,7 @@ def DatabaseTab(show_snack_callback: Callable) -> ft.Container:
         value = bool(get_control_value(e.control, ft.Switch))
         set_show_advanced(value)
         try:
-            ConfigHandler.save_config({"db_show_advanced": value})
+            database_config_vm.save_show_advanced(value)
         except Exception:  # noqa: BLE001  # NOTE(lazy): 配置写入失败降级为内存态. ceiling: 配置文件不可写. upgrade: 引入配置可写性预检或重试.
             logger.debug("[DatabaseTab] Failed to persist db_show_advanced=%s", value)
 

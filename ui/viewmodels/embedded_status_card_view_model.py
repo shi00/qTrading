@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from ui.i18n import I18n  # noqa: F401  # 保留 import 用于运行时类型检查与未来扩展
 from ui.viewmodels import Message
 from ui.viewmodels.observable_mixin import ObservableViewModelMixin
 

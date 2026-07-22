@@ -24,7 +24,6 @@ from ui.components.config_panels.external_pg_form import ExternalPgForm
 from ui.i18n import I18n, get_observable_state  # noqa: F401  # 保留 import 供测试 patch
 from ui.theme import AppColors, AppStyles  # noqa: F401  # 保留 import 供测试 patch
 from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
-from utils.config_handler import ConfigHandler
 
 
 @ft.component
@@ -56,7 +55,7 @@ def DatabaseConfigPanel(
     ft.use_state(get_observable_state)
 
     # --- Route by is_embedded_mode() ---
-    if ConfigHandler.is_embedded_mode():
+    if vm.is_embedded_mode:
         # embedded 模式: 只读状态卡片, 忽略 vm/show_header/compact/show_save_button
         return EmbeddedStatusCard()
     # external 模式: 透传所有参数到 ExternalPgForm

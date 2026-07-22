@@ -43,9 +43,14 @@ def _read_source() -> str:
 class _FakeDatabaseConfigPanelVM:
     """模拟 DatabaseConfigPanelViewModel, 满足 use_viewmodel(vm=) 外部 VM 模式契约。"""
 
-    def __init__(self, state: DatabaseConfigState | None = None) -> None:
+    def __init__(
+        self,
+        state: DatabaseConfigState | None = None,
+        is_embedded: bool = False,
+    ) -> None:
         self._state = state if state is not None else DatabaseConfigState()
         self._subscribers: list[Any] = []
+        self.is_embedded_mode = is_embedded
         self.test_connection = MagicMock()
         self.save_config = MagicMock()
         self.update_host = MagicMock()
@@ -88,7 +93,9 @@ def _render_panel_with_mocked_children(
     注意: run_mount_effects 内部已调用 render_once, 不需再显式调用 (否则 mock 被调用 2 次)。
     """
     if vm is None:
-        vm = _FakeDatabaseConfigPanelVM()
+        vm = _FakeDatabaseConfigPanelVM(is_embedded=embedded_mode)
+    else:
+        vm.is_embedded_mode = embedded_mode
     page = FakePage()
     cast(Any, page).run_task = MagicMock()
 
@@ -98,13 +105,7 @@ def _render_panel_with_mocked_children(
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch.object(panel_module, "ExternalPgForm", mock_external))
         stack.enter_context(patch.object(panel_module, "EmbeddedStatusCard", mock_embedded))
-        stack.enter_context(
-            patch.object(
-                panel_module.ConfigHandler,
-                "is_embedded_mode",
-                return_value=embedded_mode,
-            )
-        )
+        # 通过 vm.is_embedded_mode 属性控制路由 (不再 patch ConfigHandler, MVVM 契约)
         component = make_component(
             DatabaseConfigPanel,
             vm=vm,
@@ -247,40 +248,21 @@ class TestDatabaseConfigPanelRouting:
 class TestDatabaseConfigPanelModeSwitchContract:
     """R-B4 模式切换契约: DatabaseConfigPanel 必须按 is_embedded_mode() 切换渲染。"""
 
-    def test_is_embedded_mode_called_per_render(
-        self,
-        mock_i18n_state,
-        mock_app_colors_state,
-    ) -> None:
-        """每次渲染调用 is_embedded_mode() 一次。"""
-        with patch.object(
-            panel_module.ConfigHandler,
-            "is_embedded_mode",
-            return_value=False,
-        ) as mock_mode:
-            vm = _FakeDatabaseConfigPanelVM()
-            page = FakePage()
-            cast(Any, page).run_task = MagicMock()
+    def test_is_embedded_mode_property_exists_on_vm(self) -> None:
+        """DoD: DatabaseConfigPanelViewModel 暴露 is_embedded_mode property 供 View 路由 (MVVM)."""
+        from ui.viewmodels.database_config_panel_view_model import DatabaseConfigPanelViewModel
 
-            with contextlib.ExitStack() as stack:
-                stack.enter_context(patch.object(panel_module, "ExternalPgForm"))
-                stack.enter_context(patch.object(panel_module, "EmbeddedStatusCard"))
-                component = make_component(
-                    DatabaseConfigPanel,
-                    vm=vm,
-                    show_header=True,
-                    compact=False,
-                    show_save_button=True,
-                )
-                run_mount_effects(component, page=page)
-        assert mock_mode.call_count >= 1
+        assert isinstance(
+            DatabaseConfigPanelViewModel.is_embedded_mode,
+            property,
+        ), "VM 应暴露 is_embedded_mode property 供 View 路由 (避免 View 直接 import ConfigHandler)"
 
     def test_switching_mode_changes_child_component(
         self,
         mock_i18n_state,
         mock_app_colors_state,
     ) -> None:
-        """DoD: 切换 is_embedded_mode() → 调用不同的子组件。"""
+        """DoD: 切换 vm.is_embedded_mode → 调用不同的子组件。"""
         # external 模式: 调用 ExternalPgForm
         mock_ext_1, mock_emb_1, _, _ = _render_panel_with_mocked_children(embedded_mode=False)
         assert mock_ext_1.called and not mock_emb_1.called

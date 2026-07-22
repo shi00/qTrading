@@ -52,7 +52,6 @@ from ui.viewmodels.llm_config_panel_view_model import LLMConfigPanelViewModel
 from ui.viewmodels.local_model_config_panel_view_model import LocalModelConfigPanelViewModel
 from ui.viewmodels.onboarding_view_model import STEP_CONFIGS, OnboardingViewModel
 from ui.viewmodels.tushare_config_panel_view_model import TushareConfigPanelViewModel
-from utils.config_handler import ConfigHandler
 from utils.log_decorators import UILogger
 from utils.sanitizers import DataSanitizer
 
@@ -155,13 +154,13 @@ async def _validate_database_embedded() -> bool:
 def _resolve_database_validator(
     database_vm: DatabaseConfigPanelViewModel,
 ) -> Callable[[], Awaitable[bool]]:
-    """按 ConfigHandler.is_embedded_mode() 切换 database step validator (P3-12).
+    """按 database_vm.is_embedded_mode 切换 database step validator (P3-12).
 
     R-A4: 保留 STEP_CONFIGS[1] 索引不变, 通过 VM 切换 validate 行为。
     - embedded 模式 → _validate_database_embedded (always-true, 不验证表单)
     - external 模式 → database_vm.save_config (原行为: test+create+save)
     """
-    if ConfigHandler.is_embedded_mode():
+    if database_vm.is_embedded_mode:
         return _validate_database_embedded
     return database_vm.save_config
 
