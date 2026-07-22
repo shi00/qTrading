@@ -44,6 +44,7 @@
   - [标准开发工作流 (How-To)](./docs/guides/how-to.md)
   - [排查典型问题](#排查典型问题)
   - [已知架构技术债 (Known Technical Debt)](#已知架构技术债-known-technical-debt)
+  - [AI 代码检视指南](./docs/reviews/code-review-guide.md)
   - [文档索引](#文档索引)
 
 ---
@@ -639,6 +640,10 @@ except Exception as e:
 ### docs/governance/ — 治理类机器可读文件
 
 - [redlines.yml](./docs/governance/redlines.yml) — CLAUDE.md §3.1 红线表的机器可读镜像（R1~R18 编号/标题/说明/enforcement/human_review_required）
+
+### docs/reviews/ — AI 代码检视指南
+
+- [code-review-guide.md](./docs/reviews/code-review-guide.md) — 通用 AI 代码检视指南（三轮检视法 / 10 个质量维度 / 8 个专项 Profile / 项目特定 reviewProfile）
 
 ---
 
