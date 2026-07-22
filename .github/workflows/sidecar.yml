@@ -173,6 +173,8 @@ jobs:
           python-version: '3.13'
 
       - name: Generate sidecar manifest
+        # Windows 默认 PowerShell 不识别 `\` 续行符，显式指定 bash 保证三平台一致
+        shell: bash
         run: |
           python ../../scripts/generate_sidecar_manifest.py \
             --sidecar ${{ matrix.binary_path }} \
