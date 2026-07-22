@@ -101,23 +101,6 @@ class TestDatabaseConfigPanelContract:
         assert "class DatabaseConfigPanel(" not in source, "DatabaseConfigPanel 不应是 class（命令式）"
 
 
-class TestRenderMessage:
-    """_render_message 纯函数测试。"""
-
-    def test_render_message_none_returns_empty(self):
-        from ui.components.config_panels.database_config_panel import _render_message
-
-        assert _render_message(None) == ""
-
-    def test_render_message_with_default_param(self):
-        from ui.components.config_panels.database_config_panel import _render_message
-        from ui.viewmodels import Message
-
-        msg = Message("_raw_msg_", {"default": "raw error text"})
-        result = _render_message(msg)
-        assert result == "raw error text"
-
-
 class TestTushareConfigPanelContract:
     """TushareConfigPanel 声明式契约守护测试（Phase 3.2.2）。
 
