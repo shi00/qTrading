@@ -148,7 +148,7 @@ class DatabaseConfigService:
                     "[DBConfigService] Connection refused: %s:%s (error: %s)",
                     host,
                     port,
-                    e,
+                    DataSanitizer.sanitize_error(e),
                 )
                 return ConnectionResult(
                     status=ConnectionStatus.CONNECTION_ERROR,
@@ -159,7 +159,7 @@ class DatabaseConfigService:
                     "[DBConfigService] Network error (WinError 64) connecting to %s:%s: %s",
                     host,
                     port,
-                    e,
+                    DataSanitizer.sanitize_error(e),
                 )
                 return ConnectionResult(
                     status=ConnectionStatus.CONNECTION_ERROR,
@@ -169,7 +169,7 @@ class DatabaseConfigService:
                 "[DBConfigService] OS error connecting to %s:%s: %s",
                 host,
                 port,
-                e,
+                DataSanitizer.sanitize_error(e),
             )
             return ConnectionResult(
                 status=ConnectionStatus.CONNECTION_ERROR,
@@ -228,7 +228,7 @@ class DatabaseConfigService:
                             user,
                             host,
                             port,
-                            verify_err,
+                            DataSanitizer.sanitize_error(verify_err),
                         )
                         return ConnectionResult(
                             status=ConnectionStatus.CONNECTION_ERROR,
@@ -247,7 +247,7 @@ class DatabaseConfigService:
                     user,
                     host,
                     port,
-                    e,
+                    DataSanitizer.sanitize_error(e),
                 )
                 return ConnectionResult(
                     status=ConnectionStatus.AUTHENTICATION_ERROR,
@@ -258,7 +258,7 @@ class DatabaseConfigService:
                 error_type_name,
                 host,
                 port,
-                e,
+                DataSanitizer.sanitize_error(e),
             )
             return ConnectionResult(
                 status=ConnectionStatus.CONNECTION_ERROR,
@@ -321,7 +321,7 @@ class DatabaseConfigService:
             return exists is not None
 
         except Exception as exc:
-            logger.debug("[DBConfigService] db_exists check failed: %s", exc)
+            logger.debug("[DBConfigService] db_exists check failed: %s", DataSanitizer.sanitize_error(exc))
             return False
 
     @classmethod
@@ -446,7 +446,7 @@ class DatabaseConfigService:
             return None
 
         except Exception as exc:
-            logger.debug("[DBConfigService] get_db_info failed: %s", exc)
+            logger.debug("[DBConfigService] get_db_info failed: %s", DataSanitizer.sanitize_error(exc))
             return None
 
     @classmethod
@@ -544,7 +544,7 @@ class DatabaseConfigService:
             finally:
                 await conn.close()
         except Exception as exc:
-            logger.warning("[DBConfigService] Failed to check alembic_version: %s", exc)
+            logger.warning("[DBConfigService] Failed to check alembic_version: %s", DataSanitizer.sanitize_error(exc))
             return False, I18n.get("db_err_connection")
 
         if has_alembic:
@@ -597,5 +597,5 @@ class DatabaseConfigService:
             )
 
         except Exception as exc:
-            logger.debug("[DBConfigService] get_db_stats failed: %s", exc)
+            logger.debug("[DBConfigService] get_db_stats failed: %s", DataSanitizer.sanitize_error(exc))
             return None

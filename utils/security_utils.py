@@ -502,7 +502,7 @@ class SecurityManager:
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
-            raise EncryptionError(f"Encryption failed: {e}") from e
+            raise EncryptionError(f"Encryption failed: {DataSanitizer.sanitize_error(e)}") from e
 
     @classmethod
     def decrypt_data(cls, encrypted_text):
@@ -547,7 +547,7 @@ class SecurityManager:
             return plaintext.decode("utf-8")
 
         except (ValueError, TypeError) as e:
-            raise DecryptionError(f"Data corruption: {e}") from e
+            raise DecryptionError(f"Data corruption: {DataSanitizer.sanitize_error(e)}") from e
         except Exception as e:
             # cryptography library raises built-in exceptions like InvalidTag
             error_info = classify_error(e, context="general")
@@ -564,4 +564,4 @@ class SecurityManager:
                 DataSanitizer.sanitize_error(e),
                 exc_info=True,
             )
-            raise DecryptionError(f"Decryption failed (Wrong Key?): {e}") from e
+            raise DecryptionError(f"Decryption failed (Wrong Key?): {DataSanitizer.sanitize_error(e)}") from e
