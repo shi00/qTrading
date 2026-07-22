@@ -119,3 +119,6 @@ Plans*.md
 # 9. Static analysis reports (auto-generated, not source code)
 pyright_report.txt
 
+# 10. Plans directory
+docs/plans/
+
